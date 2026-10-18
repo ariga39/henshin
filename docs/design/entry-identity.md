@@ -14,15 +14,15 @@ An entry has at most one current logical location: a storage root ID and a relat
 
 Bindings, local overrides, and open events belong to the entry, not its location. Source metadata belongs to the bound EH gallery and may be shared by several entries. A filename change never changes an EH binding by itself. Separate language editions, revised editions, and distinct copies remain separate entries unless this document explicitly permits retaining identity.
 
-An entry ID is not a guarantee that the bytes currently at its recorded path still match the indexed edition. Henshin observes an externally managed NAS; it cannot make file changes and its database transaction atomic.
+An entry ID is not a guarantee that the bytes currently at its recorded path still match the indexed edition. Henshin observes an externally managed NAS; it cannot make external file changes and database transactions atomic with each other.
 
 ## Records Needed by This Topic
 
 | Record | Responsibility |
 | --- | --- |
-| Entry | Stable identity, library membership, current or last-known location, retained metadata and history |
+| Entry | Stable identity, library membership, current or last-known location, retained metadata and history, revision for conditional decisions |
 | Accepted content observation | Last accepted representation, analysis version, observation time, and available fingerprint evidence |
-| Replacement candidate | Newly observed representation at an occupied location, evidence, and pending decision; it is not yet a new accepted entry |
+| Replacement candidate | Newly observed representation at an occupied location, evidence, candidate version, and pending decision; it is not yet a new accepted entry |
 | Location revision | Changes when the current logical location changes or is detached; it lets clients and tasks detect stale location decisions |
 | Content version | Changes when a different representation is accepted; cached analysis and thumbnails depend on it |
 
@@ -40,6 +40,8 @@ Identity state and filesystem availability are separate. A root being offline, a
 
 Availability observations can be present, missing after a successful scan, inaccessible, or unknown. They include their observation time and are not claims about the client's current NAS access. Accepted entries that are missing from the server's view can still be attempted by a client with its own working mapping. A known pending replacement is a different condition and remains blocked.
 
+The existing term file status collectively refers to these two axes: identity state and last server availability observation. Do not collapse them into a single mutually exclusive enum. UI and search must distinguish, for example, an accepted-but-server-inaccessible entry from a replacement-pending entry; neither is evidence of client accessibility. Exact display labels and filter syntax belong to their later topics.
+
 ## Evidence Rules
 
 Sizes and modification times are change-detection hints, not identity proof. Similar titles, EH IDs, page counts, covers, perceptual hashes, partial hashes, or a file's continued presence at the same path do not prove identity. They may rank candidates for user inspection.
@@ -49,7 +51,7 @@ Exact fingerprint equality can prove an unchanged representation within the supp
 | Observation | Identity action |
 | --- | --- |
 | No detected change | Keep the entry; the unchanged observation is not a fresh full-content verification |
-| Reanalysis shows an exact match to the accepted fingerprint | Keep identity and content version; update observation details |
+| Reanalysis shows an exact match to the accepted fingerprint, including after a pending replacement disappears | Clear the pending candidate if any, return to Accepted, and keep identity and content version; update observation details |
 | Changed representation, even with the same EH URL or page count | Create or update a replacement candidate; keep prior accepted metadata |
 | User confirms a repack, filename-only page rename, or other representation change of the same edition | Retain entry identity, binding, overrides, and history; accept the candidate and increment content version |
 | User confirms another language edition, revised edition, or unrelated content | Detach the old entry and create a new entry at the location; do not copy binding, overrides, or events |
@@ -66,6 +68,8 @@ The user can choose:
 1. **Keep this entry**: explicitly confirm the same edition and accept the current candidate, preserving the entry's records.
 2. **Treat as a different entry**: release the old current location, preserve the old entry as detached, and create an unbound entry with no inherited overrides or events.
 3. **Decide later**: retain the unresolved state and block normal Open for that entry. A later scan can replace the candidate but cannot make the decision on the user's behalf.
+
+The exception is an exact match to the previously accepted fingerprint: restoring the accepted representation needs no edition judgment. Atomically clear the candidate and restore Accepted under the current entry, location, and candidate revisions. Advance the decision revision so an already-open comparison cannot resolve the discarded candidate. A failed scan, missing candidate file, or matching size/mtime alone does not perform this transition. Fingerprint profiles must be comparable and the observation complete and stable.
 
 Only a completely analyzed, stable candidate can be accepted. If analysis fails, offer retry and leave the decision pending. The first release does not provide an untracked preview launch to bypass the pending state.
 
@@ -117,6 +121,7 @@ No full-file hash is required for every Open, and an external reader opens by pa
 | Archive at the same path replaced with another edition | Pending first; after confirmation, old entry detached and new entry unbound |
 | User confirms a repack of the same edition | ID and records retained; content version changes and covers are regenerated |
 | Candidate changes while the comparison screen is open | Reject stale resolution and show fresh evidence |
+| Original accepted bytes are restored while a replacement is pending | Exact comparable evidence clears the candidate and restores Accepted without changing content version; a stale comparison cannot commit |
 | Two clients resolve the same candidate concurrently or retry a completed resolution | One committed result; stale conflict or idempotent replay, no duplicate entry |
 | Analysis completes after a relocation or replacement decision | Conditional commit rejects obsolete result |
 | NAS disconnects or a scan is cancelled | Preserve identities and prior claims; no mass missing/deletion inference |
@@ -134,5 +139,6 @@ These are design acceptance cases. They have not been executed against an implem
 - **Persistence and contracts**: exact constraints, revisions, operation deduplication, transaction boundaries, and retention representation.
 - **Reading and synchronization**: cached state, local mismatch checks, event version fields, retry, and stale-observation presentation.
 - **UI**: accessible comparison and resolution screens with explicit consequences for retained history.
+- **EH metadata**: a confirmed same-edition representation change preserves the binding and overrides while keeping changed local analysis separate from source metadata.
 
 No automatic identity operation for a format may ship before the corresponding evidence and transaction handoffs are specified and tested. These handoffs refine mechanisms; they do not reopen the identity/record-ownership rules above.
