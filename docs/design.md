@@ -15,6 +15,7 @@ The confirmed desktop stack is Electron + React + TypeScript. Effect is preferre
 | Product | [Product scope and scenarios](design/product-scope.md) | Requirements, defaults, release boundaries, representative scenarios |
 | Architecture | [Architecture and deployment](design/architecture.md) | Component and process responsibilities, technologies, deployment |
 | Application logic | [Application logic with Effect](design/application-logic.md) | Services, runtimes, frontend integration, errors, resource lifetimes |
+| Entry lifecycle | [Entry identity and file lifecycle](design/entry-identity.md) | Identity retention, replacement decisions, relocation evidence, copies, retained history |
 | File locations | [Storage roots and path mappings](design/path-mapping.md) | Logical locations, per-device mappings, path resolution |
 | Indexing | [File indexing and thumbnails](design/file-indexing.md) | Entry discovery, change detection, relocation, covers |
 | Persistence | [Data model and persistence](design/data-model.md) | Identity, relationships, database rules, lifecycle constraints |
@@ -37,10 +38,6 @@ The confirmed desktop stack is Electron + React + TypeScript. Effect is preferre
 5. Update implementation phases and acceptance cases with the resulting decisions and evidence.
 
 Keep each rule in its owning topic and link to it from dependent topics. Update related documents when a decision changes their contract. Do not silently promote a proposed default or open question into a confirmed requirement.
-
-## Review Record
-
-The [independent Sol and DeepSeek review](reviews/outline-review.md) records the shared criteria, baseline findings, primary-agent decisions, and resulting revisions. It distinguishes adopted corrections from deferred product choices and rejected conclusions.
 
 ## Reference Projects
 
