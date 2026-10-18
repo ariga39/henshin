@@ -6,6 +6,16 @@ This document owns implementation order, acceptance criteria, platform coverage,
 
 ## Implementation Phases and Acceptance Criteria
 
+### Design and Integration Gates
+
+Design refinement order and implementation phases are separate. UI journeys may inform contracts before code is written. Each implementation phase starts only after its required behavior, minimal schemas/contracts, and transaction boundaries are specified.
+
+- Before Phase 1 application implementation, settle storage-root ownership, entry identity including same-path replacement, and the minimum scan/open/event contracts. Run the focused Effect, SQLite, and reader-launch integration prototype, then pin the compatible packages it exercises.
+- Before Phase 2 search implementation, define short Chinese and Japanese query behavior and choose an index/tokenizer approach using a representative sample. Specify revision checks before exposing metadata edits.
+- Before migration, restore, or clone implementation, specify the identity-preservation/isolation procedure, backup-point limitations, cache refresh, and pending-event reconciliation.
+
+Exploratory prototypes may use provisional adapters to answer these questions. They are not completed Phase 1 application implementation, and their results must be reflected in the selected dependencies and contracts before dependent features are built.
+
 ### Phase 1 File Resolution and External Reading
 
 Build a minimal client and independent server with root configuration, image-directory and ZIP/CBZ scanning, a basic list, covers, path mappings, reader launch, and open events.
@@ -16,11 +26,12 @@ Acceptance criteria:
 - Local and LAN deployments use the same API and location model without transferring content through the server.
 - Chinese and Japanese names, spaces, and special characters are passed correctly. Paths outside configured roots are rejected.
 - Failed reader launches do not increase counts. Resubmitting the same event after a successful launch does not count twice.
+- Replacing a file at an unchanged path cannot silently transfer the old edition's binding, overrides, or history. Verify both a confirmed same-edition representation change and an unresolved replacement using the identity rules settled before implementation.
 - Verify actual launch and file access on Windows, macOS, and Linux. Explicitly leave unavailable platforms unverified.
 
 ### Phase 2 EH Metadata and Organization
 
-Implement URL binding, batch metadata retrieval, tag search, local overrides, candidate confirmation, and background refresh.
+Implement URL binding, batch metadata retrieval, tag search, local overrides, candidate confirmation, and background refresh. Revision checks ship with the first metadata editing commands, including binding corrections, because multiple clients can already connect.
 
 Acceptance criteria:
 
@@ -28,15 +39,17 @@ Acceptance criteria:
 - One gallery failure does not discard successful results in the same batch. Authentication expiry and rate limiting are recoverable.
 - Source tag additions and removals update search while retaining local overrides. Corrected bindings do not retain tags from the old source.
 - Language editions with identical titles remain separate. A newer gallery version does not change an existing file's binding.
+- An edit based on a stale revision cannot silently overwrite a newer edit from another device or window, for either overrides or binding corrections.
+- Title and filename search, including one- and two-character Chinese and Japanese cases, follows the query semantics selected before implementation and passes the representative functional sample.
 
 ### Phase 3 Multiple Devices and File Changes
 
-Complete incremental scanning, relocation, queued event delivery after reconnecting, change refresh, and concurrent edit handling.
+Complete incremental scanning, relocation, queued event delivery after reconnecting, and change refresh. Extend the revision protection delivered in Phase 2 to the broader reconnection and multi-device acceptance scenarios.
 
 Acceptance criteria:
 
 - One open from each of two clients adds two events in total. Batch retries and reconnects do not double-count them.
-- An edit based on a stale revision cannot silently overwrite a newer edit from another device.
+- Reconnecting clients refresh their view without bypassing the revision checks already required by Phase 2.
 - NAS disconnection or scan failure does not clear the library. Clients can still attempt to open files when their own access works but the server's does not.
 - Reliable matching or manual relocation preserves entry IDs and history after files move.
 - Switching servers does not mix mappings, caches, or pending events.
@@ -49,7 +62,8 @@ Acceptance criteria:
 
 - Packages install and run independently on their target platforms. The format support matrix matches actual validation.
 - Corrupt or encrypted archives report errors while processing continues for other files.
-- Backup and restore retain entries, bindings, overrides, and open history. Thumbnails can be regenerated.
+- Backup and restore retain entries, bindings, overrides, and open history present at the backup point. Thumbnails can be regenerated.
+- A migration has only one active authority and preserves the namespace used by mappings and events. An independent clone has a new namespace and cannot silently consume the original client's pending events. Restore checks acknowledge the backup point and missing-entry reconciliation rules.
 - Measure initial and incremental scans, short Chinese queries, combined tag queries, and recovery from NAS interruptions using actual samples. Record the environment and dataset size.
 
 ## Inputs Needed Before Implementation
@@ -60,7 +74,7 @@ Acceptance criteria:
 - Obtain representative library sizes and directory samples to establish scan defaults and measurable performance targets.
 - Validate the Effect integration described in [Application logic with Effect](application-logic.md), then pin compatible HTTP, React, and SQLite adapters before implementation.
 
-These choices do not prevent starting with a minimal workflow for path mapping, an independent server, and external opening.
+Unresolved topics that do not affect a phase may remain open. Use the gates above to distinguish exploratory prototypes from application implementation; unresolved prerequisites do block their dependent features.
 
 ## Open Design Questions
 

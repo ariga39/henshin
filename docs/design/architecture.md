@@ -28,7 +28,7 @@ flowchart LR
 
 In local mode, the client starts the server process shipped with the application and connects over the loopback interface. Remote mode connects to an independently running server. Both modes use the same API and business logic. Clients do not access the server database directly.
 
-The database resides on the server machine's local disk, and thumbnails reside in the server data directory. The NAS stores collection files. Moving the server requires migrating the database and necessary configuration, then configuring its root paths again without changing entry identities. Server migration does not overwrite client mappings.
+The database resides on the server machine's local disk, and thumbnails reside in the server data directory. The NAS stores collection files. Moving the server requires migrating the database and necessary configuration, then configuring its root paths again without changing entry identities. Server migration does not overwrite client mappings. A migration requires stopping the old authority; independently running copies follow the separate clone identity rules in [Cross-device consistency](synchronization.md).
 
 ## Technology Choices
 

@@ -17,12 +17,15 @@ Default entry boundaries: one archive is one entry; a directory directly contain
 
 Rename and move detection uses existing content fingerprints where available. Reassociate a location when the match is unique and reliable; retain candidates and allow manual relocation when evidence is insufficient or multiple identical copies exist. Size and modification time alone do not guarantee recognition of all later moves.
 
+Reanalysis of a changed file does not by itself authorize reuse of its entry identity. At an unchanged path, distinguish an established update to the same edition from replacement by another edition before applying new analysis to the accepted entry. Preserve prior bindings, overrides, and open history when identity is uncertain instead of silently carrying them onto replacement content. The resolution workflow and behavior of Open while a replacement is unresolved are prerequisites for the first file-update implementation, jointly owned with [Data model](data-model.md) and [External reading](external-reading.md).
+
 Archive processing reads only the required directory and image entries and limits resource consumption. Malformed archives, path traversal, encryption, or corruption produce entry-level errors. A single file failure does not stop processing the library. Decoders, temporary resources, and distribution arrangements for RAR and 7z will be determined during format validation.
 
 ## Open Design Questions
 
 - What exact rules identify image-directory entries when images, archives, and subdirectories coexist?
 - When are fingerprints computed, which contents do they cover, and what evidence permits automatic relocation?
+- What evidence distinguishes a representation change from another edition at the same path, and how does the user resolve uncertainty without misattributing history?
 - Which image formats, cover selection rules, thumbnail dimensions, and cache limits are required?
 - What file-stability checks, scan schedule, and cancellation boundaries are appropriate for the actual NAS?
 

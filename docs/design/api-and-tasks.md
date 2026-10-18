@@ -25,7 +25,7 @@ Define shared transport schemas and typed endpoint declarations with Effect, inc
 
 ## Background Execution
 
-Run scanning, archive processing, and image processing in background workers to avoid blocking interaction and API requests. Persist task state and recover unfinished tasks after server restarts. Do not run concurrent scans of the same storage root. Apply separate concurrency limits to EH updates and file analysis so slow NAS reads do not consume every task resource.
+Run filesystem enumeration and other asynchronous scan I/O as bounded Effect work, separate from request lifetimes. Use workers or subprocesses for synchronous or CPU-heavy archive decoding, hashing, image processing, and any filesystem adapter that would otherwise block the event loop. Persist task state and recover unfinished tasks after server restarts. Do not run concurrent scans of the same storage root. Apply separate concurrency limits to EH updates and file analysis so slow NAS reads do not consume every task resource.
 
 Effect coordinates task execution, bounded concurrency, interruption, and retry schedules. Fibers do not replace workers for blocking processing, and in-memory queues do not replace persistent task state. Disconnecting a client or cancelling a request does not automatically cancel an accepted background task or roll back a committed operation.
 

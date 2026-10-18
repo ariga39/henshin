@@ -10,8 +10,9 @@ The following table describes data responsibilities and relationships. Concrete 
 
 | Entity | Main fields or relationships | Constraints |
 | --- | --- | --- |
-| Library and storage root | Library ID, root ID, name, server mapping, scan options | Stable root IDs; avoid overlapping scan scopes within a library |
-| Library entry | Entry ID, root ID, relative path, format, size, modification time, local page count, file fingerprint, file status, content version | Unique path within a root; separate entries for language editions and revisions |
+| Library | Library ID, name, associated storage roots | A library can contain multiple storage roots; the number of user-visible libraries is a separate product choice |
+| Storage root | Root ID, owning library ID, name, server mapping, scan options | Belongs to exactly one library; stable root ID unique within a server instance; avoid overlapping scan scopes within a library |
+| Library entry | Entry ID, root ID, relative path, format, size, modification time, local page count, file fingerprint, file status, content version | At most one current entry association per root and path; separate entries for language editions and revisions |
 | EH gallery | Source, gid, token, both titles, category, site page count, raw response, retrieval time, sync status | EH and EX belong to one source identity system; preserve the access URL without duplicating galleries by domain |
 | Gallery binding | Entry ID, gallery ID, binding origin, confirmation time | At most one gallery per entry initially; multiple entries may bind to the same gallery |
 | Tag and association | Namespace, original text, gallery or entry association, translated aliases | Namespace and original text determine identity; translations are not primary keys |
@@ -23,6 +24,8 @@ Store file page counts separately from EH page counts, and overridden titles sep
 
 The first release does not automatically merge entries by EH gid, identical titles, or similar covers. Identical files may be flagged as duplicates, but the user must decide whether to merge entries and how to handle their history.
 
+An unchanged path does not establish unchanged entry identity. A verified representation change of the same edition may retain the entry ID, binding, overrides, and history. Replacement by another edition requires a distinct entry; previous records remain associated with the previous edition. An ambiguous replacement must preserve existing records without silently attributing them to the new content. Resolve the classification evidence and user-resolution workflow jointly with indexing before implementing file-update persistence. Historical locations must not compete with a new entry's current location.
+
 ## Database Direction
 
 SQLite is the proposed database, stored on the server machine's local disk. Clients access it only through the API. Do not place the live database on a NAS share or have desktop clients open it directly.
@@ -33,7 +36,8 @@ Search indexing is specified in [Search](search.md). Define schemas, indexes, an
 
 ## Open Design Questions
 
-- Should an entry have exactly one file location initially, and how are identical copies represented without merging editions?
+- Should an entry have exactly one file location initially, and how are identical copies and historical locations represented without merging editions?
+- Does the first release expose one library or several user-visible libraries? Keep this separate from support for multiple storage roots; do not add user accounts or ownership fields merely to anticipate a multi-user release.
 - What are the lifecycle rules for missing entries, explicit removal, rebinding, and retention of open history?
 - What concrete constraints and transaction boundaries protect bindings, tag updates, and event deduplication?
 - How are schema migrations and consistent backups performed without losing identity or history?

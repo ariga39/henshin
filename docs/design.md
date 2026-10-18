@@ -30,13 +30,17 @@ The confirmed desktop stack is Electron + React + TypeScript. Effect is preferre
 
 ## Refinement Order
 
-1. Establish product scenarios and resolve indexing, path, and entry-identity rules together.
+1. Establish product scenarios and resolve indexing, path, and entry-identity rules together, including replacement at an unchanged path and preservation of the previous edition's records.
 2. Detail metadata precedence, search behavior, reader integration, and cross-device consistency.
 3. Develop UI journeys against those rules, using concrete normal and failure scenarios.
 4. Define schemas, API contracts, and task state transitions; run focused investigations for uncertain platform or library behavior.
 5. Update implementation phases and acceptance cases with the resulting decisions and evidence.
 
 Keep each rule in its owning topic and link to it from dependent topics. Update related documents when a decision changes their contract. Do not silently promote a proposed default or open question into a confirmed requirement.
+
+## Review Record
+
+The [independent Sol and DeepSeek review](reviews/outline-review.md) records the shared criteria, baseline findings, primary-agent decisions, and resulting revisions. It distinguishes adopted corrections from deferred product choices and rejected conclusions.
 
 ## Reference Projects
 

@@ -14,6 +14,8 @@ Results can be sorted by date added, title, EH publication time, site rating, op
 
 Store business data in SQLite and query tags through relational tables. Validate FTS5 and substring-search behavior for Chinese and Japanese titles, particularly queries of one or two characters. Establish library sizes and performance targets through sample-library validation rather than assuming scan or query durations. [SQLite FTS5 documentation](https://sqlite.org/fts5.html)
 
+Before implementing the first title/filename search index, define expected short-query behavior and evaluate tokenizer or substring options against representative Chinese and Japanese titles. This is a Phase 2 design gate, not a Phase 4 discovery task. Phase 4 measures the selected approach at representative scale. The index remains rebuildable; query semantics should not be an accidental consequence of a tokenizer default.
+
 ## Open Design Questions
 
 - What are the exact semantics for phrases, partial titles, tag aliases, inclusion, exclusion, and multiple terms?

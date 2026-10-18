@@ -4,9 +4,9 @@ Henshin manages collection files and EH gallery information through desktop clie
 
 ## Language
 
-**Library**: A collection of library entries and their source files managed by one server. Multiple clients can access the same library.
+**Library**: A collection of library entries and their source files managed by one server and organized across one or more storage roots. Multiple clients can access the same library.
 
-**Storage Root**: A logical root directory containing collection files, such as a shared comics directory on a NAS. Its identity is independent of server deployment and device mount paths.
+**Storage Root**: A logical root directory containing collection files, such as a shared comics directory on a NAS, belonging to one library. Its identity is independent of server deployment and device mount paths.
 
 **Path Mapping**: The access path for a storage root on a particular device. Devices can access the same files through different network paths or mount points.
 
