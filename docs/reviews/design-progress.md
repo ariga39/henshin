@@ -11,7 +11,7 @@ Each topic follows the [shared review protocol](topic-review-brief.md). A topic 
 | 5 | Search semantics and filtering | [Both reviewers PASS](search-review.md) on `393e29f`; [PR #5](https://github.com/ariga39/henshin/pull/5) | `design/05-search` / `design/04-eh-metadata` |
 | 6 | External readers and open events | [Both reviewers PASS](external-reading-review.md) on `2fba5b4`; [PR #6](https://github.com/ariga39/henshin/pull/6) | `design/06-external-reading` / `design/05-search` |
 | 7 | Cross-device consistency and instance lifecycle | [Both reviewers PASS](synchronization-review.md) on `174af0a`; [PR #7](https://github.com/ariga39/henshin/pull/7) | `design/07-synchronization` / `design/06-external-reading` |
-| 8 | Product scope and release scenarios | Pending | After topic 7 |
+| 8 | Product scope and release scenarios | Draft; awaiting independent reviews | `design/08-product-scope` / `design/07-synchronization` |
 | 9 | UI journeys and interaction | Pending | After topic 8 |
 | 10 | Persistence schemas and transactions | Pending | After topic 9 |
 | 11 | API, IPC, and background-task contracts | Pending | After topic 10 |

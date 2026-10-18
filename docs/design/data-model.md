@@ -10,7 +10,7 @@ The following table describes data responsibilities and relationships. Concrete 
 
 | Entity | Main fields or relationships | Constraints |
 | --- | --- | --- |
-| Library | Library ID, name, associated storage roots, library change revision | A library can contain multiple storage roots; the number of user-visible libraries is a separate product choice |
+| Library | Library ID, name, associated storage roots, library change revision | One visible library per server in the first release; it contains multiple storage roots |
 | Storage root | Root ID, owning library ID, name, server mapping and mapping revision, scan options | Belongs to exactly one library; stable root ID unique within a server instance; active server mappings cannot overlap, including across libraries |
 | Library entry | Entry ID, date added, root ID, relative path, format, size, modification time, local page count, file fingerprint, identity state, server availability observation, content version, location revision | At most one current entry association per root and path; separate entries for language editions and revisions; date added survives relocation and metadata changes |
 | EH gallery | Source, gid, token, both titles, category, site page count, raw response, retrieval time, sync status | EH and EX belong to one source identity system; preserve the access URL without duplicating galleries by domain |
@@ -42,7 +42,6 @@ Search indexing is specified in [Search](search.md). Define schemas, indexes, an
 ## Open Design Questions
 
 - How are current claims, last-known locations, and pending replacement candidates represented under the entry-lifecycle invariants?
-- Does the first release expose one library or several user-visible libraries? Keep this separate from support for multiple storage roots; do not add user accounts or ownership fields merely to anticipate a multi-user release.
 - How are missing and detached entries retained under the entry-lifecycle rules, and how does binding revision storage support metadata correction?
 - What concrete constraints and transaction boundaries protect bindings, tag updates, and event deduplication?
 - How is the shared entry edit/decision revision stored and advanced for binding, override, and lifecycle mutations, separately from source-gallery snapshot revisions?
