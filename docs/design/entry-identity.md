@@ -69,7 +69,7 @@ The user can choose:
 2. **Treat as a different entry**: release the old current location, preserve the old entry as detached, and create an unbound entry with no inherited overrides or events.
 3. **Decide later**: retain the unresolved state and block normal Open for that entry. A later scan can replace the candidate but cannot make the decision on the user's behalf.
 
-The exception is an exact match to the previously accepted fingerprint: restoring the accepted representation needs no edition judgment. Atomically clear the candidate and restore Accepted under the current entry, location, and candidate revisions. Advance the decision revision so an already-open comparison cannot resolve the discarded candidate. A failed scan, missing candidate file, or matching size/mtime alone does not perform this transition. Fingerprint profiles must be comparable and the observation complete and stable.
+The exception is an exact match to the previously accepted fingerprint: restoring the accepted representation needs no edition judgment. Atomically clear the candidate and restore Accepted under the current entry, location, and candidate revisions. Advance the entry revision so an already-open comparison cannot resolve the discarded candidate. A failed scan, missing candidate file, or matching size/mtime alone does not perform this transition. Fingerprint profiles must be comparable and the observation complete and stable.
 
 Only a completely analyzed, stable candidate can be accepted. If analysis fails, offer retry and leave the decision pending. The first release does not provide an untracked preview launch to bypass the pending state.
 
@@ -100,7 +100,7 @@ Changing a device mapping changes only the access path for the same logical root
 
 Disabling or removing a root from active scanning retains its entries, root identity, bindings, and history. Re-enabling the same root can reconcile them. Creating a different root with the same label allocates a different ID and does not inherit those records. Removing a client mapping leaves shared data intact; that client must configure the mapping again to open files.
 
-The first release has no automatic hard deletion, entry merge, or history transfer. Missing and detached entries remain inspectable and can be filtered out of the normal available-files view. Exclusions and incomplete scans do not delete entries. A future permanent-removal feature must define retention and pending-event handling separately; it is not implied by removing a path mapping or disabling a root.
+The first release has no hard deletion, entry merge, or history transfer. Missing and detached entries remain inspectable and can be filtered out of the normal available-files view. Exclusions and incomplete scans do not delete entries. A future permanent-removal feature must define retention and pending-event handling separately; it is not implied by removing a path mapping or disabling a root.
 
 ## Opening and Delayed Events
 
