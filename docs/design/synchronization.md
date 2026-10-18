@@ -26,6 +26,8 @@ Edits use server-side revision checks. A client submits the revision it original
 
 Revision protection is a prerequisite for exposing mutable metadata commands, including overrides and binding corrections. It is delivered with those commands in Phase 2, rather than waiting for Phase 3 notifications and reconnection work.
 
+Root mapping changes already require their own per-root conditional revisions in Phase 1 under [Path mappings](path-mapping.md). The metadata milestone does not postpone that protection.
+
 ## Open Design Questions
 
 - Given the revision granularity defined in the data model, what conflict response lets users recover their changes?
