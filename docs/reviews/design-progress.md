@@ -12,7 +12,7 @@ Each topic follows the [shared review protocol](topic-review-brief.md). A topic 
 | 6 | External readers and open events | [Both reviewers PASS](external-reading-review.md) on `2fba5b4`; [PR #6](https://github.com/ariga39/henshin/pull/6) | `design/06-external-reading` / `design/05-search` |
 | 7 | Cross-device consistency and instance lifecycle | [Both reviewers PASS](synchronization-review.md) on `174af0a`; [PR #7](https://github.com/ariga39/henshin/pull/7) | `design/07-synchronization` / `design/06-external-reading` |
 | 8 | Product scope and release scenarios | [Both reviewers PASS](product-scope-review.md) on `a149c17`; [PR #8](https://github.com/ariga39/henshin/pull/8) | `design/08-product-scope` / `design/07-synchronization` |
-| 9 | UI journeys and interaction | Draft; awaiting independent reviews | `design/09-user-interface` / `design/08-product-scope` |
+| 9 | UI journeys and interaction | [Both reviewers PASS](user-interface-review.md) on `b8bd349`; [PR #9](https://github.com/ariga39/henshin/pull/9) | `design/09-user-interface` / `design/08-product-scope` |
 | 10 | Persistence schemas and transactions | Pending | After topic 9 |
 | 11 | API, IPC, and background-task contracts | Pending | After topic 10 |
 | 12 | Effect runtime and application composition | Pending | After topic 11 |
