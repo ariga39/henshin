@@ -22,3 +22,7 @@ Each topic follows the [shared review protocol](topic-review-brief.md). A topic 
 This order follows behavioral dependencies. Existing outline decisions constrain each topic throughout; security and integrity prerequisites cannot be postponed merely because their full topic appears later. Product scope and UI receive separate documents, reviews, and PRs. Technical claims requiring platform or dependency experiments must remain marked unverified until those experiments actually run.
 
 All 14 detailed topics have passed their independent design-review gates. The stack remains unmerged. Runtime implementation and platform validation have not started; [delivery](../design/delivery-and-validation.md) defines the remaining evidence gates.
+
+## Whole-stack Follow-up
+
+[PR #15](https://github.com/ariga39/henshin/pull/15), based on PR #14, applies the [whole-stack review corrections](whole-stack-review.md). DeepSeek V4.1 Flash and Step 5 Preview both verified design revision `634ff57` with no remaining material findings. This supplements, rather than rewrites, the 14 historical topic verdicts.
