@@ -1,77 +1,84 @@
-# Application Logic with Effect
+# Application Logic and Runtime Composition with Effect
 
-Effect is the preferred foundation for server and frontend application logic. This document owns service composition, runtime lifetimes, error handling, and the boundary between React, Electron, and server workflows. Electron and React remain the selected desktop technologies.
+Effect is the preferred foundation for frontend and backend application logic. This topic owns service seams, runtime composition, state ownership, cancellation, errors, and resource lifetimes. Electron/React/TypeScript and the independent Node/SQLite server remain the chosen direction; [API/IPC](api-and-tasks.md) owns serialized operations and [persistence](data-model.md) owns database atomicity.
 
 [Design overview](../design.md) | [Domain glossary](../../CONTEXT.md)
 
-## Responsibilities
+## Composition and Package Boundary
 
-| Layer | Responsibility | Effect integration |
+Keep three separate application compositions: independent server, Electron main, and each renderer window. Each composition has one explicitly owned runtime at startup and a scoped dependency graph built with Layers. Domain workflows receive services from that graph; they do not create nested runtimes or call global run functions inside business logic. Execute Effects at HTTP, scheduler, IPC, and React-adapter entry points. Live service instances, Effects, fibers, database handles, and failure causes never cross HTTP/IPC.
+
+Pure rules remain ordinary typed functions: effective title/tag calculation, query identity, revision comparisons, candidate-decision validation, and display-state reductions need no service solely for test substitution. Services represent real I/O or lifetime seams. Avoid a Layer per component/helper or a generic repository abstraction that erases transaction invariants.
+
+The intended HTTP direction is Effect's typed API declarations, derived client, and compatible Node adapter. [HttpApi](https://effect.website/docs/v4/api/effect/http-api/HttpApi), [HttpApiClient](https://effect.website/docs/v4/api/effect/http-api/HttpApiClient), [HttpServer](https://effect.website/docs/v4/api/effect/http/HttpServer), and [runtime guidance](https://effect.website/docs/v4/runtime) are reference links, not a pinned dependency set. The referenced v4 HTTP modules have been described as unstable in the current outline; do not mix v3 and v4 imports/examples. Select and pin one compatible Effect/Node/React/SQLite combination through the integration gate before application implementation. A fresh website fetch during this topic's preparation failed TLS/reachability checks; this design makes no new package-version or API-execution claim from that fetch.
+
+Use the selected release's lifecycle-managed runtime facility (for example `ManagedRuntime` where supported) at framework edges, with explicit disposal. Exact constructors/import paths are a prototype result, not invented executable code in this specification. A separate Fastify layer or workflow engine is unnecessary unless that prototype demonstrates a concrete unmet need.
+
+## Service Seams and Ownership
+
+| Composition | Service responsibilities | Lifetime |
 | --- | --- | --- |
-| React UI | Render results, collect input, manage focus and transient interaction state | Invoke application operations through a small binding layer; subscribe to their state |
-| Renderer application logic | Search requests, metadata commands, task subscriptions, coordination of local open actions | Effect programs with explicit dependencies, expected errors, cancellation, and connection-scoped resources |
-| Electron main process | Authenticated HTTP clients and credentials, bounded thumbnail delivery, device path resolution, file checks, reader launch, local server lifecycle, durable local event storage | Effect services around local capabilities, exposed through a narrow preload API |
-| Independent server | Library operations, EH integration, persistence, task orchestration | Effect services composed with Layers and owned by the server lifecycle |
-| Shared contracts | Transport data, request and response schemas, public error variants | Effect Schema and typed HTTP declarations; no server-only dependencies |
+| Server | Library commands/queries, transactional store, root resolver, scan reconciliation, archive/image workers, EH client, task scheduler, thumbnail/artifact store, authentication/configuration | Process runtime; request and task child scopes |
+| Main | Connection sessions and authenticated typed HTTP, credential store, client mappings/native resolution, reader profiles/launcher, local journal/delivery, thumbnail bytes/cache, local-service supervisor | Desktop process runtime, independent of renderer windows |
+| Renderer | Allowed preload client, query/command coordination, normalized view snapshots, form-draft coordination, subscription bridge, UI actions | Window runtime plus selected-connection/view scopes |
+| Shared contracts | HTTP/IPC schemas, tagged public errors, IDs/revisions, version/capability declarations | Pure package with no Node/Electron/native imports |
 
-Keep deterministic domain calculations as ordinary pure TypeScript functions where useful. Use services at actual dependency boundaries, such as filesystem access, persistence, HTTP access, and reader launch. Do not create a service or Layer for every helper or React component.
+Service interfaces expose use cases with their actual preconditions: resolve an entry under captured mapping/identity context; commit a replacement with expected versions; accept immutable events; fetch a page under query/epoch context. Do not expose arbitrary SQL, raw HTTP URL fetch, or shell execution as renderer services. The store exposes transaction-sized operations rather than making callers compose several independent writes into an alleged atomic decision.
 
-## Composition and Runtime Lifetimes
+An EH refresh workflow depends on a policy-bound EH client and store, not on UI state. Archive decoding runs through a bounded worker capability; its output includes analysis/generation tokens. Local Open depends on trusted entry snapshots, native resolution, profiles, and the launch journal. A main-process connection session supplies its instance/epoch and redacted public state; credentials remain behind that session and are never a dependency of the renderer runtime.
 
-Express application workflows as Effects and compose their dependencies with Layers. Execute them at entry points such as HTTP handlers, task runners, Electron IPC handlers, and React integration code. Avoid starting unrelated runtimes inside domain services.
+## Renderer State and React Integration
 
-The server, Electron main process, and each renderer have separate runtime lifetimes. A renderer runtime cannot grant Node.js privileges or share live services across IPC. Transport only validated, serializable data across HTTP and IPC; do not send Effect values, runtime objects, database handles, or raw failure causes.
+React owns focus, selection, expanded panels, in-progress text, and unsent form drafts. Renderer Effect workflows own asynchronous request/command state and subscriptions, exposed through a small immutable external-store bridge using React's `useSyncExternalStore` contract or an equivalently tested adapter. No Effect is executed during render. Create the window runtime once outside component render; hooks subscribe/unsubscribe views, not recreate the dependency graph.
 
-Use a lifecycle-managed runtime at framework boundaries. Effect documents `ManagedRuntime` for reusing service composition in environments such as React. In Henshin, connection-specific resources belong to the selected server session and are disposed or replaced when that session changes. [Effect runtime documentation](https://effect.website/docs/v4/runtime)
+Use one owner for remote query state within each window. Query keys include connection/profile context, instance/epoch once known, operation and complete validated input, plus relevant normalization/content versions. Entry IDs alone do not identify cached metadata, cover bytes, or search results. Main's durable display cache serves disconnected snapshots; it is not a second independently optimistic server-state controller. Main owns shared image-byte/cache policy, while the renderer owns bounded Blob URLs and disposes them with their view/cache use.
 
-Client requests and subscriptions must not outlive their owners. Dispose renderer resources when a window closes, and release server and main-process resources during shutdown. Persist pending open events before disposing the component that sends them. A cancelled UI request must not be interpreted as a rollback of a server operation already committed.
+For search and detail reads, each view has a request generation. New input interrupts superseded work where possible; a response also must match current generation, namespace, epoch, and required content/projection versions before publication. Cancellation alone is insufficient because a transport can finish late. Within an epoch, retain newer known revisions; do not merge old source-gallery fragments into a newer entry projection. [Search](search.md) and [UI](user-interface.md) define live-pagination and selection behavior.
 
-## Frontend State and Operations
+Mutation UI transitions are explicit: idle/editing, submitting, committed, conflict, failed, or outcome-unknown. Preserve submitted operation ID/payload while ambiguous. Do not optimistically change identity, bindings, authoritative tags/counts, or root configuration before commit; display unsent intent and pending event state separately. A component unmount disposes its subscription and local view interest, not durable work or committed effects. React development remounts must not duplicate commands; commands originate only from deliberate event handlers with stable action/operation IDs, never mount effects.
 
-React retains transient presentation state such as an expanded panel, focus, or an unsubmitted form field. Effect owns asynchronous application workflows and their expected failures. Keep these workflows outside view components so they can be exercised without rendering the UI.
+A window may switch servers without destroying another window's session. Renderer connection scope changes invalidate that window's reads/subscriptions/drafts context. Main sessions are keyed by saved profile and verified namespace, with ref-counted view use plus separate ownership by event delivery or local-service supervision. A session with pending durable work cannot be disposed just because its last visible screen closed. Authentication or epoch change pauses/reconciles according to [consistency](synchronization.md), rather than silently creating a new namespace.
 
-Select one owner for remote query caching and subscription state. Evaluate Effect's React integration against the chosen package versions before selecting bindings; do not introduce competing caches or a custom state framework by default. The binding must expose loading, successful, stale, failed, and interrupted operations where those states affect the user.
+## Main-process Open and Durable Work
 
-For search, a newer query supersedes the older display request. Interrupt work where supported and reject obsolete results so they cannot replace the current view. A read request may be retried according to policy. Commands require operation-specific retry rules: submitting an existing open event is safe to repeat with its event ID, but launching a reader again is a new external action.
+The preload Open handler validates sender and schema once at its trust boundary, then captures namespace/action/profile/entry context. Its Effect calls the resolver and journal services in the order fixed by [external reading](external-reading.md). Before dispatch, cancellation/configuration changes can abort. After dispatch begins, a main-owned operation scope records the outcome and immutable event even if the requesting component/window disappears. It never retries OS launch.
 
-An Open command resolves to the Electron capability, which checks the local path and launches the reader. Once accepted by the operating system, the resulting event is persisted locally and submitted independently of the originating React component. The reader remains usable even if the details screen is closed.
+Only short critical bookkeeping is protected from interruption: claim dispatch ownership and persist the accepted/unknown result. Do not make a long filesystem check, network call, or reader lifetime uninterruptible. Async native adapters report acceptance/error/unknown and connect cancellation only where it is meaningful. A reader process is deliberately independent after handoff; resource cleanup must not terminate it when the Effect scope closes. Crash between acceptance and event commit remains possible and is reported as such, not hidden by Effect terminology.
 
-## Server Logic and HTTP Direction
+The event delivery worker reads durable accepted events, submits bounded batches through the correct authenticated session, and persists acknowledgments. Its fibers/queues coordinate work but are not the queue's source of truth. Retry only event delivery/persistence with the same payload, respecting permanent/held/auth/epoch outcomes. Local reader tests and access checks remain distinct non-counting operations.
 
-The preferred backend is an independent Node.js/TypeScript process using Effect, with SQLite persistence. First evaluate Effect's `HttpApi`, typed client, and Node HTTP adapter as the HTTP stack. Fastify is no longer the default proposal; add a separate HTTP framework only if validation exposes a concrete requirement the Effect stack does not meet.
+Thumbnail loading handles validated local-entry/candidate covers and remote EH candidate previews as separate source policies. Local replacement covers require indexing evidence/version checks, not EH authorization. Remote previews additionally require the EH preview policy. Both arrive through bounded, allowlisted image IPC; no arbitrary remote image URL reaches React as a capability.
 
-Effect's HTTP client derives operations and request/response codecs from shared API declarations. Run the authenticated derived client in Electron main behind the allowed preload operation surface; renderer Effect logic invokes those operations without handling transport credentials or arbitrary URLs. Use that contract to connect client application logic to server use cases, while keeping database entities and private errors internal. [HttpApi](https://effect.website/docs/v4/api/effect/http-api/HttpApi), [HttpApiClient](https://effect.website/docs/v4/api/effect/http-api/HttpApiClient), and [HttpServer](https://effect.website/docs/v4/api/effect/http/HttpServer) describe this integration.
+## Server Requests, Transactions, and Tasks
 
-The referenced v4 HTTP modules are marked unstable. Select and pin a compatible Effect release and adapter set before implementation; verify the actual APIs and packaging together. These references establish an architectural direction, not a completed dependency or version selection. Do not mix examples or import paths from different Effect major versions.
+HTTP adapters decode schemas, authenticate, validate namespace/epoch, and invoke use cases. Public expected errors are encoded through the shared contract; private stores/models stay internal. A request scope owns read queries and reply resources. Background task creation persists the task/result before returning its ID, then the process scheduler owns it. Request cancellation cannot turn a committed job submission into nonexistence.
 
-## Errors and Resource Handling
+The SQLite adapter serializes writes on the database worker. A transaction Effect either completes its conditional write/result or rolls back; interruptions cannot return a worker connection with an open transaction. Once a command is committed, a lost caller scope changes only reply delivery. Do not blindly retry a whole transaction containing external side effects. Filesystem observations/decodes/network fetches occur outside the transaction and return captured fences for conditional publication.
 
-Represent expected failures with explicit types, for example an unavailable storage root, a missing mapping, an expired EH session, a revision conflict, or a reader launch failure. Map them to public HTTP or IPC errors and then to user-facing states. Unexpected defects remain diagnostic failures; do not disguise them as successful empty results or retry them indefinitely.
+Task scheduler fibers are bounded dispatch mechanisms over durable records. On restart, run the recovery protocol before selecting work; root generations and task attempt tokens fence old results. A task child scope owns its I/O/worker handles. Cancellation first commits the cancellation fence, then interrupts children and awaits bounded cleanup; force-terminate only Henshin-owned decoder workers after the cleanup deadline, never the external reader or independent remote server. Retryable failures transition the persisted task state before sleeping/scheduling another attempt. No in-memory sleep is the only record of a future retry.
 
-Validate data at HTTP, IPC, configuration, and external-response boundaries using schemas. Within a validated application flow, rely on typed values instead of repeatedly decoding the same object. Layer implementations translate third-party Promise failures into the application's error model and connect cancellation where the underlying operation supports it.
+Use separate concurrency budgets for NAS enumeration, full fingerprints, image/archive decoding, EH requests, and database writes. Effect fibers provide concurrency, not CPU parallelism. Blocking native code and codecs run in worker threads or subprocesses chosen by the native-adapter prototype. Worker messages are validated at that boundary and carry task/attempt/generation identifiers; late output cannot commit merely because a fiber is still alive. Backpressure bounds pending messages and output buffers.
 
-Use scoped resource handling for connections, subscriptions, and temporary processing resources. Database transactions remain responsible for database atomicity. Interruption must respect commit boundaries, and an interrupted archive decoder may require explicit worker or process cleanup.
+## Errors, Retries, and Resource Cleanup
 
-## Concurrency and Durable Work
+Expected tagged failures include unavailable mapping, missing/unsafe target, unsupported format, stale decision/epoch, auth required, rate limited, storage busy/full, reader failure/unknown, and validation errors. Convert Promise/native callback failures at service adapters into that error algebra. Unexpected defects retain an internal diagnostic cause and map to an opaque public error; never catch all failures as empty search results or automatic retries.
 
-Effect coordinates concurrent I/O, bounded work, retry schedules, and interruption. Fibers do not make synchronous CPU-heavy work run on another thread. Archive decoding and image processing still need appropriate workers or subprocesses when they would block the event loop. [Effect fibers](https://effect.website/docs/v4/concurrency/fibers)
+Interruption is neither a domain failure nor proof of rollback. Record committed/unknown command state separately from view cancellation. Retry policies are attached at the boundary that owns idempotency: bounded reads, safe same-ID commands within their window, immutable event uploads, or persisted job attempts. Avoid stacking transport retries and use-case retries so one request explodes into multiplicative attempts. Honor upstream delays and use injected Clock/randomness for deterministic retry tests.
 
-In-memory queues and fibers are not the durable task store. Persist task identity, progress, and recovery state in SQLite, and reconcile interrupted tasks after a restart. Keep the first implementation within the existing server architecture rather than adopting an additional workflow engine without a demonstrated need.
+Acquire/release resources in scopes: HTTP response bodies, subscriptions, temporary analysis files, database-worker connections, and owned decoder processes. Release must run on typed failure, interruption, and defects. File cleanup never deletes collection content and must verify application-owned paths. An interrupted publication leaves unreferenced artifacts recoverable by cleanup; it cannot erase a committed entry because a temporary file failed to delete.
 
-## Validation Before Adoption Details Are Finalized
+Graceful server shutdown stops admission/scheduling, fences/cancels active attempts, lets short database commits settle, persists recovery state, closes connections/workers, and releases the data lock last. Desktop shutdown stops new Open, gives in-flight handoff recording a bounded opportunity to become durable, keeps unacknowledged events, disposes windows/sessions, then stops only its owned local service as deployment specifies. Failed durability surfaces recovery information; shutdown cannot claim audit-grade completeness. Abrupt termination follows journal/task restart rules.
 
-- Exercise one shared-schema endpoint from renderer Effect operations through preload and the main-process typed HTTP client to a Node HTTP adapter to a SQLite-backed server operation.
-- Verify renderer mount/unmount and server switching release resources, ignore obsolete search results, and do not duplicate subscriptions or commands under React development checks.
-- Verify typed errors survive HTTP and IPC encoding without exposing private causes or credentials.
-- Verify request interruption, task cancellation, database commit handling, and restart recovery as separate behaviors.
-- Verify native SQLite and archive dependencies in the independent server and Electron packaging on the target platforms.
+## Integration and Verification Gate
 
-## Open Design Questions
+Before selecting package versions or writing dependent features, build one narrow throwaway/prototype vertical slice and record its evidence:
 
-- Which compatible Effect release, Node adapter, React binding, and SQLite integration should be pinned after the integration prototype?
-- What owns frontend remote state and caching, and how are its lifecycle and invalidation rules exposed to React?
-- What service boundaries are justified by the first end-to-end workflows, without adding unused abstractions?
+1. Renderer Effect operation through the typed preload/main client reaches an independent Node Effect HTTP handler and SQLite worker transaction; a tagged conflict round-trips without private details.
+2. React remount/unmount, window switching, late responses, and epoch change leave one appropriate subscription and never duplicate a command or overwrite the current view.
+3. A local native reader adapter plus journal demonstrates pre-dispatch cancellation, accepted handoff after component teardown, no automatic relaunch, and persisted event retry/deduplication.
+4. A durable task schedules a worker result, is cancelled/restarted, and rejects stale generation output; a busy/full database returns the specified error while preserving transaction state.
+5. Resource counters and crash fixtures show that sockets, response bodies, workers, Blob URLs, and temp files have bounded cleanup, with the documented exceptions for already launched readers and recovery artifacts.
 
-## Related Topics
+Use pure rule tests for deterministic semantics and real adapter integration tests for transaction, worker, IPC, process, and packaging boundaries. Test Layer substitutions are appropriate for clocks, HTTP fixtures, and deterministic failure injection; an in-memory store cannot prove SQLite/NAS/native-reader correctness. Required platform coverage belongs to [delivery](delivery-and-validation.md).
 
-- [Architecture](architecture.md) owns deployment and process boundaries. [API and tasks](api-and-tasks.md) owns wire contracts and task state machines. [User interface](user-interface.md) owns visible behavior. [Data model](data-model.md) owns persistence and transaction rules.
+This topic selects composition responsibilities, not an untested API version or React library. No Effect prototype, compiled program, runtime leak test, or native package integration has run. [Architecture](architecture.md) owns deployment/packaging and [contracts](api-and-tasks.md) remains authoritative for public shapes.

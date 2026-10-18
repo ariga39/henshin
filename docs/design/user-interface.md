@@ -103,7 +103,7 @@ Grid/list virtualization must preserve logical focus and accessible item identit
 
 Support text scaling, reduced motion, high-contrast/OS color preferences, and layouts that keep essential actions reachable in narrow windows. Do not announce successful actions only through transient toasts; durable task/event states remain available. Precise visual tokens and localization catalogs are later implementation choices, but layout must tolerate longer translated labels and non-Latin titles. English documentation does not prescribe the application's only UI language.
 
-React owns presentation, focus, and unsent form state. [Effect application logic](application-logic.md) owns connection/query lifetimes, command states, cancellation, and subscriptions; Electron main owns paths, profiles, launch coordination, and the journal through narrow IPC. Do not duplicate authoritative server state in independent component stores or run side effects during render. No component unmount may replay a reader action or discard a pending event.
+React owns presentation, focus, and unsent form state. [Effect application logic](application-logic.md) owns connection/query lifetimes, command states, cancellation, and subscriptions; Electron main owns authenticated HTTP/credentials, bounded thumbnail delivery, paths, profiles, launch coordination, and the journal through narrow IPC. Do not duplicate authoritative server state in independent component stores or run side effects during render. No component unmount may replay a reader action or discard a pending event.
 
 ## Acceptance and Implementation Gates
 
