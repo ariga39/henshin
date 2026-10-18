@@ -45,7 +45,7 @@ On successful authenticated reconnect:
 3. Refresh visible views, details used for Open, root configuration, and task status. Revalidate device mappings if their root identity or expected evidence changed; server-native prefix changes alone do not rewrite client mappings.
 4. Reconcile and resume immutable event delivery for this instance. Request per-event results and keep unresolved items visible. Refresh authoritative count/history after acknowledgment; do not add local pending totals to server counts without labeling them separately.
 
-Concurrent windows share main-process connection/event coordination, rather than running independent launch journals or competing queue drainers. Switching active servers cancels/invalidates old view requests but leaves accepted events and diagnostics in their original namespace. Delivery may continue only to an authenticated connection for that namespace; otherwise it waits. No queued event migrates to another server profile merely because that profile becomes active.
+Concurrent windows share main-process connection/event and per-instance/entry active Open coordination, rather than running independent launch journals or competing queue drainers. Switching active servers cancels/invalidates old view requests but leaves accepted events and diagnostics in their original namespace. Delivery may continue only to an authenticated connection for that namespace; otherwise it waits. No queued event migrates to another server profile merely because that profile becomes active.
 
 ## Durable Event Delivery
 
