@@ -6,7 +6,7 @@ This document owns entry discovery, directory boundaries, file-change detection,
 
 ## Scanning and Thumbnail Workflow
 
-1. Load the storage root configuration and check accessibility. If the root is unreachable, mark it offline without marking all entries as deleted.
+1. Load the active storage root mapping and its revision, then check accessibility. If the root is unreachable, mark it offline without marking all entries as deleted. Apply path-mapping containment and overlap rules; old mapping revisions cannot commit scan results.
 2. Enumerate allowed formats and directories, skipping exclusions and temporary downloads. Defer analysis of files that are still changing.
 3. Compare recorded paths, sizes, and modification times to create or update analysis tasks. Normal scans use incremental checks; forced reanalysis handles content replacements that preserve modification times.
 4. Analyze candidates and record formats, local page counts, and cover candidates. Sort images naturally; the presence of a cover image must not cause the entire library root to be treated as one book.
