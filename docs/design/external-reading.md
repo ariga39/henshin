@@ -63,7 +63,7 @@ Before dispatch, verify the journal can accept a new intent within its finite st
 
 ## Event Ownership and Time
 
-Device ID is a random installation identifier generated and persisted by Electron main, shared by its windows, retained across normal upgrades, and renewed on reinstall or independent desktop-profile cloning. It labels event provenance, not authentication, user identity, or deduplication. Synchronization owns device-label semantics and clone handling; persistence owns the instance-local registry, and API contracts owns authenticated registration, lookup and conditional label updates; deleting or renaming a device label cannot change historical event ownership.
+Device ID is a random installation identifier generated and persisted by Electron main, shared by its windows, retained across normal upgrades, and renewed on reinstall or independent desktop-profile cloning. It labels event provenance, not authentication, user identity, or deduplication. Synchronization defines device-label semantics and clone handling. Persistence owns the instance-local registry. API contracts defines authenticated registration, lookup and conditional label updates. Deleting or renaming a device label cannot change historical event ownership.
 
 An event contains event/action ID, server instance ID, entry ID, device ID, observed location revision, observed content version, and occurrence time as a UTC instant with millisecond precision. Its payload becomes immutable after acceptance. The server supplies receipt time and deduplicates by event ID within the instance; a duplicate ID with different payload is a conflict, never an additional count. No native path, reader executable, or argument list is needed in the shared event.
 
