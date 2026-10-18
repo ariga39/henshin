@@ -10,7 +10,7 @@ The following interface responsibilities are a draft. Endpoint paths and respons
 
 | Interface group | Typical operations |
 | --- | --- |
-| Server connection | Read instance ID, version, capabilities, and authentication status |
+| Server connection | Read instance ID, authority epoch, version, capabilities, and authentication status; register/look up device labels and conditionally update them |
 | Libraries and storage roots | Query libraries, configure server root paths, check accessibility, trigger scans |
 | Entries | Paginated search, details, local override editing, relocation of missing files |
 | Thumbnails | Retrieve covers by entry and thumbnail version |
