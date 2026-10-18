@@ -8,7 +8,7 @@ File storage and server deployment are independent. The current target scenario 
 
 English is the working language for repository documentation.
 
-- [Design overview and topic index](docs/design.md): navigation and refinement order for 14 separate design documents with behavioral contracts and explicit implementation gates.
+- [Design overview and topic index](docs/design.md): navigation and refinement order for separate design topics with behavioral contracts and explicit implementation gates.
 - [Domain glossary](CONTEXT.md): shared definitions for libraries, entries, storage roots, path mappings, EH galleries, and open history.
 
 ## Current status
