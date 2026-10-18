@@ -25,6 +25,12 @@ const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 export const Uuid = Schema.String.check(Schema.isPattern(UUID_PATTERN))
 export type Uuid = typeof Uuid.Type
 
-/** Bounded prototype note text (UTF-16 code units). */
+/**
+ * Bounded prototype note text (UTF-16 code units).
+ *
+ * U+0000 is intentionally allowed: the pinned Node 24 `node:sqlite` adapter
+ * round-trips it faithfully. Node 22's adapter truncates TEXT at NUL, which is
+ * one reason the workspace requires Node >= 24.19.0.
+ */
 export const Text = Schema.String.check(Schema.isMaxLength(1024))
 export type Text = typeof Text.Type

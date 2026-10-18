@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./canonical": "./src/canonical.ts",
     "./channels": "./src/channels.ts",
     "./ids": "./src/ids.ts"
   },

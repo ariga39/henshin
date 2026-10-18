@@ -27,18 +27,3 @@ export const HandshakeData = Schema.Struct({
   capabilities: Schema.Array(Schema.String)
 })
 export type HandshakeData = typeof HandshakeData.Type
-
-/**
- * Canonical command identity used for same-epoch deduplication. Field order is
- * fixed so an identical logical payload always serializes identically.
- */
-export const canonicalEditPayload = (input: {
-  readonly noteId: string
-  readonly text: string
-  readonly expectedRevision: string
-}): string =>
-  JSON.stringify({
-    expected_revision: input.expectedRevision,
-    note_id: input.noteId,
-    text: input.text
-  })

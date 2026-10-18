@@ -1,7 +1,6 @@
 import { Effect } from "effect"
 import { HttpApiBuilder } from "effect/http-api"
 import {
-  canonicalEditPayload,
   EpochChanged,
   InstanceMismatch,
   InternalError,
@@ -88,19 +87,13 @@ export const PrototypeHandlers = HttpApiBuilder.group(PrototypeApi, "prototype",
             })
           }
 
-          const canonicalPayload = canonicalEditPayload({
-            noteId: params.id,
-            text: payload.text,
-            expectedRevision: payload.expected_revision
-          })
           const outcome = yield* store
             .commitNote({
               noteId: params.id,
               text: payload.text,
               expectedRevision: payload.expected_revision,
               operationId: payload.operation_id,
-              epoch: server.epoch,
-              canonicalPayload
+              epoch: server.epoch
             })
             .pipe(Effect.mapError(() => internalError(ctx.request_id)))
 

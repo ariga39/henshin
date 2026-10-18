@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import http from "node:http"
 import { DatabaseSync } from "node:sqlite"
 import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
@@ -29,6 +30,54 @@ const withClient = <A, E>(
       PrototypeHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })
     )
   )
+
+interface RawResponse {
+  readonly status: number
+  readonly body: string
+}
+
+/**
+ * Sends a PUT with Transfer-Encoding: chunked (no Content-Length) over
+ * node:http, so the chunked path is exercised for real.
+ */
+const chunkedPut = (server: RunningServer, payload: string): Promise<RawResponse> =>
+  new Promise((resolve, reject) => {
+    const request = http.request(
+      {
+        host: "127.0.0.1",
+        port: Number(new URL(server.baseUrl).port),
+        method: "PUT",
+        path: "/prototype/v1/note/note-1",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${server.bearerToken}`
+        }
+      },
+      (response) => {
+        let body = ""
+        response.on("data", (chunk: Buffer) => {
+          body += chunk.toString("utf8")
+        })
+        response.on("end", () => resolve({ status: response.statusCode ?? 0, body }))
+      }
+    )
+    request.on("error", reject)
+
+    const chunkSize = 65_536
+    let offset = 0
+    const write = () => {
+      while (offset < payload.length) {
+        const part = payload.slice(offset, offset + chunkSize)
+        offset += chunkSize
+        if (!request.write(part)) {
+          request.once("drain", write)
+          return
+        }
+      }
+      request.end()
+    }
+    write()
+  })
 
 describe("prototype HTTP boundary", () => {
   it("rejects missing and invalid bearer tokens without disclosing namespace or epoch", async () => {
@@ -218,31 +267,108 @@ describe("prototype HTTP boundary", () => {
     expect(overLongText.status).toBe(400)
   })
 
-  it("enforces the 1 MiB JSON body ceiling during parsing", async () => {
+  it("enforces the 1 MiB JSON ceiling for declared and chunked bodies", async () => {
     const server = await start()
-    const response = await fetch(`${server.baseUrl}/prototype/v1/note/note-1`, {
-      method: "PUT",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${server.bearerToken}`
-      },
-      body: JSON.stringify({
-        operation_id: randomUUID(),
-        expected_revision: "0",
-        text: "x",
-        instance_id: server.instanceId,
-        epoch: server.epoch,
-        // Excess fields are ignored by the schema, so without a parse-time body
-        // ceiling this request would succeed.
-        padding: "a".repeat(1024 * 1024)
-      })
+    const url = `${server.baseUrl}/prototype/v1/note/note-1`
+    const headers = {
+      "content-type": "application/json",
+      authorization: `Bearer ${server.bearerToken}`
+    }
+    const base = {
+      operation_id: randomUUID(),
+      expected_revision: "0",
+      text: "x",
+      instance_id: server.instanceId,
+      epoch: server.epoch
+    }
+    // Excess fields are ignored by the schema, so without a parse-time ceiling
+    // these requests would succeed.
+    const overLimit = JSON.stringify({ ...base, padding: "a".repeat(1024 * 1024) })
+
+    const declared = await fetch(url, { method: "PUT", headers, body: overLimit })
+    expect(declared.status).toBe(413)
+
+    const chunked = await chunkedPut(server, overLimit)
+    expect(chunked.status).toBe(413)
+
+    // A within-limit chunked body is still accepted, proving the ceiling is a
+    // size bound rather than a blanket rejection of chunked encoding.
+    const accepted = await chunkedPut(server, JSON.stringify({ ...base, text: "chunked-ok" }))
+    expect(accepted.status).toBe(200)
+
+    const read = await fetch(url, { headers: { authorization: `Bearer ${server.bearerToken}` } })
+    expect(read.status).toBe(200)
+    expect(((await read.json()) as { data: unknown }).data).toEqual({
+      note_id: "note-1",
+      text: "chunked-ok",
+      revision: "1"
     })
-    expect(response.status).toBe(413)
+  })
+
+  it("accepts a maximum-length text of JSON-escaped control characters", async () => {
+    const server = await start()
+    const text = "\u0001".repeat(1024)
+
+    const result = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* PrototypeHttpClient
+        const handshake = yield* client.handshake()
+        const edited = yield* client.editNote({
+          params: { id: "note-1" },
+          payload: {
+            operation_id: randomUUID(),
+            expected_revision: "0",
+            text,
+            instance_id: handshake.instance_id,
+            epoch: handshake.epoch
+          }
+        })
+        const read = yield* client.getNote({ params: { id: "note-1" } })
+        return { edited, read }
+      })
+    )
+
+    expect(result.edited.data.revision).toBe("1")
+    expect(result.read.data.text).toBe(text)
+  })
+
+  it("round-trips an embedded NUL on the pinned node:sqlite runtime", async () => {
+    const server = await start()
+    const text = "\u0000".repeat(1024)
+
+    const result = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* PrototypeHttpClient
+        const handshake = yield* client.handshake()
+        const edited = yield* client.editNote({
+          params: { id: "note-1" },
+          payload: {
+            operation_id: randomUUID(),
+            expected_revision: "0",
+            text,
+            instance_id: handshake.instance_id,
+            epoch: handshake.epoch
+          }
+        })
+        const read = yield* client.getNote({ params: { id: "note-1" } })
+        return { edited, read }
+      })
+    )
+
+    expect(result.edited.data.revision).toBe("1")
+    expect(result.read.data.text).toBe(text)
+  })
+
+  it("rejects a malformed chunked JSON body with a 400 and no write", async () => {
+    const server = await start()
+    const response = await chunkedPut(server, "{not-json")
+    expect(response.status).toBe(400)
 
     const read = await fetch(`${server.baseUrl}/prototype/v1/note/note-1`, {
       headers: { authorization: `Bearer ${server.bearerToken}` }
     })
-    expect(read.status).toBe(200)
     expect(((await read.json()) as { data: unknown }).data).toEqual({
       note_id: "note-1",
       text: "hello",

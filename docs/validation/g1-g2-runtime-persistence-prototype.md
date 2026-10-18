@@ -1,10 +1,15 @@
 # G1/G2 Runtime Persistence Prototype Evidence
 
-Status: **Pass** for the executed cases below. All other G1/G2 cases remain
-**Not run** and are listed at the end.
+Status: **Prototype pass** for the executed cases below. This is not a gate
+completion: every other G1/G2 case remains **Not run** and is listed at the end.
+The prototype is a synthetic, isolated slice, not a product client or server.
 
-This record covers only the focused prototype in `apps/`, `packages/contracts`,
-and the associated tests. It is not a milestone or release claim.
+## Source under test
+
+- Prototype base commit: `ec2cc9a` (first frozen install/typecheck/test pass).
+- Follow-up fixes commit: the commit that adds this record; its SHA is reported
+  with the commit. It contains the chunked-body handling and canonical-identity
+  fixes and the reruns recorded below.
 
 ## Scope and fixtures
 
@@ -21,38 +26,46 @@ and the associated tests. It is not a milestone or release claim.
 ## Environment
 
 - macOS 26.7.1 (build 25G241), arm64.
-- Standalone Node 22.23.2; Electron 44.9.0 (bundled Node 24.22.0, ABI 149).
+- Primary verification runtime: Node 24.19.0 (the command-PATH `node`).
+- Desktop/server runtime: Electron 44.9.0, which bundles Node 24.22.0.
+- Separate evidence runtime: Node 22.23.2.
 - effect 4.0.5, @effect/platform-node 4.0.5, typescript 5.9.3, vitest 5.0.5,
   @playwright/test 1.64.1, react/react-dom 19.3.1.
-- SQLite driver: built-in `node:sqlite` (`DatabaseSync`) running on a dedicated
+- SQLite driver: built-in `node:sqlite` (`DatabaseSync`) on a dedicated
   `node:worker_threads` worker in the server process.
-- Version evidence: `pnpm-lock.yaml`; Effect 4.0.5 was selected as the current
-  stable v4 release after confirming the beta tag points at a superseded
+- Version evidence: `pnpm-lock.yaml`. Effect 4.0.5 was selected as the current
+  stable v4 release after confirming the `beta` tag points at a superseded
   pre-release (`4.0.0-beta.107`).
 
 ## Driver selection experiment
 
-Before writing dependent code, `node:sqlite` was executed directly (open, DDL,
-insert, select, close) in each runtime that must run the server:
+`node:sqlite` was executed directly (open, DDL, insert, select, close) in each
+runtime that must run the server:
 
-| Runtime | Result |
-| --- | --- |
-| Standalone Node 22.23.2 | Pass (`DatabaseSync` transaction returned the inserted row) |
-| Electron 44.9.0 main process (Node 24.22.0) | Pass |
-| `ELECTRON_RUN_AS_NODE=1` with the Electron binary | Pass |
+| Runtime | Transaction | Embedded U+0000 round trip |
+| --- | --- | --- |
+| Node 24.19.0 (primary) | Pass | Pass (`a\u0000b` length 3, equal) |
+| Electron 44.9.0 / Node 24.22.0 | Pass | Pass |
+| Node 22.23.2 (separate) | Pass | **Fail** (TEXT truncated at U+0000) |
+
+Because the pinned runtimes (Node >= 24.19.0 and Electron's Node 24.22.0)
+preserve NUL exactly, no native rebuild adapter was needed and public text was
+not narrowed. Node 22 is unsupported: `package.json` `engines.node` is
+`>=24.19.0`.
 
 `BigInt` binding and `StatementSync.setReadBigInts(true)` were verified to read
-and write `9223372036854775807` exactly. Because the driver works in every
-required runtime, no native rebuild adapter (`better-sqlite3`) was needed.
+and write `9223372036854775807` exactly.
 
 ## Executed commands and outcomes
+
+All commands were run on the primary Node 24.19.0 runtime unless noted.
 
 | Command | Result |
 | --- | --- |
 | `pnpm install` | Pass (locked install, explicit `allowBuilds` for electron/esbuild) |
-| `pnpm build` | Pass (server `dist/server.mjs` + `dist/worker.mjs`; desktop main/preload/renderer) |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
-| `pnpm test:http` | Pass, 9/9 (real HTTP over loopback against the built independent server) |
+| `pnpm build` | Pass (server `dist/server.mjs` + `dist/worker.mjs`; desktop main/preload/renderer) |
+| `pnpm test:http` | Pass, 12/12 (real HTTP over loopback against the built independent server) |
 | `pnpm test:e2e` | Pass, 1/1 (real Electron via Playwright `_electron`) |
 
 No leaked Electron or owned server child processes remained after the suites.
@@ -72,17 +85,24 @@ No leaked Electron or owned server child processes remained after the suites.
   `epoch_changed` before any write.
 - Command deduplication: an identical same-epoch retry returns the stored result
   before preconditions are re-evaluated; the same operation id with a different
-  payload returns `operation_conflict`.
+  payload returns `operation_conflict`. Canonical identity is derived inside the
+  worker from validated fields.
 - Authentication: missing and invalid bearer tokens return
   `authentication_required` without disclosing the live instance or epoch.
 - Input bounds: non-canonical and out-of-range revisions and over-long text are
   rejected at the HTTP boundary (400).
 - JSON body ceiling: a body over the 1 MiB limit is rejected with 413 at HTTP
-  parsing, before schema decoding, and the record is unchanged.
-- Exact revision arithmetic: starting from `9007199254740992`
-  (2^53), the note increments to `9007199254740993`, reads back exactly, and a
-  stale edit reports `current_revision = 9007199254740993` — beyond
-  `Number.MAX_SAFE_INTEGER`.
+  parsing for **both** a declared `Content-Length` and a chunked
+  (`Transfer-Encoding: chunked`, no `Content-Length`) body, with no write. A
+  within-limit chunked body is still accepted (200). A malformed chunked JSON
+  body is rejected with 400.
+- Text fidelity: a maximum-length text of 1024 U+0001 control characters (whose
+  JSON escaping expands well past the old 4096-byte internal bound) is accepted
+  and round-trips; a maximum-length text of 1024 U+0000 characters round-trips
+  exactly on the pinned runtime.
+- Exact revision arithmetic: starting from `9007199254740992` (2^53), the note
+  increments to `9007199254740993`, reads back exactly, and a stale edit reports
+  `current_revision = 9007199254740993` — beyond `Number.MAX_SAFE_INTEGER`.
 
 ## Pending G1/G2 cases (Not run)
 
@@ -108,3 +128,5 @@ No leaked Electron or owned server child processes remained after the suites.
 - Prototype-only schema and API; not the first-release persistence contract.
 - The desktop spawns the server via `ELECTRON_RUN_AS_NODE`, not a packaged
   standalone runtime or installer.
+- The prototype's chunked-body handling buffers unmeasured bodies in memory up
+  to the 1 MiB bound; it does not implement streaming upload.

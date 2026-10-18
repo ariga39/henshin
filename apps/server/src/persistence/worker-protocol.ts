@@ -34,8 +34,7 @@ export const WorkerRequest = Schema.Union([
     text: Text,
     expectedRevision: Revision,
     operationId: Uuid,
-    epoch: Uuid,
-    canonicalPayload: Schema.String.check(Schema.isMaxLength(4096))
+    epoch: Uuid
   }),
   Schema.Struct({ op: Schema.Literal("close") })
 ])

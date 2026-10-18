@@ -8,7 +8,6 @@ export interface CommitNoteInput {
   readonly expectedRevision: string
   readonly operationId: string
   readonly epoch: string
-  readonly canonicalPayload: string
 }
 
 const decodeReadNote = Schema.decodeUnknownOption(ReadNoteResult)

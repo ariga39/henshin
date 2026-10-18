@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { DatabaseSync } from "node:sqlite"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
+import { canonicalEditPayload } from "@henshin/contracts/canonical"
 import {
   WorkerMessage,
   WorkerResponse,
@@ -76,6 +77,12 @@ const readNoteRow = (noteId: string): NoteRow | undefined => {
 }
 
 const commitNote = (request: Extract<WorkerRequest, { op: "commitNote" }>): CommitOutcome => {
+  // Derive canonical command identity from validated fields inside the worker.
+  const canonicalPayload = canonicalEditPayload({
+    noteId: request.noteId,
+    text: request.text,
+    expectedRevision: request.expectedRevision
+  })
   db.exec("BEGIN IMMEDIATE")
   try {
     const existing = selectOperation.get(request.epoch, request.operationId) as
@@ -83,7 +90,7 @@ const commitNote = (request: Extract<WorkerRequest, { op: "commitNote" }>): Comm
       | undefined
 
     if (existing !== undefined) {
-      if (existing.payload !== request.canonicalPayload) {
+      if (existing.payload !== canonicalPayload) {
         db.exec("ROLLBACK")
         return { kind: "operation_conflict" }
       }
@@ -107,7 +114,7 @@ const commitNote = (request: Extract<WorkerRequest, { op: "commitNote" }>): Comm
     insertOperation.run(
       request.epoch,
       request.operationId,
-      request.canonicalPayload,
+      canonicalPayload,
       JSON.stringify(note),
       Date.now()
     )

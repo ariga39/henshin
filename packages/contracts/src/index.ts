@@ -1,5 +1,6 @@
 export * from "./api"
 export * from "./auth"
+export * from "./canonical"
 export * from "./channels"
 export * from "./client"
 export * from "./envelope"
