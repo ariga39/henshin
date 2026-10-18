@@ -19,6 +19,7 @@ The confirmed desktop stack is Electron + React + TypeScript. Effect is preferre
 | Source protection | [NAS source safety](design/source-safety.md) | Read-only source capability, NAS permissions, disjoint outputs, reader write boundary |
 | File locations | [Storage roots and path mappings](design/path-mapping.md) | Logical locations, per-device mappings, path resolution |
 | Indexing | [File indexing and thumbnails](design/file-indexing.md) | Entry discovery, change detection, relocation, covers |
+| Recovery and retention | [Backup and archival recovery](design/backup-and-archive.md) | Server/desktop backup, publication, rotation, long-term archives, restore drills and NAS backup boundary |
 | Persistence | [Data model and persistence](design/data-model.md) | Identity, relationships, database rules, lifecycle constraints |
 | EH integration | [EH metadata and matching](design/eh-metadata.md) | Matching, bindings, updates, overrides, translations |
 | Search | [Search and filtering](design/search.md) | Query semantics, filters, sorting, pagination, language support |

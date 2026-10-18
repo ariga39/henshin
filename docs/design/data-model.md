@@ -1,6 +1,6 @@
 # Data Model and Persistence
 
-This topic owns logical schemas, keys, constraints, revisions, transaction boundaries, migrations, and backup/export storage. [Entry lifecycle](entry-identity.md), [indexing](file-indexing.md), [EH metadata](eh-metadata.md), [reading](external-reading.md), and [consistency](synchronization.md) own behavior. The schema below is the first-release storage contract; executable DDL and adapter selection must implement it rather than inventing alternate ownership.
+This topic owns logical schemas, keys, constraints, revisions, transaction boundaries, migrations, and backup/export storage. [Backup and archival recovery](backup-and-archive.md) owns operational scope, destinations, bundle publication, retention and restore procedures. [Entry lifecycle](entry-identity.md), [indexing](file-indexing.md), [EH metadata](eh-metadata.md), [reading](external-reading.md), and [consistency](synchronization.md) own behavior. The schema below is the first-release storage contract; executable DDL and adapter selection must implement it rather than inventing alternate ownership.
 
 [Design overview](../design.md) | [Domain glossary](../../CONTEXT.md)
 
@@ -104,7 +104,7 @@ Main atomically admits only one active Open per instance/entry before asynchrono
 
 Proposed initial retention: retain acknowledged/definitely failed action diagnostics for seven days and operation results for seven days within their epoch. Public command responses advertise result expiry; clients stop automatic retries before that boundary. Unresolved launch intents remain until explicit dismissal; their UUIDs are not reused. Never purge an in-flight operation's result. A new server epoch disables automatic command retries independently of retention. Open-event IDs on the server have no TTL while history is retained.
 
-Before implementation, choose finite journal/cache/response capacities with actionable full-store errors and crash-safe compaction. The required rule is preserve pending history and block new counted launch before exceeding the durable journal budget, not a universal numeric limit absent collection evidence. Back up a desktop profile only with a consistent local snapshot; independent-profile export excludes the live journal and credentials and creates a new installation ID. Moving the same installation while it is stopped can preserve its journal, but must not leave two live copies draining it.
+Before implementation, choose finite journal/cache/response capacities with actionable full-store errors and crash-safe compaction. The required rule is preserve pending history and block new counted launch before exceeding the durable journal budget, not a universal numeric limit absent collection evidence. Back up a desktop profile only with a consistent local snapshot; independent-profile export excludes live journals, credentials, drafts and command attempts and creates a new installation ID under [backup and recovery](backup-and-archive.md). Moving the same installation while it is stopped can preserve its journal, but must not leave two live copies draining it.
 
 ## Indexes, Migrations, and Derived Files
 
