@@ -19,7 +19,7 @@ Use the selected release's lifecycle-managed runtime facility (for example `Mana
 | Composition | Service responsibilities | Lifetime |
 | --- | --- | --- |
 | Server | Library commands/queries, transactional store, root resolver, scan reconciliation, archive/image workers, EH client, task scheduler, thumbnail/artifact store, authentication/configuration | Process runtime; request and task child scopes |
-| Main | Connection sessions and authenticated typed HTTP, credential store, client mappings/native resolution, reader profiles/launcher, local journal/delivery, saved-draft and unresolved-command recovery store, thumbnail bytes/cache, local-service supervisor | Desktop process runtime, independent of renderer windows |
+| Main | Connection sessions and authenticated typed HTTP, credential store, client mappings/native resolution, reader profiles/launcher, local journal/delivery, RecoveryStore for saved drafts and unresolved commands, thumbnail bytes/cache, local-service supervisor | Desktop process runtime, independent of renderer windows |
 | Renderer | Allowed preload client, query/command coordination, normalized view snapshots, form-draft coordination, subscription bridge, UI actions | Window runtime plus selected-connection/view scopes |
 | Shared contracts | HTTP/IPC schemas, tagged public errors, IDs/revisions, version/capability declarations | Pure package with no Node/Electron/native imports |
 
