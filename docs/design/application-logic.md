@@ -10,7 +10,7 @@ Effect is the preferred foundation for server and frontend application logic. Th
 | --- | --- | --- |
 | React UI | Render results, collect input, manage focus and transient interaction state | Invoke application operations through a small binding layer; subscribe to their state |
 | Renderer application logic | Search requests, metadata commands, task subscriptions, coordination of local open actions | Effect programs with explicit dependencies, expected errors, cancellation, and connection-scoped resources |
-| Electron main process | Device path resolution, file checks, reader launch, local server lifecycle, durable local event storage | Effect services around local capabilities, exposed through a narrow preload API |
+| Electron main process | Authenticated HTTP clients and credentials, bounded thumbnail delivery, device path resolution, file checks, reader launch, local server lifecycle, durable local event storage | Effect services around local capabilities, exposed through a narrow preload API |
 | Independent server | Library operations, EH integration, persistence, task orchestration | Effect services composed with Layers and owned by the server lifecycle |
 | Shared contracts | Transport data, request and response schemas, public error variants | Effect Schema and typed HTTP declarations; no server-only dependencies |
 

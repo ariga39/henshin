@@ -8,22 +8,24 @@ This document owns deployment modes, component responsibilities, process boundar
 
 ```mermaid
 flowchart LR
-    UI[Desktop client] -->|Queries and edits| API[Server API]
+    UI[React renderer] -->|Allowed preload operations| MAIN[Electron main]
+    MAIN -->|Authenticated queries and edits| API[Server API]
     API --> DB[Database and search index]
     API --> JOB[Background tasks]
     JOB -->|Server path mapping| NAS[NAS collection files]
     JOB --> EH[EH metadata API and search]
     JOB --> THUMB[Server thumbnail cache]
-    THUMB -->|Thumbnails| UI
-    UI -->|Client path mapping| READER[External reader on client]
+    THUMB -->|Authenticated derived images| MAIN
+    MAIN -->|Bounded image bytes| UI
+    MAIN -->|Client path mapping| READER[External reader on client]
     READER -->|Direct access| NAS
-    UI -->|Open events| API
+    MAIN -->|Open events| API
 ```
 
 | Component | Responsibilities | Stored data |
 | --- | --- | --- |
 | Server | Scanning, file analysis, cover extraction, EH access, queries and updates, statistics, task scheduling | Library database, EH bindings and metadata, tags, local overrides, open events, tasks, thumbnails, server mappings |
-| Desktop client | User interaction, local path resolution, accessibility checks, reader launch, event submission | Server connections, device mappings, reader configuration, display cache, pending events |
+| Desktop client | User interaction; main-process authenticated HTTP/credential ownership, bounded thumbnail delivery, local path resolution, reader launch, event submission | Server connections and protected credential references, device mappings, reader configuration, display cache, pending events |
 | NAS | Store collection files and provide access to devices | Archives and image directories |
 
 In local mode, the client starts the server process shipped with the application and connects over the loopback interface. Remote mode connects to an independently running server. Both modes use the same API and business logic. Clients do not access the server database directly.
@@ -36,7 +38,7 @@ The desktop stack is Electron + React + TypeScript, with Effect preferred for ap
 
 The proposed HTTP stack is Effect HttpApi with a compatible Node adapter. Its version constraints and integration checks are owned by [Application logic with Effect](application-logic.md). The server is an independent program with no Electron runtime dependency. Local mode starts that program from the desktop application; remote mode runs it independently. Docker is an optional deployment candidate, not a required first-release deliverable. Packaging details remain to be validated.
 
-React runs in the Electron renderer and implements the library, search, entry details, matching queue, and task screens. The Electron main process handles device path resolution, file accessibility checks, external reader launch, and local server lifecycle. Expose these local capabilities through a narrow preload bridge with context isolation enabled and renderer Node.js integration disabled. Scanning, database access, and EH synchronization remain in the independent server, which must run without Electron.
+React runs in the Electron renderer and implements the library, search, entry details, matching queue, and task screens. The Electron main process owns authenticated HTTP clients and credentials, delivers bounded derived-image bytes through preload, and handles device path resolution, file accessibility checks, external reader launch, and local server lifecycle. Expose these local capabilities through a narrow preload bridge with context isolation enabled and renderer Node.js integration disabled. Scanning, database access, and EH synchronization remain in the independent server, which must run without Electron.
 
 ## Connection and Process Boundaries
 
