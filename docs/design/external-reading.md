@@ -22,7 +22,7 @@ First-image selection follows the manifest, not the cover choice: indexing may s
 
 No automatic archive extraction, mount creation, application installation, or content download is provided. Shell scripts, batch files, interpreter/shell wrappers, and remote executable configuration are outside the initial profile model. macOS app-bundle selection needs a tested native application adapter before that selection mode is offered; an internal executable path is not assumed equivalent to opening its app bundle. Named-reader presets are added only after validating their argument and target behavior. No particular third-party reader has yet been certified.
 
-Profiles are edited through trusted local settings. The renderer's Open request carries entry/profile identifiers and an action ID, never arbitrary executable paths or arguments. Electron main resolves profiles and the current server namespace, validates the IPC request, and owns native access. Server responses and imported metadata cannot create profiles or execute commands. [API/IPC contracts](api-and-tasks.md) defines the precise bridge and sender validation.
+Profiles are edited through trusted local settings. Executable selection uses a main-owned native picker; main issues a selection handle and resolves it when saving the profile. Save never treats a renderer-supplied path as an executable selection. Main validates the selected target against the native executable/wrapper restrictions above. The renderer's Open request carries entry/profile identifiers and an action ID, never arbitrary executable paths or arguments. Electron main resolves profiles and the current server namespace, validates the IPC request, and owns native access. Server responses and imported metadata cannot create profiles or execute commands. [API/IPC contracts](api-and-tasks.md) defines the precise bridge and sender validation.
 
 ## Open Workflow and Identity Checks
 
@@ -74,6 +74,8 @@ Display occurrence instants in the user's current display time zone with a way t
 Pending local events appear separately as pending history/count information for their namespace. They do not change server search order or authoritative totals. First release provides read-only history and delivery diagnostics; manual count adjustment, editing timestamps, deletion of accepted history, and session-duration tracking are outside scope. No external-reader telemetry or observation of opens made outside Henshin is implied.
 
 ## Acceptance and Handoffs
+
+Verify that first-image mode accepts only image directories and rejects archives without extracting them, and that profile saving rejects fabricated handles or renderer-supplied executable paths while accepting a valid main-picker selection.
 
 | Scenario | Required result |
 | --- | --- |

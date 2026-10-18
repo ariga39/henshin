@@ -35,7 +35,7 @@ Identity state and filesystem availability are separate. A root being offline, a
 | Identity state | Meaning | Normal Open |
 | --- | --- | --- |
 | Accepted | An entry has an accepted representation and current location | Allowed subject to local accessibility and the checks below |
-| Replacement pending | A changed representation at the current location has not been classified | Blocked until resolved; do not count a launch against the old entry |
+| Replacement pending | A changed representation at the current location has not been classified | No reader launch or open event until resolved |
 | Detached | The location was deliberately released, for example when a replacement became a new entry | Unavailable; show retained metadata and history |
 
 Availability observations can be present, missing after a successful scan, inaccessible, or unknown. They include their observation time and are not claims about the client's current NAS access. Accepted entries that are missing from the server's view can still be attempted by a client with its own working mapping. A known pending replacement is a different condition and remains blocked.
@@ -73,7 +73,7 @@ The user can choose:
 3. **Decide later**: retain the unresolved state and block normal Open for that entry. A later scan can replace the candidate but cannot make the decision on the user's behalf.
 4. **Stop scanning this location**: for an unacceptable replacement, explicitly add an exact-path exclusion and retain the old entry, its current claim, and pending state with an excluded/error indicator. Normal Open stays blocked and no new entry is created. The user can later remove the exclusion and retry analysis after repairing the file or adding format support; source-file deletion is not required. This terminal handling preserves old records without pretending the replacement was accepted.
 
-The exception is an exact match to the previously accepted fingerprint: restoring the accepted representation needs no edition judgment. Atomically clear the candidate and restore Accepted under the current entry, location, and candidate revisions. Advance the entry revision so an already-open comparison cannot resolve the discarded candidate. A failed scan, missing candidate file, or matching size/mtime alone does not perform this transition. Fingerprint profiles must be comparable and the observation complete and stable.
+The exception is an exact match to the previously accepted fingerprint: restoring the accepted representation needs no edition judgment. Atomically clear the candidate and restore Accepted under the current decision, location, and candidate revisions. Advance the decision revision so an already-open comparison cannot resolve the discarded candidate. A failed scan, missing candidate file, or matching size/mtime alone does not perform this transition. Fingerprint profiles must be comparable and the observation complete and stable.
 
 Only a stable candidate satisfying the complete acceptance analysis profile in [Indexing](file-indexing.md) can be accepted. This means a complete supported-page manifest, not full decoding of every page or mandatory full-byte hashing. Unsupported-page/incomplete-manifest failures remain pending; a separately reported cover error need not invalidate a complete manifest. The first release does not provide an untracked preview launch to bypass the pending state.
 
@@ -81,7 +81,7 @@ Accepting a byte-unverified candidate with an explicit same-edition judgment alw
 
 Stop scanning is a non-accepting configuration action: it requires matching entry/location/candidate revisions but no successful analysis or fingerprint. Atomically add the exact-path exclusion and preserve the existing claim/state; reject a stale target. Its operation ID makes retries idempotent. The fresh-evidence acceptance checks below apply to Keep this entry and Treat as a different entry, not to exclusion or Decide later.
 
-Resolution submits the entry revision, location revision, and candidate version observed by the user. Before accepting, check that the candidate still matches a fresh stable observation and that those revisions still match; compare the same fingerprint profile when fingerprint evidence is available. Without it, repeat the lightweight/manifest checks and retain the explicitly byte-unverified classification and its limits. Changed evidence requires refreshing the comparison. Apply the old-entry detachment, new-entry creation or accepted-content update, location ownership, and cache invalidation atomically. No intermediate state may expose two accepted entries at one current location or move old events to the new entry. A retry after a successful resolution returns the existing result for the same operation ID rather than creating another entry.
+Resolution submits the decision revision, location revision, and candidate version observed by the user. Before accepting, check that the candidate still matches a fresh stable observation and that those revisions still match; compare the same fingerprint profile when fingerprint evidence is available. Without it, repeat the lightweight/manifest checks and retain the explicitly byte-unverified classification and its limits. Changed evidence requires refreshing the comparison. Apply the old-entry detachment, new-entry creation or accepted-content update, location ownership, and cache invalidation atomically. No intermediate state may expose two accepted entries at one current location or move old events to the new entry. A retry after a successful resolution returns the existing result for the same operation ID rather than creating another entry.
 
 Scanning and resolution for a location must serialize their commits or use conditional revision checks. A late analysis result for an old location/candidate cannot overwrite a later user decision. A file can still change after the last check: subsequent observation returns it to pending. This is a documented external-filesystem race, not an atomic file-lock guarantee.
 
@@ -108,9 +108,9 @@ Changing a device mapping changes only the access path for the same logical root
 
 Disabling or removing a root from active scanning retains its entries, root identity, bindings, and history. Re-enabling the same root can reconcile them. Creating a different root with the same label allocates a different ID and does not inherit those records. Removing a client mapping leaves shared data intact; that client must configure the mapping again to open files.
 
-The first release has no hard deletion, entry merge, or history transfer. Missing and detached entries remain inspectable and can be filtered out of the normal available-files view. Exclusions and incomplete scans do not delete entries. A future permanent-removal feature must define retention and pending-event handling separately; it is not implied by removing a path mapping or disabling a root.
+The first release has no hard deletion, entry merge, or history transfer. Missing entries with current claims remain in default library browsing regardless of server availability; detached entries require an explicit view/filter. Both remain inspectable under [search](search.md#tag-aliases-and-filters). Exclusions and incomplete scans do not delete entries. A future permanent-removal feature must define retention and pending-event handling separately; it is not implied by removing a path mapping or disabling a root.
 
-A user may explicitly stop awaiting relocation for a confirmed-missing current claim by detaching it. Require the observed entry/location revisions, explain that metadata/history remain and automatic relocation will no longer use that claim, and release only the location. This is not file deletion or record removal; it prevents intentionally retired missing claims from indefinitely blocking unrelated new discoveries. A detached entry may later be manually relocated to an unclaimed target under the same identity evidence rules.
+A user may explicitly stop awaiting relocation for a confirmed-missing current claim by detaching it. Require the observed decision/location revisions, explain that metadata/history remain and automatic relocation will no longer use that claim, and release only the location. This is not file deletion or record removal; it prevents intentionally retired missing claims from indefinitely blocking unrelated new discoveries. A detached entry may later be manually relocated to an unclaimed target under the same identity evidence rules.
 
 ## Opening and Delayed Events
 
@@ -143,13 +143,13 @@ No full-file hash is required for every Open, and an external reader opens by pa
 
 These are design acceptance cases. They have not been executed against an implementation or a NAS.
 
-## Handoffs to Later Topics
+## Related Contracts
 
-- **Path mappings**: root verification, path comparison, unsupported names, overlap detection, and links/reparse points.
-- **Indexing**: fingerprint profiles, stable observations, reconciliation scopes, staging, directory boundaries, and stale-result rejection.
-- **Persistence and contracts**: exact constraints, revisions, operation deduplication, transaction boundaries, and retention representation.
-- **Reading and synchronization**: cached state, local mismatch checks, event version fields, retry, and stale-observation presentation.
-- **UI**: accessible comparison and resolution screens with explicit consequences for retained history.
-- **EH metadata**: a confirmed same-edition representation change preserves the binding and overrides while keeping changed local analysis separate from source metadata.
+- [Path mappings](path-mapping.md): root verification, path comparison, unsupported names, overlap detection, and links/reparse points.
+- [Indexing](file-indexing.md): fingerprint profiles, stable observations, reconciliation scopes, staging, directory boundaries, and stale-result rejection.
+- [Persistence](data-model.md) and [contracts](api-and-tasks.md): exact constraints, revisions, operation deduplication, transaction boundaries, and retention representation.
+- [Reading](external-reading.md) and [synchronization](synchronization.md): cached state, local mismatch checks, event version fields, retry, and stale-observation presentation.
+- [UI](user-interface.md): accessible comparison and resolution screens with explicit consequences for retained history.
+- [EH metadata](eh-metadata.md): a confirmed same-edition representation change preserves the binding and overrides while keeping changed local analysis separate from source metadata.
 
 No automatic identity operation for a format may ship before the corresponding evidence and transaction handoffs are specified and tested. These handoffs refine mechanisms; they do not reopen the identity/record-ownership rules above.

@@ -39,7 +39,7 @@ Search follows [literal substring rules](search.md). Show active tag chips by na
 
 Use stable entry IDs for cards, rows, focus, and selection. Grid/list switching preserves loaded IDs and focus where possible. Paging appends live results with ID deduplication; a library revision change shows Refresh results. Refresh replaces the sequence and preserves selected IDs only if they remain in the new loaded set, reporting removals. A visible Load more control supports keyboard/screen-reader pagination even if scrolling also triggers it. Do not display an exact total unless supplied with its request-time scope.
 
-Select all means all currently loaded entries, labeled with the exact selected count; it never implies all matching rows on the server. The first bulk action is metadata refresh. Bulk reader launch, replacement resolution, deletion, and automatic binding are not offered. Before executing, show eligible/skipped IDs and reasons; validate current revisions on the server and report per-item results. A bulk refresh may start one coalesced source-gallery job for several entries. Newly matching entries are never added to the submitted IDs.
+Select all means all currently loaded entries, labeled with the exact selected count; it never implies all matching rows on the server. The only first-release bulk edit action is metadata refresh; batch personal tag editing is deferred. Bulk reader launch, replacement resolution, deletion, and automatic binding are not offered. Before executing, show eligible/skipped IDs and reasons; validate current revisions on the server and report per-item results. A bulk refresh may start one coalesced source-gallery job for several entries. Newly matching entries are never added to the submitted IDs.
 
 ## Entry Details and Editing
 
@@ -85,6 +85,7 @@ While an Open action is pending, disable repeated launch controls for that entry
 | Server disconnected | Mark cached view partial/stale, disable shared edits, retain eligible local Open and pending history |
 | Authentication/protocol failure | Show connection recovery; do not silently route writes to another server or downgrade to plaintext |
 | Missing/suspended mapping | Open device mapping setup for that root; keep server data visible |
+| Cached local size/mtime or manifest mismatch while disconnected | Explain that Open is blocked until server reconciliation; offer Check access and connection recovery, retain the cached record, and require a new deliberate Open after reconciliation; no untracked launch |
 | Local target unavailable | Report this device's observation and OS diagnostic; no claim that the library entry was deleted |
 | Pending/detached identity | Explain why Open is blocked and link to appropriate review/history |
 | Queue full/write failed | Explain event durability state; offer diagnostics/recovery, not an automatic untracked launch |
