@@ -42,4 +42,6 @@ The optional EH handoff was added to clarify that local analysis changes do not 
 
 ## Review Gate
 
-In progress. The next topic must wait until both reviewers have verified a fixed revision with no unresolved material finding. This file records outcomes and is not input for independent initial reviews.
+Both reviewers returned PASS on `7dc45f9f00dd21ff605dd5ff9b93be5b9926e34b`, with no unresolved material finding. Flash additionally noted two non-blocking wording ambiguities: "decision revision" instead of the existing entry revision, and "automatic" potentially qualifying the merge prohibition. Both have been corrected directly; the final wording check is pending. The optional similarity-deduplication comment adds no feature: exact-copy flagging and later similarity detection remain distinct.
+
+Both passes covered requirements/scope, domain/consistency, feasibility/boundaries, integrity/failures, complexity/sequencing, and acceptance/readiness. The next topic waits for the final wording verification and document checks.
