@@ -9,9 +9,9 @@ Henshin makes an externally managed collection searchable and keeps its metadata
 - A cross-platform desktop application with an independent client/server architecture. The server can run on the desktop's machine or another machine.
 - Electron with React and TypeScript for the desktop. Effect is preferred for backend and frontend application logic.
 - Collection storage and server location are independent. The current collection is on a NAS; server and desktop may mount the same content at different native paths.
-- File indexing, thumbnails, EH information/tags and updates, search, and opening counts.
+- File indexing, thumbnails, EH information/tags and updates, search, and open counts.
 - Reading invokes an external reader locally. No embedded reader is required.
-- Shared library metadata and opening records are synchronized across clients of the authoritative service.
+- Shared library metadata and open events are synchronized across clients of the authoritative service.
 - Design documentation is English and organized into separate topics.
 
 The NAS scenario does not require the service to run on the NAS, and a remote service does not imply remote file delivery. The server must be able to read collection files to index them; each desktop needs its own access to open them. Mounts and share credentials are managed by the operating system.
@@ -57,12 +57,12 @@ Content downloads, replication, server-side collection forwarding, automatic NAS
 
 | Scenario | Observable outcome and owning contract |
 | --- | --- |
-| Same-machine service, NAS collection | Configure server root A and client root B once; scan creates searchable entries/covers; Open launches the desktop's reader against B. [Mappings](path-mapping.md), [reading](external-reading.md) |
+| Same-machine service, NAS collection | Configure server root A and client root B once; scan creates searchable entries/covers; Open launches the desktop's reader against B. [Indexing](file-indexing.md), [mappings](path-mapping.md), [reading](external-reading.md) |
 | Move service to another LAN machine | After controlled migration, the same entry IDs/overrides/history remain; clients keep their mappings and authenticate the new endpoint. [Consistency](synchronization.md) |
 | Second desktop joins | After its own mapping/profile setup, it sees server metadata/history and contributes unique events without accessing the database directly. [Consistency](synchronization.md) |
 | Bind and refresh EH metadata | A user confirms the source; refresh updates source fields while retaining local title/tag decisions. Failure preserves last-known data with status. [EH](eh-metadata.md) |
 | Find a short CJK title or combined tags | One-/two-character literal matches work; canonical tag filters and deterministic order follow the specified rules. [Search](search.md) |
-| NAS unavailable to server but available to desktop | Library remains searchable while service is up; accepted entries may open locally without treating server status as client access proof. [Identity](entry-identity.md) |
+| NAS unavailable to server but available to desktop | Library remains searchable while service is up; accepted entries may open locally without treating server status as client access proof. [Identity](entry-identity.md), [search](search.md), [reading](external-reading.md) |
 | Service offline but NAS available | Only cached eligible entries can open with stale status; queued events later deduplicate. No complete offline search claim. [Reading](external-reading.md), [consistency](synchronization.md) |
 | External move or same-path replacement | Evidence and explicit decisions preserve or split identity correctly; old history never follows a filename automatically. [Identity](entry-identity.md), [indexing](file-indexing.md) |
 | Conflicting edits or partial event upload | Preserve unsaved intent, show conflicts/per-event outcomes, and retry only safe operations. [Consistency](synchronization.md) |
@@ -72,7 +72,7 @@ Each required workflow must include usable loading, empty, error, stale, and rec
 
 ## Release Readiness and Remaining Evidence
 
-The first usable implementation milestone is narrower than a complete first release: it proves scan, cover, mapped Open, and durable event handoff. Metadata/search, reconnect/conflict handling, and final maintenance/packaging follow in dependency order. [Delivery](delivery-and-validation.md) defines phases and must distinguish development milestones from supported release claims.
+The first usable implementation milestone is narrower than a complete first release: it proves scan, cover, mapped Open, and durable event handoff together with required authentication and replacement-identity handling. This summary does not waive any Phase 1 acceptance criterion. Metadata/search, reconnect/conflict handling, and final maintenance/packaging follow in dependency order. [Delivery](delivery-and-validation.md) defines phases and must distinguish development milestones from supported release claims.
 
 Target platforms are Windows, macOS, and Linux; Electron alone does not establish functional parity for mounts, filesystem names, native dependencies, or reader invocation. Release capability statements must be backed by the platform matrix. Package/native-adapter choices and signing/distribution procedures remain implementation gates, with explicit unsupported combinations when necessary.
 
