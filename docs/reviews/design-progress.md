@@ -34,3 +34,7 @@ All 14 detailed topics have passed their independent design-review gates. The st
 ## Source-safety Follow-up
 
 [PR #18](https://github.com/ariga39/henshin/pull/18), based on PR #16 and registered in GitHub Stack #17, adds the [NAS source-safety contract](../design/source-safety.md). [Fresh Sol and DeepSeek reviews](source-safety-review.md) both passed `5cc0f89`. This adds a topic beyond the original 14; prior verdicts remain historical. Runtime NAS/permission tests remain unexecuted.
+
+## Backup and Archival Recovery Follow-up
+
+[PR #19](https://github.com/ariga39/henshin/pull/19), based on PR #18 in GitHub Stack #17, adds [application backup and archival recovery](../design/backup-and-archive.md). The user confirmed application-data-only backup with original content protected by external NAS tools. [Fresh Sol and DeepSeek review](backup-and-archive-review.md) passed final design revision `271cb98`; settings reads, snapshot configuration, maintenance ownership, retention ordering and rollback-cache boundaries were clarified. No live backup, original content copy or restore drill was performed.
