@@ -29,7 +29,7 @@ Use one active scan generation per root, covering enumeration through reconcilia
 
 Read the root's active mapping revision before starting. A changed mapping, disabled root, cancellation, or stale task cannot publish absence or accepted-analysis results from the old generation. Recheck revision and claim ownership when committing. Retain task errors and the most recent successful observations; restarting resumes/retries staged work only after fresh validation, never by treating interrupted enumeration as complete.
 
-Every scan publication also checks current exclusions and root enablement in its commit transaction. An exclusion added while analysis runs prevents that result from accepting content or marking the excluded path missing; removing an exclusion schedules fresh observation instead of reviving an obsolete result.
+Changing exclusions or root enablement retires the current scan generation; a retired generation never becomes current again, even if the setting is later reversed. Every scan publication checks its generation, current exclusions, and root enablement in its commit transaction. An exclusion added while analysis runs prevents that result from accepting content or marking the excluded path missing; removing an exclusion schedules fresh observation instead of reviving an obsolete result.
 
 Normal scans compare path, kind, size, and modification time; image directories also compare their direct page-name/stat manifest. A change schedules analysis. No detected change reuses accepted analysis without claiming a full-byte check. Forced reanalysis rereads candidates regardless of timestamps; explicit fingerprint verification performs full-byte reads. These modes must be separately visible to users.
 
