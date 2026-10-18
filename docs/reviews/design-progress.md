@@ -30,3 +30,7 @@ All 14 detailed topics have passed their independent design-review gates. The st
 ## Adversarial Follow-up
 
 [PR #16](https://github.com/ariga39/henshin/pull/16), based on PR #15, applies the [invariant/failure-sequence framework](adversarial-review-brief.md). The [adjudication and verification record](adversarial-review.md) preserves independent initial findings, rejected traces, corrections and limits. Main-process cross-window Open admission/status is now explicit, and exact restoration explicitly requires successful acceptance analysis. DeepSeek V4.1 Flash and Step 5 Preview both returned NO SUPPORTED COUNTEREXAMPLE FOUND at design revision `5628734`; runtime and platform evidence remains unexecuted.
+
+## Source-safety Follow-up
+
+[PR #18](https://github.com/ariga39/henshin/pull/18), based on PR #16 and registered in GitHub Stack #17, adds the [NAS source-safety contract](../design/source-safety.md). [Fresh Sol and DeepSeek reviews](source-safety-review.md) both passed `5cc0f89`. This adds a topic beyond the original 14; prior verdicts remain historical. Runtime NAS/permission tests remain unexecuted.
