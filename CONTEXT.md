@@ -48,7 +48,7 @@ These terms summarize the owning contracts; they do not create additional state 
 
 **Identity State**: Accepted, replacement-pending, or detached status governing an entry's claim and Open eligibility; separate from whether a device can reach the file. See [entry lifecycle](docs/design/entry-identity.md).
 
-**Availability Observation**: A device's time-stamped result of checking file access; the server's observation is not proof of client access. See [path mappings](docs/design/path-mapping.md).
+**Availability Observation**: A time-stamped result of checking file access on the server or a client; neither proves the other's access. See [path mappings](docs/design/path-mapping.md).
 
 **Staged Discovery**: A persisted observed candidate awaiting analysis/reconciliation or explicit allocation, not yet an accepted library entry. See [indexing](docs/design/file-indexing.md).
 
