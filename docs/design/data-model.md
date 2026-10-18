@@ -16,7 +16,7 @@ The following table describes data responsibilities and relationships. Concrete 
 | EH gallery | Source, gid, token, both titles, category, site page count, raw response, retrieval time, sync status | EH and EX belong to one source identity system; preserve the access URL without duplicating galleries by domain |
 | Gallery binding | Entry ID, gallery ID, binding origin, confirmation time | At most one gallery per entry initially; multiple entries may bind to the same gallery |
 | Tag and association | Namespace, original text, gallery or entry association, translated aliases | Namespace and original text determine identity; translations are not primary keys |
-| Local override | Entry ID, title override, added tags, hidden source tags, notes, revision | Stored separately from EH data; distinguish an empty value from removing an override |
+| Local override | Entry ID, title override, added tags, hidden source tags, notes, entry edit/decision revision | Stored separately from EH data; binding/override edits share the entry revision; distinguish an empty value from removing an override |
 | Open event | Event ID, entry ID, device ID, observed location revision, observed content version, occurrence time, server receipt time | Unique event ID; retries do not increase the count; observed versions never reassign entry ownership |
 | Background task | Type, target, status, progress, attempt count, next attempt time, error | Recoverable after restart; coalesce duplicate triggers for the same target |
 
@@ -42,7 +42,7 @@ Search indexing is specified in [Search](search.md). Define schemas, indexes, an
 - Does the first release expose one library or several user-visible libraries? Keep this separate from support for multiple storage roots; do not add user accounts or ownership fields merely to anticipate a multi-user release.
 - How are missing and detached entries retained under the entry-lifecycle rules, and how does binding revision storage support metadata correction?
 - What concrete constraints and transaction boundaries protect bindings, tag updates, and event deduplication?
-- Which editable records share a revision, and which mutations advance it atomically?
+- How is the shared entry edit/decision revision stored and advanced for binding, override, and lifecycle mutations, separately from source-gallery snapshot revisions?
 - How are schema migrations and consistent backups performed without losing identity or history?
 
 ## Related Topics
