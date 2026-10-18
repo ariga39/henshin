@@ -7,7 +7,7 @@ Each topic follows the [shared review protocol](topic-review-brief.md). A topic 
 | 1 | Entry identity and file lifecycle | [Both reviewers PASS](entry-identity-review.md) on `b2a9362`; [PR #1](https://github.com/ariga39/henshin/pull/1) | `design/01-entry-identity` / `main` |
 | 2 | Storage roots and device path mappings | [Both reviewers PASS](path-mapping-review.md) on `d5cbbc2`; [PR #2](https://github.com/ariga39/henshin/pull/2) | `design/02-path-mapping` / `design/01-entry-identity` |
 | 3 | File indexing and thumbnails | [Both reviewers PASS](file-indexing-review.md) on `2efcc0b`; [PR #3](https://github.com/ariga39/henshin/pull/3) | `design/03-file-indexing` / `design/02-path-mapping` |
-| 4 | EH metadata, bindings, and overrides | Draft; awaiting independent reviews | `design/04-eh-metadata` / `design/03-file-indexing` |
+| 4 | EH metadata, bindings, and overrides | [Review in progress](eh-metadata-review.md); [PR #4](https://github.com/ariga39/henshin/pull/4) | `design/04-eh-metadata` / `design/03-file-indexing` |
 | 5 | Search semantics and filtering | Pending | After topic 4 |
 | 6 | External readers and open events | Pending | After topic 5 |
 | 7 | Cross-device consistency and instance lifecycle | Pending | After topic 6 |

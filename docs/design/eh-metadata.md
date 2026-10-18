@@ -10,7 +10,7 @@ The [EHWiki API page](https://ehwiki.org/wiki/API), inspected on 2026-10-18, doc
 
 Use that documented metadata endpoint initially; do not infer a separate ExHentai API endpoint from a pasted page URL. Gallery page access/search and metadata retrieval are different adapters with separate capability/error reporting. Validate restricted-gallery behavior with permitted test accounts before implementation; the design does not promise that all inaccessible galleries are available through `gdata`.
 
-The canonical source key is `(eh, gid)` across EH and EX. A token is a request credential/locator for that gallery, not a separate edition or primary key. Preserve the confirmed page domain as the user's preferred access link. Conflicting tokens for one gid require verification before replacing a working token; do not create duplicate galleries just because the domain or token differs.
+The canonical source key is `(source, gid)`, with `source = EH` for both EH and EX page domains. A token is a request credential/locator for that gallery, not a separate edition or primary key. Preserve the confirmed page domain as the user's preferred access link. Conflicting tokens for one gid require verification before replacing a working token; do not create duplicate galleries just because the domain or token differs.
 
 ## URLs, Imports, and Candidate Selection
 
@@ -39,7 +39,7 @@ Keep three layers separate: a gallery's last successful source snapshot, an entr
 
 The source-title preference above is a labeled first-release default. Sorting uses the effective display title unless the search topic explicitly defines another sort. Source/filename matching remains possible even when display is overridden. An explicit empty title override remains distinguishable from removing the override: preserve the empty value, show an Untitled placeholder, and expose source titles separately. Clearing the override restores fallback behavior; whitespace-only input is treated as explicit empty after trimming. Notes may be empty without affecting other fields.
 
-Let `S` be current source tags, `H` source-tag suppressions, and `A` locally added canonical tags. Effective tags are `(S minus H) union A`. Canonical identity is namespace plus original tag text; translations are aliases, never keys. An add removes that tag from `H`; hide/remove removes it from `A` and adds it to `H` so a subsequent source refresh cannot resurrect it unexpectedly. Resetting a tag override removes it from both local sets. Hiding an absent source tag keeps a suppression for later reappearance. Keep local-only tags in a distinct `local` namespace; they do not become EH source tags or translations.
+Let `S` be current source tags, `H` source-tag suppressions, and `A` locally added tags, whether canonical EH tags or local-namespace tags. Effective tags are `(S minus H) union A`. Canonical identity is namespace plus original tag text; translations are aliases, never keys. An add removes that tag from `H`; hide/remove removes it from `A` and adds it to `H` so a subsequent source refresh cannot resurrect it unexpectedly. Resetting a tag override removes it from both local sets. Hiding an absent source tag keeps a suppression for later reappearance. Keep local-only tags in a distinct `local` namespace; they do not become EH source tags or translations.
 
 Example using neutral names: source `artist:alpha` is hidden, source refresh adds `artist:beta`, and the user adds `local:favorite`. Effective tags are `artist:beta` and `local:favorite`; removing the local suppression restores `artist:alpha` if still present upstream. Source removal never deletes a local addition of the same canonical tag. Bulk edits apply the same rule independently per entry, with per-entry conflicts reported.
 
@@ -62,13 +62,14 @@ Publish source fields, source-tag associations, and gallery revision atomically.
 | Outcome | Policy |
 | --- | --- |
 | Valid item | Replace that gallery snapshot; preserve entry overrides and expose retrieval time |
+| Valid snapshot carries an `expunged` flag | Preserve and display the source flag; it does not prove local deletion or prevent publishing otherwise valid metadata |
 | Invalid token or explicit gallery-level error | Preserve prior data, flag that gallery, require corrected locator or explicit retry |
 | Expired credentials or access challenge established by adapter evidence | Pause affected authenticated tasks until credentials/access are repaired |
 | Access denied or unavailable gallery | Preserve data; expose the adapter's known cause, or unknown access failure when ambiguous |
 | Timeout, transient server failure, or rate-limit response | Bounded delayed retry; honor server-provided retry timing when available |
 | Malformed response, unexpected redirect, or parser/layout change | Stop that attempt, retain data, report adapter/protocol failure rather than treating it as an empty gallery |
 
-Do not equate all HTTP failures or empty pages with authentication expiry, deletion, or a ban. Error classifiers need fixtures and diagnostics before deployment. The UI presents last success and latest failure separately, so stale metadata is useful without appearing freshly synchronized.
+Do not equate all HTTP failures or empty pages with authentication expiry, deletion, or a ban. Only adapter evidence of terminal source unavailability pauses that gallery's automatic refresh until an explicit retry or locator correction; an expunged flag alone is not such evidence. Error classifiers need fixtures and diagnostics before deployment. The UI presents last success and latest failure separately, so stale metadata is useful without appearing freshly synchronized.
 
 ## Scheduling and Credentials
 
