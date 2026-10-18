@@ -104,8 +104,8 @@ Removing a client mapping blocks that device's future Open actions but leaves li
 
 | Result | Meaning and recovery |
 | --- | --- |
-| Missing mapping | Configure the root on this device |
-| Draft or suspended mapping | Complete verification; do not attempt Open or scanning with it |
+| Absent effective mapping | Configure the root, or complete verification if a draft is pending; no resolution yet |
+| Suspended effective mapping | Verify and reactivate before resolution |
 | Unavailable root | Check mount/network; keep indexed entries and prior observations |
 | Permission denied | Explain that OS/share access is required; Henshin does not mount or prompt for NAS credentials |
 | Missing target | Report this device's observation; do not declare the entry deleted |
@@ -116,6 +116,8 @@ Removing a client mapping blocks that device's future Open actions but leaves li
 
 When an OS error cannot distinguish disconnection from permissions or missing content, report an unavailable/unknown result with the diagnostic rather than inventing a specific cause. Mapping errors do not change entry identity or clear metadata. The [reader topic](external-reading.md) adds reader configuration and launch failures after resolution succeeds.
 
+A pending draft never overrides the resolvability of an Active effective mapping. Resolution results are based on the effective mapping, not on whether its settings editor has a draft.
+
 ## Acceptance Scenarios and Implementation Gates
 
 | Scenario | Required result |
@@ -124,6 +126,7 @@ When an OS error cannot distinguish disconnection from permissions or missing co
 | Mapping changed to another valid prefix for the same root | Entry IDs, relative paths, and history unchanged; mapping revision advances |
 | Wrong directory selected or exact sample fingerprints conflict | Show discrepancy; no silent activation or scan-driven identity reset |
 | Candidate root inaccessible | Save draft at most; existing active mapping retained |
+| Active mapping has a pending or invalid draft | Continue resolving through the active mapping; the draft alone cannot block Open or scanning |
 | `../`, drive paths, backslashes, empty segments, or NUL in a relative path | Reject before filesystem access |
 | Name contains literal `%2e%2e`, spaces, or shell metacharacters | Treat as literal segments when legal; no URL decoding or shell evaluation |
 | Child symlink/junction/file redirection escapes root | Henshin skips/rejects it, including final archive links; its own reads and supplied target stay within the checked boundary |

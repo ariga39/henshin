@@ -27,6 +27,7 @@ Acceptance criteria:
 - Local and LAN deployments use the same API and location model without transferring content through the server.
 - Local connections use credentials and remote connections use authenticated HTTPS. Missing or invalid credentials cannot access library details, covers, settings, or event submission.
 - The server runs without Electron, and the desktop can start and connect to its local server in the development build with the selected native dependencies.
+- Root configuration includes mapping revision protection in Phase 1: stale configuration edits are rejected, concurrent overlap cannot activate, and old-mapping scan results cannot commit. Metadata-edit revision checks remain a separate Phase 2 requirement.
 - Chinese and Japanese names, spaces, and special characters are passed correctly. Paths outside configured roots are rejected.
 - Failed reader launches do not increase counts. Resubmitting the same event after a successful launch does not count twice.
 - Replacing a file at an unchanged path cannot silently transfer the old edition's binding, overrides, or history. Verify both a confirmed same-edition representation change and an unresolved replacement using the identity rules settled before implementation.

@@ -45,6 +45,12 @@ The lifecycle topic now distinguishes device mapping revisions from entry locati
 
 Sol initially returned REVISE for S1. Flash returned PASS with six optional low findings; all were addressed before final verification. Both use all six criteria, and no additional product decision was requested.
 
+## Revision Verification
+
+Sol returned PASS on `82e4241a6502fc6c97085565f89af77e59f2482e`. Flash identified one medium residual inconsistency: the old resolution-results row still grouped drafts with suspended effective mappings, despite the new separate draft model. It is now keyed only on effective state, with an explicit statement and acceptance case that pending drafts cannot block an active mapping.
+
+Flash's two optional handoffs were also clarified: portable-name exclusions are linked from indexing, and conditional mapping changes belong to Phase 1 rather than waiting for Phase 2 metadata editing. Both are existing protection requirements, not new product capabilities.
+
 ## Review Gate
 
 In progress. Runtime/native-adapter/NAS behavior remains untested; no implementation-ready platform claim follows from this document review.
