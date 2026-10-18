@@ -38,7 +38,7 @@ Main exposes active status by instance/entry and publishes launch-state hints to
 
 Mapping changes, navigation, server switching, and cancellation can prevent dispatch before it happens. After dispatch, cancellation cannot undo an accepted launch; the main process finishes result recording in the captured namespace even if the renderer unmounts or the client switches servers. Do not kill the reader to cancel event delivery or close Henshin. [Effect composition](application-logic.md) must place this work in a main-process lifetime rather than a React component's scope.
 
-The application does not recursively hash content on every Open or sandbox the reader. Containment protects Henshin's reads and supplied target, not the reader's later enumeration, link traversal, or navigation. Reader setup explains this boundary. External filesystem changes between checking and use can still cause a launch based on stale evidence.
+The application does not recursively hash content on every Open or sandbox the reader. Containment protects Henshin's reads and supplied target, not the reader's later enumeration, link traversal, or navigation. Reader setup explains this boundary and the [source-write protection requirements](source-safety.md#external-readers-and-setup). Henshin source reads are strictly read-only; the external reader needs read-only NAS permissions to prevent its own sidecars, extraction or archive updates. External filesystem changes between checking and use can still cause a launch based on stale evidence.
 
 ## What Counts as Accepted
 

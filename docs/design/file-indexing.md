@@ -4,6 +4,8 @@ This topic specifies discovery, analysis, reconciliation, fingerprint evidence, 
 
 [Design overview](../design.md) | [Domain glossary](../../CONTEXT.md)
 
+All source enumeration, analysis and fingerprint work follows [NAS source safety](source-safety.md): read-only opens, no repair or adjacent files, and private bounded worker outputs outside the source. Disk-full or decoder failure never enables a source-write fallback.
+
 ## Scan Modes and Entry Boundaries
 
 The server scans through its active mapping. Clients do not scan the NAS for the shared index; their local resolution checks remain independent. The first release provides manual root scans, a configurable per-root schedule, and explicit forced reanalysis. The default schedule is disabled until configured. Filesystem watchers may later trigger reconciliation but are not required for correctness, especially on network shares.
