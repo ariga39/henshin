@@ -53,4 +53,6 @@ Flash's two optional handoffs were also clarified: portable-name exclusions are 
 
 ## Review Gate
 
-In progress. Runtime/native-adapter/NAS behavior remains untested; no implementation-ready platform claim follows from this document review.
+Both reviewers verified `d5cbbc2230072aa5e665422a381f1aaf002728c2` and returned PASS with no remaining findings. Their final focused verification reuses the prior six-criterion review and checks the changed contracts for regressions. Local links, English prose, code fences, heading spacing, topic indexing, and whitespace passed across 24 Markdown documents. The next topic may proceed.
+
+Runtime/native-adapter/NAS behavior remains untested; no implementation-ready platform claim follows from this document review. Later edits to this record do not change the reviewed design revision.
