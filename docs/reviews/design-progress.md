@@ -26,3 +26,7 @@ All 14 detailed topics have passed their independent design-review gates. The st
 ## Whole-stack Follow-up
 
 [PR #15](https://github.com/ariga39/henshin/pull/15), based on PR #14, applies the [whole-stack review corrections](whole-stack-review.md). DeepSeek V4.1 Flash and Step 5 Preview both verified design revision `634ff57` with no remaining material findings. This supplements, rather than rewrites, the 14 historical topic verdicts.
+
+## Adversarial Follow-up
+
+[PR #16](https://github.com/ariga39/henshin/pull/16), based on PR #15, applies the [invariant/failure-sequence framework](adversarial-review-brief.md). The [adjudication and verification record](adversarial-review.md) preserves independent initial findings, rejected traces, corrections and limits. Main-process cross-window Open admission/status is now explicit, and exact restoration explicitly requires successful acceptance analysis. DeepSeek V4.1 Flash and Step 5 Preview both returned NO SUPPORTED COUNTEREXAMPLE FOUND at design revision `5628734`; runtime and platform evidence remains unexecuted.
