@@ -6,16 +6,17 @@ Each topic follows the [shared review protocol](topic-review-brief.md). A topic 
 | --- | --- | --- | --- |
 | 1 | Entry identity and file lifecycle | [Both reviewers PASS](entry-identity-review.md) on `b2a9362`; [PR #1](https://github.com/ariga39/henshin/pull/1) | `design/01-entry-identity` / `main` |
 | 2 | Storage roots and device path mappings | [Both reviewers PASS](path-mapping-review.md) on `d5cbbc2`; [PR #2](https://github.com/ariga39/henshin/pull/2) | `design/02-path-mapping` / `design/01-entry-identity` |
-| 3 | File indexing and thumbnails | [Review in progress](file-indexing-review.md); [PR #3](https://github.com/ariga39/henshin/pull/3) | `design/03-file-indexing` / `design/02-path-mapping` |
+| 3 | File indexing and thumbnails | [Both reviewers PASS](file-indexing-review.md) on `2efcc0b`; [PR #3](https://github.com/ariga39/henshin/pull/3) | `design/03-file-indexing` / `design/02-path-mapping` |
 | 4 | EH metadata, bindings, and overrides | Pending | After topic 3 |
 | 5 | Search semantics and filtering | Pending | After topic 4 |
 | 6 | External readers and open events | Pending | After topic 5 |
 | 7 | Cross-device consistency and instance lifecycle | Pending | After topic 6 |
-| 8 | Product scope and UI journeys | Pending | After topic 7 |
-| 9 | Persistence schemas and transactions | Pending | After topic 8 |
-| 10 | API, IPC, and background-task contracts | Pending | After topic 9 |
-| 11 | Effect runtime and application composition | Pending | After topic 10 |
-| 12 | Deployment, authentication, and packaging | Pending | After topic 11 |
-| 13 | Delivery gates and validation plan | Pending | After topic 12 |
+| 8 | Product scope and release scenarios | Pending | After topic 7 |
+| 9 | UI journeys and interaction | Pending | After topic 8 |
+| 10 | Persistence schemas and transactions | Pending | After topic 9 |
+| 11 | API, IPC, and background-task contracts | Pending | After topic 10 |
+| 12 | Effect runtime and application composition | Pending | After topic 11 |
+| 13 | Deployment, authentication, and packaging | Pending | After topic 12 |
+| 14 | Delivery gates and validation plan | Pending | After topic 13 |
 
-This order follows behavioral dependencies. Existing outline decisions constrain each topic throughout; security and integrity prerequisites cannot be postponed merely because their full topic appears later. Product scope and UI remain separate source documents, even where reviewed together. Technical claims requiring platform or dependency experiments must remain marked unverified until those experiments actually run.
+This order follows behavioral dependencies. Existing outline decisions constrain each topic throughout; security and integrity prerequisites cannot be postponed merely because their full topic appears later. Product scope and UI receive separate documents, reviews, and PRs. Technical claims requiring platform or dependency experiments must remain marked unverified until those experiments actually run.
