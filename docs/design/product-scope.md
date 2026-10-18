@@ -72,7 +72,7 @@ Each required workflow must include usable loading, empty, error, stale, and rec
 
 ## Release Readiness and Remaining Evidence
 
-The first usable implementation milestone is narrower than a complete first release: it proves scan, cover, mapped Open, and durable event handoff together with required authentication and replacement-identity handling. This summary does not waive any Phase 1 acceptance criterion. Metadata/search, reconnect/conflict handling, and final maintenance/packaging follow in dependency order. [Delivery](delivery-and-validation.md) defines phases and must distinguish development milestones from supported release claims.
+The first usable implementation milestone is narrower than a complete first release: it proves scan, cover, mapped Open, and durable event handoff together with required authentication and replacement-identity handling. This summary does not waive any Phase 1 acceptance criterion. Metadata/search, comprehensive multi-device reconnect/conflict workflows, and final maintenance/packaging follow in dependency order. Basic durable event delivery/reconnect and integrity checks already belong to Phase 1; later phases expand coverage rather than postponing those foundations. [Delivery](delivery-and-validation.md) defines phases and must distinguish development milestones from supported release claims.
 
 Target platforms are Windows, macOS, and Linux; Electron alone does not establish functional parity for mounts, filesystem names, native dependencies, or reader invocation. Release capability statements must be backed by the platform matrix. Package/native-adapter choices and signing/distribution procedures remain implementation gates, with explicit unsupported combinations when necessary.
 

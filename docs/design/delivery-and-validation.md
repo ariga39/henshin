@@ -36,7 +36,7 @@ A platform unavailable to the implementer remains unverified. A labeled developm
 
 G1 includes the five cases in [application composition](application-logic.md), not just a successful HTTP request. G2 must exercise actual SQLite and IPC; G3/G5 need actual native adapters and mounts. G6 is an early dependency, not postponed until final installers. Separate Electron-main and standalone-Node native builds must work in development before their features rely on them; final packaged ABI verification is repeated in G10.
 
-Configuration proposals already specified by [contracts](api-and-tasks.md), [EH](eh-metadata.md), and [persistence](data-model.md) are starting values, not missing decisions or measured performance claims. Record chosen versions, finite capacities/deadlines and their evidence before enabling the corresponding feature. Do not replace a defined semantic rule to meet a benchmark.
+Explicit configuration proposals in the owning topics, including [contracts](api-and-tasks.md), [EH](eh-metadata.md), and [persistence](data-model.md), are starting values, not missing decisions or measured performance claims. Values explicitly left unchosen still require their named prototype gate. Record chosen versions, finite capacities/deadlines and their evidence before enabling the corresponding feature. Do not replace a defined semantic rule to meet a benchmark.
 
 ## Implementation Milestones
 
@@ -74,7 +74,7 @@ Broaden the already-safe Phase 1/2 foundations to the full product journeys: con
 
 Acceptance includes two clients each opening once yielding exactly two unique events; partial batches and lost acknowledgments; same-epoch command retry versus changed-epoch/expired ambiguity; retained drafts and command attempts across restart; and explicit Disconnect pausing work without deleting it.
 
-Exercise source moves during enumeration, unchanged-path replacements with and without exact baselines, manual holds across restart, incomplete-scan import confirmation, missing-claim detachment, and Stop-scanning fences. Server NAS failure must not imply that a client's independent access fails. Cached eligible Open during service outage remains partial and visibly stale.
+Broaden the lifecycle cases already required and verified in Phase 1 through complete multi-device UI journeys; this is additional coverage, not their first integrity check. Exercise source moves during enumeration, unchanged-path replacements with and without exact baselines, manual holds across restart, incomplete-scan import confirmation, missing-claim detachment, and Stop-scanning fences. Server NAS failure must not imply that a client's independent access fails. Cached eligible Open during service outage remains partial and visibly stale.
 
 Switching instances cannot reuse mappings, caches, drafts, task selections or pending events across namespaces. A changed URL with the same instance still requires endpoint authentication; an independent clone is not replication. Notifications are hints backed by bounded periodic/focus refresh. Cancel/commit races retain completed work, forced reanalysis creates a durable compatible follow-up, and stale workers cannot publish.
 
