@@ -109,7 +109,7 @@ Thumbnail cache keys include entry ID, accepted content version, chosen page ide
 | Repack/rename changes fingerprint profile input | Do not call it exact equality; use explicit same-edition judgment |
 | Accepted cover evicted after old bytes become unavailable | Retain a placeholder; no candidate bytes may regenerate an old accepted-cover key |
 | Late cover task or fingerprint finishes after content/mapping change | Cannot publish under the newer accepted version |
-| Selected cover page disappears; cache is evicted | Explicit fallback or regeneration; metadata/history unchanged |
+| Selected cover page absent in a newly accepted representation, or cache evicted while accepted source data remains eligible | Fall back to the default cover for the newly accepted content version, or regenerate only from eligible accepted source data; otherwise keep a placeholder; metadata/history unchanged |
 
 Acceptance fixtures must exercise the failure cases on representative NAS data; none have been runtime-tested yet. Before implementation, choose the exact directory serialization, page formats/decoders, quiet interval, thumbnail profile, and finite resource limits. Measure discovery, cover latency, incremental enumeration, verification throughput, and cancellation separately. Record dataset size and machine/NAS environment rather than setting unsupported performance targets.
 
