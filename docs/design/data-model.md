@@ -17,6 +17,7 @@ The following table describes data responsibilities and relationships. Concrete 
 | Gallery binding | Entry ID, gallery ID, binding origin, confirmation time | At most one gallery per entry initially; multiple entries may bind to the same gallery |
 | Tag and association | Namespace, original text, gallery or entry association, translated aliases | Namespace and original text determine identity; translations are not primary keys |
 | Local override | Entry ID, title override, added tags, hidden source tags, notes, entry edit/decision revision | Stored separately from EH data; binding/override edits share the entry revision; distinguish an empty value from removing an override |
+| Device label | Device ID, display label, edit revision | Instance-local diagnostic registry; no authentication authority; label changes retain event provenance IDs |
 | Open event | Event ID, entry ID, device ID, observed location revision, observed content version, occurrence time, server receipt time | Unique event ID within the server instance across all entries/devices; retries do not increase the count; observed versions never reassign entry ownership |
 | Background task | Type, target, status, progress, attempt count, next attempt time, error | Recoverable after restart; coalesce duplicate triggers for the same target |
 

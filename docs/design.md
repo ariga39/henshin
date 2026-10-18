@@ -22,7 +22,7 @@ The confirmed desktop stack is Electron + React + TypeScript. Effect is preferre
 | EH integration | [EH metadata, bindings, and local overrides](design/eh-metadata.md) | Matching, bindings, updates, overrides, translations |
 | Search | [Search, filtering, and result ordering](design/search.md) | Query semantics, tag selection, filters, sorting, pagination, language support, index correctness |
 | Reading | [External readers and open history](design/external-reading.md) | Reader profiles, identity-checked launch, accepted-handoff counting, local durability, crash recovery and event ownership |
-| Consistency | [Cross-device consistency](design/synchronization.md) | Concurrent edits, reconnects, event delivery, instance isolation |
+| Consistency | [Cross-device consistency and instance lifecycle](design/synchronization.md) | Concurrent edits, reconnects, event delivery, authority epochs, migration, cloning, restore |
 | UI | [User interface and journeys](design/user-interface.md) | Screens, navigation, setup, actions, visible states |
 | Contracts and execution | [API contracts and background tasks](design/api-and-tasks.md) | Requests and responses, task transitions, retries, notifications |
 | Delivery | [Delivery and validation](design/delivery-and-validation.md) | Implementation phases, acceptance criteria, platform checks |
