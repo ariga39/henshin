@@ -8,7 +8,7 @@ Both reviewers use the [topic protocol](topic-review-brief.md), the same six cri
 
 - Sol: new Codex task `01a14cca-edde-7712-b06f-416c8afb0a43`, model `gpt-6.1-sol`.
 - Flash: new OpenCode Plan session `ses_eb3313936ffez79PbzQ8WfqlR1` through Herdr, verified as `opencode-go/deepseek-v4.1-flash` before submission.
-- An initial Flash attempt followed a link into the earlier outline review. It was stopped and discarded; the replacement session starts without that history. Its output is not counted as an independent review.
+- An initial Flash attempt followed a link into the earlier outline review. It was stopped and discarded; the replacement session starts without that history. The discarded attempt contributes no review findings.
 
 No runtime, NAS, framework integration, or platform behavior is established by these reviews. The draft's acceptance cases remain specifications.
 
@@ -42,6 +42,6 @@ The optional EH handoff was added to clarify that local analysis changes do not 
 
 ## Review Gate
 
-Both reviewers returned PASS on `7dc45f9f00dd21ff605dd5ff9b93be5b9926e34b`, with no unresolved material finding. Flash additionally noted two non-blocking wording ambiguities: "decision revision" instead of the existing entry revision, and "automatic" potentially qualifying the merge prohibition. Both have been corrected directly; the final wording check is pending. The optional similarity-deduplication comment adds no feature: exact-copy flagging and later similarity detection remain distinct.
+Both reviewers returned PASS on `7dc45f9f00dd21ff605dd5ff9b93be5b9926e34b`, with no unresolved material finding. Flash additionally noted two non-blocking wording ambiguities: "decision revision" instead of the existing entry revision, and "automatic" potentially qualifying the merge prohibition. Both were corrected in `b2a936237c85999ba1b3c96ca85e71e6d8cdd994`; both reviewers then inspected the exact two-phrase diff and returned PASS with no remaining findings. The optional similarity-deduplication comment adds no feature: exact-copy flagging and later similarity detection remain distinct.
 
-Both passes covered requirements/scope, domain/consistency, feasibility/boundaries, integrity/failures, complexity/sequencing, and acceptance/readiness. The next topic waits for the final wording verification and document checks.
+Both passes covered requirements/scope, domain/consistency, feasibility/boundaries, integrity/failures, complexity/sequencing, and acceptance/readiness. Local links, English prose, code fences, heading spacing, topic indexing, and whitespace passed across 23 Markdown documents. The topic gate is complete; path mappings may proceed. Later edits to the review record do not change the verified design revision.
