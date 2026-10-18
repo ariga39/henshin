@@ -6,10 +6,12 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Source under test
 
+- Tested code: `abb3ce4a752b520f421cc4cae732fac854385383` — `pnpm typecheck`,
+  `pnpm build`, `pnpm test:http` (12/12), and `pnpm test:e2e` (1/1) all pass on
+  this revision.
 - Prototype base commit: `ec2cc9a` (first frozen install/typecheck/test pass).
-- Follow-up fixes commit: the commit that adds this record; its SHA is reported
-  with the commit. It contains the chunked-body handling and canonical-identity
-  fixes and the reruns recorded below.
+- Documentation-only follow-up commits after the tested code do not require a
+  retest; they leave the code revision above unchanged.
 
 ## Scope and fixtures
 

@@ -18,8 +18,9 @@ import {
  *
  * Driver choice is backed by an executed experiment (see
  * docs/validation/g1-g2-runtime-persistence-prototype.md): `node:sqlite` loads
- * in standalone Node 22.23.2, Electron 44.9.0 main (Node 24.22.0), and
- * ELECTRON_RUN_AS_NODE, so no native rebuild is required.
+ * and preserves embedded U+0000 in the supported Node 24 runtimes (Node 24.19.0
+ * and Electron 44.9.0 main, Node 24.22.0), so no native rebuild is required.
+ * Node 22's adapter truncates TEXT at U+0000 and is unsupported.
  *
  * Revisions are handled as canonical decimal strings and converted to `BigInt`
  * for arithmetic and binding, never through `Number`, so an exact INTEGER

@@ -43,7 +43,7 @@ list of pending gate cases are in
 ### Reproducible commands
 
 ```sh
-pnpm install     # locked install; allowBuilds covers electron and esbuild
+pnpm install --frozen-lockfile   # locked install; allowBuilds covers electron and esbuild
 pnpm typecheck   # contracts, server, desktop
 pnpm build       # server and desktop bundles
 pnpm test:http   # HTTP-boundary tests against the built independent server

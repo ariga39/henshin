@@ -6,7 +6,17 @@ This topic owns implementation sequence, evidence, acceptance coverage, and rele
 
 ## Current Evidence and Meaning of Completion
 
-This repository currently contains design documents only. No application, compiled Effect prototype, executable schema, endpoint, reader adapter, installer, or runtime test exists. Document review and checks of links, English prose, fences, headings, indexing, and whitespace establish documentation quality only. All runtime gates below are **Not run**.
+This repository is a design baseline plus one focused, isolated
+runtime/persistence prototype. The prototype lives under `apps/` and
+`packages/contracts`, and its executed evidence is recorded in
+[the prototype evidence record](../validation/g1-g2-runtime-persistence-prototype.md).
+It covers only a synthetic renderer → preload → main → independent Effect HTTP
+server → SQLite worker edit and its tagged conflict; it is not a product client
+or server. No product application, first-release schema, endpoint surface,
+reader adapter, installer, or gate-level runtime test exists. Document review
+and checks of links, English prose, fences, headings, indexing, and whitespace
+establish documentation quality only. Every runtime gate below remains
+**Not run** except the specific prototype cases recorded in that evidence file.
 
 Distinguish four stages:
 
