@@ -34,7 +34,7 @@ All tables live within one server instance. The instance ID is stored once in `s
 | `galleries` (`gallery_id`) | Unique `(source, gid)` with common EH source across domains; locator/token, preferred domain, credential/request generation, snapshot revision/status, last success/error metadata |
 | `gallery_snapshots` (`gallery_id`) | Current validated source fields, raw bounded response/profile, retrieval time, normalized title copies; replace a successful snapshot atomically, retaining it on refresh failure |
 | `bindings` (`entry_id`) | At most one gallery FK, binding origin/time; edits share entry decision revision |
-| `entry_overrides` (`entry_id`) | `title_present` boolean plus nullable title value, notes, rebind-review indicator, normalized local title/profile; CHECK ensures absent title has null value and present title has a string including empty; entry revision protects edits |
+| `entry_overrides` (`entry_id`) | `title_present` boolean plus nullable title value, notes, rebind-review indicator, normalized local title/profile; CHECK ensures absent title has null value and present title has a string including empty; entry decision revision protects edits |
 | `tags` (`tag_id`) | Unique exact `(namespace, original_text)`; no Unicode/lowercase normalization of identity; `local` reserved for local-only tags |
 | `gallery_tags` (`gallery_id`, `tag_id`) | Source membership set with composite primary key |
 | `entry_tag_overrides` (`entry_id`, `tag_id`) | One action, add or suppress, per canonical EH tag; local-namespace tags permit add only, and removal deletes that row without creating a suppression; reset deletes row; effective tags follow `(source minus suppressions) union additions` |
