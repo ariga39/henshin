@@ -16,6 +16,7 @@ The confirmed desktop stack is Electron + React + TypeScript. Effect is preferre
 | Architecture | [Architecture and deployment](design/architecture.md) | Component and process responsibilities, technologies, deployment |
 | Application logic | [Application logic with Effect](design/application-logic.md) | Services, runtimes, frontend integration, errors, resource lifetimes |
 | Entry lifecycle | [Entry identity and file lifecycle](design/entry-identity.md) | Identity retention, replacement decisions, relocation evidence, copies, retained history |
+| Source protection | [NAS source safety](design/source-safety.md) | Read-only source capability, NAS permissions, disjoint outputs, reader write boundary |
 | File locations | [Storage roots and path mappings](design/path-mapping.md) | Logical locations, per-device mappings, path resolution |
 | Indexing | [File indexing and thumbnails](design/file-indexing.md) | Entry discovery, change detection, relocation, covers |
 | Persistence | [Data model and persistence](design/data-model.md) | Identity, relationships, lifecycle constraints, server/client-local storage, journal transactions, migrations and retention |

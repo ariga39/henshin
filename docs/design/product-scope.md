@@ -10,6 +10,7 @@ Henshin makes an externally managed collection searchable and keeps its metadata
 - Electron with React and TypeScript for the desktop. Effect is preferred for backend and frontend application logic.
 - Collection storage and server location are independent. The current collection is on a NAS; server and desktop may mount the same content at different native paths.
 - File indexing, thumbnails, EH information/tags and updates, search, and open counts.
+- All Henshin collection-source access is strictly read-only: no creation, overwrite, rename, deletion, repacking, permission changes or explicit timestamp changes in the source. [NAS source safety](source-safety.md) defines the required boundary.
 - Reading invokes an external reader locally. No embedded reader is required.
 - Shared library metadata and open events are synchronized across clients of the authoritative service.
 - Design documentation is English and organized into separate topics.
@@ -25,7 +26,7 @@ These are design decisions for a coherent initial release, not additional confir
 | Audience | One user across several desktops; no accounts, roles, sharing invitations, or per-user history partitioning |
 | Authority | One authoritative server per connection; several saved connections may be switched, but their libraries and event queues stay separate |
 | Visible library | One visible library per server, containing multiple storage roots; initialize its stable ID with the server, without library creation/deletion/switching UI inside that instance |
-| Storage ownership | Read-only collection access; changes to filenames, archives, and folder organization remain external to Henshin |
+| Source-protection deployment | Enforce the confirmed read-only requirement with narrow application capabilities and NAS permissions; restrict the external reader as well for end-to-end protection. File organization remains external under [source safety](source-safety.md) |
 | Service stack | Independent Node/TypeScript + Effect HTTP direction and SQLite on server-local disk; package/adapter validation is required |
 | Disconnected use | Browse the explicitly partial display cache and attempt Open for eligible cached entries; no offline metadata edits, full-library search promise, or distributed merge |
 | Opening statistics | Count OS-accepted Henshin handoffs per entry across devices, not actual reading, completion, duration, or launches made outside Henshin |
