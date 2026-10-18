@@ -8,7 +8,7 @@ This document owns search fields, query semantics, filtering, ordering, paginati
 
 The first release supports title and filename queries, with filters for namespaced tags, language, category, storage root, binding status, whether an entry has been opened, and file status. Tag filters support inclusion and exclusion; multiple filters use intersection by default. More complex query syntax can follow once basic filtering is stable.
 
-Results can be sorted by date added, title, EH publication time, site rating, open count, and last-opened time. Pagination runs on the server rather than loading the entire library into the client. Results should distinguish filename matches, source-title matches, and overridden-title matches.
+Results can be sorted by date added, title, EH publication time, site rating, open count, and last-opened time. Pagination runs on the server rather than loading the entire library into the client. Results should distinguish filename matches, source-title matches, and overridden-title matches. Title sorting uses the effective display-title rule in [EH metadata](eh-metadata.md); effective tags and language facets use its override set rule.
 
 ## Indexing Direction
 
@@ -20,7 +20,7 @@ Before implementing the first title/filename search index, define expected short
 
 - What are the exact semantics for phrases, partial titles, tag aliases, inclusion, exclusion, and multiple terms?
 - How should one- and two-character Chinese or Japanese queries behave, and which tokenizer or substring strategy meets that behavior?
-- Which title wins for display and sorting, and how are ties and missing values ordered?
+- Given the EH topic's effective-title precedence, how are ties, explicit empty overrides, and missing sort values ordered?
 - What pagination contract and performance targets apply to the representative library?
 
 ## Related Topics
