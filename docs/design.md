@@ -4,7 +4,7 @@ Henshin organizes a NAS collection into a searchable library with updatable meta
 
 ## Design Status
 
-The design is split by topic so each area can be discussed and refined independently. The detailed behavioral baseline remains distinct from executable implementation and runtime validation. Confirmed requirements and proposed defaults are distinguished in the product scope; empirical choices and acceptance evidence are tracked by the delivery gates. Review status and exact reviewed revisions are recorded separately below.
+The design is split by topic so each area can be discussed and refined independently. The detailed behavioral baseline remains distinct from executable implementation and runtime validation. Confirmed requirements and proposed defaults are distinguished in the product scope; empirical choices and acceptance evidence are tracked by the delivery gates.
 
 The confirmed desktop stack is Electron + React + TypeScript. Effect is preferred for frontend and server application logic; the proposed backend combines Node.js, Effect's HTTP stack, and SQLite. Specific package versions and adapters remain subject to integration validation. NAS storage is independent of server deployment, and each device resolves the same files through its own root mappings. There is no built-in reader or content-transfer requirement.
 
@@ -40,12 +40,6 @@ The confirmed desktop stack is Electron + React + TypeScript. Effect is preferre
 5. Update implementation phases and acceptance cases with the resulting decisions and evidence.
 
 Keep each rule in its owning topic and link to it from dependent topics. Update related documents when a decision changes their contract. Do not silently promote a proposed default or open question into a confirmed requirement.
-
-## Review Record
-
-The [independent Sol and DeepSeek review](reviews/outline-review.md) records the shared criteria, baseline findings, primary-agent decisions, and resulting revisions. It distinguishes adopted corrections from deferred product choices and rejected conclusions.
-
-Detailed topics follow the [review protocol](reviews/topic-review-brief.md) and [progress record](reviews/design-progress.md), with one stacked PR per topic and new Sol/DeepSeek V4.1 Flash sessions for each topic.
 
 ## Reference Projects
 
