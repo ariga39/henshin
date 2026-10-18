@@ -4,7 +4,7 @@ Henshin organizes a NAS collection into a searchable library with updatable meta
 
 ## Design Status
 
-The design is split by topic so each area can be discussed and refined independently. These are working drafts, not complete implementation specifications. Confirmed requirements and proposed defaults are distinguished in the product scope; unresolved behavior appears under Open Design Questions in its owning document.
+The design is split by topic so each area can be discussed and refined independently. The detailed behavioral baseline remains distinct from executable implementation and runtime validation. Confirmed requirements and proposed defaults are distinguished in the product scope; empirical choices and acceptance evidence are tracked by the delivery gates. Review status and exact reviewed revisions are recorded separately below.
 
 The confirmed desktop stack is Electron + React + TypeScript. Effect is preferred for frontend and server application logic; the proposed backend combines Node.js, Effect's HTTP stack, and SQLite. Specific package versions and adapters remain subject to integration validation. NAS storage is independent of server deployment, and each device resolves the same files through its own root mappings. There is no built-in reader or content-transfer requirement.
 

@@ -17,6 +17,6 @@ Each topic follows the [shared review protocol](topic-review-brief.md). A topic 
 | 11 | API, IPC, and background-task contracts | [Both reviewers PASS](api-and-tasks-review.md) on `c7bec1d`; [PR #11](https://github.com/ariga39/henshin/pull/11) | `design/11-api-and-tasks` / `design/10-persistence` |
 | 12 | Effect runtime and application composition | [Both reviewers PASS](effect-composition-review.md) on `b4a9262`; [PR #12](https://github.com/ariga39/henshin/pull/12) | `design/12-effect-composition` / `design/11-api-and-tasks` |
 | 13 | Deployment, authentication, and packaging | [Both reviewers PASS](deployment-review.md) on `14f5787`; [PR #13](https://github.com/ariga39/henshin/pull/13) | `design/13-deployment` / `design/12-effect-composition` |
-| 14 | Delivery gates and validation plan | Pending | After topic 13 |
+| 14 | Delivery gates and validation plan | Draft; awaiting independent reviews | `design/14-delivery-validation` / `design/13-deployment` |
 
 This order follows behavioral dependencies. Existing outline decisions constrain each topic throughout; security and integrity prerequisites cannot be postponed merely because their full topic appears later. Product scope and UI receive separate documents, reviews, and PRs. Technical claims requiring platform or dependency experiments must remain marked unverified until those experiments actually run.
