@@ -15,6 +15,10 @@ _Avoid_: Using "EH Gallery" to refer to a library entry.
 
 **Library File**: An archive or image directory containing collected content, potentially located on shared storage such as a NAS. Access from multiple devices does not imply a separate copy on each device.
 
+**Replacement Candidate**: Newly observed content at an entry's location whose relationship to the indexed edition has not yet been resolved. It is not automatically the same edition or a new accepted entry.
+
+**Detached Entry**: A retained library entry that no longer owns a current file location. Its metadata and open history still describe the previous edition.
+
 **EH Gallery**: A gallery published on E-Hentai/ExHentai and its site metadata. An EH gallery can be associated with multiple library entries, and a library entry may have no gallery match yet.
 
 **Gallery Binding**: A confirmed association between a library entry and a specific EH gallery. A candidate search result is not a binding.
