@@ -87,7 +87,7 @@ Server settings expose configured destination IDs, backup enablement/retention p
 | Scenario | Required result |
 | --- | --- |
 | Library/configuration changes during backup | Database and configuration projection come from one snapshot, even if live settings change during serialization; restore rejects a conflicting projection |
-| Backup policy registered before any artifact exists | Settings read exposes destination IDs, policy revision and inactive/active state without requiring an artifact or revealing secret/native-path data |
+| Backup policy registered before any artifact exists | Settings read exposes destination IDs, settings revision and inactive/active state without requiring an artifact or revealing secret/native-path data |
 | Known credential sentinels in both stores and external secret storage | Published bundles exclude EH/owner-token/connection secret contents; permitted private verifiers/locators remain labeled, and restore clears active authentication references |
 | Wall clock moves backward between backups | Retention uses catalog publication order and preserves the newest verified recovery point |
 | Older server snapshot restored with newer covers left on disk, then content version reused | Old bytes cannot serve under the reused key; clients observing the new epoch evict/refetch, unavailable accepted sources show placeholders |

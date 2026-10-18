@@ -6,7 +6,7 @@ This topic owns logical schemas, keys, constraints, revisions, transaction bound
 
 ## Stores and Primitive Types
 
-Use two separate SQLite stores: the authoritative server database on server-local disk, and a desktop database owned only by Electron main on device-local disk. Clients never open the server database; renderers never open either database. Collection NAS roots contain neither live database nor application temporary outputs. Local databases may back up to a separately configured destination, but live WAL operation requires local storage.
+Use two separate SQLite stores: the authoritative server database on server-local disk, and a desktop database on device-local disk, owned by Electron main while running and by the exclusive stopped-store maintenance tool during maintenance. Clients never open the server database; renderers never open either database. Collection NAS roots contain neither live database nor application temporary outputs. Local databases may back up to a separately configured destination, but live WAL operation requires local storage.
 
 Enable foreign-key enforcement on every connection, WAL journaling, and FULL synchronous durability for authoritative/journal writes. A single application writer serializes short write transactions per store; independent bounded read connections may read snapshots. Synchronous drivers run on a dedicated database worker, never the renderer or server request event loop. No network/filesystem scan, hash, decoder, or reader launch runs inside a write transaction. Busy errors use bounded retries and a clear unavailable result, not infinite blocking. Tune checkpoint cadence and busy deadlines with measured workloads before implementation.
 
