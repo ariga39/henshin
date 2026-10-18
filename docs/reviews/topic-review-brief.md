@@ -4,7 +4,7 @@ Each topic receives a new Codex session using `gpt-6.1-sol` and a new OpenCode s
 
 ## Reviewer Instructions
 
-Review the commit and primary topic named in the task prompt using `git show`, not a changing working tree. Read `AGENTS.md`, `CONTEXT.md`, `docs/design.md`, the primary topic, and every design document the primary topic links to. Inspect the topic commit's changes for cross-document contradictions. Do not read review outcomes or other reviewer conversations. Remain read-only: no edits, commits, installs, configuration changes, or delegation. Respond in English.
+Review the commit and primary topic named in the task prompt using `git show`, not a changing working tree. Read `AGENTS.md`, `CONTEXT.md`, `docs/design.md`, the primary topic, and every design document the primary topic links to. Inspect the topic commit's changes for cross-document contradictions. Do not follow overview links into `docs/reviews`: this brief is the only file in that directory allowed during independent review. Do not read review outcomes or other reviewer conversations. Remain read-only: no edits, commits, installs, configuration changes, or delegation. Respond in English.
 
 ## Requirements and Stage
 

@@ -4,7 +4,7 @@ Each topic follows the [shared review protocol](topic-review-brief.md). A topic 
 
 | Order | Topic | Status | Branch / base |
 | --- | --- | --- | --- |
-| 1 | Entry identity and file lifecycle | Draft; awaiting independent reviews | `design/01-entry-identity` / `main` |
+| 1 | Entry identity and file lifecycle | [Review in progress](entry-identity-review.md); [PR #1](https://github.com/ariga39/henshin/pull/1) | `design/01-entry-identity` / `main` |
 | 2 | Storage roots and device path mappings | Pending | After topic 1 |
 | 3 | File indexing and thumbnails | Pending | After topic 2 |
 | 4 | EH metadata, bindings, and overrides | Pending | After topic 3 |

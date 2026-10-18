@@ -12,17 +12,17 @@ The following table describes data responsibilities and relationships. Concrete 
 | --- | --- | --- |
 | Library | Library ID, name, associated storage roots | A library can contain multiple storage roots; the number of user-visible libraries is a separate product choice |
 | Storage root | Root ID, owning library ID, name, server mapping, scan options | Belongs to exactly one library; stable root ID unique within a server instance; avoid overlapping scan scopes within a library |
-| Library entry | Entry ID, root ID, relative path, format, size, modification time, local page count, file fingerprint, file status, content version | At most one current entry association per root and path; separate entries for language editions and revisions |
+| Library entry | Entry ID, root ID, relative path, format, size, modification time, local page count, file fingerprint, identity state, server availability observation, content version, location revision | At most one current entry association per root and path; separate entries for language editions and revisions |
 | EH gallery | Source, gid, token, both titles, category, site page count, raw response, retrieval time, sync status | EH and EX belong to one source identity system; preserve the access URL without duplicating galleries by domain |
 | Gallery binding | Entry ID, gallery ID, binding origin, confirmation time | At most one gallery per entry initially; multiple entries may bind to the same gallery |
 | Tag and association | Namespace, original text, gallery or entry association, translated aliases | Namespace and original text determine identity; translations are not primary keys |
 | Local override | Entry ID, title override, added tags, hidden source tags, notes, revision | Stored separately from EH data; distinguish an empty value from removing an override |
-| Open event | Event ID, entry ID, device ID, occurrence time, server receipt time | Unique event ID; retries do not increase the count |
+| Open event | Event ID, entry ID, device ID, observed location revision, observed content version, occurrence time, server receipt time | Unique event ID; retries do not increase the count; observed versions never reassign entry ownership |
 | Background task | Type, target, status, progress, attempt count, next attempt time, error | Recoverable after restart; coalesce duplicate triggers for the same target |
 
 Store file page counts separately from EH page counts, and overridden titles separately from source titles. Aggregate statistics from open events; cached counts can be rebuilt. Search indexes and thumbnails are also rebuildable data.
 
-The first release does not automatically merge entries by EH gid, identical titles, or similar covers. Identical files may be flagged as duplicates, but the user must decide whether to merge entries and how to handle their history.
+The first release does not merge entries or transfer their history, whether they share an EH gid, similar titles/covers, or identical bytes. Duplicate detection may flag candidates for inspection, but copies remain separate entries under the [entry lifecycle](entry-identity.md).
 
 The [entry lifecycle](entry-identity.md) owns identity decisions: one current location per entry, explicit resolution of changed representations, distinct entries for replacement editions, and retained detached records. Historical locations do not compete with current claims. Model its candidate/version checks and atomic resolution before implementing file-update persistence.
 

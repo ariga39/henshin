@@ -19,6 +19,8 @@ _Avoid_: Using "EH Gallery" to refer to a library entry.
 
 **Detached Entry**: A retained library entry that no longer owns a current file location. Its metadata and open history still describe the previous edition.
 
+**File Status**: The combination of an entry's identity state and the server's last observation of its file availability. It does not describe whether another device can currently access the file.
+
 **EH Gallery**: A gallery published on E-Hentai/ExHentai and its site metadata. An EH gallery can be associated with multiple library entries, and a library entry may have no gallery match yet.
 
 **Gallery Binding**: A confirmed association between a library entry and a specific EH gallery. A candidate search result is not a binding.
