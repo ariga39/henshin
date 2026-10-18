@@ -24,7 +24,7 @@ An entry ID is not a guarantee that the bytes currently at its recorded path sti
 | Accepted content observation | Last accepted representation, analysis version, observation time, and available fingerprint evidence |
 | Replacement candidate | Newly observed representation at an occupied location, evidence, candidate version, and pending decision; it is not yet a new accepted entry |
 | Location revision | Changes when the current logical location changes or is detached; it lets clients and tasks detect stale location decisions |
-| Content version | Changes when a different representation is accepted; cached analysis and thumbnails depend on it |
+| Content version | Advances when a different or byte-unverified representation is accepted; exact-equality observation refresh retains it; cached analysis and thumbnails depend on it |
 
 Do not implement a general versioned file archive or retain old content bytes. Keeping metadata about an old representation does not preserve the old file. Schema design may combine these responsibilities where the invariants remain explicit.
 
@@ -42,6 +42,8 @@ Availability observations can be present, missing after a successful scan, inacc
 
 The existing term file status collectively refers to these two axes: identity state and last server availability observation. Do not collapse them into a single mutually exclusive enum. UI and search must distinguish, for example, an accepted-but-server-inaccessible entry from a replacement-pending entry; neither is evidence of client accessibility. Exact display labels and filter syntax belong to their later topics.
 
+Excluded is a separate scan-scope indicator derived from root/path policy, not a fifth availability observation. It can coexist with any retained identity/availability state and does not establish whether the file exists or is locally readable.
+
 ## Evidence Rules
 
 Sizes and modification times are change-detection hints, not identity proof. Similar titles, EH IDs, page counts, covers, perceptual hashes, partial hashes, or a file's continued presence at the same path do not prove identity. They may rank candidates for user inspection.
@@ -51,6 +53,7 @@ Exact fingerprint equality can prove an unchanged representation within the supp
 | Observation | Identity action |
 | --- | --- |
 | No detected change | Keep the entry; the unchanged observation is not a fresh full-content verification |
+| Lightweight stats/manifest change without comparable full evidence | Treat as an uncertain replacement and block counted Open until exact verification or explicit edition confirmation; the hint alone proves neither change nor equality |
 | Reanalysis shows an exact match to the accepted fingerprint, including after a pending replacement disappears | Clear the pending candidate if any, return to Accepted, and keep identity and content version; update observation details |
 | Changed representation, even with the same EH URL or page count | Create or update a replacement candidate; keep prior accepted metadata |
 | User confirms a repack, filename-only page rename, or other representation change of the same edition | Retain entry identity, binding, overrides, and history; accept the candidate and increment content version |
@@ -68,12 +71,17 @@ The user can choose:
 1. **Keep this entry**: explicitly confirm the same edition and accept the current candidate, preserving the entry's records.
 2. **Treat as a different entry**: release the old current location, preserve the old entry as detached, and create an unbound entry with no inherited overrides or events.
 3. **Decide later**: retain the unresolved state and block normal Open for that entry. A later scan can replace the candidate but cannot make the decision on the user's behalf.
+4. **Stop scanning this location**: for an unacceptable replacement, explicitly add an exact-path exclusion and retain the old entry, its current claim, and pending state with an excluded/error indicator. Normal Open stays blocked and no new entry is created. The user can later remove the exclusion and retry analysis after repairing the file or adding format support; source-file deletion is not required. This terminal handling preserves old records without pretending the replacement was accepted.
 
 The exception is an exact match to the previously accepted fingerprint: restoring the accepted representation needs no edition judgment. Atomically clear the candidate and restore Accepted under the current entry, location, and candidate revisions. Advance the entry revision so an already-open comparison cannot resolve the discarded candidate. A failed scan, missing candidate file, or matching size/mtime alone does not perform this transition. Fingerprint profiles must be comparable and the observation complete and stable.
 
-Only a completely analyzed, stable candidate can be accepted. If analysis fails, offer retry and leave the decision pending. The first release does not provide an untracked preview launch to bypass the pending state.
+Only a stable candidate satisfying the complete acceptance analysis profile in [Indexing](file-indexing.md) can be accepted. This means a complete supported-page manifest, not full decoding of every page or mandatory full-byte hashing. Unsupported-page/incomplete-manifest failures remain pending; a separately reported cover error need not invalidate a complete manifest. The first release does not provide an untracked preview launch to bypass the pending state.
 
-Resolution submits the entry revision, location revision, and candidate version observed by the user. Before committing, check that the candidate still matches a fresh observation under the same fingerprint profile and that those revisions still match. Changed evidence requires refreshing the comparison. Apply the old-entry detachment, new-entry creation or accepted-content update, location ownership, and cache invalidation atomically. No intermediate state may expose two accepted entries at one current location or move old events to the new entry. A retry after a successful resolution returns the existing result for the same operation ID rather than creating another entry.
+Accepting a byte-unverified candidate with an explicit same-edition judgment always advances content version and invalidates derived analysis/thumbnail keys, even when the user believes only timestamps changed. Without prior exact evidence, reusing the old cache could hide actual changes. Only comparable exact equality retains content version; version advancement is a conservative invalidation decision, not proof that the bytes differ.
+
+Stop scanning is a non-accepting configuration action: it requires matching entry/location/candidate revisions but no successful analysis or fingerprint. Atomically add the exact-path exclusion and preserve the existing claim/state; reject a stale target. Its operation ID makes retries idempotent. The fresh-evidence acceptance checks below apply to Keep this entry and Treat as a different entry, not to exclusion or Decide later.
+
+Resolution submits the entry revision, location revision, and candidate version observed by the user. Before accepting, check that the candidate still matches a fresh stable observation and that those revisions still match; compare the same fingerprint profile when fingerprint evidence is available. Without it, repeat the lightweight/manifest checks and retain the explicitly byte-unverified classification and its limits. Changed evidence requires refreshing the comparison. Apply the old-entry detachment, new-entry creation or accepted-content update, location ownership, and cache invalidation atomically. No intermediate state may expose two accepted entries at one current location or move old events to the new entry. A retry after a successful resolution returns the existing result for the same operation ID rather than creating another entry.
 
 Scanning and resolution for a location must serialize their commits or use conditional revision checks. A late analysis result for an old location/candidate cannot overwrite a later user decision. A file can still change after the last check: subsequent observation returns it to pending. This is a documented external-filesystem race, not an atomic file-lock guarantee.
 
@@ -102,6 +110,8 @@ Disabling or removing a root from active scanning retains its entries, root iden
 
 The first release has no hard deletion, entry merge, or history transfer. Missing and detached entries remain inspectable and can be filtered out of the normal available-files view. Exclusions and incomplete scans do not delete entries. A future permanent-removal feature must define retention and pending-event handling separately; it is not implied by removing a path mapping or disabling a root.
 
+A user may explicitly stop awaiting relocation for a confirmed-missing current claim by detaching it. Require the observed entry/location revisions, explain that metadata/history remain and automatic relocation will no longer use that claim, and release only the location. This is not file deletion or record removal; it prevents intentionally retired missing claims from indefinitely blocking unrelated new discoveries. A detached entry may later be manually relocated to an unclaimed target under the same identity evidence rules.
+
 ## Opening and Delayed Events
 
 Before launching, an online client refreshes the entry's identity state, current location, location revision, and content version. A disconnected client uses its last cached accepted state, clearly marked stale. It never knowingly bypasses a cached pending or detached state. If a lightweight local check detects changed size/mtime compared with that accepted observation, block the normal counted Open and ask for server reconciliation; unchanged hints do not prove unchanged bytes.
@@ -121,6 +131,7 @@ No full-file hash is required for every Open, and an external reader opens by pa
 | Archive at the same path replaced with another edition | Pending first; after confirmation, old entry detached and new entry unbound |
 | User confirms a repack of the same edition | ID and records retained; content version changes and covers are regenerated |
 | Candidate changes while the comparison screen is open | Reject stale resolution and show fresh evidence |
+| Replacement cannot meet the analysis profile | Retain pending/error state; explicit exact-path exclusion suppresses further scanning without deleting files or history; removing it permits retry |
 | Original accepted bytes are restored while a replacement is pending | Exact comparable evidence clears the candidate and restores Accepted without changing content version; a stale comparison cannot commit |
 | Two clients resolve the same candidate concurrently or retry a completed resolution | One committed result; stale conflict or idempotent replay, no duplicate entry |
 | Analysis completes after a relocation or replacement decision | Conditional commit rejects obsolete result |
