@@ -11,6 +11,7 @@ This document owns implementation order, acceptance criteria, platform coverage,
 Design refinement order and implementation phases are separate. UI journeys may inform contracts before code is written. Each implementation phase starts only after its required behavior, minimal schemas/contracts, and transaction boundaries are specified.
 
 - Before Phase 1 application implementation, settle storage-root ownership, entry identity including same-path replacement, and the minimum scan/open/event contracts. Run the focused Effect, SQLite, and reader-launch integration prototype, then pin the compatible packages it exercises.
+- Phase 1 also requires the minimal local/LAN authentication flow and HTTPS setup for remote connections. Validate independent server startup, desktop-managed local startup, and required native dependencies in the development build; final installers remain Phase 4 work.
 - Before Phase 2 search implementation, define short Chinese and Japanese query behavior and choose an index/tokenizer approach using a representative sample. Specify revision checks before exposing metadata edits.
 - Before migration, restore, or clone implementation, specify the identity-preservation/isolation procedure, backup-point limitations, cache refresh, and pending-event reconciliation.
 
@@ -24,6 +25,8 @@ Acceptance criteria:
 
 - A server using path A and a client using path B can open the same NAS file. Cover drive letters, UNC paths, and Unix-like mount paths.
 - Local and LAN deployments use the same API and location model without transferring content through the server.
+- Local connections use credentials and remote connections use authenticated HTTPS. Missing or invalid credentials cannot access library details, covers, settings, or event submission.
+- The server runs without Electron, and the desktop can start and connect to its local server in the development build with the selected native dependencies.
 - Chinese and Japanese names, spaces, and special characters are passed correctly. Paths outside configured roots are rejected.
 - Failed reader launches do not increase counts. Resubmitting the same event after a successful launch does not count twice.
 - Replacing a file at an unchanged path cannot silently transfer the old edition's binding, overrides, or history. Verify both a confirmed same-edition representation change and an unresolved replacement using the identity rules settled before implementation.
@@ -56,13 +59,14 @@ Acceptance criteria:
 
 ### Phase 4 Formats and Delivery
 
-Validate RAR/CBR and 7z support, package all three desktop platforms, prepare remote server deployment, implement backup and restore, and check performance with a representative library.
+Validate RAR/CBR and 7z support, package all three desktop platforms, prepare remote server deployment, implement backup, restore, and metadata export, and check performance with a representative library.
 
 Acceptance criteria:
 
 - Packages install and run independently on their target platforms. The format support matrix matches actual validation.
 - Corrupt or encrypted archives report errors while processing continues for other files.
 - Backup and restore retain entries, bindings, overrides, and open history present at the backup point. Thumbnails can be regenerated.
+- Metadata export produces a readable artifact matching the format and field scope specified before implementation. Validate representative bound and unbound entries, source metadata, and local overrides against that contract; exclude credentials. Export is not a database backup or a promise of re-import support.
 - A migration has only one active authority and preserves the namespace used by mappings and events. An independent clone has a new namespace and cannot silently consume the original client's pending events. Restore checks acknowledge the backup point and missing-entry reconciliation rules.
 - Measure initial and incremental scans, short Chinese queries, combined tag queries, and recovery from NAS interruptions using actual samples. Record the environment and dataset size.
 

@@ -28,7 +28,7 @@ Revision protection is a prerequisite for exposing mutable metadata commands, in
 
 ## Open Design Questions
 
-- What revision granularity is used for edits, and what conflict response lets users recover their changes?
+- Given the revision granularity defined in the data model, what conflict response lets users recover their changes?
 - What event acknowledgement, partial-batch failure, retry, and pending-queue persistence rules are required?
 - Which metadata is cached for disconnected use, and how is stale information presented after reconnecting?
 - How does the migration/clone workflow enforce the identity rules, and how do clients refresh cached state and reconcile pending events after an older backup is restored?

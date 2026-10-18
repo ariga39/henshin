@@ -2,29 +2,34 @@
 
 ## Baseline and Method
 
-Both reviewers independently reviewed commit `f0acdd43115696202226311769ff237acad10ec0`, using the same [review brief](outline-review-brief.md), requirement summary, six dimensions, and output criteria. Both were instructed to read the complete baseline, remain read-only, and avoid the other reviewer's findings. Findings below refer to baseline line numbers; the revised files have different line numbers.
+The requested comparison is Codex Sol and OpenCode Go DeepSeek V4.1 Flash. The initial DeepSeek session mistakenly used V4 Pro. After the user corrected the model, a fresh Flash session reviewed the same baseline independently; the V4 Pro report remains historical evidence and is not relabeled as Flash output.
+
+All three sessions reviewed commit `f0acdd43115696202226311769ff237acad10ec0`, using the same [review brief](outline-review-brief.md), requirement summary, six dimensions, output criteria, and task prompt. Each was instructed to read the complete baseline, remain read-only, and avoid other reviewers' findings. Findings below refer to baseline line numbers; the revised files have different line numbers.
 
 | Reviewer | Execution | Findings |
 | --- | --- | --- |
 | Sol | New Codex task using `gpt-6.1-sol` | Two medium findings; no high findings |
-| DeepSeek | New OpenCode session using `opencode-go/deepseek-v4-pro`, launched through Herdr in Plan mode | Three medium and three low findings; no high findings |
+| DeepSeek V4 Pro (mistaken initial selection) | New OpenCode session using `opencode-go/deepseek-v4-pro`, launched through Herdr in Plan mode | Three medium and three low findings; no high findings |
+| DeepSeek V4.1 Flash (requested model) | Fresh OpenCode session using `opencode-go/deepseek-v4.1-flash`, launched through Herdr in Plan mode | Four medium, one reported as medium-low, and two low findings; no high findings |
 
-The primary agent checked each finding against the baseline and user requirements. Seven findings resulted in corrections or clarifications, sometimes with a different remedy from the reviewer's proposal. One claimed sequencing defect was not accepted. This review does not establish that runtime integrations or platform behavior have been tested.
+The initial Sol/V4 Pro pass produced eight findings: seven corrections or clarifications and one rejected sequencing claim. The corrective Flash pass produced seven findings: four led to narrow clarifications or acceptance changes, and three were not accepted as outline defects. Earlier justified revisions remain in place. This review does not establish that runtime integrations or platform behavior have been tested.
+
+For the corrective pass, both the model listing and the active OpenCode UI verified DeepSeek V4.1 Flash through OpenCode Go before submission. Session: `ses_eb355230effeIQVg2hTcZfLdB4`. Flash explicitly reviewed the original 17 documents and excluded the then-current revision `8fe13b3` as evidence.
 
 ## Shared Dimension Coverage
 
-| Dimension | Sol | DeepSeek |
-| --- | --- | --- |
-| Requirements and scope | No material finding | No major scope finding; D6 identifies readiness wording |
-| Domain and document consistency | S1 | D1, D2 |
-| Technical feasibility and boundaries | No material finding; adapters remain unvalidated | D5 |
-| Data integrity and failure behavior | S1, S2 | D2 |
-| Complexity and sequencing | S2 | D3, D4 |
-| Readiness and verification | No additional finding | D6 |
+| Dimension | Sol | V4 Pro (historical) | V4.1 Flash |
+| --- | --- | --- | --- |
+| Requirements and scope | No material finding | No major scope finding; D6 identifies readiness wording | F5, F7 |
+| Domain and document consistency | S1 | D1, D2 | F1, F2, F3 |
+| Technical feasibility and boundaries | No material finding; adapters remain unvalidated | D5 | F6 |
+| Data integrity and failure behavior | S1, S2 | D2 | No separate material finding |
+| Complexity and sequencing | S2 | D3, D4 | F4 |
+| Readiness and verification | No additional finding | D6 | F5 |
 
-An empty cell of findings does not imply experimental verification. Both reviewers treated acknowledged detailed-design questions as legitimate unless they conflicted with a commitment or prerequisite.
+No finding does not imply experimental verification. The common brief excludes acknowledged detailed-design questions unless they conflict with a commitment or prerequisite; the primary-agent dispositions below apply that standard to all reports.
 
-## Findings and Disposition
+## Initial Sol and V4 Pro Findings and Disposition
 
 ### S1 Same-path Replacement and Entry Identity
 
@@ -80,6 +85,42 @@ The design order remains unchanged. [Delivery gates](../design/delivery-and-vali
 
 [Delivery gates](../design/delivery-and-validation.md) now allow exploratory prototypes with provisional adapters, then require validation and pinning before dependent application implementation. They do not treat an unvalidated prototype as a completed Phase 1 deliverable or defer dependency resolution until after production features depend on it.
 
+## Corrective V4.1 Flash Findings and Disposition
+
+### F1 Revision Ownership
+
+**Reported severity: medium. Accepted as a narrow ownership clarification.** Baseline `docs/design/data-model.md:43` assigns revision semantics to synchronization, while `docs/design/synchronization.md:28` says the data model owns revisions. This is not necessarily contradictory: stored revisions and the conflict protocol are different responsibilities. However, explicit ownership helps topic refinement. The data model now owns revision granularity, storage, and atomic advancement; synchronization owns submission and conflict responses. The open granularity question has moved to the data model. No concrete revision schema is selected yet.
+
+### F2 Persisted Operational State
+
+**Reported severity: medium. Not accepted as an outline defect; retained as detailed-design input.** The reviewer compared root offline/scan-error behavior in `docs/design/file-indexing.md:9,14` and retained EH errors in `docs/design/eh-metadata.md:19` with the abbreviated entity fields at `docs/design/data-model.md:13,15`. The table explicitly lists main fields and defers concrete schemas; background tasks also have persisted errors. Omitted columns do not establish that the state cannot be represented or recovered. When specifying persistence, account for retained EH errors and scan observations without treating a persisted last-known root status as proof of current reachability. No additional fields or persistence mechanism are imposed at outline stage.
+
+### F3 Search Sort and Filter Fields
+
+**Reported severity: medium. Not accepted as an outline defect; retained as detailed-design input.** Baseline `docs/design/search.md:9,11` defines filters and ordering, while the abbreviated entry/gallery rows at `docs/design/data-model.md:14,15` omit explicit added-time, publication-time, and rating fields. The same model preserves raw source responses and requires schema/index design before persistence. There is no commitment to implement an exhaustive schema from that table alone. Detailed schema design must map the required query keys to stored or derived values and specify missing-value ordering; no new outline-level field list is needed.
+
+### F4 Phase 1 Authentication and Startup Prerequisites
+
+**Reported severity: medium. Accepted in part.** Baseline `docs/design/delivery-and-validation.md:16` accepts LAN use, and `docs/design/architecture.md:43` requires authentication and HTTPS, but Phase 1 lacks corresponding acceptance. The delivery plan now explicitly requires local credentials, authenticated remote HTTPS, rejected unauthenticated access, and independent/local-managed server startup with native dependencies in the development build.
+
+The claim that Phase 1 requires final installer packaging is not accepted: development startup can be verified before distribution packaging. Final installers remain Phase 4 work. The previous integration gates already moved dependency validation before dependent implementation. LAN support is retained because it is a core user scenario.
+
+### F5 Metadata Export Delivery Coverage
+
+**Reported severity: medium-low (outside the brief's three severity labels); treated as low. Accepted.** Baseline `docs/design/product-scope.md:40`, `docs/design/api-and-tasks.md:20`, and `docs/design/user-interface.md:16` include metadata export, but `docs/design/delivery-and-validation.md:46,52` only assigns and validates backup/restore. Phase 4 now explicitly includes metadata export and a representative artifact check against a format/field contract specified before implementation. Credentials are excluded, and export does not imply backup equivalence or re-import support. The reviewer called this a confirmed user requirement; more precisely, it is part of the proposed release scope already documented in the outline.
+
+### F6 Effect Stack and a Preselected Fallback
+
+**Reported severity: low. Not accepted as a defect or a reason to select a fallback framework now.** Baseline `docs/design/application-logic.md:41,45` identifies a preferred, unpinned direction; `:63-67` already specifies shared-schema endpoint, lifecycle, error, interruption, and packaging checks. The claim that the contract is already pinned contradicts that wording. Previous delivery revisions also make integration validation a prerequisite. A failed required check must be resolved before dependent implementation; it does not justify choosing another framework before observing a concrete limitation. No runtime or package claim was independently tested in this review.
+
+### F7 Docker Scope
+
+**Reported severity: low. Accepted as a scope clarification.** Baseline `docs/design/architecture.md:37` says the independent server can run directly or through Docker. This is a deployment option, not necessarily a mandatory deliverable, but the wording could be read as a commitment. Architecture now explicitly marks Docker as optional. Independent server execution remains required; no container implementation is added.
+
+### Flash Product Questions
+
+Flash also raised first-run server selection, maintenance scope, and library-versus-instance cardinality. These remain detailed-design inputs rather than newly confirmed requirements. The UI already requires selecting a local or remote connection; refinement should explain that a new independent server does not share another server's records. The existing proposal retains backup/restore and export, with Docker now explicitly optional. Earlier revisions already separate libraries and roots, scope root IDs within an instance, and leave the number of user-visible libraries open; they do not equate a library with a server instance.
+
 ## Product Decisions Retained for Detailed Design
 
 - The one-user, one-authoritative-server model remains an explicitly proposed default. No speculative user-account schema was added.
@@ -94,4 +135,4 @@ Start with entry identity, directory boundaries, same-path replacement, relocati
 
 ## Verification
 
-The revisions were checked against both reports and the original requirements. Document validation covers local links, topic indexing, English-only prose, Markdown fences and spacing, and Git whitespace checks. No application tests, NAS access tests, Effect integration tests, or packaging tests were run because this change contains design documents only. The revised outline remains a working design, not a finished implementation specification.
+The initial revisions were checked against the Sol and V4 Pro reports and the original requirements. The corrective pass checked all seven Flash findings against the same baseline and the revised outline. Document validation covers local links, topic indexing, English-only prose, Markdown fences and spacing, and Git whitespace checks. No application tests, NAS access tests, Effect integration tests, or packaging tests were run because this change contains design documents only. The revised outline remains a working design, not a finished implementation specification.

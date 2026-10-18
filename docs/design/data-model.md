@@ -1,6 +1,6 @@
 # Data Model and Persistence
 
-This document owns entity identities, relationships, persistence rules, and database constraints. Domain terms remain defined in the glossary.
+This document owns entity identities, relationships, persistence rules, and database constraints, including which editable records carry revisions and how those revisions advance atomically. Synchronization owns the client conflict protocol. Domain terms remain defined in the glossary.
 
 [Design overview](../design.md) | [Domain glossary](../../CONTEXT.md)
 
@@ -40,8 +40,9 @@ Search indexing is specified in [Search](search.md). Define schemas, indexes, an
 - Does the first release expose one library or several user-visible libraries? Keep this separate from support for multiple storage roots; do not add user accounts or ownership fields merely to anticipate a multi-user release.
 - What are the lifecycle rules for missing entries, explicit removal, rebinding, and retention of open history?
 - What concrete constraints and transaction boundaries protect bindings, tag updates, and event deduplication?
+- Which editable records share a revision, and which mutations advance it atomically?
 - How are schema migrations and consistent backups performed without losing identity or history?
 
 ## Related Topics
 
-- [Indexing](file-indexing.md) identifies file changes. [EH metadata](eh-metadata.md) defines bindings and overrides. [Synchronization](synchronization.md) defines revision and event semantics. [Delivery](delivery-and-validation.md) owns backup and restore acceptance.
+- [Indexing](file-indexing.md) identifies file changes. [EH metadata](eh-metadata.md) defines bindings and overrides. [Synchronization](synchronization.md) defines revision-check submission, conflict responses, and event delivery. [Delivery](delivery-and-validation.md) owns backup and restore acceptance.
