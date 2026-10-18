@@ -27,7 +27,7 @@ Include the observed location revision and content version with each event. Dela
 - Which readers and argument forms must be tested on each desktop platform?
 - How are executable selection, argument placeholders, associated applications, and launch errors configured and presented?
 - How are rapid repeated actions distinguished from intentional repeated opens?
-- Can users inspect or correct open history, and what should last-opened time mean when device clocks disagree?
+- Can users inspect or correct open history, and how should clock-skew diagnostics accompany the last-opened occurrence-time statistic specified by search?
 
 ## Related Topics
 
