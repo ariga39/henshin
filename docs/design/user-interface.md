@@ -15,7 +15,7 @@ Use one active server context per window, with a persistent connection indicator
 | Entry details | Effective title/tags, source versus local values, file observations, identity/location, cover, binding, notes, history, Open and edit actions |
 | Review | Separate queues for staged discoveries, file identity decisions, and EH candidate matching; staged discoveries are not normal library entries |
 | Tasks | Scan/analysis/metadata jobs, determinate or indeterminate progress, scoped errors, cancellation/retry, held event delivery diagnostics |
-| Settings: This device | Server connections, client root mappings, reader profiles, display/cache preferences, device ID and per-server label editing, pending-event recovery |
+| Settings: This device | Server connections, client root mappings, reader profiles, display/cache preferences, device ID and per-server label editing, namespace-scoped recovery for events, saved drafts, and unresolved commands |
 | Settings: Server | Server roots/schedules, EH credentials/status, backup/export and maintenance entry points |
 
 Display raw titles/tags/paths as text, never executable HTML. Source links open only after the URL is validated against the EH domain contract. Copying paths and revealing a target are explicit local actions; they do not count as Open. Remote native paths may be shown as labeled configuration diagnostics, but only the client-resolved path can be passed to a local capability.
@@ -47,7 +47,7 @@ Show an effective display title plus expandable source titles and filename. An e
 
 Present three separate status groups: entry identity (accepted/replacement pending/detached), last server file observation with time, and this device's last local access result with time. Scan exclusion is a separate badge. Unknown local access is not an error until checked; rendering a grid must not probe every NAS path. Open performs the required current checks; an explicit Check access action may refresh a local diagnostic without counting an open.
 
-Metadata forms submit their base revision. On conflict, preserve the unsaved values and show the current server values with Refresh/reapply controls; do not auto-save the old draft over new data. Switching away from a dirty form asks whether to keep a local unsent draft or discard it. Offline drafts remain unsent and visibly stale; offline editing commands are disabled as specified by [consistency](synchronization.md). A restored or changed authority requires refresh before any reapplication.
+Metadata forms submit their base revision. On conflict, preserve the unsaved values and show the current server values with Refresh/reapply controls; do not auto-save the old draft over new data. Switching away from a dirty form asks whether to keep a local unsent draft or discard it. Settings Recovery lists saved drafts and unresolved commands for the selected namespace. Draft recovery loads the form against fresh server state and offers explicit reapply/discard; unresolved commands query recorded operation/task status and current state, with a consequence notice before dismissing an unknown outcome. Neither action automatically resends a pre-restart command. Offline drafts remain unsent and visibly stale; offline editing commands are disabled as specified by [consistency](synchronization.md). A restored or changed authority requires refresh before any reapplication.
 
 History lists accepted events separately from locally pending/held events, with occurrence time, receipt time in diagnostics, device label/ID, and delivery state. Count and last-opened statistics retain [search](search.md) semantics. Clock-skew indications explain the two clocks; history has no edit/delete/count-correction controls in this release.
 
@@ -103,7 +103,7 @@ Grid/list virtualization must preserve logical focus and accessible item identit
 
 Support text scaling, reduced motion, high-contrast/OS color preferences, and layouts that keep essential actions reachable in narrow windows. Do not announce successful actions only through transient toasts; durable task/event states remain available. Precise visual tokens and localization catalogs are later implementation choices, but layout must tolerate longer translated labels and non-Latin titles. English documentation does not prescribe the application's only UI language.
 
-React owns presentation, focus, and unsent form state. [Effect application logic](application-logic.md) owns connection/query lifetimes, command states, cancellation, and subscriptions; Electron main owns paths, profiles, launch coordination, and the journal through narrow IPC. Do not duplicate authoritative server state in independent component stores or run side effects during render. No component unmount may replay a reader action or discard a pending event.
+React owns presentation, focus, and unsent form state. [Effect application logic](application-logic.md) owns connection/query lifetimes, command states, cancellation, and subscriptions; Electron main owns authenticated HTTP/credentials, bounded thumbnail delivery, paths, profiles, launch coordination, and the journal through narrow IPC. Do not duplicate authoritative server state in independent component stores or run side effects during render. No component unmount may replay a reader action or discard a pending event.
 
 ## Acceptance and Implementation Gates
 
