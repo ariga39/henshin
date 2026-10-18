@@ -14,6 +14,8 @@ This document owns launching readers on the client, determining whether an open 
 
 Each device chooses its reader and argument format independently. Initially, Henshin passes an archive, an image directory, or the directory's first image directly to the reader. The reader must support the chosen format. Henshin does not initially extract entire archives to accommodate readers without archive support.
 
+Path containment protects Henshin's reads and selected launch target, not subsequent reader behavior. An external reader may enumerate directory links that Henshin skipped or navigate elsewhere; even a first-image launch may trigger sibling enumeration. Reader setup must make this boundary clear. Henshin does not sandbox the external application.
+
 Open count measures requests successfully handed to the operating system through Henshin, not completed reading sessions. An intentional new open creates a new event; network retries reuse the original event ID. Reader launch and event persistence cannot form an atomic transaction across processes. A crash between them may lose an event, so counts are personal usage records rather than an audit-grade completeness guarantee.
 
 Use device occurrence time for display and retain server receipt time to help diagnose clock differences. Define explicit time zone and ordering rules. Aggregate history across devices by library entry, not directly by file path or EH gallery.
