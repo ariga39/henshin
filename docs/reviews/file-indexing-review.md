@@ -54,4 +54,6 @@ Both reviewers closed the original issues at `06e01c47173e2f7300a7cde9c204c22ef9
 
 ## Review Gate
 
-Awaiting verification of the revised fixed commit, including the rationale for F1. No runtime, NAS, decoder, or performance tests have run. Representative collection size remains an input for measurements rather than an assumed throughput target.
+Both reviewers returned PASS on `adcc3aa2baae607ff141f4775277c50e05c07814`, including the adjusted content-version rationale. Flash's non-blocking wording suggestions were then applied: fresh stable observations do not require a nonexistent fingerprint, exclusion is a scan-scope indicator, retirement affects only its root, and unrelated staged records/holds survive for fresh validation. Final focused wording verification is pending.
+
+No runtime, NAS, decoder, or performance tests have run. Representative collection size remains an input for measurements rather than an assumed throughput target.
