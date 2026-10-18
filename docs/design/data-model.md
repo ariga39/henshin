@@ -20,7 +20,7 @@ All tables live within one server instance. The instance ID is stored once in `s
 
 | Table / key | Stored responsibility and constraints |
 | --- | --- |
-| `server_state` (singleton) | Instance ID, schema version, optional independent owner-token verifier, installation/configuration identifiers, active alias-dataset/profile pointer, active EH credential-version reference; credentials are protected separately as deployment specifies |
+| `server_state` (singleton) | Instance ID, schema version, optional independent owner-token verifier, installation/configuration identifiers, active alias-dataset/profile pointer, optional active EH credential-version reference (absent means unconfigured); credentials are protected separately as deployment specifies |
 | `libraries` (`library_id`) | Display name, library change revision; one initial row, stable across restore/migration |
 | `roots` (`root_id`) | Library FK, label, scan-enabled flag, policy revision, exclusion policy; retain disabled roots; root/library pair is unique for composite references |
 | `server_mappings` (`root_id`) | Effective Absent/Active/Suspended configuration, mapping revision and non-reused generation, native prefix/canonical evidence/comparison profile; separate draft fields do not replace the effective mapping |
