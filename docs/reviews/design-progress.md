@@ -8,7 +8,7 @@ Each topic follows the [shared review protocol](topic-review-brief.md). A topic 
 | 2 | Storage roots and device path mappings | [Both reviewers PASS](path-mapping-review.md) on `d5cbbc2`; [PR #2](https://github.com/ariga39/henshin/pull/2) | `design/02-path-mapping` / `design/01-entry-identity` |
 | 3 | File indexing and thumbnails | [Both reviewers PASS](file-indexing-review.md) on `2efcc0b`; [PR #3](https://github.com/ariga39/henshin/pull/3) | `design/03-file-indexing` / `design/02-path-mapping` |
 | 4 | EH metadata, bindings, and overrides | [Both reviewers PASS](eh-metadata-review.md) on `e65a922`; [PR #4](https://github.com/ariga39/henshin/pull/4) | `design/04-eh-metadata` / `design/03-file-indexing` |
-| 5 | Search semantics and filtering | Draft; awaiting independent reviews | `design/05-search` / `design/04-eh-metadata` |
+| 5 | Search semantics and filtering | [Both reviewers PASS](search-review.md) on `393e29f`; [PR #5](https://github.com/ariga39/henshin/pull/5) | `design/05-search` / `design/04-eh-metadata` |
 | 6 | External readers and open events | Pending | After topic 5 |
 | 7 | Cross-device consistency and instance lifecycle | Pending | After topic 6 |
 | 8 | Product scope and release scenarios | Pending | After topic 7 |
