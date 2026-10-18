@@ -75,7 +75,7 @@ Authentication failure, rate limit, network failure, and valid empty candidate r
 
 ## Open and Failure Presentation
 
-While an Open action is pending, disable repeated launch controls for that entry across local windows and show progress without promising a reader window. A known failed launch has no count; success is labeled request handed to reader/OS. An unknown result after crash/timeout says it may have opened and offers a new explicit Open, never an automatic retry. Closing details does not cancel an already accepted handoff or its durable event processing.
+While an Open action is pending, disable repeated launch controls for that entry across local windows and show progress without promising a reader window. Read active state by namespace/entry and follow main's launch-state hints; if stale controls submit another action, follow the existing action ID returned by main without auto-retrying the rejected proposal. A terminal published result ends active blocking independently of reader lifetime and event delivery. A known failed launch has no count; success is labeled request handed to reader/OS. An unknown result after crash/timeout says it may have opened and offers a new explicit Open, never an automatic retry. Closing details does not cancel an already accepted handoff or its durable event processing.
 
 | State | UI behavior and recovery |
 | --- | --- |
