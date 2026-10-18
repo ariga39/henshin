@@ -13,9 +13,9 @@ Use one active server context per window, with a persistent connection indicator
 | Connection/setup | Saved connections, local service or remote URL, authentication, compatibility, expected-instance confirmation, setup progress |
 | Library | Search, canonical tag chips, filters, sorting, cover grid/list, explicit loaded-item selection, entry details/Open |
 | Entry details | Effective title/tags, source versus local values, file observations, identity/location, cover, binding, notes, history, Open and edit actions |
-| Review | Separate queues for file identity decisions and EH candidate matching; staged discoveries are not normal library entries |
+| Review | Separate queues for staged discoveries, file identity decisions, and EH candidate matching; staged discoveries are not normal library entries |
 | Tasks | Scan/analysis/metadata jobs, determinate or indeterminate progress, scoped errors, cancellation/retry, held event delivery diagnostics |
-| Settings: This device | Server connections, client root mappings, reader profiles, display/cache preferences, pending-event recovery |
+| Settings: This device | Server connections, client root mappings, reader profiles, display/cache preferences, device ID and per-server label editing, pending-event recovery |
 | Settings: Server | Server roots/schedules, EH credentials/status, backup/export and maintenance entry points |
 
 Display raw titles/tags/paths as text, never executable HTML. Source links open only after the URL is validated against the EH domain contract. Copying paths and revealing a target are explicit local actions; they do not count as Open. Remote native paths may be shown as labeled configuration diagnostics, but only the client-resolved path can be passed to a local capability.
@@ -24,7 +24,7 @@ Display raw titles/tags/paths as text, never executable HTML. Source links open 
 
 1. Choose Start local service or Connect to server. Local setup waits for authenticated readiness and shows startup errors with retry/diagnostics. Remote setup collects URL and credentials, validates TLS, protocol compatibility, and instance identity. An unexpected instance requires explicit separate enrollment; do not silently replace existing data context.
 2. For a new empty service, add a server storage root. Label its path as the path on the server, not this desktop. Existing libraries skip this step and can be browsed immediately. Run mapping verification and activate the mapping only under [path rules](path-mapping.md); failed verification remains a draft with a reason.
-3. Start the first scan explicitly and show its task. Entries/covers appear as accepted results become available; unfinished staging has its own review/progress state. Explain missing/unsupported content without presenting it as a successful empty library.
+3. Before confirming the first scan, show a server-side discovery preview of candidate boundaries, including image directories versus child collections, with editable exact-file/directory exclusions. Preview enumeration never allocates entries; errors and partial coverage are visible. Saving exclusions uses current root revisions and invalidates obsolete preview decisions. Then start the scan explicitly, re-observing current content rather than treating the preview as fresh identity proof, and show its task. Entries/covers appear as accepted results become available; unfinished staging has its own review/progress state. Explain missing/unsupported content without presenting it as a successful empty library.
 4. Configure this device's mapping for the same logical root. Show the server root label, logical identity, and verification samples alongside the independently selected local prefix. Do not assume equal absolute paths even for a local service. An unavailable NAS mount leads to OS/mapping recovery, not a download button.
 5. Configure a compatible local reader profile and target mode. Present arguments as separate tokens and show the resolved target preview. A profile test is labeled as a local application test and creates no entry open event. System association explicitly warns that opening a directory may show a file manager.
 6. Open an accepted entry. Report OS handoff, then pending or server-confirmed event status. First success does not imply completed reading.
@@ -59,6 +59,14 @@ The file review queue shows accepted old data and candidate data side by side, c
 
 Enable acceptance decisions only with the required current evidence and revisions; rejected stale decisions reload comparison and preserve the user's prior intent as unsent context. Stop scanning follows its non-accepting revision checks even when analysis fails. Detach a confirmed-missing claim and manual relocation are explicit detail/review actions with their ownership consequences. No action is labeled Delete when it merely detaches/excludes. [Entry lifecycle](entry-identity.md) owns exact transitions and [indexing](file-indexing.md) owns staged/accepted evidence.
 
+### Staged Discoveries and Relocation
+
+Before starting a manual scan, offer Hold new discoveries for review, with an explanation that it prevents automatic allocation/relocation of new targets until reviewed. For a cross-root move, the user selects this mode on the destination before scanning. The server records the mode with the scan and creates each new candidate already held; it cannot first allocate the candidate and then wait for UI reservation. Normal scans retain their existing automatic reconciliation behavior. Existing accepted claims still receive ordinary observations/replacement handling.
+
+The Review screen has a Staged discoveries section showing root/path, analysis readiness, scan completeness/error, candidate version, and hold state. A held or otherwise staged target supports Relocate existing entry here, Import as new entry, Release hold, and Retry analysis as applicable. Relocation selects a missing or detached entry from the same library, compares evidence, and explains history retention. Import confirms a new unbound identity; when scan context is incomplete, explicitly warn that a move cannot be ruled out and no old history will transfer. Release hold makes the target eligible for normal reconciliation only after fresh validation; it does not assert successful analysis or force import.
+
+A separate Reserve for relocation action can conditionally hold a target discovered by a normal scan while it is still staged. If automatic allocation already won, show the existing-entry conflict and preserve the user's source selection; do not claim the hold succeeded or offer a merge. Changes to mappings, policy, or candidate evidence require refreshing decisions while retaining holds as specified by indexing. A failed/cancelled scan retains its staged items and holds with recovery actions. No staged-only item has normal counted Open.
+
 ### EH Binding and Matching
 
 Unbound entries may accept a validated gallery URL or request candidates. Candidate cards show source title, canonical tags/category, page count, link, and any permitted preview with provenance; no first candidate is preselected for binding. Compare and confirm one candidate. A batch preserves independent per-entry outcomes and does not hide ambiguous or failed matches. Existing bindings are shown before correction; confirm that rebind removes the old source layer immediately and retains local overrides for review.
@@ -83,6 +91,8 @@ While an Open action is pending, disable repeated launch controls for that entry
 | Held event after restore | Show original entry/namespace, export/discard consequence, and retry only after reconciliation |
 | Stale edit or task result | Refresh current state, retain unsent intent, and show that prior work did not overwrite current data |
 
+Tasks and held-event diagnostics are scoped to the selected server namespace and visibly label it. Switching servers cannot reuse a retry/discard selection; commands retain the diagnostic item's original instance ID. Device-label editing is conditional within that server registry and cannot change the installation ID or historical payloads.
+
 Task views show scope, latest progress time, success/failed/skipped counts when known, and retryable versus permanent errors. Indeterminate enumeration must not display a fictional percentage. Offer cancellation only for supported states; pause is not implied before [task contracts](api-and-tasks.md) defines resumable pause. Partial results remain inspectable after cancellation. Cancel request and confirmed cancellation are distinct statuses.
 
 ## Accessibility, Scale, and State Ownership
@@ -97,6 +107,6 @@ React owns presentation, focus, and unsent form state. [Effect application logic
 
 ## Acceptance and Implementation Gates
 
-Exercise first-run local/remote setup; independent server/client paths; initial scan errors; short-CJK/tag searches; live pagination/selection; metadata conflict/rebinding; replacement decisions with stale evidence; offline Open; unknown launch recovery; queue errors; and epoch/restore recovery. Test each with keyboard-only navigation and representative screen readers on the target desktop platforms. Check focus preservation during virtualization, asynchronous refresh, dialog dismissal, and entry disappearance.
+Exercise first-run local/remote setup and pre-scan boundary/exclusion preview; independent server/client paths; initial scan errors; short-CJK/tag searches; live pagination/selection; metadata conflict/rebinding; replacement decisions with stale evidence; cross-root held-target relocation, hold release, incomplete-scan import, and allocation-race conflicts; offline Open; unknown launch recovery; queue errors; namespace-scoped task/held-event actions; and epoch/restore recovery. Test each with keyboard-only navigation and representative screen readers on the target desktop platforms. Check focus preservation during virtualization, asynchronous refresh, dialog dismissal, and entry disappearance.
 
 Before UI implementation, produce screen-level wireframes/state examples for these journeys, choose tested accessible primitives, and define IPC/public error mappings. Record usability and accessibility evidence in [delivery](delivery-and-validation.md); this document specifies behavior but contains no rendered mockup, measured virtualization performance, or executed accessibility test.
