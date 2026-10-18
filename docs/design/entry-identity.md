@@ -102,6 +102,8 @@ Disabling or removing a root from active scanning retains its entries, root iden
 
 The first release has no hard deletion, entry merge, or history transfer. Missing and detached entries remain inspectable and can be filtered out of the normal available-files view. Exclusions and incomplete scans do not delete entries. A future permanent-removal feature must define retention and pending-event handling separately; it is not implied by removing a path mapping or disabling a root.
 
+A user may explicitly stop awaiting relocation for a confirmed-missing current claim by detaching it. Require the observed entry/location revisions, explain that metadata/history remain and automatic relocation will no longer use that claim, and release only the location. This is not file deletion or record removal; it prevents intentionally retired missing claims from indefinitely blocking unrelated new discoveries. A detached entry may later be manually relocated to an unclaimed target under the same identity evidence rules.
+
 ## Opening and Delayed Events
 
 Before launching, an online client refreshes the entry's identity state, current location, location revision, and content version. A disconnected client uses its last cached accepted state, clearly marked stale. It never knowingly bypasses a cached pending or detached state. If a lightweight local check detects changed size/mtime compared with that accepted observation, block the normal counted Open and ask for server reconciliation; unchanged hints do not prove unchanged bytes.

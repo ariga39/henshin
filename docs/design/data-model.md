@@ -26,6 +26,8 @@ The first release does not merge entries or transfer their history, whether they
 
 The [entry lifecycle](entry-identity.md) owns identity decisions: one current location per entry, explicit resolution of changed representations, distinct entries for replacement editions, and retained detached records. Historical locations do not compete with current claims. Model its candidate/version checks and atomic resolution before implementing file-update persistence.
 
+[Indexing](file-indexing.md) also requires durable scan generations, staged discoveries, per-scope completion/errors, accepted observation tokens, and versioned fingerprint profiles. Keep staged paths separate from current entry claims until reconciliation commits; a restart cannot convert an incomplete scan into missing-file evidence. Exact table layout and deduplication constraints belong to the schema refinement.
+
 ## Database Direction
 
 SQLite is the proposed database, stored on the server machine's local disk. Clients access it only through the API. Do not place the live database on a NAS share or have desktop clients open it directly.
