@@ -15,7 +15,7 @@ Each topic follows the [shared review protocol](topic-review-brief.md). A topic 
 | 9 | UI journeys and interaction | [Both reviewers PASS](user-interface-review.md) on `b8bd349`; [PR #9](https://github.com/ariga39/henshin/pull/9) | `design/09-user-interface` / `design/08-product-scope` |
 | 10 | Persistence schemas and transactions | [Both reviewers PASS](persistence-review.md) on `ba6b050`; [PR #10](https://github.com/ariga39/henshin/pull/10) | `design/10-persistence` / `design/09-user-interface` |
 | 11 | API, IPC, and background-task contracts | [Both reviewers PASS](api-and-tasks-review.md) on `c7bec1d`; [PR #11](https://github.com/ariga39/henshin/pull/11) | `design/11-api-and-tasks` / `design/10-persistence` |
-| 12 | Effect runtime and application composition | Draft; awaiting independent reviews | `design/12-effect-composition` / `design/11-api-and-tasks` |
+| 12 | Effect runtime and application composition | [Both reviewers PASS](effect-composition-review.md) on `b4a9262`; [PR #12](https://github.com/ariga39/henshin/pull/12) | `design/12-effect-composition` / `design/11-api-and-tasks` |
 | 13 | Deployment, authentication, and packaging | Pending | After topic 12 |
 | 14 | Delivery gates and validation plan | Pending | After topic 13 |
 
