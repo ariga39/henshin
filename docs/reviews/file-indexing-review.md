@@ -43,6 +43,15 @@ The suggested alternative of clearing uncertainty from fast analysis alone is no
 
 The optional cache-lifecycle comment is addressed with bounded LRU eviction and inactive-task temporary cleanup; cache references do not guarantee file presence. Scan generation terminology is unified across enumeration and reconciliation. Both initial verdicts were REVISE: Sol reported one medium finding; Flash reported two medium and three low findings.
 
+## Revision Verification
+
+Both reviewers closed the original issues at `06e01c47173e2f7300a7cde9c204c22ef91f5b67`, including the conservative no-baseline rationale. Each requested a further correction:
+
+- **Sol, medium:** ordinary ZIP directory records need a trailing-separator exception. Recognized directory records now allow one terminator before component validation; page members still reject trailing separators. An explicit `book/` plus `book/001.jpg` fixture is included.
+- **Flash, medium:** unacceptable replacement candidates need terminal handling. An explicit exact-path exclusion retains the old claim and pending/error records, suppresses scanning, and keeps Open blocked. Removing the exclusion permits retry without requiring source deletion or accepting invalid content.
+- **Flash, low:** content-version behavior after baseline-free confirmation was unclear. The rule is now explicit, but the suggested no-increment remedy is not adopted: without byte equality evidence, accepting the candidate advances content version and invalidates derived caches. This avoids stale covers while retaining entry history. Exact equality alone preserves the version.
+- **Flash, low:** absolute completeness wording conflicted with unknown-extension limits. Acceptance now distinguishes known omitted pages from unrecognized file contents. Targeted automatic verification and potential bulk timestamp-change effects are also explicitly described.
+
 ## Review Gate
 
 Awaiting verification of the revised fixed commit, including the rationale for F1. No runtime, NAS, decoder, or performance tests have run. Representative collection size remains an input for measurements rather than an assumed throughput target.
