@@ -24,7 +24,7 @@ Store file page counts separately from EH page counts, and overridden titles sep
 
 The first release does not automatically merge entries by EH gid, identical titles, or similar covers. Identical files may be flagged as duplicates, but the user must decide whether to merge entries and how to handle their history.
 
-An unchanged path does not establish unchanged entry identity. A verified representation change of the same edition may retain the entry ID, binding, overrides, and history. Replacement by another edition requires a distinct entry; previous records remain associated with the previous edition. An ambiguous replacement must preserve existing records without silently attributing them to the new content. Resolve the classification evidence and user-resolution workflow jointly with indexing before implementing file-update persistence. Historical locations must not compete with a new entry's current location.
+The [entry lifecycle](entry-identity.md) owns identity decisions: one current location per entry, explicit resolution of changed representations, distinct entries for replacement editions, and retained detached records. Historical locations do not compete with current claims. Model its candidate/version checks and atomic resolution before implementing file-update persistence.
 
 ## Database Direction
 
@@ -36,9 +36,9 @@ Search indexing is specified in [Search](search.md). Define schemas, indexes, an
 
 ## Open Design Questions
 
-- Should an entry have exactly one file location initially, and how are identical copies and historical locations represented without merging editions?
+- How are current claims, last-known locations, and pending replacement candidates represented under the entry-lifecycle invariants?
 - Does the first release expose one library or several user-visible libraries? Keep this separate from support for multiple storage roots; do not add user accounts or ownership fields merely to anticipate a multi-user release.
-- What are the lifecycle rules for missing entries, explicit removal, rebinding, and retention of open history?
+- How are missing and detached entries retained under the entry-lifecycle rules, and how does binding revision storage support metadata correction?
 - What concrete constraints and transaction boundaries protect bindings, tag updates, and event deduplication?
 - Which editable records share a revision, and which mutations advance it atomically?
 - How are schema migrations and consistent backups performed without losing identity or history?
