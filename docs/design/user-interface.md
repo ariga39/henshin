@@ -115,3 +115,7 @@ Before UI implementation, produce screen-level wireframes/state examples for the
 ## Source-protection Setup
 
 Root, reader and writable-destination setup follows [NAS source safety](source-safety.md). Show Henshin read-only source access separately from observed mount policy, operator-confirmed NAS/account restrictions and validated external-reader protection. Unknown enforcement is labeled unverified; a successful read is not a write-denial test. Explain that a reader needing source writes is incompatible with the protected workflow. Reject known source/output overlap, and provide recovery instructions for permissions or local output failures without offering source writes, permission escalation or a writable-source fallback.
+
+## Backup and Recovery Journeys
+
+Follow [backup and archival recovery](backup-and-archive.md) for manual rotating/archive requests, optional schedules, explicit retention policy and bounded artifact/verification results. Show last successful snapshot, destination verification and restore-drill times separately, plus failures and excluded data; a local server backup does not protect unsent desktop work or NAS originals. Explain the independent stopped-desktop backup workflow. Restore instructions disclose lost intervals, fresh credentials, inactive restored local settings, mapping verification and paused retention before resumption; no live Restore button may replace the running database. Archives never expire under routine rotation.
