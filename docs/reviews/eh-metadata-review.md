@@ -18,6 +18,8 @@ Persistence identifies the shared entry edit/decision revision for binding and o
 
 Both reviewers returned PASS on the initial commit with no material findings or blocking product decisions. Their coverage includes requirements/scope, domain/consistency, feasibility/boundaries, integrity/failures, complexity/sequencing, and acceptance/readiness, plus the cited API/license statements.
 
-Flash offered three non-blocking clarifications, all applied: source identity explicitly uses the common EH discriminator rather than a page domain; the local addition set includes both EH and local-namespace tags; an expunged source flag is distinct from evidence of terminal unavailability and never implies local deletion. Final focused verification of these clarifications is pending.
+Flash offered three non-blocking clarifications, all applied: source identity explicitly uses the common EH discriminator rather than a page domain; the local addition set includes both EH and local-namespace tags; an expunged source flag is distinct from evidence of terminal unavailability and never implies local deletion. Both reviewers verified final design revision `e65a9223d7c81fadd328da2a796e1dbd69fbe075` and returned PASS without remaining findings or material regressions. The topic gate is complete.
+
+Local links, English prose, code fences, heading spacing, topic indexing, and whitespace passed across 26 Markdown documents. Review-record updates do not alter the verified design revision.
 
 No live authenticated EH requests, upstream issue/message submissions, implementation tests, or runtime validation have occurred. Restricted-gallery capability, parsers, preview policy, and selected integrations remain explicit implementation gates.
