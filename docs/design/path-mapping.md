@@ -13,7 +13,7 @@ An entry has a server-scoped stable ID and at most one current logical location:
   "entry_id": "entry-001",
   "storage_root_id": "nas-books",
   "relative_path": "Author/Title.zip",
-  "location_revision": 3
+  "location_revision": "3"
 }
 ```
 
