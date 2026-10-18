@@ -18,10 +18,10 @@ The confirmed desktop stack is Electron + React + TypeScript. Effect is preferre
 | Entry lifecycle | [Entry identity and file lifecycle](design/entry-identity.md) | Identity retention, replacement decisions, relocation evidence, copies, retained history |
 | File locations | [Storage roots and path mappings](design/path-mapping.md) | Logical locations, per-device mappings, path resolution |
 | Indexing | [File indexing and thumbnails](design/file-indexing.md) | Entry discovery, change detection, relocation, covers |
-| Persistence | [Data model and persistence](design/data-model.md) | Identity, relationships, database rules, lifecycle constraints |
+| Persistence | [Data model and persistence](design/data-model.md) | Identity, relationships, lifecycle constraints, server/client-local storage, journal transactions, migrations and retention |
 | EH integration | [EH metadata, bindings, and local overrides](design/eh-metadata.md) | Matching, bindings, updates, overrides, translations |
 | Search | [Search, filtering, and result ordering](design/search.md) | Query semantics, tag selection, filters, sorting, pagination, language support, index correctness |
-| Reading | [External readers and open history](design/external-reading.md) | Reader launch, success semantics, event creation |
+| Reading | [External readers and open history](design/external-reading.md) | Reader profiles, identity-checked launch, accepted-handoff counting, local durability, crash recovery and event ownership |
 | Consistency | [Cross-device consistency](design/synchronization.md) | Concurrent edits, reconnects, event delivery, instance isolation |
 | UI | [User interface and journeys](design/user-interface.md) | Screens, navigation, setup, actions, visible states |
 | Contracts and execution | [API contracts and background tasks](design/api-and-tasks.md) | Requests and responses, task transitions, retries, notifications |
