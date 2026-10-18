@@ -14,6 +14,8 @@ Initial source formats are image directories and ZIP/CBZ. JPEG, PNG, and WebP ar
 
 For archives, inspect members without extracting the entire archive. Supported pages can occur in member subdirectories. Archive member names are decoder identifiers, never native output paths. Preserve the decoded original name for ordering, display, and member selection; duplicate names mean exact code-point equality, without case folding or Unicode normalization. Reject exact duplicates or names the decoder cannot losslessly distinguish. Backslashes inside member names are permitted; inspect both slash styles as separators only for safety validation, rejecting absolute/drive-qualified names, traversal, empty or dot segments, and NUL. This permits common Windows-produced member names without converting them into source-file paths or silently aliasing distinct members. Encrypted or detected structurally corrupt content produces candidate-level errors. Source filenames still follow the separate portable path rules. Thumbnail files are written only under a server-controlled cache name.
 
+Recognized archive directory records are not page members. Allow one trailing separator as their directory terminator, then validate the remaining components under the same rules; interior empty segments, traversal, and absolute names remain invalid. Regular page-member names cannot end in a separator. An explicit `book/` directory record followed by `book/001.jpg` is a valid layout, not an empty-segment error.
+
 ## Pipeline and Positive Results
 
 | Stage | Durable result | Failure behavior |
@@ -29,6 +31,8 @@ Read the root's active mapping revision before starting. A changed mapping, disa
 
 Normal scans compare path, kind, size, and modification time; image directories also compare their direct page-name/stat manifest. A change schedules analysis. No detected change reuses accepted analysis without claiming a full-byte check. Forced reanalysis rereads candidates regardless of timestamps; explicit fingerprint verification performs full-byte reads. These modes must be separately visible to users.
 
+Normal scans can also schedule targeted full-byte verification when a changed entry has a comparable accepted baseline; show that work separately from fast analysis and requested bulk verification. A NAS-wide timestamp update can leave many baseline-free entries awaiting confirmation. Preview and report this workload without silently confirming the whole set.
+
 New discoveries are staged before allocation so an old missing entry can be relocated first. A changed lightweight observation puts an existing claim into replacement-pending as an uncertain change, not proof that its bytes differ; old bindings/history/accepted covers remain intact. If an accepted comparable fingerprint exists, change-triggered analysis automatically verifies the current bytes and can restore Accepted on an exact match. This targeted verification is distinct from opt-in bulk fingerprint acquisition. If no old fingerprint exists, fast analysis cannot prove unchanged representation: after successful analysis the user explicitly confirms the same edition or creates a new entry. A timestamp-only touch can therefore require one confirmation for an unverified entry. Matching page count, cover, or new timestamps must not silently clear the uncertainty. This conservative default implements the existing known-change Open restriction; full initial verification remains optional.
 
 ## Stable Observations and Partial Analysis
@@ -38,6 +42,8 @@ A candidate is eligible for acceptance only after two matching lightweight obser
 These checks reduce the chance of analyzing an active download; they cannot prove that an external writer has finished or detect every same-size/same-time mutation. Decoder failures remain errors rather than evidence of a different edition. Full fingerprints require their own stable before/after observations and are discarded if interrupted or changed. No filesystem snapshot guarantee is claimed.
 
 A complete supported-page manifest is the minimum acceptance analysis profile: record `manifest-complete` and a separate cover-ready/cover-error result. A failed cover decode does not invalidate that manifest, but the error remains visible. Detected structural corruption, encryption, unsupported page members, a zero-page candidate, or an incomplete manifest cannot satisfy this profile; retain staged/pending state and diagnostic counts instead of publishing a new accepted page count. Fast analysis validates enumeration/structure and the pages actually decoded, not every page payload. The local page count is the complete supported manifest count, not a guarantee that every page decodes. A later page-decoding error is surfaced when encountered. Optional full fingerprints are recorded separately. A new failed candidate remains visible in scan/task results for retry without inheriting another entry's records. For an existing entry, failures preserve its accepted analysis and pending state. A single candidate failure does not prevent analysis of other candidates.
+
+Permanent unsupported/error candidates may be explicitly excluded by exact source path. For a replacement this follows the lifecycle's Stop scanning action: keep the old claim and pending/error records, block normal Open, and suppress further scheduled work for that excluded path. Removing the exclusion allows a fresh retry; it does not itself accept the candidate. An excluded new candidate likewise creates no accepted entry. Completion means completeness over recognized page formats under the chosen profile, not discovery of arbitrary unknown-extension images.
 
 ## Reconciliation Scope and Moves
 
@@ -83,11 +89,13 @@ Thumbnail cache keys include entry ID, accepted content version, chosen page ide
 | Scenario | Required result |
 | --- | --- |
 | Directory contains direct images, an archive, and child image directories | Separate candidates using explicit boundaries; no recursive absorption |
-| Root has loose images, unsupported page formats, or nonportable filenames | Explain what was excluded/unassigned; no silently incomplete successful book |
+| Root has loose images, known unsupported page formats, or nonportable filenames | Explain what was excluded/unassigned; no acceptance with known pages omitted; unknown-extension contents remain a stated detection limit |
 | Archive with traversal, duplicate member names, encryption, corruption, or excessive resources | Candidate error; no writes outside cache and no halt of unrelated analysis |
+| ZIP contains an explicit `book/` directory record and `book/001.jpg` | Ignore the directory record for page count; validate components and analyze the nested page normally |
 | Download changes during quiet interval, analysis, or fingerprinting | Discard stale result, retry when stable; retain prior accepted records |
 | Same-size/same-time replacement | Normal scan may miss it; forced reanalysis/verification exposes the documented limitation |
-| Timestamp-only touch with/without an accepted full fingerprint | Automatic exact verification clears pending when a baseline exists; otherwise successful analysis requires explicit same-edition confirmation |
+| Timestamp-only touch with/without an accepted full fingerprint | Exact verification clears pending without a version change when a baseline exists; otherwise same-edition confirmation advances content version and refreshes derived caches |
+| Replacement remains structurally corrupt, encrypted, or unsupported | Explicit exclusion preserves the old pending/error entry without source deletion; removing it enables retry, not acceptance |
 | ZIP has 20 JPEG members and one unsupported GIF member | Remain staged/pending with `unsupported-pages`; show 20 supported and 1 unsupported as diagnostics, not an accepted 20-page book |
 | Partial enumeration or changed mapping | No absence inference for failed scopes and no automatic new-entry/move allocation from incomplete root context |
 | Unique exact within-root move with prior accepted fingerprint | Preserve identity after complete reconciliation |
