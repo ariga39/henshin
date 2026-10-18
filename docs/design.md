@@ -20,7 +20,7 @@ The confirmed desktop stack is Electron + React + TypeScript. Effect is preferre
 | Indexing | [File indexing and thumbnails](design/file-indexing.md) | Entry discovery, change detection, relocation, covers |
 | Persistence | [Data model and persistence](design/data-model.md) | Identity, relationships, database rules, lifecycle constraints |
 | EH integration | [EH metadata, bindings, and local overrides](design/eh-metadata.md) | Matching, bindings, updates, overrides, translations |
-| Search | [Search and filtering](design/search.md) | Query semantics, filters, sorting, pagination, language support |
+| Search | [Search, filtering, and result ordering](design/search.md) | Query semantics, tag selection, filters, sorting, pagination, language support, index correctness |
 | Reading | [External readers and open history](design/external-reading.md) | Reader launch, success semantics, event creation |
 | Consistency | [Cross-device consistency](design/synchronization.md) | Concurrent edits, reconnects, event delivery, instance isolation |
 | UI | [User interface and journeys](design/user-interface.md) | Screens, navigation, setup, actions, visible states |
