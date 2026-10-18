@@ -20,7 +20,7 @@ All tables live within one server instance. The instance ID is stored once in `s
 
 | Table / key | Stored responsibility and constraints |
 | --- | --- |
-| `server_state` (singleton) | Instance ID, schema version, installation/configuration identifiers, active alias-dataset/profile pointer, active EH credential-version reference; credentials are protected separately as deployment specifies |
+| `server_state` (singleton) | Instance ID, schema version, independent owner-token verifier/auth revision, installation/configuration identifiers, active alias-dataset/profile pointer, active EH credential-version reference; credentials are protected separately as deployment specifies |
 | `libraries` (`library_id`) | Display name, library change revision; one initial row, stable across restore/migration |
 | `roots` (`root_id`) | Library FK, label, scan-enabled flag, policy revision, exclusion policy; retain disabled roots; root/library pair is unique for composite references |
 | `server_mappings` (`root_id`) | Effective Absent/Active/Suspended configuration, mapping revision and non-reused generation, native prefix/canonical evidence/comparison profile; separate draft fields do not replace the effective mapping |
@@ -42,7 +42,7 @@ All tables live within one server instance. The instance ID is stored once in `s
 | `device_labels` (`device_id`) | Unique instance-local provenance ID, label, edit revision; no authentication role; unknown historical IDs can display raw ID until registered |
 | `open_events` (`event_id`) | Entry FK, immutable device ID, observed location/content revisions, occurrence time, receipt time; unique across entries/devices; device registry not a required FK for admission |
 | `entry_statistics` (`entry_id`) | Rebuildable accepted-event count and maximum occurrence time; no local pending events |
-| `operation_results` (`epoch`, `operation_id`) | Command type, canonical validated payload, result, expiration; duplicates compare complete payload, not just a hash; effects/result commit together |
+| `operation_results` (`epoch`, `operation_id`) | Command type, canonical validated nonsecret payload and protected secret-version references where needed, result, expiration; duplicates compare complete logical payload through the credential adapter, not just a hash/redacted marker; effects/result commit together |
 | `tasks` (`task_id`) | Type/target, status, attempt/checkpoint, generation/owner fences, next attempt time, bounded error/progress; durable scheduling/coalescing keys |
 | `thumbnail_refs` (versioned key) | Entry/candidate owner, content/candidate version, page identity, rendering profile, size, cached filename if present; files remain evictable and regenerable |
 
