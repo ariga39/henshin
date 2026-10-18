@@ -42,7 +42,9 @@ Initial bounded defaults: 1 MiB JSON request body, 100 events per batch, 200 exp
 | `GET /tasks`, `GET /tasks/{id}`, `POST /tasks/{id}/commands` | Query status/result or request cancel/retry with task revision and operation ID |
 | `GET /changes` | Authenticated SSE invalidation hints bound to instance/epoch; no guaranteed replay |
 | `GET /thumbnails/{key}` | Derived image or explicit missing/updating status; immutable versioned key and bounded image type/size; never a generic path endpoint |
-| `POST /maintenance/backups` and `/maintenance/exports` | Operation ID, explicit export scope/options or configured backup destination ID with rotating/archive retention class and optional label; return task/artifact ID, never accept arbitrary server output paths |
+| `GET /settings/backups` | Registered destination IDs/display labels, per-destination settings revision, schedule/rotation enablement, retention count, destination validation/reconciliation state and last success/failure; works before the first artifact exists; no native paths or secrets |
+| `POST /maintenance/backups` | Operation ID, registered destination ID, rotating/archive retention class and optional label; return task/artifact ID, never accept arbitrary server output paths |
+| `POST /maintenance/exports` | Operation ID and explicit export scope/privacy options; return task/artifact ID. Export is neither a rotating backup nor an archive retention class |
 | `GET /maintenance/artifacts` | Authenticated bounded listing of artifact IDs, store kind, snapshot/verification times, retention class, completion state and destination ID; opaque cursor, no directory browser |
 | `POST /maintenance/artifacts/{id}/verify` | Operation ID and artifact ID; bounded integrity-verification task under registered destination, no restore or source write |
 | `GET /maintenance/artifacts/{id}` | Authenticated bounded/streamed completed artifact with content type, size and digest; expire regenerable exports under stated retention, not a backup without operator policy |
