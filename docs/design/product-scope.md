@@ -25,7 +25,7 @@ These are design decisions for a coherent initial release, not additional confir
 | Audience | One user across several desktops; no accounts, roles, sharing invitations, or per-user history partitioning |
 | Authority | One authoritative server per connection; several saved connections may be switched, but their libraries and event queues stay separate |
 | Visible library | One visible library per server, containing multiple storage roots; initialize its stable ID with the server, without library creation/deletion/switching UI inside that instance |
-| Storage ownership | Read-only collection access; changes to filenames, archives, and folder organization remain external to Henshin |
+| Storage ownership | All Henshin source operations are strictly read-only under [source safety](source-safety.md); file organization remains external. NAS permissions must also restrict the external reader for end-to-end write protection |
 | Service stack | Independent Node/TypeScript + Effect HTTP direction and SQLite on server-local disk; package/adapter validation is required |
 | Disconnected use | Browse the explicitly partial display cache and attempt Open for eligible cached entries; no offline metadata edits, full-library search promise, or distributed merge |
 | Opening statistics | Count OS-accepted Henshin handoffs per entry across devices, not actual reading, completion, duration, or launches made outside Henshin |
