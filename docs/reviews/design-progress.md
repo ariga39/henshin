@@ -9,7 +9,7 @@ Each topic follows the [shared review protocol](topic-review-brief.md). A topic 
 | 3 | File indexing and thumbnails | [Both reviewers PASS](file-indexing-review.md) on `2efcc0b`; [PR #3](https://github.com/ariga39/henshin/pull/3) | `design/03-file-indexing` / `design/02-path-mapping` |
 | 4 | EH metadata, bindings, and overrides | [Both reviewers PASS](eh-metadata-review.md) on `e65a922`; [PR #4](https://github.com/ariga39/henshin/pull/4) | `design/04-eh-metadata` / `design/03-file-indexing` |
 | 5 | Search semantics and filtering | [Both reviewers PASS](search-review.md) on `393e29f`; [PR #5](https://github.com/ariga39/henshin/pull/5) | `design/05-search` / `design/04-eh-metadata` |
-| 6 | External readers and open events | Pending | After topic 5 |
+| 6 | External readers and open events | Draft; awaiting independent reviews | `design/06-external-reading` / `design/05-search` |
 | 7 | Cross-device consistency and instance lifecycle | Pending | After topic 6 |
 | 8 | Product scope and release scenarios | Pending | After topic 7 |
 | 9 | UI journeys and interaction | Pending | After topic 8 |

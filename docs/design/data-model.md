@@ -22,6 +22,8 @@ The following table describes data responsibilities and relationships. Concrete 
 
 Store file page counts separately from EH page counts, and overridden titles separately from source titles. Aggregate statistics from open events; cached counts can be rebuilt. Search indexes and thumbnails are also rebuildable data.
 
+The desktop also owns a durable local launch/event journal, isolated by server instance. Prepared or unresolved launch intents are not server open events and cannot be replayed after restart; only accepted-handoff events enter the delivery queue. Preserve immutable event payloads until acknowledged and never evict pending events silently. Its transaction/retention design must implement the [external-reading crash rules](external-reading.md) separately from server event aggregation.
+
 The first release does not merge entries or transfer their history, whether they share an EH gid, similar titles/covers, or identical bytes. Duplicate detection may flag candidates for inspection, but copies remain separate entries under the [entry lifecycle](entry-identity.md).
 
 The [entry lifecycle](entry-identity.md) owns identity decisions: one current location per entry, explicit resolution of changed representations, distinct entries for replacement editions, and retained detached records. Historical locations do not compete with current claims. Model its candidate/version checks and atomic resolution before implementing file-update persistence.
