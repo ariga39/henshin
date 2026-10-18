@@ -51,6 +51,7 @@ Exact fingerprint equality can prove an unchanged representation within the supp
 | Observation | Identity action |
 | --- | --- |
 | No detected change | Keep the entry; the unchanged observation is not a fresh full-content verification |
+| Lightweight stats/manifest change without comparable full evidence | Treat as an uncertain replacement and block counted Open until exact verification or explicit edition confirmation; the hint alone proves neither change nor equality |
 | Reanalysis shows an exact match to the accepted fingerprint, including after a pending replacement disappears | Clear the pending candidate if any, return to Accepted, and keep identity and content version; update observation details |
 | Changed representation, even with the same EH URL or page count | Create or update a replacement candidate; keep prior accepted metadata |
 | User confirms a repack, filename-only page rename, or other representation change of the same edition | Retain entry identity, binding, overrides, and history; accept the candidate and increment content version |
@@ -71,7 +72,7 @@ The user can choose:
 
 The exception is an exact match to the previously accepted fingerprint: restoring the accepted representation needs no edition judgment. Atomically clear the candidate and restore Accepted under the current entry, location, and candidate revisions. Advance the entry revision so an already-open comparison cannot resolve the discarded candidate. A failed scan, missing candidate file, or matching size/mtime alone does not perform this transition. Fingerprint profiles must be comparable and the observation complete and stable.
 
-Only a completely analyzed, stable candidate can be accepted. If analysis fails, offer retry and leave the decision pending. The first release does not provide an untracked preview launch to bypass the pending state.
+Only a stable candidate satisfying the complete acceptance analysis profile in [Indexing](file-indexing.md) can be accepted. This means a complete supported-page manifest, not full decoding of every page or mandatory full-byte hashing. Unsupported-page/incomplete-manifest failures remain pending; a separately reported cover error need not invalidate a complete manifest. The first release does not provide an untracked preview launch to bypass the pending state.
 
 Resolution submits the entry revision, location revision, and candidate version observed by the user. Before committing, check that the candidate still matches a fresh observation under the same fingerprint profile and that those revisions still match. Changed evidence requires refreshing the comparison. Apply the old-entry detachment, new-entry creation or accepted-content update, location ownership, and cache invalidation atomically. No intermediate state may expose two accepted entries at one current location or move old events to the new entry. A retry after a successful resolution returns the existing result for the same operation ID rather than creating another entry.
 
