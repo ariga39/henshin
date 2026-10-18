@@ -13,6 +13,7 @@ Henshin makes an externally managed collection searchable and keeps its metadata
 - All Henshin collection-source access is strictly read-only: no creation, overwrite, rename, deletion, repacking, permission changes or explicit timestamp changes in the source. [NAS source safety](source-safety.md) defines the required boundary.
 - Reading invokes an external reader locally. No embedded reader is required.
 - Shared library metadata and open events are synchronized across clients of the authoritative service.
+- First-release backup and archival protection covers application data. Original collection files are protected by external NAS tools, as confirmed by the user; [backup and recovery](backup-and-archive.md) defines the operational contract.
 - Design documentation is English and organized into separate topics.
 
 The NAS scenario does not require the service to run on the NAS, and a remote service does not imply remote file delivery. The server must be able to read collection files to index them; each desktop needs its own access to open them. Mounts and share credentials are managed by the operating system.
@@ -48,11 +49,11 @@ Library IDs remain in contracts to scope roots and events coherently, but multip
 | Tag aliases | Chinese aliases when the chosen translation dataset and license permit distribution; canonical identity remains usable without aliases | Additional translation providers/languages are extensions; no translation service credential requirement |
 | Reader/history | Local profiles, direct executable/association modes, archive/directory targets and directory-only first-image mode, accepted-event history and pending diagnostics | Reader progress telemetry, history editing/deletion, manual count correction, and untracked Open mode deferred |
 | Consistency | Conditional edits, per-event deduplication, bounded refresh, isolated connection caches/queues, migration/clone/restore semantics | Independent-server replication and offline edit merging deferred |
-| Maintenance | Consistent backup/restore, task controls, diagnostic errors, metadata export | External plugin framework, content backup, bulk source cleanup, and automatic upgrades across incompatible schemas deferred |
+| Maintenance | Consistent server/desktop backup and restore, optional server backup schedules/rotation, explicit long-term application archives, task controls, diagnostic errors, metadata export | External plugin framework, content backup, bulk source cleanup, and automatic upgrades across incompatible schemas deferred |
 
 Conditional archive support must be advertised per validated capability; it cannot silently become a first-release dependency. Unsupported pages in an otherwise recognized container follow [indexing](file-indexing.md), rather than being silently dropped. Restricted EH access requires the operator's valid credentials and upstream availability; the core library remains usable when source refresh is blocked. [EH integration](eh-metadata.md) owns source policy, translation licensing, and failure distinctions.
 
-Content downloads, replication, server-side collection forwarding, automatic NAS mounts, embedded readers, and modifying source archives are outside scope. Derived covers and metadata are application data, not a promise to make collection content available without the NAS. Export is metadata-only and excludes credentials, executable profiles, and file bytes by default; schema and private-field handling belong to persistence/contracts. Backup covers application state, not the user's collection itself.
+Content downloads, replication, server-side collection forwarding, automatic NAS mounts, embedded readers, and modifying source archives are outside scope. Derived covers and metadata are application data, not a promise to make collection content available without the NAS. Export is metadata-only and excludes credentials, executable profiles, and file bytes by default; schema and private-field handling belong to persistence/contracts. [Backup and archival recovery](backup-and-archive.md) covers application state; NAS content snapshots and independent file backups remain operator-managed and cannot be replaced by application backup.
 
 ## Release Scenarios and Observable Success
 
