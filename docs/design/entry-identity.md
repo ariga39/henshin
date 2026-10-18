@@ -42,6 +42,8 @@ Availability observations can be present, missing after a successful scan, inacc
 
 The existing term file status collectively refers to these two axes: identity state and last server availability observation. Do not collapse them into a single mutually exclusive enum. UI and search must distinguish, for example, an accepted-but-server-inaccessible entry from a replacement-pending entry; neither is evidence of client accessibility. Exact display labels and filter syntax belong to their later topics.
 
+Excluded is a separate scan-scope indicator derived from root/path policy, not a fifth availability observation. It can coexist with any retained identity/availability state and does not establish whether the file exists or is locally readable.
+
 ## Evidence Rules
 
 Sizes and modification times are change-detection hints, not identity proof. Similar titles, EH IDs, page counts, covers, perceptual hashes, partial hashes, or a file's continued presence at the same path do not prove identity. They may rank candidates for user inspection.
@@ -79,7 +81,7 @@ Accepting a byte-unverified candidate with an explicit same-edition judgment alw
 
 Stop scanning is a non-accepting configuration action: it requires matching entry/location/candidate revisions but no successful analysis or fingerprint. Atomically add the exact-path exclusion and preserve the existing claim/state; reject a stale target. Its operation ID makes retries idempotent. The fresh-evidence acceptance checks below apply to Keep this entry and Treat as a different entry, not to exclusion or Decide later.
 
-Resolution submits the entry revision, location revision, and candidate version observed by the user. Before committing, check that the candidate still matches a fresh observation under the same fingerprint profile and that those revisions still match. Changed evidence requires refreshing the comparison. Apply the old-entry detachment, new-entry creation or accepted-content update, location ownership, and cache invalidation atomically. No intermediate state may expose two accepted entries at one current location or move old events to the new entry. A retry after a successful resolution returns the existing result for the same operation ID rather than creating another entry.
+Resolution submits the entry revision, location revision, and candidate version observed by the user. Before accepting, check that the candidate still matches a fresh stable observation and that those revisions still match; compare the same fingerprint profile when fingerprint evidence is available. Without it, repeat the lightweight/manifest checks and retain the explicitly byte-unverified classification and its limits. Changed evidence requires refreshing the comparison. Apply the old-entry detachment, new-entry creation or accepted-content update, location ownership, and cache invalidation atomically. No intermediate state may expose two accepted entries at one current location or move old events to the new entry. A retry after a successful resolution returns the existing result for the same operation ID rather than creating another entry.
 
 Scanning and resolution for a location must serialize their commits or use conditional revision checks. A late analysis result for an old location/candidate cannot overwrite a later user decision. A file can still change after the last check: subsequent observation returns it to pending. This is a documented external-filesystem race, not an atomic file-lock guarantee.
 
