@@ -13,7 +13,7 @@ Henshin makes an externally managed collection searchable and keeps its metadata
 - All Henshin collection-source access is strictly read-only: no creation, overwrite, rename, deletion, repacking, permission changes or explicit timestamp changes in the source. [NAS source safety](source-safety.md) defines the required boundary.
 - Reading invokes an external reader locally. No embedded reader is required.
 - Shared library metadata and open events are synchronized across clients of the authoritative service.
-- Data backup and archival protection are required; [backup and recovery](backup-and-archive.md) defines the proposed first-release application-state scope and the separate external NAS-content backup responsibility.
+- First-release backup and archival protection covers application data. Original collection files are protected by external NAS tools, as confirmed by the user; [backup and recovery](backup-and-archive.md) defines the operational contract.
 - Design documentation is English and organized into separate topics.
 
 The NAS scenario does not require the service to run on the NAS, and a remote service does not imply remote file delivery. The server must be able to read collection files to index them; each desktop needs its own access to open them. Mounts and share credentials are managed by the operating system.
