@@ -18,6 +18,12 @@ Design refinement order and implementation phases are separate. UI journeys may 
 
 Exploratory prototypes may use provisional adapters to answer these questions. They are not completed Phase 1 application implementation, and their results must be reflected in the selected dependencies and contracts before dependent features are built.
 
+### Deployment and Security Evidence Handoff
+
+The detailed [architecture acceptance gates](architecture.md#acceptance-and-remaining-gates) are mandatory inputs to these phases, not optional packaging follow-up. Phase 1 must validate owned-child bootstrap/readiness/timeout/orphan cleanup, independent-service reuse without ownership, locks/stale rendezvous, credential initialization and rotation, loopback auth, TLS/proxy SSE, keyring-unavailable behavior, secret redaction, production CSP/IPC sender rejection, and separate Electron/Node native ABIs before exposing the affected capability. Record concrete adapters, versions, cleanup deadlines, proxy recipe, and evidence.
+
+Phase 4 must validate signed builds/notarization where required by the distribution channel, codec licenses, actual OS/NAS service-account access, backup secret reattachment, uninstall data preservation, and upgrade/restore rollback. Restore, authority migration, and clone preparation must reset copied owner verifiers before serving; test that restoring a pre-rotation backup rejects the old token. The delivery refinement will turn this handoff into the consolidated evidence matrix; no runtime or package success is implied.
+
 ### Phase 1 File Resolution and External Reading
 
 Build a minimal client and independent server with root configuration, image-directory and ZIP/CBZ scanning, a basic list, covers, path mappings, reader launch, and open events.
