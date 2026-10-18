@@ -19,7 +19,7 @@ The confirmed desktop stack is Electron + React + TypeScript. Effect is preferre
 | File locations | [Storage roots and path mappings](design/path-mapping.md) | Logical locations, per-device mappings, path resolution |
 | Indexing | [File indexing and thumbnails](design/file-indexing.md) | Entry discovery, change detection, relocation, covers |
 | Persistence | [Data model and persistence](design/data-model.md) | Identity, relationships, database rules, lifecycle constraints |
-| EH integration | [EH metadata and matching](design/eh-metadata.md) | Matching, bindings, updates, overrides, translations |
+| EH integration | [EH metadata, bindings, and local overrides](design/eh-metadata.md) | Matching, bindings, updates, overrides, translations |
 | Search | [Search and filtering](design/search.md) | Query semantics, filters, sorting, pagination, language support |
 | Reading | [External readers and open history](design/external-reading.md) | Reader launch, success semantics, event creation |
 | Consistency | [Cross-device consistency](design/synchronization.md) | Concurrent edits, reconnects, event delivery, instance isolation |
