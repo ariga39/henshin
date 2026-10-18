@@ -40,7 +40,7 @@ An Open command resolves to the Electron capability, which checks the local path
 
 The preferred backend is an independent Node.js/TypeScript process using Effect, with SQLite persistence. First evaluate Effect's `HttpApi`, typed client, and Node HTTP adapter as the HTTP stack. Fastify is no longer the default proposal; add a separate HTTP framework only if validation exposes a concrete requirement the Effect stack does not meet.
 
-Effect's HTTP client derives operations and request/response codecs from shared API declarations. Use that contract to connect client application logic to server use cases, while keeping database entities and private errors internal. [HttpApi](https://effect.website/docs/v4/api/effect/http-api/HttpApi), [HttpApiClient](https://effect.website/docs/v4/api/effect/http-api/HttpApiClient), and [HttpServer](https://effect.website/docs/v4/api/effect/http/HttpServer) describe this integration.
+Effect's HTTP client derives operations and request/response codecs from shared API declarations. Run the authenticated derived client in Electron main behind the allowed preload operation surface; renderer Effect logic invokes those operations without handling transport credentials or arbitrary URLs. Use that contract to connect client application logic to server use cases, while keeping database entities and private errors internal. [HttpApi](https://effect.website/docs/v4/api/effect/http-api/HttpApi), [HttpApiClient](https://effect.website/docs/v4/api/effect/http-api/HttpApiClient), and [HttpServer](https://effect.website/docs/v4/api/effect/http/HttpServer) describe this integration.
 
 The referenced v4 HTTP modules are marked unstable. Select and pin a compatible Effect release and adapter set before implementation; verify the actual APIs and packaging together. These references establish an architectural direction, not a completed dependency or version selection. Do not mix examples or import paths from different Effect major versions.
 
@@ -60,7 +60,7 @@ In-memory queues and fibers are not the durable task store. Persist task identit
 
 ## Validation Before Adoption Details Are Finalized
 
-- Exercise one shared-schema endpoint from a renderer-side Effect client through a Node HTTP adapter to a SQLite-backed server operation.
+- Exercise one shared-schema endpoint from renderer Effect operations through preload and the main-process typed HTTP client to a Node HTTP adapter to a SQLite-backed server operation.
 - Verify renderer mount/unmount and server switching release resources, ignore obsolete search results, and do not duplicate subscriptions or commands under React development checks.
 - Verify typed errors survive HTTP and IPC encoding without exposing private causes or credentials.
 - Verify request interruption, task cancellation, database commit handling, and restart recovery as separate behaviors.
