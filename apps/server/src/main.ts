@@ -43,4 +43,8 @@ const main = async () => {
   NodeRuntime.runMain(Layer.launch(appLayer), { disableErrorReporting: true })
 }
 
-void main()
+void main().catch(() => {
+  console.error("server bootstrap failed: invalid or unavailable bootstrap channel")
+  process.stdin.destroy()
+  process.exitCode = 1
+})
