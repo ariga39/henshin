@@ -137,6 +137,10 @@ test("retains an unresolved command across Electron restart and shows epoch-chan
   try {
     await first.window.getByTestId("load").click()
     await expect(first.window.getByTestId("note-text")).toHaveText("hello")
+    // Initialize the real desktop SQLite schema before seeding its durable row.
+    await expect(
+      first.window.evaluate(() => window.henshinPrototype.loadDraft({ note_id: "note-1", form_id: "synthetic-note" }))
+    ).resolves.toMatchObject({ ok: true, data: null })
     instanceId = (await first.window.getByTestId("instance").textContent()) ?? ""
     oldEpoch = (await first.window.getByTestId("epoch").textContent()) ?? ""
   } finally {
@@ -330,5 +334,48 @@ test("does not cross-read a saved draft between verified server instances", asyn
     await expect(firstAgain.window.getByTestId("text-input")).toHaveValue("instance-one")
   } finally {
     await close(firstAgain.app)
+  }
+})
+
+test("pauses direct server IPC while retaining local recovery and form state across reconnect", async () => {
+  const dbPath = await tempDbPath()
+  const clientDbPath = `${dbPath}.desktop`
+  const app = await launch(dbPath, clientDbPath)
+
+  try {
+    await app.window.getByTestId("load").click()
+    await expect(app.window.getByTestId("connection-status")).toHaveText("connected")
+    await expect(app.window.getByTestId("note-text")).toHaveText("hello")
+    await app.window.getByTestId("text-input").fill("retained while disconnected")
+    await app.window.getByTestId("save-local-draft").click()
+    await expect(app.window.getByTestId("outcome")).toContainText("local draft saved")
+
+    await app.window.getByTestId("disconnect").click()
+    await expect(app.window.getByTestId("connection-status")).toHaveText("disconnected")
+    await expect(app.window.getByTestId("save")).toBeDisabled()
+    await expect(app.window.getByTestId("load")).toBeDisabled()
+    await expect(app.window.getByTestId("text-input")).toHaveValue("retained while disconnected")
+    await expect(app.window.getByTestId("save-local-draft")).toBeEnabled()
+    await expect(app.window.getByTestId("load-recovery")).toBeEnabled()
+
+    const disconnectedCalls = await app.window.evaluate(async () => ({
+      note: await window.henshinPrototype.getNote("note-1"),
+      draft: await window.henshinPrototype.loadDraft({ note_id: "note-1", form_id: "synthetic-note" }),
+      attempts: await window.henshinPrototype.listCommandAttempts(),
+      dismiss: await window.henshinPrototype.dismissCommand("11111111-1111-4111-8111-111111111111")
+    }))
+    expect(disconnectedCalls.note).toMatchObject({ ok: false, error: { code: "connection_paused" } })
+    expect(disconnectedCalls.draft).toMatchObject({ ok: true, data: { text: "retained while disconnected" } })
+    expect(disconnectedCalls.attempts).toEqual({ ok: true, data: [] })
+    expect(disconnectedCalls.dismiss).toMatchObject({ ok: false })
+    expect((disconnectedCalls.dismiss as { error: { code: string } }).error.code).not.toBe("connection_paused")
+
+    await app.window.getByTestId("reconnect").click()
+    await expect(app.window.getByTestId("connection-status")).toHaveText("connected")
+    await expect(app.window.getByTestId("note-text")).toHaveText("hello")
+    await expect(app.window.getByTestId("base-revision")).toHaveText("0")
+    await expect(app.window.getByTestId("text-input")).toHaveValue("retained while disconnected")
+  } finally {
+    await close(app.app)
   }
 })
