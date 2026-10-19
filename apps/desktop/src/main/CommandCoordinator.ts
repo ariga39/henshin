@@ -26,6 +26,8 @@ export interface NoteEditInput {
   readonly operationId: string
 }
 
+export type BeforeNetworkDispatch = () => void
+
 export type NoteCommandClient = Pick<
   PrototypeHttpClient["Service"],
   "editNote" | "getOperation" | "getNote"
@@ -118,12 +120,14 @@ const storedOperationResult = (attempt: CommandAttempt): OperationResult | null 
 const markUnresolved = (
   store: CommandAttemptStore["Service"],
   session: VerifiedSession,
-  operationId: string
+  operationId: string,
+  onPersisted?: () => void
 ): Effect.Effect<never, CommandAttemptUnresolvedError, never> =>
   store
     .markUnresolved({ instanceId: session.instanceId, operationId })
     .pipe(
       Effect.catch(() => Effect.succeed(undefined)),
+      Effect.tap(() => onPersisted === undefined ? Effect.void : Effect.sync(onPersisted)),
       Effect.flatMap(() => Effect.fail(new CommandAttemptUnresolvedError({ operationId })))
     )
 
@@ -136,9 +140,11 @@ export const executeNoteEdit = (
   client: NoteCommandClient,
   store: CommandAttemptStore["Service"],
   session: VerifiedSession,
-  input: NoteEditInput
+  input: NoteEditInput,
+  beforeDispatch?: BeforeNetworkDispatch
 ): Effect.Effect<NoteView, unknown> =>
   Effect.gen(function*() {
+    let phase: "admitting" | "submitted" | "dispatching" | "terminalizing" | "terminal" = "admitting"
     const admitted = yield* store.admit(inputFor(session, input))
     if (!admitted.admitted) {
       const existingResult = storedResult(admitted.attempt)
@@ -155,57 +161,122 @@ export const executeNoteEdit = (
 
     // This short local transition is part of admission. If it cannot be
     // persisted, no HTTP dispatch is attempted and the prepared row remains.
-    yield* store.markSubmitted({ instanceId: session.instanceId, operationId: input.operationId })
-
-    const response = yield* client
-      .editNote({
-        params: { id: input.noteId },
-        payload: {
-          operation_id: input.operationId,
-          expected_revision: input.expectedRevision,
-          text: input.text,
-          instance_id: session.instanceId,
-          epoch: session.epoch
+    // The phase write is inside the uninterruptible bookkeeping region so an
+    // interruption cannot lose the proof that the local row became submitted.
+    const localKey = { instanceId: session.instanceId, operationId: input.operationId }
+    const localAdmission = Effect.uninterruptible(
+      store.markSubmitted(localKey).pipe(
+        Effect.tap(() => Effect.sync(() => {
+          phase = "submitted"
+        }))
+      )
+    )
+    return yield* Effect.gen(function*() {
+      const response = yield* Effect.gen(function*() {
+        yield* localAdmission
+        if (beforeDispatch !== undefined) {
+          yield* Effect.try({ try: beforeDispatch, catch: (error) => error })
         }
+        yield* Effect.uninterruptible(Effect.sync(() => {
+          phase = "dispatching"
+        }))
+        return yield* client
+          .editNote({
+            params: { id: input.noteId },
+            payload: {
+              operation_id: input.operationId,
+              expected_revision: input.expectedRevision,
+              text: input.text,
+              instance_id: session.instanceId,
+              epoch: session.epoch
+            }
+          })
+          .pipe(Effect.result, Effect.timeoutOption(COMMAND_DEADLINE))
       })
-      .pipe(Effect.result, Effect.timeoutOption(COMMAND_DEADLINE))
 
-    if (Option.isNone(response)) {
-      return yield* markUnresolved(store, session, input.operationId)
-    }
-    if (Result.isFailure(response.value)) {
-      const failure = response.value.failure
-      if (!isDefinitiveNoWrite(failure)) {
-        return yield* markUnresolved(store, session, input.operationId)
+      const markUnresolvedAndFail = () => markUnresolved(
+        store,
+        session,
+        input.operationId,
+        () => {
+          phase = "terminal"
+        }
+      )
+
+      if (Option.isNone(response)) {
+        phase = "terminalizing"
+        return yield* markUnresolvedAndFail()
       }
+      if (Result.isFailure(response.value)) {
+        const failure = response.value.failure
+        if (!isDefinitiveNoWrite(failure)) {
+          phase = "terminalizing"
+          return yield* markUnresolvedAndFail()
+        }
+        phase = "terminalizing"
+        const persisted = yield* store
+          .markRejected({
+            instanceId: session.instanceId,
+            operationId: input.operationId,
+            errorCode: errorCode(failure),
+            errorMessage: errorMessage(failure),
+            currentRevision: currentRevision(failure)
+          })
+          .pipe(Effect.result)
+        if (Result.isFailure(persisted)) {
+          return yield* markUnresolvedAndFail()
+        }
+        phase = "terminal"
+        return yield* Effect.fail(failure)
+      }
+
+      const result = response.value.success.data
+      phase = "terminalizing"
       const persisted = yield* store
-        .markRejected({
+        .markSucceeded({
           instanceId: session.instanceId,
           operationId: input.operationId,
-          errorCode: errorCode(failure),
-          errorMessage: errorMessage(failure),
-          currentRevision: currentRevision(failure)
+          resultNote: result.note,
+          expiresAtMs: result.expires_at_ms
         })
         .pipe(Effect.result)
-      if (Result.isFailure(persisted)) {
-        return yield* markUnresolved(store, session, input.operationId)
+      if (Result.isFailure(persisted) || persisted.success.status !== "succeeded") {
+        return yield* markUnresolvedAndFail()
       }
-      return yield* Effect.fail(failure)
-    }
-
-    const result = response.value.success.data
-    const persisted = yield* store
-      .markSucceeded({
-        instanceId: session.instanceId,
-        operationId: input.operationId,
-        resultNote: result.note,
-        expiresAtMs: result.expires_at_ms
-      })
-      .pipe(Effect.result)
-    if (Result.isFailure(persisted) || persisted.success.status !== "succeeded") {
-      return yield* markUnresolved(store, session, input.operationId)
-    }
-    return result.note
+      phase = "terminal"
+      return result.note
+    }).pipe(
+      Effect.ensuring(
+        Effect.uninterruptible(
+          Effect.suspend(() => {
+            if (phase === "submitted") {
+              return store.markRejected({
+                ...localKey,
+                errorCode: "not_dispatched",
+                errorMessage: "command was not dispatched",
+                currentRevision: null
+              }).pipe(
+                Effect.asVoid,
+                Effect.catch(() => Effect.void)
+              )
+            }
+            if (phase === "dispatching") {
+              return store.markUnresolved(localKey).pipe(
+                Effect.asVoid,
+                Effect.catch(() => Effect.void)
+              )
+            }
+            if (phase === "terminalizing") {
+              return store.markUnresolved(localKey).pipe(
+                Effect.asVoid,
+                Effect.catch(() => Effect.void)
+              )
+            }
+            return Effect.void
+          })
+        )
+      )
+    )
   })
 const readCurrentNote = (
   client: NoteCommandClient,

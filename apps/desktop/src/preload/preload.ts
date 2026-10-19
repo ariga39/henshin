@@ -7,11 +7,15 @@ import { IpcChannels } from "@henshin/contracts/channels"
  */
 contextBridge.exposeInMainWorld("henshinPrototype", {
   handshake: () => ipcRenderer.invoke(IpcChannels.handshake, {}),
+  connect: () => ipcRenderer.invoke(IpcChannels.connect, {}),
+  disconnect: () => ipcRenderer.invoke(IpcChannels.disconnect, {}),
+  connectionStatus: () => ipcRenderer.invoke(IpcChannels.connectionStatus, {}),
   getNote: (noteId: string) => ipcRenderer.invoke(IpcChannels.getNote, { note_id: noteId }),
   editNote: (input: {
     readonly note_id: string
     readonly text: string
     readonly expected_revision: string
+    readonly base_epoch: string
     readonly operation_id: string
   }) => ipcRenderer.invoke(IpcChannels.editNote, input),
   saveDraft: (input: {

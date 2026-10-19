@@ -5,6 +5,8 @@ import {
   dismissRecovery,
   discardSavedDraft,
   loadNote,
+  disconnect,
+  reconnect,
   loadRecovery,
   loadSavedDraft,
   reconcileRecovery,
@@ -55,6 +57,7 @@ const reconciliationReasonText = (reason: NonNullable<ReturnType<typeof viewStor
 export const App = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   const currentNoteLoading = state.status === "loading"
+  const connected = state.connection.state === "connected"
 
   return (
     <main>
@@ -64,6 +67,8 @@ export const App = () => {
         Local drafts never send a server mutation.
       </p>
       <dl>
+        <dt>connection</dt>
+        <dd data-testid="connection-status">{state.connection.state}</dd>
         <dt>instance</dt>
         <dd data-testid="instance">{state.instance_id ?? "none"}</dd>
         <dt>epoch</dt>
@@ -75,6 +80,30 @@ export const App = () => {
         <dt>editing from revision</dt>
         <dd data-testid="base-revision">{state.base_revision ?? "none"}</dd>
       </dl>
+      <section aria-labelledby="connection-actions">
+        <h2 id="connection-actions">Server connection</h2>
+        <p>
+          {state.connection.state === "disconnected"
+            ? "Server network work is paused; local drafts and command recovery remain available."
+            : state.connection.state === "blocked"
+              ? `Connection blocked: ${state.connection.reason ?? "recovery required"}.`
+              : state.connection.state}
+        </p>
+        <button
+          data-testid="reconnect"
+          disabled={state.connection.state === "connecting"}
+          onClick={() => void runtime.runPromise(reconnect)}
+        >
+          Reconnect
+        </button>
+        <button
+          data-testid="disconnect"
+          disabled={!connected}
+          onClick={() => void runtime.runPromise(disconnect)}
+        >
+          Disconnect
+        </button>
+      </section>
       <label htmlFor="text-input">New text</label>
       <input
         id="text-input"
@@ -85,7 +114,7 @@ export const App = () => {
       />
       <button
         data-testid="load"
-        disabled={currentNoteLoading}
+        disabled={currentNoteLoading || !connected}
         onClick={() => void runtime.runPromise(loadNote)}
       >
         Load current note
@@ -125,7 +154,7 @@ export const App = () => {
         <p>Only this deliberate Save sends the synthetic note edit to the server.</p>
         <button
           data-testid="save"
-          disabled={currentNoteLoading}
+          disabled={currentNoteLoading || !connected}
           onClick={() => void runtime.runPromise(saveNote(state.form_text))}
         >
           Save to server

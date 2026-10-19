@@ -32,6 +32,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@effect/platform-node':
+        specifier: 4.0.5
+        version: 4.0.5(effect@4.0.5)(redis@6.3.0)
       '@henshin/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
