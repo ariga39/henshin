@@ -310,6 +310,7 @@ describe("main command-attempt coordinator", () => {
           }
           const generation = lifecycle.currentGeneration()
           if (generation === null) return yield* Effect.die("missing lifecycle generation")
+          let beforeDispatchCalled = false
           const dispatch = lifecycle.run(
             Effect.gen(function*() {
               const client = yield* PrototypeHttpClient
@@ -318,7 +319,10 @@ describe("main command-attempt coordinator", () => {
                 heldStore,
                 session,
                 { noteId: "note-1", text: "must-not-send", expectedRevision: "0", operationId },
-                () => lifecycle.assertGeneration(generation)
+                () => {
+                  beforeDispatchCalled = true
+                  lifecycle.assertGeneration(generation)
+                }
               )
             }).pipe(Effect.result)
           ).then(
@@ -331,17 +335,48 @@ describe("main command-attempt coordinator", () => {
           const dispatchOutcome = yield* Effect.promise(() => dispatch)
           yield* Effect.promise(() => disconnecting)
           const attempt = yield* store.get({ instanceId: session.instanceId, operationId })
-          return { dispatchOutcome, attempt }
+          return { dispatchOutcome, attempt, beforeDispatchCalled }
         }),
         proxy.baseUrl
       )
 
       expect(result.dispatchOutcome).toBeInstanceOf(Error)
-      expect(result.attempt?.status).toBe("submitted")
+      expect(result.beforeDispatchCalled).toBe(false)
+      expect(result.attempt?.status).toBe("rejected")
+      expect(result.attempt?.error_code).toBe("not_dispatched")
       expect(proxy.putCount()).toBe(0)
     } finally {
       await lifecycle.close()
     }
+  })
+
+  it("records a synchronous before-dispatch guard failure as a terminal local rejection", async () => {
+    const server = await startOwnedServer()
+    const localDbPath = await makeLocalDbPath()
+    const operationId = randomUUID()
+    const result = await withServices(
+      server,
+      localDbPath,
+      Effect.gen(function*() {
+        const client = yield* PrototypeHttpClient
+        const store = yield* CommandAttemptStore
+        const outcome = yield* executeNoteEdit(
+          client,
+          store,
+          sessionFor(server),
+          { noteId: "note-1", text: "guarded-local", expectedRevision: "0", operationId },
+          () => {
+            throw new Error("connection generation changed")
+          }
+        ).pipe(Effect.result)
+        return { outcome, attempt: yield* store.get({ instanceId: server.instanceId, operationId }) }
+      })
+    )
+
+    expect(Result.isFailure(result.outcome)).toBe(true)
+    expect(result.attempt?.status).toBe("rejected")
+    expect(result.attempt?.error_code).toBe("not_dispatched")
+    expect(result.attempt?.error_message).toBe("command was not dispatched")
   })
 
   it("keeps a real SQLite attempt after a loopback response stream is dropped after commit", async () => {

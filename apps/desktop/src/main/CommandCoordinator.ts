@@ -141,6 +141,7 @@ export const executeNoteEdit = (
   beforeDispatch?: BeforeNetworkDispatch
 ): Effect.Effect<NoteView, unknown> =>
   Effect.gen(function*() {
+    let phase: "admitting" | "submitted" | "dispatching" = "admitting"
     const admitted = yield* store.admit(inputFor(session, input))
     if (!admitted.admitted) {
       const existingResult = storedResult(admitted.attempt)
@@ -157,23 +158,55 @@ export const executeNoteEdit = (
 
     // This short local transition is part of admission. If it cannot be
     // persisted, no HTTP dispatch is attempted and the prepared row remains.
-    yield* store.markSubmitted({ instanceId: session.instanceId, operationId: input.operationId })
-    if (beforeDispatch !== undefined) {
-      yield* Effect.try({ try: beforeDispatch, catch: (error) => error })
-    }
-
-    const response = yield* client
-      .editNote({
-        params: { id: input.noteId },
-        payload: {
-          operation_id: input.operationId,
-          expected_revision: input.expectedRevision,
-          text: input.text,
-          instance_id: session.instanceId,
-          epoch: session.epoch
-        }
-      })
-      .pipe(Effect.result, Effect.timeoutOption(COMMAND_DEADLINE))
+    // The phase write is inside the uninterruptible bookkeeping region so an
+    // interruption cannot lose the proof that the local row became submitted.
+    const localKey = { instanceId: session.instanceId, operationId: input.operationId }
+    const localAdmission = Effect.uninterruptible(
+      store.markSubmitted(localKey).pipe(
+        Effect.tap(() => Effect.sync(() => {
+          phase = "submitted"
+        }))
+      )
+    )
+    const response = yield* Effect.gen(function*() {
+      yield* localAdmission
+      if (beforeDispatch !== undefined) {
+        yield* Effect.try({ try: beforeDispatch, catch: (error) => error })
+      }
+      yield* Effect.uninterruptible(Effect.sync(() => {
+        phase = "dispatching"
+      }))
+      return yield* client
+        .editNote({
+          params: { id: input.noteId },
+          payload: {
+            operation_id: input.operationId,
+            expected_revision: input.expectedRevision,
+            text: input.text,
+            instance_id: session.instanceId,
+            epoch: session.epoch
+          }
+        })
+        .pipe(Effect.result, Effect.timeoutOption(COMMAND_DEADLINE))
+    }).pipe(
+      Effect.ensuring(
+        Effect.uninterruptible(
+          Effect.suspend(() =>
+            phase === "submitted"
+              ? store.markRejected({
+                  ...localKey,
+                  errorCode: "not_dispatched",
+                  errorMessage: "command was not dispatched",
+                  currentRevision: null
+                }).pipe(
+                  Effect.asVoid,
+                  Effect.catch(() => Effect.void)
+                )
+              : Effect.void
+          )
+        )
+      )
+    )
 
     if (Option.isNone(response)) {
       return yield* markUnresolved(store, session, input.operationId)

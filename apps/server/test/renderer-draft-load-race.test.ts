@@ -201,7 +201,9 @@ describe("explicit renderer load races", () => {
     expect(viewStore.getState()).toMatchObject({
       connection: { state: "disconnected" },
       note: null,
-      status: "loading"
+      status: "idle",
+      form_text: "",
+      base_revision: null
     })
 
     pendingDisconnect.resolve({
@@ -209,6 +211,26 @@ describe("explicit renderer load races", () => {
       data: { state: "disconnected", instance_id: handshake.instance_id, epoch: null, reason: "explicit_disconnect" }
     })
     await disconnecting
+  })
+
+  it("restores ready local editing state when disconnect abandons a cached-note load", async () => {
+    viewStore.set({
+      status: "loading",
+      connection: connected,
+      note,
+      base_revision: note.revision,
+      form_text: "local text"
+    })
+
+    viewStore.beginConnectionTransition("disconnected")
+
+    expect(viewStore.getState()).toMatchObject({
+      status: "ready",
+      connection: { state: "disconnected" },
+      note,
+      base_revision: note.revision,
+      form_text: "local text"
+    })
   })
 
   it("fences a held recovery response during a connection transition", async () => {
