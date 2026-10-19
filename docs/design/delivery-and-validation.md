@@ -20,7 +20,10 @@ establish documentation quality only. Every runtime gate below remains
 and the bounded source-manifest precursor recorded in
 [source-manifests-prototype.md](../validation/source-manifests-prototype.md).
 The source-manifest record is evidence for its stated precursor scope only; it
-does not complete G3 or G4.
+does not complete G3 or G4. The bounded macOS native source-boundary evidence
+is recorded in
+[native-source-boundaries-prototype.md](../validation/native-source-boundaries-prototype.md);
+it likewise does not complete G3.
 
 Distinguish four stages:
 
