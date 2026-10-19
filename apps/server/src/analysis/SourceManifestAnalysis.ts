@@ -27,7 +27,7 @@ import {
   type ZipReaderConstructorOptions
 } from "@zip.js/zip.js"
 
-const textDecoder = new TextDecoder("utf-8", { fatal: true })
+const textDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
 const textEncoder = new TextEncoder()
 
 export const MANIFEST_FORMATS = ["jpeg", "png", "webp"] as const

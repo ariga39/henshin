@@ -274,6 +274,33 @@ describe("bounded source manifest analysis", () => {
     expect(before).toEqual(after)
   })
 
+  it("preserves a leading BOM in direct, EFS, and Unicode-path-extra names", async () => {
+    const root = await makeTempRoot()
+    const direct = join(root, "direct")
+    await (await import("node:fs/promises")).mkdir(direct)
+    const directName = "\uFEFFdirect.jpg"
+    await writeFile(join(direct, directName), pageBytes)
+    expect((await analyze(direct)).pages.map((page) => page.name)).toEqual([directName])
+
+    const efs = join(root, "efs.zip")
+    const efsName = "\uFEFFefs.jpg"
+    await makeZip(efs, [{ name: efsName, bytes: pageBytes }])
+    expect((await analyze(efs)).pages.map((page) => page.name)).toEqual([efsName])
+
+    const unicodeExtra = join(root, "unicode-extra.zip")
+    const unicodeExtraName = "\uFEFFextra.jpg"
+    await makeZip(
+      unicodeExtra,
+      [{
+        name: "x.jpg",
+        bytes: pageBytes,
+        options: { extraField: new Map([[0x7075, unicodePathExtra(unicodeExtraName)]]) }
+      }],
+      { useUnicodeFileNames: false }
+    )
+    expect((await analyze(unicodeExtra)).pages.map((page) => page.name)).toEqual([unicodeExtraName])
+  })
+
   it("streams a ZIP/CBZ listing, preserves backslashes, and ignores nested archives", async () => {
     const root = await makeTempRoot()
     const archive = join(root, "fixture.cbz")
