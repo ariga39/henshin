@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process"
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { randomBytes } from "node:crypto"
-import { mkdtemp } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -25,12 +25,34 @@ interface ReadyLine {
   readonly epoch: string
 }
 
-const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+const waitForExit = (child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> => {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.off("exit", onExit)
+      resolve(false)
+    }, timeoutMs)
+    const onExit = () => {
+      clearTimeout(timer)
+      resolve(true)
+    }
+    child.once("exit", onExit)
+  })
+}
+
+const removeTempDbDirectory = async (dbPath: string): Promise<void> => {
+  await rm(path.dirname(dbPath), { recursive: true, force: true })
+}
 
 export const makeTempDbPath = async (): Promise<string> => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "henshin-prototype-"))
   return path.join(dir, "prototype.db")
 }
+
+export const cleanupTempDb = removeTempDbDirectory
+
+const spawnServerProcess = (): ChildProcessWithoutNullStreams =>
+  spawn(process.execPath, [SERVER_PATH], { stdio: ["pipe", "pipe", "pipe"] })
 
 /**
  * Spawns the built independent server with the same private bootstrap channel
@@ -38,7 +60,7 @@ export const makeTempDbPath = async (): Promise<string> => {
  */
 export const startServer = async (dbPath: string): Promise<RunningServer> => {
   const bearerToken = randomBytes(32).toString("base64url")
-  const child = spawn(process.execPath, [SERVER_PATH], { stdio: ["pipe", "pipe", "pipe"] })
+  const child = spawnServerProcess()
 
   let stderr = ""
   child.stderr.on("data", (chunk: Buffer) => {
@@ -48,17 +70,17 @@ export const startServer = async (dbPath: string): Promise<RunningServer> => {
   child.stdin.write(JSON.stringify({ bearerToken, dbPath }) + "\n")
 
   const stop = async () => {
-    if (child.exitCode !== null) return
+    if (child.exitCode !== null || child.signalCode !== null) return
+    const exited = waitForExit(child, STOP_TIMEOUT_MS)
     try {
       child.stdin.end()
     } catch {
       // Already closed.
     }
-    await Promise.race([
-      new Promise<void>((resolve) => child.once("exit", () => resolve())),
-      delay(STOP_TIMEOUT_MS)
-    ])
-    if (child.exitCode === null) child.kill("SIGKILL")
+    if (!(await exited) && child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL")
+      await waitForExit(child, STOP_TIMEOUT_MS)
+    }
   }
 
   const ready = await new Promise<ReadyLine>((resolve, reject) => {
