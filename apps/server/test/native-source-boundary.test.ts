@@ -89,6 +89,24 @@ describe("native source boundary precursor", () => {
     })
   })
 
+  it("preserves a leading BOM in an exact native filename", async () => {
+    const root = await makeTempRoot()
+    const sourceRoot = join(root, "collection")
+    await mkdir(sourceRoot)
+    const archiveName = "\uFEFFbook.zip"
+    await writeFile(join(sourceRoot, archiveName), Buffer.from("archive-fixture"))
+
+    const observation = await selectedRoot(sourceRoot)
+    await expect(resolveSourceCandidate(observation, archiveName)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        requestedRelativePath: archiveName,
+        observedRelativePath: archiveName,
+        nativePath: join(observation.canonicalPath, archiveName)
+      }
+    })
+  })
+
   it("accepts a root symlink, records its target, and rejects retargeting", async () => {
     const root = await makeTempRoot()
     const targetA = join(root, "target-a")
