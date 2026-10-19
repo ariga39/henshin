@@ -241,45 +241,64 @@ describe("server data-directory ownership", () => {
     }
   })
 
-  it("serializes simultaneous first starts on a fresh data directory", async () => {
-    const dbPath = await makeTempDbPath()
-    const first = launch(dbPath)
-    const second = launch(dbPath)
-    const observe = async (attempt: ServerAttempt) => {
+  it("serializes repeated simultaneous first starts on fresh data directories", async () => {
+    for (let iteration = 0; iteration < 10; iteration += 1) {
+      const dbPath = await makeTempDbPath()
       try {
-        return { attempt, ready: await waitForReady(attempt) }
-      } catch (error) {
-        return { attempt, error, result: await waitForExit(attempt.child, EXIT_TIMEOUT_MS) }
+        const first = launch(dbPath)
+        const second = launch(dbPath)
+        const observe = async (attempt: ServerAttempt) => {
+          try {
+            return { attempt, ready: await waitForReady(attempt) }
+          } catch (error) {
+            return { attempt, error, result: await waitForExit(attempt.child, EXIT_TIMEOUT_MS) }
+          }
+        }
+
+        const outcomes = await Promise.all([observe(first), observe(second)])
+        const ready = outcomes.filter(
+          (outcome): outcome is typeof outcome & { readonly ready: ReadyLine } => "ready" in outcome
+        )
+        const failed = outcomes.filter(
+          (outcome): outcome is typeof outcome & {
+            readonly result: { readonly code: number | null; readonly signal: NodeJS.Signals | null }
+          } => "result" in outcome
+        )
+        const diagnostics = outcomes
+          .map((outcome, contender) => {
+            const detail =
+              outcome.ready !== undefined
+                ? `ready port=${outcome.ready.port}`
+                : `exit=${outcome.result.code} signal=${outcome.result.signal ?? "none"} ` +
+                  `error=${String(outcome.error)} stdout=${outcome.attempt.stdout()} stderr=${outcome.attempt.stderr()}`
+            return `iteration=${iteration} contender=${contender} ${detail}`
+              .replaceAll(outcome.attempt.bearerToken, "<redacted-token>")
+              .replaceAll(dbPath, "<redacted-db-path>")
+          })
+          .join("\n")
+        expect(ready, diagnostics).toHaveLength(1)
+        expect(failed).toHaveLength(1)
+        expect(failed[0].result.code).toBe(1)
+        expect(failed[0].attempt.stderr()).toContain(
+          "server startup failed at ownership: data directory is already owned"
+        )
+
+        const survivor = ready[0]
+        const running: RunningServer = {
+          ...survivor.attempt,
+          baseUrl: `http://127.0.0.1:${survivor.ready.port}`,
+          instanceId: survivor.ready.instance_id,
+          epoch: survivor.ready.epoch,
+          stop: () => stop(survivor.attempt)
+        }
+        try {
+          await expect(readNote(running)).resolves.toEqual({ note_id: "note-1", text: "hello", revision: "0" })
+        } finally {
+          await running.stop()
+        }
+      } finally {
+        await cleanupTempDb(dbPath)
       }
-    }
-
-    const outcomes = await Promise.all([observe(first), observe(second)])
-    const ready = outcomes.filter((outcome): outcome is typeof outcome & { readonly ready: ReadyLine } =>
-      "ready" in outcome
-    )
-    const failed = outcomes.filter((outcome): outcome is typeof outcome & { readonly result: { readonly code: number | null } } =>
-      "result" in outcome
-    )
-    expect(ready).toHaveLength(1)
-    expect(failed).toHaveLength(1)
-    expect(failed[0].result.code).toBe(1)
-    expect(failed[0].attempt.stderr()).toContain(
-      "server startup failed at ownership: data directory is already owned"
-    )
-
-    const survivor = ready[0]
-    const running: RunningServer = {
-      ...survivor.attempt,
-      baseUrl: `http://127.0.0.1:${survivor.ready.port}`,
-      instanceId: survivor.ready.instance_id,
-      epoch: survivor.ready.epoch,
-      stop: () => stop(survivor.attempt)
-    }
-    try {
-      await expect(readNote(running)).resolves.toEqual({ note_id: "note-1", text: "hello", revision: "0" })
-    } finally {
-      await running.stop()
-      await cleanupTempDb(dbPath)
     }
   })
 
