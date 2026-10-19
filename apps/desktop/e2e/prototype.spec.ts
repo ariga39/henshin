@@ -126,6 +126,58 @@ test("a synthetic conditional edit commits, persists across restart, and reports
   expect(observed.secondEpoch).not.toBe(observed.firstEpoch)
 })
 
+test("rejects a stale direct edit after the main session epoch changes without dispatch or overwrite", async () => {
+  const dbPath = await tempDbPath()
+  const clientDbPath = `${dbPath}.desktop`
+  let oldEpoch = ""
+
+  const first = await launch(dbPath, clientDbPath)
+  try {
+    await first.window.getByTestId("load").click()
+    await expect(first.window.getByTestId("note-text")).toHaveText("hello")
+    oldEpoch = (await first.window.getByTestId("epoch").textContent()) ?? ""
+    await first.window.getByTestId("text-input").fill("retained-from-old-epoch")
+    await first.window.getByTestId("save-local-draft").click()
+    await expect(first.window.getByTestId("outcome")).toContainText("local draft saved")
+  } finally {
+    await close(first.app)
+  }
+
+  const second = await launch(dbPath, clientDbPath)
+  try {
+    await second.window.getByTestId("load").click()
+    await expect(second.window.getByTestId("note-text")).toHaveText("hello")
+    await expect(second.window.getByTestId("epoch")).not.toHaveText(oldEpoch)
+    await second.window.getByTestId("load-local-draft").click()
+    await expect(second.window.getByTestId("text-input")).toHaveValue("retained-from-old-epoch")
+    await expect(second.window.getByTestId("draft-status")).toContainText(`base epoch=${oldEpoch}`)
+
+    const staleEdit = await second.window.evaluate((baseEpoch) =>
+      window.henshinPrototype.editNote({
+        note_id: "note-1",
+        text: "must-not-overwrite",
+        expected_revision: "0",
+        base_epoch: baseEpoch,
+        operation_id: "77777777-7777-4777-8777-777777777777"
+      }), oldEpoch)
+    expect(staleEdit).toEqual({
+      ok: false,
+      error: {
+        code: "epoch_changed",
+        message: "authority epoch changed; reload the current note before saving",
+        retryable: true
+      }
+    })
+
+    await expect(second.window.evaluate(() => window.henshinPrototype.getNote("note-1")))
+      .resolves.toMatchObject({ ok: true, data: { text: "hello", revision: "0" } })
+    await expect(second.window.evaluate(() => window.henshinPrototype.listCommandAttempts()))
+      .resolves.toEqual({ ok: true, data: [] })
+  } finally {
+    await close(second.app)
+  }
+})
+
 test("retains an unresolved command across Electron restart and shows epoch-change comparison without replay", async () => {
   const dbPath = await tempDbPath()
   const clientDbPath = `${dbPath}.desktop`

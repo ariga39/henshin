@@ -284,6 +284,16 @@ const registerIpc = (): void => {
     try {
       const activeSession = requireSession()
       const activeConnection = requireConnection()
+      if (request.base_epoch !== activeSession.epoch) {
+        return {
+          ok: false as const,
+          error: {
+            code: "epoch_changed",
+            message: "authority epoch changed; reload the current note before saving",
+            retryable: true
+          }
+        }
+      }
       const generation = activeConnection.currentGeneration()
       if (generation === null) throw new ConnectionPausedError({ state: activeConnection.getStatus().state })
       return requireRuntime()

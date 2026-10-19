@@ -22,6 +22,7 @@ export interface ViewState {
   readonly epoch: string | null
   readonly note: NoteView | null
   readonly base_revision: string | null
+  readonly base_epoch: string | null
   readonly form_text: string
   readonly form_edit_version: number
   readonly draft_local_revision: string
@@ -39,6 +40,7 @@ const initialState: ViewState = {
   epoch: null,
   note: null,
   base_revision: null,
+  base_epoch: null,
   form_text: "",
   form_edit_version: 0,
   draft_local_revision: "0",
