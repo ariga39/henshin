@@ -48,7 +48,7 @@ export class DraftStore extends Context.Service<
     readonly discard: (key: DraftKey & { readonly expectedLocalRevision: string }) => Effect.Effect<DiscardedDraft, LocalDatabaseWorkerError | DraftConflictError>
   }
 >()("henshin/desktop/DraftStore") {
-  static readonly layer = (dbPath: string, workerUrl: URL): Layer.Layer<DraftStore> =>
+  static readonly layerFromWorker: Layer.Layer<DraftStore, never, LocalDatabaseWorker> =
     Layer.effect(
       DraftStore,
       Effect.gen(function*() {
@@ -135,5 +135,8 @@ export class DraftStore extends Context.Service<
 
         return DraftStore.of({ load, save, discard })
       })
-    ).pipe(Layer.provide(LocalDatabaseWorker.layer(dbPath, { workerUrl })))
+    )
+
+  static readonly layer = (dbPath: string, workerUrl: URL): Layer.Layer<DraftStore> =>
+    DraftStore.layerFromWorker.pipe(Layer.provide(LocalDatabaseWorker.layer(dbPath, { workerUrl })))
 }

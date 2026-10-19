@@ -60,7 +60,10 @@ describe("explicit renderer load races", () => {
         note_id: "note-1",
         form_id: "synthetic-note",
         local_revision: "4"
-      } })
+      } }),
+      listCommandAttempts: () => Effect.succeed({ ok: true, data: [] }),
+      reconcileCommand: () => Effect.succeed({ ok: false, error: { code: "not_used", message: "not used", retryable: false } }),
+      dismissCommand: () => Effect.succeed({ ok: false, error: { code: "not_used", message: "not used", retryable: false } })
     })
 
     const loading = Effect.runPromise(Effect.provide(loadNote, Layer.succeed(PrototypeClient, client)))
@@ -89,7 +92,10 @@ describe("explicit renderer load races", () => {
         note_id: "note-1",
         form_id: "synthetic-note",
         local_revision: "4"
-      } })
+      } }),
+      listCommandAttempts: () => Effect.succeed({ ok: true, data: [] }),
+      reconcileCommand: () => Effect.succeed({ ok: false, error: { code: "not_used", message: "not used", retryable: false } }),
+      dismissCommand: () => Effect.succeed({ ok: false, error: { code: "not_used", message: "not used", retryable: false } })
     })
 
     viewStore.set({

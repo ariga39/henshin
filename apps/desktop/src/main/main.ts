@@ -4,18 +4,33 @@ import path from "node:path"
 import { pathToFileURL } from "node:url"
 import {
   DiscardDraftIpcRequest,
+  DismissCommandIpcRequest,
   EditNoteIpcRequest,
   GetNoteIpcRequest,
   HandshakeIpcRequest,
   IpcChannels,
   LoadDraftIpcRequest,
+  ListCommandAttemptsIpcRequest,
   PrototypeHttpClient,
   PublicApiError,
   SaveDraftIpcRequest,
+  ReconcileCommandIpcRequest,
   type PublicError
 } from "@henshin/contracts"
 import { startServerChild, type ServerChild } from "./server-child"
 import { DraftConflictError, DraftStore, DraftStoreFullError } from "./persistence/DraftStore"
+import {
+  CommandAttemptConflictError,
+  CommandAttemptStore,
+  CommandAttemptStoreFullError
+} from "./persistence/CommandAttemptStore"
+import {
+  CommandAttemptUnresolvedError,
+  StoredCommandRejectionError,
+  executeNoteEdit,
+  reconcileNoteCommand
+} from "./CommandCoordinator"
+import { LocalDatabaseWorker } from "./persistence/LocalDatabaseWorker"
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
 
@@ -35,7 +50,7 @@ interface IpcErr {
 
 let mainWindow: BrowserWindow | null = null
 let serverChild: ServerChild | null = null
-type MainServices = PrototypeHttpClient | DraftStore
+type MainServices = PrototypeHttpClient | DraftStore | CommandAttemptStore
 let runtime: ManagedRuntime.ManagedRuntime<MainServices, never> | null = null
 let session: Session | null = null
 let rendererUrl = ""
@@ -59,6 +74,35 @@ const decodePublicError = Schema.decodeUnknownOption(PublicApiError)
  * message, stack, or internal cause never crosses the IPC boundary.
  */
 const toPublicError = (error: unknown): PublicError => {
+  if (error instanceof CommandAttemptConflictError) {
+    return {
+      code: "operation_conflict",
+      message: "operation id reused with a different local intent",
+      retryable: false
+    }
+  }
+  if (error instanceof CommandAttemptStoreFullError) {
+    return {
+      code: "command_attempt_store_full",
+      message: "unresolved command recovery storage is full; reconcile or dismiss an attempt",
+      retryable: false
+    }
+  }
+  if (error instanceof CommandAttemptUnresolvedError) {
+    return {
+      code: "reconciliation_required",
+      message: "command outcome is unresolved; reconcile before creating a new save",
+      retryable: false
+    }
+  }
+  if (error instanceof StoredCommandRejectionError) {
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: false,
+      ...(error.currentRevision === null ? {} : { current_revision: error.currentRevision })
+    }
+  }
   if (error instanceof DraftConflictError) {
     return {
       code: "draft_conflict",
@@ -177,17 +221,68 @@ const registerIpc = (): void => {
       toResult(
         Effect.gen(function*() {
           const client = yield* PrototypeHttpClient
-          const result = yield* client.editNote({
-            params: { id: request.note_id },
-            payload: {
-              operation_id: request.operation_id,
-              expected_revision: request.expected_revision,
+          const attempts = yield* CommandAttemptStore
+          return {
+            data: yield* executeNoteEdit(client, attempts, activeSession, {
+              noteId: request.note_id,
               text: request.text,
-              instance_id: activeSession.instanceId,
-              epoch: activeSession.epoch
-            }
-          })
-          return { ...result, data: result.data.note }
+              expectedRevision: request.expected_revision,
+              operationId: request.operation_id
+            })
+          }
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.listCommandAttempts, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ListCommandAttemptsIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    const activeSession = requireSession()
+    return requireRuntime().runPromise(
+      toResult(
+        Effect.gen(function*() {
+          const attempts = yield* CommandAttemptStore
+          return { data: yield* attempts.list(activeSession.instanceId) }
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.reconcileCommand, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ReconcileCommandIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    const activeSession = requireSession()
+    return requireRuntime().runPromise(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* PrototypeHttpClient
+          const attempts = yield* CommandAttemptStore
+          return {
+            data: yield* reconcileNoteCommand(client, attempts, activeSession, decoded.value.operation_id)
+          }
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.dismissCommand, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(DismissCommandIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    const activeSession = requireSession()
+    return requireRuntime().runPromise(
+      toResult(
+        Effect.gen(function*() {
+          const attempts = yield* CommandAttemptStore
+          return {
+            data: yield* attempts.dismiss({
+              instanceId: activeSession.instanceId,
+              operationId: decoded.value.operation_id
+            })
+          }
         })
       )
     )
@@ -313,14 +408,16 @@ const bootstrap = async (): Promise<void> => {
   serverChild = await startServerChild(dbPath)
 
   const draftWorkerUrl = pathToFileURL(path.join(app.getAppPath(), "dist", "draft-worker.mjs"))
+  const localWorker = LocalDatabaseWorker.layer(clientDbPath, { workerUrl: draftWorkerUrl })
   runtime = ManagedRuntime.make(
-    Layer.merge(
+    Layer.mergeAll(
       PrototypeHttpClient.layer({
         baseUrl: serverChild.baseUrl,
         bearerToken: serverChild.bearerToken
       }),
-      DraftStore.layer(clientDbPath, draftWorkerUrl)
-    )
+      DraftStore.layerFromWorker,
+      CommandAttemptStore.layerFromWorker
+    ).pipe(Layer.provide(localWorker))
   )
 
   // Establish the authenticated session through the typed client, so the

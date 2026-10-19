@@ -64,6 +64,53 @@ export const OperationResult = Schema.Struct({
 })
 export type OperationResult = typeof OperationResult.Type
 
+export const CommandAttemptStatus = Schema.Union([
+  Schema.Literal("prepared"),
+  Schema.Literal("submitted"),
+  Schema.Literal("unresolved"),
+  Schema.Literal("succeeded"),
+  Schema.Literal("rejected")
+])
+export type CommandAttemptStatus = typeof CommandAttemptStatus.Type
+
+/**
+ * Main-owned local recovery state for one deliberate note command. The intent
+ * is bounded and non-secret so it can survive a renderer or desktop restart.
+ */
+export const CommandAttempt = Schema.Struct({
+  instance_id: Uuid,
+  operation_id: Uuid,
+  note_id: NoteId,
+  intent_text: Text,
+  base_revision: Revision,
+  epoch: Uuid,
+  status: CommandAttemptStatus,
+  created_at_ms: Schema.Int,
+  updated_at_ms: Schema.Int,
+  result_note: Schema.NullOr(Note),
+  expires_at_ms: Schema.NullOr(Schema.Int),
+  error_code: Schema.NullOr(Schema.String),
+  error_message: Schema.NullOr(Schema.String),
+  current_revision: Schema.NullOr(Revision),
+  dismissed: Schema.Boolean
+})
+export type CommandAttempt = typeof CommandAttempt.Type
+
+export const CommandReconciliation = Schema.Struct({
+  attempt: CommandAttempt,
+  current_note: Schema.NullOr(Note),
+  server_result: Schema.NullOr(OperationResult),
+  requires_reconciliation: Schema.Boolean,
+  reconciliation_reason: Schema.Union([
+    Schema.Literal("complete"),
+    Schema.Literal("operation_expired"),
+    Schema.Literal("query_unavailable"),
+    Schema.Literal("persistence_failed"),
+    Schema.Literal("changed_epoch")
+  ])
+})
+export type CommandReconciliation = typeof CommandReconciliation.Type
+
 export const HandshakeData = Schema.Struct({
   api_version: Schema.String,
   capabilities: Schema.Array(Schema.String)

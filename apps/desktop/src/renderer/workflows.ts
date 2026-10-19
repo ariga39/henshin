@@ -185,3 +185,52 @@ export const discardSavedDraft = Effect.gen(function*() {
     yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
   }
 })
+
+export const loadRecovery = Effect.gen(function*() {
+  const client = yield* PrototypeClient
+  const result = yield* client.listCommandAttempts()
+  if (result.ok) {
+    yield* Effect.sync(() => viewStore.set({ recovery_attempts: result.data, outcome: null }))
+  } else {
+    yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+  }
+})
+
+export const reconcileRecovery = (operationId: string) =>
+  Effect.gen(function*() {
+    const client = yield* PrototypeClient
+    const result = yield* client.reconcileCommand(operationId)
+    if (result.ok) {
+      yield* Effect.sync(() =>
+        viewStore.set({
+          recovery_result: result.data,
+          recovery_attempts: viewStore
+            .getState()
+            .recovery_attempts.map((attempt) =>
+              attempt.operation_id === operationId ? result.data.attempt : attempt
+            ),
+          outcome: { kind: "reconciled", requires_reconciliation: result.data.requires_reconciliation }
+        })
+      )
+    } else {
+      yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+    }
+  })
+
+export const dismissRecovery = (operationId: string) =>
+  Effect.gen(function*() {
+    const client = yield* PrototypeClient
+    const result = yield* client.dismissCommand(operationId)
+    if (result.ok) {
+      yield* Effect.sync(() =>
+        viewStore.set({
+          recovery_attempts: viewStore
+            .getState()
+            .recovery_attempts.filter((attempt) => attempt.operation_id !== operationId),
+          outcome: null
+        })
+      )
+    } else {
+      yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+    }
+  })
