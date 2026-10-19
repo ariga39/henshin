@@ -7,7 +7,7 @@ not a product client or server.
 
 ## Source under test
 
-- Current candidate source: `52ab0e041b36eb7389e06142629ffdefbf8d52a0`.
+- Current candidate source: `d4c9a448a1e820a041763d7e09e5fa1ef3a2de1c`.
 
 ## Scope and fixtures
 
@@ -32,10 +32,10 @@ Final candidate checks on that source were:
 | Check | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass; contracts, server, and desktop |
-| `pnpm test` | Pass; build, 68 Vitest tests in 8 files, and 5 real Electron tests |
+| `pnpm test` | Pass; build, 72 Vitest tests in 8 files, and 5 real Electron tests |
 
 Primary independently accepted this exact source with pinned Node 24.19.0:
-typecheck, build, and the full suite passed with 68 Vitest tests in 8 files and
+typecheck, build, and the full suite passed with 72 Vitest tests in 8 files and
 5 real Electron tests.
 
 The executed command-attempt cases include:
@@ -96,7 +96,9 @@ The executed command-attempt cases include:
   continued local draft/attempt-list/dismiss availability, and retained form
   text across reconnect. A clean form adopts a refreshed server note; a dirty
   form, including text edited during reconnect, keeps its text and original
-  edit base.
+  edit base. Reconnect also preserves text entered before any note load and
+  explicitly restored empty drafts, while an untouched empty form or a clean
+  loaded form refreshes normally, even if saved-draft metadata is retained.
 
 The slice does not establish full G1. In particular, profile/connection
 switching, broad profile management, multi-window ownership, renderer crash
@@ -149,7 +151,7 @@ their current results are:
 | Command | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
-| `pnpm test` | Pass; build, 68 Vitest tests in 8 files, and 5 real Electron tests |
+| `pnpm test` | Pass; build, 72 Vitest tests in 8 files, and 5 real Electron tests |
 
 ### Durable draft precursor checks
 
