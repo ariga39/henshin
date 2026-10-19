@@ -7,7 +7,7 @@ not a product client or server.
 
 ## Source under test
 
-- Current candidate source: `d4c9a448a1e820a041763d7e09e5fa1ef3a2de1c`.
+- Current candidate source: `8cbf06d314fa28d420f46ea6234d5850cc5579c6`.
 
 ## Scope and fixtures
 
@@ -32,10 +32,10 @@ Final candidate checks on that source were:
 | Check | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass; contracts, server, and desktop |
-| `pnpm test` | Pass; build, 72 Vitest tests in 8 files, and 5 real Electron tests |
+| `pnpm test` | Pass; build, 76 Vitest tests in 9 files, and 5 real Electron tests |
 
 Primary independently accepted this exact source with pinned Node 24.19.0:
-typecheck, build, and the full suite passed with 72 Vitest tests in 8 files and
+typecheck, build, and the full suite passed with 76 Vitest tests in 9 files and
 5 real Electron tests.
 
 The executed command-attempt cases include:
@@ -67,6 +67,10 @@ The executed command-attempt cases include:
   cancellation. Terminal succeeded/rejected rows become eligible for bounded
   cleanup after seven days; unresolved rows become eligible only after explicit
   dismissal, while undismissed unresolved rows are not evicted.
+- The integrated command-attempt regressions verify original SQLite errors
+  after auto-rollback, seven-day terminal/dismissed retention, non-eviction of
+  undismissed unresolved records, and clearing only a dismissed comparison.
+  Retryable storage failures remain unresolved without redispatch.
 - A real Electron restart opens a retained unresolved row through main IPC,
   observes a changed authority epoch, fetches the current note without
   mutation, and renders original intent/base revision, historical result or
@@ -151,7 +155,7 @@ their current results are:
 | Command | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
-| `pnpm test` | Pass; build, 72 Vitest tests in 8 files, and 5 real Electron tests |
+| `pnpm test` | Pass; build, 76 Vitest tests in 9 files, and 5 real Electron tests |
 
 ### Durable draft precursor checks
 
