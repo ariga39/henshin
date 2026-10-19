@@ -28,6 +28,7 @@ const outcomeText = (state: ReturnType<typeof viewStore.getState>): string => {
 
 export const App = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
+  const currentNoteLoading = state.status === "loading"
 
   return (
     <main>
@@ -53,21 +54,38 @@ export const App = () => {
         id="text-input"
         data-testid="text-input"
         value={state.form_text}
+        disabled={currentNoteLoading}
         onChange={(event) => viewStore.editFormText(event.target.value)}
       />
-      <button data-testid="load" onClick={() => void runtime.runPromise(loadNote)}>
+      <button
+        data-testid="load"
+        disabled={currentNoteLoading}
+        onClick={() => void runtime.runPromise(loadNote)}
+      >
         Load current note
       </button>
       <section aria-labelledby="draft-actions">
         <h2 id="draft-actions">Desktop-local draft</h2>
         <p>Load saved draft copies text into this form only. Refresh the note before deliberate server reapply.</p>
-        <button data-testid="save-local-draft" onClick={() => void runtime.runPromise(saveLocalDraft)}>
+        <button
+          data-testid="save-local-draft"
+          disabled={currentNoteLoading}
+          onClick={() => void runtime.runPromise(saveLocalDraft)}
+        >
           Save local draft
         </button>
-        <button data-testid="load-local-draft" onClick={() => void runtime.runPromise(loadSavedDraft)}>
+        <button
+          data-testid="load-local-draft"
+          disabled={currentNoteLoading}
+          onClick={() => void runtime.runPromise(loadSavedDraft)}
+        >
           Load saved draft
         </button>
-        <button data-testid="discard-local-draft" onClick={() => void runtime.runPromise(discardSavedDraft)}>
+        <button
+          data-testid="discard-local-draft"
+          disabled={currentNoteLoading}
+          onClick={() => void runtime.runPromise(discardSavedDraft)}
+        >
           Discard saved draft
         </button>
         <p data-testid="draft-status">
@@ -79,7 +97,11 @@ export const App = () => {
       <section aria-labelledby="server-actions">
         <h2 id="server-actions">Server mutation</h2>
         <p>Only this deliberate Save sends the synthetic note edit to the server.</p>
-        <button data-testid="save" onClick={() => void runtime.runPromise(saveNote(state.form_text))}>
+        <button
+          data-testid="save"
+          disabled={currentNoteLoading}
+          onClick={() => void runtime.runPromise(saveNote(state.form_text))}
+        >
           Save to server
         </button>
       </section>
