@@ -8,7 +8,7 @@ completion of either gate or of the production indexer.
 
 The isolated server analysis service inspects one trusted local regular-file
 ZIP/CBZ or one direct-image directory in read-only mode. It returns a complete
-naturally ordered manifest of direct JPEG, PNG, and WebP pages, or a typed
+naturally ordered manifest of JPEG, PNG, and WebP pages, or a typed
 candidate error. Directory children, nested archives, sidecars, and unknown
 extensions are outside the page manifest. Recognized unsupported page formats
 produce an unsupported-pages error with bounded diagnostic counts rather than
@@ -30,6 +30,15 @@ and finite-limit violations are rejected. Directories use lossless buffer-name
 enumeration and reject page-suffixed symlink children. Natural ordering is
 tested with numeric runs, zero padding, Unicode, case, normalization, nested,
 and backslash-name fixtures.
+
+Run the sanitized probe after `pnpm build`:
+
+```sh
+node apps/server/dist/manifest-probe.mjs /path/to/disposable-source
+```
+
+It prints aggregate counts, declared bytes, and elapsed time, or a redacted
+error code. It does not print page names or contents.
 
 ## Finite defaults
 
@@ -59,7 +68,7 @@ Primary independently accepted the exact candidate commit with:
 | `pnpm typecheck` | Pass |
 | `pnpm build` | Pass |
 | `pnpm test` | Pass; 80 Vitest tests and 5 Electron tests |
-| Read-only sample probe | 3 ZIP/CBZ samples; aggregate 726014572 bytes; complete manifests of 148, 201, and 299 pages |
+| Read-only sample probe | 3 ZIP samples; aggregate 726014572 bytes; complete manifests of 148, 201, and 299 pages |
 
 The sample probe recorded process-inclusive times of 128 ms, 150 ms, and 149
 ms. Its before/after source observations were unchanged size and mtime only;
