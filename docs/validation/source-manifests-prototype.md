@@ -1,7 +1,7 @@
 # Source Manifest Prototype Evidence
 
 Status: **Focused bounded prototype evidence** for exact commit
-`8887d0d81168f084a8ee6fdb1d1121434d78233c`. This is a G3/G4 precursor, not
+`a10fe88ed13be95eab53f77b4e6ccce38bde0db3`. This is a G3/G4 precursor, not
 completion of either gate or of the production indexer.
 
 ## Scope
@@ -22,6 +22,10 @@ payloads. Central-directory tail reads are bounded and may incidentally
 include payload bytes. One instrumented large stored-member fixture showed no
 payload-overlapping read for that fixture; this is not a universal zero-payload
 read claim. The manifest does not claim page decode validity or CRC validation.
+
+Archive failures match exact zip.js sentinels. A genuine overlapping-data fixture
+asserts the library error and its structural-corruption result; native EACCES/EIO
+failures remain redacted read-failure results regardless of words in the path.
 
 Names are preserved as decoded member names, with CP437 and declared UTF-8
 handling supplied by zip.js. Unsafe names, lossy decoding, exact duplicates,
@@ -67,7 +71,7 @@ Primary independently accepted the exact candidate commit with:
 | --- | --- |
 | `pnpm typecheck` | Pass |
 | `pnpm build` | Pass |
-| `pnpm test` | Pass; 80 Vitest tests and 5 Electron tests |
+| `pnpm test` | Pass; 85 Vitest tests and 5 Electron tests |
 | Read-only sample probe | 3 ZIP samples; aggregate 726014572 bytes; complete manifests of 148, 201, and 299 pages |
 
 The sample probe recorded process-inclusive times of 128 ms, 150 ms, and 149
