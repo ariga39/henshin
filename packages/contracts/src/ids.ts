@@ -19,6 +19,10 @@ export type Revision = typeof Revision.Type
 export const NoteId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{1,64}$/))
 export type NoteId = typeof NoteId.Type
 
+/** Stable identifier for a renderer form within the local draft store. */
+export const DraftFormId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{1,64}$/))
+export type DraftFormId = typeof DraftFormId.Type
+
 const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
 /** Operation id, instance id, and epoch are all UUIDs on the wire. */

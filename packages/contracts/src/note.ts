@@ -1,5 +1,5 @@
 import { Schema } from "effect"
-import { NoteId, Revision, Text, Uuid } from "./ids"
+import { DraftFormId, NoteId, Revision, Text, Uuid } from "./ids"
 
 /**
  * The synthetic prototype subject. It is deliberately not a production domain
@@ -12,6 +12,36 @@ export const Note = Schema.Struct({
   revision: Revision
 })
 export type Note = typeof Note.Type
+
+/** A desktop-local saved form snapshot; it is never a server mutation. */
+export const SavedDraft = Schema.Struct({
+  instance_id: Uuid,
+  note_id: NoteId,
+  form_id: DraftFormId,
+  text: Text,
+  local_revision: Revision,
+  base_server_revision: Revision,
+  base_epoch: Uuid
+})
+export type SavedDraft = typeof SavedDraft.Type
+
+/** No saved text is present, but the key's local revision remains conditional. */
+export const SavedDraftAbsent = Schema.Struct({
+  instance_id: Uuid,
+  note_id: NoteId,
+  form_id: DraftFormId,
+  local_revision: Revision
+})
+export type SavedDraftAbsent = typeof SavedDraftAbsent.Type
+
+/** Result of a successful discard, including the tombstone revision. */
+export const DiscardedDraft = Schema.Struct({
+  instance_id: Uuid,
+  note_id: NoteId,
+  form_id: DraftFormId,
+  local_revision: Revision
+})
+export type DiscardedDraft = typeof DiscardedDraft.Type
 
 export const EditNotePayload = Schema.Struct({
   operation_id: Uuid,
