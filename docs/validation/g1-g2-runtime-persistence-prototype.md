@@ -6,12 +6,12 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Source under test
 
-- Tested code: `6dbcd8f00e9f138f1678f892e76bde2e01d3fcc8`.
-- Primary acceptance independently ran `pnpm typecheck` and `pnpm test` on
-  `9798ae3`, whose code matches that revision: 27 Vitest tests and three real
-  Electron tests passed. The instance-isolation Electron case also passed five
-  repeated runs after the asynchronous input-race fix.
-- Subsequent stack integration changes only this evidence document.
+- Tested code: `8d2d7bdda2a8942f022bb15e0091976255f5cbba`.
+- Primary acceptance independently ran `pnpm typecheck` and `pnpm test` on that
+  revision: 27 Vitest tests and three real Electron tests passed. Note editing
+  and draft/server actions are disabled during current-note loading; the
+  namespace fixture waits for visible note readiness before editing.
+- Subsequent stack integration changes only this evidence document and ancestry.
 
 ## Scope and fixtures
 
@@ -71,15 +71,10 @@ All commands were run on the primary Node 24.19.0 runtime unless noted.
 
 ### Durable draft precursor checks
 
-These checks cover the narrow synthetic-note draft slice only; they do not
+The full suite above includes three real draft-worker tests, two deterministic
+renderer load/edit race tests, and the Electron draft restart and namespace
+cases. They cover the narrow synthetic-note draft slice only and do not
 replace the full G1 case 2 gate.
-
-| Command | Result |
-| --- | --- |
-| `pnpm typecheck` | Pass on source `6dbcd8f00e9f138f1678f892e76bde2e01d3fcc8` |
-| `pnpm build` | Pass; includes the bundled desktop draft worker |
-| `pnpm exec vitest run apps/server/test/desktop-draft-worker.test.ts apps/server/test/renderer-draft-load-race.test.ts` | Pass, 2 files and 5 tests |
-| `pnpm exec playwright test apps/desktop/e2e/prototype.spec.ts -g "does not cross-read a saved draft between verified server instances"` | Pass, 1 real Electron test |
 
 The executed lifecycle suite awaited cleanup of its owned child processes and
 temporary database directories; no fixture process was left running by the
