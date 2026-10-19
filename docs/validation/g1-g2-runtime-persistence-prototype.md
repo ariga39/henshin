@@ -6,13 +6,15 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Source under test
 
-- Tested code: `5dd562d01784a66c3cb00a9e9ca52eef384fa765` — `pnpm typecheck`,
-  `pnpm build`, `pnpm test:http` (13/13), and `pnpm test:e2e` (1/1) all pass on
-  this revision.
+- Tested code: `65b26f7c69353dc41f0e062e6485ef3467576ec6` — `pnpm typecheck`,
+  `pnpm build`, `pnpm test` (22 server tests, 1 Electron e2e test) all pass on
+  this revision. The preceding bootstrap-redaction fix is included at
+  `0788c8a`.
 - Prototype base commit: `ec2cc9a` (first frozen install/typecheck/test pass).
-- Primary acceptance reran the full suite after the bootstrap-error redaction
-  change in the tested revision. The earlier `abb3ce4` run covered 12 HTTP tests;
-  this run also covers the malformed-bootstrap child-process regression.
+- Primary acceptance independently reran typechecking and the full suite on
+  `9e95b7a`, whose code matches the tested revision above: 12 HTTP cases, one
+  bootstrap-redaction case, nine lifecycle cases, and one real Electron test.
+  Subsequent stack integration changes only this evidence document.
 
 ## Scope and fixtures
 
@@ -68,10 +70,11 @@ All commands were run on the primary Node 24.19.0 runtime unless noted.
 | `pnpm install` | Pass (locked install, explicit `allowBuilds` for electron/esbuild) |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
 | `pnpm build` | Pass (server `dist/server.mjs` + `dist/worker.mjs`; desktop main/preload/renderer) |
-| `pnpm test:http` | Pass, 13/13 (12 real HTTP cases plus the malformed-bootstrap child-process regression) |
-| `pnpm test:e2e` | Pass, 1/1 (real Electron via Playwright `_electron`) |
+| `pnpm test` | Pass, 22 server tests plus 1/1 real Electron e2e test |
 
-No leaked Electron or owned server child processes remained after the suites.
+The executed lifecycle suite awaited cleanup of its owned child processes and
+temporary database directories; no fixture process was left running by the
+suite.
 
 ## Cases exercised
 
@@ -109,6 +112,28 @@ No leaked Electron or owned server child processes remained after the suites.
   increments to `9007199254740993`, reads back exactly, and a stale edit reports
   `current_revision = 9007199254740993` — beyond `Number.MAX_SAFE_INTEGER`.
 
+## Runtime lifecycle precursor (executed)
+
+This is a bounded G1 case 5 / G6 precursor, not completion of the full resource
+gate or resource framework.
+
+- Eight concurrent calls are pending when a real worker thread exits; all settle
+  with the worker-death error, and later admission fails closed.
+- A real worker call times out and an interrupted call is removed from pending.
+  A barrier fixture confirms 64 calls reached pending before the 65th is
+  rejected; after interruption, a new call is admitted. A worker that ignores
+  close is terminated within the configured shutdown deadline.
+- The production child supervisor is exercised with a real built server for
+  normal stop, failed SQLite readiness, a never-ready child killed at the
+  readiness deadline, and a missing executable. Spawn errors settle without an
+  unhandled child-process error.
+- Closing the production child's private stdin control channel makes the owned
+  child exit, while a separately started server remains reachable. This models
+  parent loss at the documented control-channel boundary.
+- A standalone real-process bootstrap test supplies a sentinel in malformed
+  input and observes a bounded nonzero exit, a safe diagnostic, and no sentinel
+  or token echo in stderr.
+
 ## Pending G1/G2 cases (Not run)
 
 - G1 case 2: React remount/unmount, window switching, late responses and epoch
@@ -118,8 +143,9 @@ No leaked Electron or owned server child processes remained after the suites.
   accepted handoff after teardown, no automatic relaunch, event retry).
 - G1 case 4: durable task scheduling, cancellation/restart, stale-generation
   rejection, busy/full database behavior.
-- G1 case 5: resource counters and crash fixtures for sockets, bodies, workers,
-  Blob URLs, and temp files.
+- G1 case 5 remainder: resource counters and crash fixtures for sockets, bodies,
+  Blob URLs, and the broader temporary-resource surface. This revision only
+  executes the bounded worker/server-child precursor above.
 - G1 remainder: lost-reply reconciliation and explicit Disconnect.
 - G2 remainder: executable DDL for the full authoritative schema,
   pagination/cursor limits and stale-cursor restart, live-refresh fixtures,
@@ -133,5 +159,11 @@ No leaked Electron or owned server child processes remained after the suites.
 - Prototype-only schema and API; not the first-release persistence contract.
 - The desktop spawns the server via `ELECTRON_RUN_AS_NODE`, not a packaged
   standalone runtime or installer.
+- Parent loss is tested by closing the private stdin control channel through the
+  production supervisor seam; no Electron `SIGKILL` crash fixture or packaged
+  desktop process-tree assertion was executed.
+- Full resource counters, renderer crash behavior, sockets/body/Blob URL
+  accounting, NAS/EH/reader resources, and the remaining G1/G6 gates remain
+  untested.
 - The prototype's chunked-body handling buffers unmeasured bodies in memory up
   to the 1 MiB bound; it does not implement streaming upload.

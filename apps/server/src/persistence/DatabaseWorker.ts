@@ -12,6 +12,14 @@ const SHUTDOWN_DEADLINE_MS = 2_000
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
+export interface DatabaseWorkerOptions {
+  /** Test-only worker replacement and data used by worker fault fixtures. */
+  readonly workerUrl?: URL
+  readonly workerData?: Readonly<Record<string, unknown>>
+  readonly callDeadline?: Duration.Duration
+  readonly shutdownDeadlineMs?: number
+}
+
 /**
  * Owns the dedicated SQLite worker thread.
  *
@@ -26,7 +34,10 @@ export class DatabaseWorker extends Context.Service<
   DatabaseWorker,
   { readonly call: (request: WorkerRequest) => Effect.Effect<unknown, DatabaseWorkerError> }
 >()("henshin/server/DatabaseWorker") {
-  static readonly layer = (dbPath: string): Layer.Layer<DatabaseWorker> =>
+  static readonly layer = (
+    dbPath: string,
+    options: DatabaseWorkerOptions = {}
+  ): Layer.Layer<DatabaseWorker> =>
     Layer.effect(
       DatabaseWorker,
       Effect.gen(function*() {
@@ -45,8 +56,8 @@ export class DatabaseWorker extends Context.Service<
 
         const worker = yield* Effect.acquireRelease(
           Effect.sync(() => {
-            const instance = new Worker(new URL("./worker.mjs", import.meta.url), {
-              workerData: { dbPath }
+            const instance = new Worker(options.workerUrl ?? new URL("./worker.mjs", import.meta.url), {
+              workerData: { ...options.workerData, dbPath }
             })
 
             instance.on("message", (raw: unknown) => {
@@ -89,9 +100,12 @@ export class DatabaseWorker extends Context.Service<
                   resolve()
                 }
               })
-              await Promise.race([ack, delay(SHUTDOWN_DEADLINE_MS)])
+              await Promise.race([ack, delay(options.shutdownDeadlineMs ?? SHUTDOWN_DEADLINE_MS)])
               if (instance.threadId !== -1) {
-                await Promise.race([instance.terminate(), delay(SHUTDOWN_DEADLINE_MS)])
+                await Promise.race([
+                  instance.terminate(),
+                  delay(options.shutdownDeadlineMs ?? SHUTDOWN_DEADLINE_MS)
+                ])
               }
             })
         )
@@ -129,7 +143,7 @@ export class DatabaseWorker extends Context.Service<
 
             return execute.pipe(
               Effect.onInterrupt(() => Effect.sync(() => void pending.delete(id))),
-              Effect.timeoutOption(CALL_DEADLINE),
+              Effect.timeoutOption(options.callDeadline ?? CALL_DEADLINE),
               Effect.flatMap(
                 Option.match({
                   onNone: () =>

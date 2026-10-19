@@ -4,20 +4,36 @@ import { DatabaseSync } from "node:sqlite"
 import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import { PrototypeHttpClient } from "@henshin/contracts"
-import { makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
+import {
+  cleanupTempDb,
+  makeTempDbPath,
+  startServer,
+  type RunningServer
+} from "./support/server-process"
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const servers: RunningServer[] = []
+const tempDbPaths = new Set<string>()
 
 const start = async (dbPath?: string): Promise<RunningServer> => {
-  const server = await startServer(dbPath ?? (await makeTempDbPath()))
-  servers.push(server)
-  return server
+  const actualDbPath = dbPath ?? (await makeTempDbPath())
+  tempDbPaths.add(actualDbPath)
+  try {
+    const server = await startServer(actualDbPath)
+    servers.push(server)
+    return server
+  } catch (error) {
+    await cleanupTempDb(actualDbPath)
+    tempDbPaths.delete(actualDbPath)
+    throw error
+  }
 }
 
 afterEach(async () => {
   for (const server of servers.splice(0)) await server.stop()
+  for (const dbPath of tempDbPaths) await cleanupTempDb(dbPath)
+  tempDbPaths.clear()
 })
 
 const withClient = <A, E>(
