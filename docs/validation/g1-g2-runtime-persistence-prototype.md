@@ -6,12 +6,13 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Source under test
 
-- Tested code: `abb3ce4a752b520f421cc4cae732fac854385383` — `pnpm typecheck`,
-  `pnpm build`, `pnpm test:http` (12/12), and `pnpm test:e2e` (1/1) all pass on
+- Tested code: `5dd562d01784a66c3cb00a9e9ca52eef384fa765` — `pnpm typecheck`,
+  `pnpm build`, `pnpm test:http` (13/13), and `pnpm test:e2e` (1/1) all pass on
   this revision.
 - Prototype base commit: `ec2cc9a` (first frozen install/typecheck/test pass).
-- Documentation-only follow-up commits after the tested code do not require a
-  retest; they leave the code revision above unchanged.
+- Primary acceptance reran the full suite after the bootstrap-error redaction
+  change in the tested revision. The earlier `abb3ce4` run covered 12 HTTP tests;
+  this run also covers the malformed-bootstrap child-process regression.
 
 ## Scope and fixtures
 
@@ -67,13 +68,15 @@ All commands were run on the primary Node 24.19.0 runtime unless noted.
 | `pnpm install` | Pass (locked install, explicit `allowBuilds` for electron/esbuild) |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
 | `pnpm build` | Pass (server `dist/server.mjs` + `dist/worker.mjs`; desktop main/preload/renderer) |
-| `pnpm test:http` | Pass, 12/12 (real HTTP over loopback against the built independent server) |
+| `pnpm test:http` | Pass, 13/13 (12 real HTTP cases plus the malformed-bootstrap child-process regression) |
 | `pnpm test:e2e` | Pass, 1/1 (real Electron via Playwright `_electron`) |
 
 No leaked Electron or owned server child processes remained after the suites.
 
 ## Cases exercised
 
+- Malformed bootstrap input containing a sentinel credential exits within the
+  test deadline with a fixed redacted diagnostic and without echoing the input.
 - Renderer Effect operation through the typed preload/main client reaches the
   independent server and a SQLite worker transaction; a tagged
   `revision_conflict` round-trips to the UI without private details.
