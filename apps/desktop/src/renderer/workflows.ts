@@ -222,11 +222,14 @@ export const dismissRecovery = (operationId: string) =>
     const client = yield* PrototypeClient
     const result = yield* client.dismissCommand(operationId)
     if (result.ok) {
+      const state = viewStore.getState()
       yield* Effect.sync(() =>
         viewStore.set({
-          recovery_attempts: viewStore
-            .getState()
-            .recovery_attempts.filter((attempt) => attempt.operation_id !== operationId),
+          recovery_attempts: state.recovery_attempts.filter((attempt) => attempt.operation_id !== operationId),
+          recovery_result:
+            state.recovery_result?.attempt.operation_id === operationId
+              ? null
+              : state.recovery_result,
           outcome: null
         })
       )

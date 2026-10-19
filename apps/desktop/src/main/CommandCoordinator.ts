@@ -71,6 +71,7 @@ const isDefinitiveNoWrite = (error: unknown): boolean =>
     const decoded = publicError(error)
     return (
       decoded !== undefined &&
+      decoded.retryable === false &&
       decoded._tag !== "InternalError" &&
       decoded._tag !== "EpochChanged" &&
       decoded._tag !== "InstanceMismatch" &&
