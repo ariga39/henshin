@@ -7,7 +7,7 @@ not a product client or server.
 
 ## Source under test
 
-- Current candidate source: `261f8b823a26e141ac72540b7a5ae2ce0d587879`.
+- Current candidate source: `8375cf5235adfe636218cdc14b80d563af2f9db7`.
 
 ## Scope and fixtures
 
@@ -32,10 +32,10 @@ Final candidate checks on that source were:
 | Check | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass; contracts, server, and desktop |
-| `pnpm test` | Pass; build, 67 Vitest tests in 8 files, and 5 real Electron tests |
+| `pnpm test` | Pass; build, 68 Vitest tests in 8 files, and 5 real Electron tests |
 
 Primary independently accepted this exact source with pinned Node 24.19.0:
-typecheck, build, and the full suite passed with 67 Vitest tests in 8 files and
+typecheck, build, and the full suite passed with 68 Vitest tests in 8 files and
 5 real Electron tests.
 
 The executed command-attempt cases include:
@@ -87,9 +87,9 @@ The executed command-attempt cases include:
   Wrong-instance and explicit 401/403 responses remain blocked, retain local
   drafts and attempts, and emit no mutation. Late lifecycle responses cannot
   reopen a stopped generation.
-- Disconnect during an in-flight renderer load releases the abandoned loading
+- A connection transition during an in-flight renderer load releases the abandoned loading
   state, keeping local editing and draft actions available; its late response
-  cannot overwrite a newer generation.
+  cannot overwrite a newer generation, including when Reconnect fails authentication.
 - Electron coverage verifies direct IPC network denial while disconnected,
   continued local draft/attempt-list/dismiss availability, and retained form
   text across reconnect. A clean form adopts a refreshed server note; a dirty
@@ -147,7 +147,7 @@ their current results are:
 | Command | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
-| `pnpm test` | Pass; build, 67 Vitest tests in 8 files, and 5 real Electron tests |
+| `pnpm test` | Pass; build, 68 Vitest tests in 8 files, and 5 real Electron tests |
 
 ### Durable draft precursor checks
 
