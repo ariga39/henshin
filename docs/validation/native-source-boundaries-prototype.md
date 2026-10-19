@@ -1,7 +1,7 @@
 # Native Source Boundary Precursor
 
 Status: **bounded macOS development-host precursor evidence**, not a G3
-completion claim. The implementation is recorded at commit `3c8289e83960be1522f22446e396173ea2e8e74b` in
+completion claim. The implementation is recorded at commit `3642d1d14b699d738be27378ef477ad4c17dc417` in
 [`NativeSourceBoundary.ts`](../../apps/server/src/analysis/NativeSourceBoundary.ts)
 with focused cases in
 [`native-source-boundary.test.ts`](../../apps/server/test/native-source-boundary.test.ts).
@@ -81,6 +81,6 @@ a future managed output tree. It does not claim hard native-I/O cancellation,
 hostile-swap protection, or immunity to unknown NAS aliases/mount changes.
 
 The focused native suite recorded 10/10 passing cases at the implementation
-commit. The independently accepted broader verification was 95 Vitest tests
-in 10 files plus 5 Electron tests, with typecheck and build passing; those
+commit. The independently accepted broader verification was 108 Vitest tests
+in 11 files plus 6 Electron tests, with typecheck and build passing; those
 results do not expand this precursor's scope. Full G3 remains **Not run**.
