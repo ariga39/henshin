@@ -7,7 +7,7 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Source under test
 
-- Current candidate source: `85b90242d3078e86a88fd1a3e61d9b3e3fdd9c1f`;
+- Current candidate source: `67a79f5e3a35c9225779b0025c2fa5313eb566e0`;
   its focused main-owned command-attempt evidence is recorded below.
 - Accepted operation-results predecessor: `8350c34adcaf432461d16034ca6c40b8fa852724`;
   see [operation-results prototype evidence](operation-results-prototype.md).
@@ -29,7 +29,7 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 ## Current main-owned command-attempt slice
 
 The focused implementation is recorded at code commit
-`85b90242d3078e86a88fd1a3e61d9b3e3fdd9c1f`. It is an additional prototype
+`67a79f5e3a35c9225779b0025c2fa5313eb566e0`. It is an additional prototype
 precursor, not completion of the G1 gate or a production command contract.
 
 Final candidate checks on that source were:
@@ -56,7 +56,9 @@ The executed command-attempt cases include:
   stream. The production coordinator retains the unresolved attempt, performs
   read-only status/current-note reconciliation, and recovers the single
   revision. A controlled real-proxy race also proves stale unresolved
-  bookkeeping cannot downgrade the terminal SQLite state.
+  bookkeeping cannot downgrade the terminal SQLite state. Recovery returns the
+  winning durable result and reports reconciliation complete when concurrent
+  dispatch succeeds after the status query observed an absent result.
 - A successful server lookup whose local terminal persistence fails remains
   unresolved and is reported as `persistence_failed`. An unresolved attempt
   whose same-epoch operation result is expired or unknown remains read-only and
