@@ -1,7 +1,7 @@
 # Native Source Boundary Precursor
 
 Status: **bounded macOS development-host precursor evidence**, not a G3
-completion claim. The implementation is recorded at commit `3642d1d14b699d738be27378ef477ad4c17dc417` in
+completion claim. The implementation is recorded at commit `dfb83983460c9d7425333f22c763f5636fbe0d46` in
 [`NativeSourceBoundary.ts`](../../apps/server/src/analysis/NativeSourceBoundary.ts)
 with focused cases in
 [`native-source-boundary.test.ts`](../../apps/server/test/native-source-boundary.test.ts).
@@ -25,7 +25,7 @@ disposable temporary directories only. Fixtures covered:
 Portable logical paths are validated before native access. Empty segments,
 `.`/`..`, absolute paths, backslashes, drive-like prefixes, NUL, and trailing
 slashes are rejected. Literal percent, shell, space, and Unicode characters
-are preserved. Configured absolute native paths containing `.` or `..` are
+are preserved, including a leading U+FEFF in an exact filename. Configured absolute native paths containing `.` or `..` are
 deliberately rejected rather than lexically normalized across a symlink.
 
 Each requested component is resolved by incremental directory enumeration and
@@ -80,11 +80,11 @@ auditing, or cross-platform behavior. It does not validate links or cleanup in
 a future managed output tree. It does not claim hard native-I/O cancellation,
 hostile-swap protection, or immunity to unknown NAS aliases/mount changes.
 
-The focused native suite recorded 10/10 passing cases at the implementation
-commit. The independently accepted broader verification was 108 Vitest tests
+The focused native suite recorded 11/11 passing cases at the implementation
+commit. The independently accepted broader verification was 111 Vitest tests
 in 11 files plus 6 Electron tests, with typecheck and build passing; those
 results do not expand this precursor's scope. The cooperative deadline and
 source-root/source-root overlap are implemented but were not triggered by
-these ten fixtures. The case-alias outcome was observed on the tested
+these eleven fixtures. The case-alias outcome was observed on the tested
 case-insensitive volume; a case-sensitive volume may report `missing-target`.
 Full G3 remains **Not run**.
