@@ -1,5 +1,7 @@
 import { Context, Effect, Layer } from "effect"
 import type {
+  CommandAttempt,
+  CommandReconciliation,
   DiscardedDraft,
   HandshakeView,
   NoteView,
@@ -26,6 +28,9 @@ export interface PrototypeBridge {
   saveDraft(input: SaveDraftInput): Promise<Result<SavedDraft>>
   loadDraft(input: LoadDraftInput): Promise<Result<SavedDraft | SavedDraftAbsent | null>>
   discardDraft(input: DiscardDraftInput): Promise<Result<DiscardedDraft>>
+  listCommandAttempts(): Promise<Result<ReadonlyArray<CommandAttempt>>>
+  reconcileCommand(operationId: string): Promise<Result<CommandReconciliation>>
+  dismissCommand(operationId: string): Promise<Result<CommandAttempt>>
 }
 
 export interface SaveDraftInput {
@@ -85,6 +90,9 @@ export class PrototypeClient extends Context.Service<
     readonly saveDraft: (input: SaveDraftInput) => Effect.Effect<Result<SavedDraft>>
     readonly loadDraft: (input: LoadDraftInput) => Effect.Effect<Result<SavedDraft | SavedDraftAbsent | null>>
     readonly discardDraft: (input: DiscardDraftInput) => Effect.Effect<Result<DiscardedDraft>>
+    readonly listCommandAttempts: () => Effect.Effect<Result<ReadonlyArray<CommandAttempt>>>
+    readonly reconcileCommand: (operationId: string) => Effect.Effect<Result<CommandReconciliation>>
+    readonly dismissCommand: (operationId: string) => Effect.Effect<Result<CommandAttempt>>
   }
 >()("henshin/desktop/renderer/PrototypeClient") {
   static readonly layer = Layer.succeed(
@@ -95,7 +103,10 @@ export class PrototypeClient extends Context.Service<
       editNote: (input) => callIpc(() => window.henshinPrototype.editNote(input)),
       saveDraft: (input) => callIpc(() => window.henshinPrototype.saveDraft(input)),
       loadDraft: (input) => callIpc(() => window.henshinPrototype.loadDraft(input)),
-      discardDraft: (input) => callIpc(() => window.henshinPrototype.discardDraft(input))
+      discardDraft: (input) => callIpc(() => window.henshinPrototype.discardDraft(input)),
+      listCommandAttempts: () => callIpc(() => window.henshinPrototype.listCommandAttempts()),
+      reconcileCommand: (operationId) => callIpc(() => window.henshinPrototype.reconcileCommand(operationId)),
+      dismissCommand: (operationId) => callIpc(() => window.henshinPrototype.dismissCommand(operationId))
     })
   )
 }

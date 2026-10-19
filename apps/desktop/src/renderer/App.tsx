@@ -1,7 +1,16 @@
 import { useSyncExternalStore } from "react"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { discardSavedDraft, loadNote, loadSavedDraft, saveLocalDraft, saveNote } from "./workflows"
+import {
+  dismissRecovery,
+  discardSavedDraft,
+  loadNote,
+  loadRecovery,
+  loadSavedDraft,
+  reconcileRecovery,
+  saveLocalDraft,
+  saveNote
+} from "./workflows"
 
 const outcomeText = (state: ReturnType<typeof viewStore.getState>): string => {
   const outcome = state.outcome
@@ -21,8 +30,25 @@ const outcomeText = (state: ReturnType<typeof viewStore.getState>): string => {
       return `local draft discarded revision=${outcome.local_revision}`
     case "draft_conflict":
       return `local draft conflict current_revision=${outcome.current_local_revision}`
+    case "reconciled":
+      return outcome.requires_reconciliation ? "reconciliation still required" : "reconciliation complete"
     case "error":
       return `error ${outcome.message}`
+  }
+}
+
+const reconciliationReasonText = (reason: NonNullable<ReturnType<typeof viewStore.getState>["recovery_result"]>["reconciliation_reason"]): string => {
+  switch (reason) {
+    case "operation_expired":
+      return "operation result unavailable or expired"
+    case "query_unavailable":
+      return "operation status unavailable; current state may still be authoritative"
+    case "persistence_failed":
+      return "recovery result found but local persistence is incomplete"
+    case "changed_epoch":
+      return "authority epoch changed"
+    case "complete":
+      return "complete"
   }
 }
 
@@ -106,6 +132,53 @@ export const App = () => {
         </button>
       </section>
       <p data-testid="outcome">{outcomeText(state)}</p>
+      <section aria-labelledby="recovery-actions">
+        <h2 id="recovery-actions">Command recovery</h2>
+        <p>Recovery is read-only. It never resends a saved mutation.</p>
+        <button data-testid="load-recovery" onClick={() => void runtime.runPromise(loadRecovery)}>
+          List command diagnostics
+        </button>
+        {state.recovery_attempts.map((attempt) => (
+          <article key={attempt.operation_id} data-testid={`recovery-${attempt.operation_id}`}>
+            <p>
+              operation {attempt.operation_id}: {attempt.status}; intent “{attempt.intent_text}” from revision{" "}
+              {attempt.base_revision}
+            </p>
+            <p>submitted epoch {attempt.epoch}</p>
+            <button onClick={() => void runtime.runPromise(reconcileRecovery(attempt.operation_id))}>
+              Reconcile
+            </button>
+            <button onClick={() => void runtime.runPromise(dismissRecovery(attempt.operation_id))}>
+              Dismiss
+            </button>
+          </article>
+        ))}
+        {state.recovery_result !== null && (
+          <div data-testid="recovery-comparison">
+            <p>
+              original intent: “{state.recovery_result.attempt.intent_text}” from revision {state.recovery_result.attempt.base_revision}
+            </p>
+            <p>submitted epoch: {state.recovery_result.attempt.epoch}</p>
+            <p>
+              recovered result: {state.recovery_result.server_result === null
+                ? "unavailable or expired"
+                : `“${state.recovery_result.server_result.note.text}” at revision ${state.recovery_result.server_result.note.revision} (lookup expiry ${state.recovery_result.server_result.expires_at_ms})`}
+            </p>
+            <p>
+              current note: {state.recovery_result.current_note === null
+                ? "unavailable"
+                : `“${state.recovery_result.current_note.text}” at revision ${state.recovery_result.current_note.revision}`}
+            </p>
+            <p data-testid="recovery-result">
+              {state.recovery_result.requires_reconciliation
+                ? state.recovery_result.reconciliation_reason === "changed_epoch"
+                  ? "authority epoch changed; compare the current note before deliberate reapply"
+                  : `${reconciliationReasonText(state.recovery_result.reconciliation_reason)}; compare the current note before deliberate reapply`
+                : `reconciled ${state.recovery_result.attempt.status}; compare before deliberate reapply`}
+            </p>
+          </div>
+        )}
+      </section>
     </main>
   )
 }

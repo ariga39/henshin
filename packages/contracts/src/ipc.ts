@@ -1,6 +1,12 @@
 import { Schema } from "effect"
 import { DraftFormId, NoteId, Revision, Text, Uuid } from "./ids"
-import type { DiscardedDraft, SavedDraft, SavedDraftAbsent } from "./note"
+import type {
+  CommandAttempt,
+  CommandReconciliation,
+  DiscardedDraft,
+  SavedDraft,
+  SavedDraftAbsent
+} from "./note"
 
 /**
  * IPC request schemas. The renderer never supplies instance/epoch/auth: main
@@ -47,6 +53,18 @@ export type DiscardDraftIpcRequest = typeof DiscardDraftIpcRequest.Type
 
 export type SavedDraftIpcResult = SavedDraft | SavedDraftAbsent | null
 export type DiscardedDraftIpcResult = DiscardedDraft
+
+export const ListCommandAttemptsIpcRequest = Schema.Struct({})
+export type ListCommandAttemptsIpcRequest = typeof ListCommandAttemptsIpcRequest.Type
+
+export const ReconcileCommandIpcRequest = Schema.Struct({ operation_id: Uuid })
+export type ReconcileCommandIpcRequest = typeof ReconcileCommandIpcRequest.Type
+
+export const DismissCommandIpcRequest = Schema.Struct({ operation_id: Uuid })
+export type DismissCommandIpcRequest = typeof DismissCommandIpcRequest.Type
+
+export type CommandAttemptsIpcResult = ReadonlyArray<CommandAttempt>
+export type CommandReconciliationIpcResult = CommandReconciliation
 
 /** Public error shape returned across the IPC boundary. */
 export const PublicError = Schema.Struct({

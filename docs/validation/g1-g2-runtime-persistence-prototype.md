@@ -7,10 +7,10 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Source under test
 
-- Current operation-results source: `8350c34adcaf432461d16034ca6c40b8fa852724`;
+- Current candidate source: `485718e5e36c394ce6b78cf4ffc1d7ac605a3717`;
+  its focused main-owned command-attempt evidence is recorded below.
+- Accepted operation-results predecessor: `8350c34adcaf432461d16034ca6c40b8fa852724`;
   see [operation-results prototype evidence](operation-results-prototype.md).
-- Primary independently accepted that source with `pnpm typecheck` and
-  `pnpm test`: 40 Vitest tests and three real Electron tests passed.
 - Historical precursor source: `a016244cba000e522573146f558359a5ded69f83`;
   the earlier counts and cases below remain anchored to that revision.
 
@@ -25,6 +25,71 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 - Auth is required even on loopback: a random 256-bit bearer token is generated
   by main and passed to the server over its private stdin channel. It never
   appears in argv, the environment, or logs.
+
+## Current main-owned command-attempt slice
+
+The focused implementation is recorded at code commit
+`485718e5e36c394ce6b78cf4ffc1d7ac605a3717`. It is an additional prototype
+precursor, not completion of the G1 gate or a production command contract.
+
+Final candidate checks on that source were:
+
+| Check | Result |
+| --- | --- |
+| `pnpm typecheck` | Pass; contracts, server, and desktop |
+| `pnpm test` | Pass; build, 56 Vitest tests in 8 files, and 4 real Electron tests |
+
+Primary independently accepted this candidate with the same typecheck, build,
+and full-suite result: 56 Vitest tests and 4 Electron tests passed.
+
+The executed command-attempt cases include:
+
+- Main-owned admission through the real desktop SQLite worker, with verified
+  instance/epoch, note/base revision, bounded intent, and timestamps persisted
+  before dispatch. Admission persistence failure and full capacity both have
+  zero typed HTTP mutation dispatches.
+- Same-ID concurrent IPC admission is gated and counted at the typed HTTP
+  boundary: exactly one PUT dispatch occurs. An identical locally retained
+  success returns the recorded note without dispatch even after its server
+  lookup expiry; its original expiry remains visible as historical metadata.
+- A real loopback proxy commits the upstream PUT and destroys the response
+  stream. The production coordinator retains the unresolved attempt, performs
+  read-only status/current-note reconciliation, and recovers the single
+  revision. A controlled real-proxy race also proves stale unresolved
+  bookkeeping cannot downgrade the terminal SQLite state. Recovery returns the
+  winning durable result and reports reconciliation complete when concurrent
+  dispatch succeeds after the status query observed an absent result.
+- A successful server lookup whose local terminal persistence fails remains
+  unresolved and is reported as `persistence_failed`. An unresolved attempt
+  whose same-epoch operation result is expired or unknown remains read-only and
+  reconciliation-required, while an unavailable status query is distinguished
+  from schema-decoded `OperationExpired`. Five-second hanging dispatch and
+  status reads settle into durable recovery state.
+- The worker enforces the 64-row bound, namespace-qualified reads and writes,
+  duplicate-intent/conflict behavior, conditional terminal transitions, and
+  restart retention. Explicit dismissal hides a row but does not claim
+  cancellation. Terminal succeeded/rejected rows become eligible for bounded
+  cleanup after seven days; unresolved rows become eligible only after explicit
+  dismissal, while undismissed unresolved rows are not evicted.
+- Real worker tests verify that SQLite auto-rollback preserves the original
+  failure, dismissal hides but retains records, seven-day cleanup removes
+  eligible terminal/dismissed records, and undismissed unresolved records
+  survive compaction. Retryable server storage failures remain unresolved;
+  repeating the same operation does not dispatch again. Dismissing a selected
+  recovery record clears its comparison without clearing another record.
+- A real Electron restart opens a retained unresolved row through main IPC,
+  observes a changed authority epoch, fetches the current note without
+  mutation, and renders original intent/base revision, historical result or
+  unavailability, current text/revision, expiry metadata, and the recovery
+  reason. The fixture seeds the unresolved row only after the first Electron
+  launch has created the production schema; it is not a crash-induced row.
+
+The slice does not establish full G1. In particular, profile/connection
+switching, explicit Disconnect, multi-window ownership, renderer crash
+recovery, deliberate reapplication UX, and the broader resource/native-reader
+cases remain outside this prototype. The loopback and Electron checks require
+the permitted host environment; sandboxed loopback binding is not evidence of
+a product failure.
 
 ## Environment
 
