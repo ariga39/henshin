@@ -29,7 +29,7 @@ const loadNoteWithOptions = (preserveFormText: boolean) => Effect.gen(function*(
   const initialState = viewStore.getState()
   const editVersionAtStart = initialState.form_edit_version
   const connectionGenerationAtStart = initialState.connection_generation
-  const retainedUnsavedText =
+  const initiallyDirty =
     preserveFormText && initialState.note !== null && initialState.form_text !== initialState.note.text
   yield* Effect.sync(() => viewStore.set({ status: "loading", outcome: null }))
 
@@ -57,13 +57,16 @@ const loadNoteWithOptions = (preserveFormText: boolean) => Effect.gen(function*(
 
   if (!isCurrent(readGeneration)) return
   yield* Effect.sync(() => {
-    const copied = !preserveFormText && viewStore.getState().form_edit_version === editVersionAtStart
+    const currentState = viewStore.getState()
+    const changedDuringRead = currentState.form_edit_version !== editVersionAtStart
+    const retainFormText = preserveFormText && (initiallyDirty || changedDuringRead)
+    const copied = !retainFormText && currentState.form_edit_version === editVersionAtStart
     viewStore.set({
       status: "ready",
       instance_id: handshake.data.instance_id,
       epoch: handshake.data.epoch,
       note: note.data,
-      base_revision: retainedUnsavedText ? initialState.base_revision : note.data.revision,
+      base_revision: retainFormText ? initialState.base_revision : note.data.revision,
       ...(copied ? { form_text: note.data.text } : {}),
       outcome: null
     })
