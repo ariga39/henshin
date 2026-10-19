@@ -495,6 +495,30 @@ describe("explicit renderer load races", () => {
     })
   })
 
+  it("refreshes a clean loaded form even when retained draft metadata remains", async () => {
+    const client = reconnectClient(() => Effect.succeed({ ok: true, data: refreshedNote }))
+    viewStore.set({
+      status: "ready",
+      connection: { state: "disconnected", instance_id: handshake.instance_id, epoch: null, reason: "explicit_disconnect" },
+      connection_generation: 1,
+      instance_id: handshake.instance_id,
+      epoch: handshake.epoch,
+      note,
+      base_revision: note.revision,
+      form_text: note.text,
+      form_edit_version: 0,
+      saved_draft: draft
+    })
+
+    await Effect.runPromise(Effect.provide(reconnect, Layer.succeed(PrototypeClient, client)))
+
+    expect(viewStore.getState()).toMatchObject({
+      note: refreshedNote,
+      form_text: refreshedNote.text,
+      base_revision: refreshedNote.revision
+    })
+  })
+
   it("retains text typed during a reconnect read and keeps its old edit base", async () => {
     const pendingNote = deferred<Result<NoteView>>()
     let getNoteStartedResolve!: () => void
