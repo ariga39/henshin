@@ -516,6 +516,7 @@ const pageFromArchiveEntry = (
     if (decodedUnicodePath !== name || unicodePath.filename !== name) throw new LossyName()
   }
   assertSafeArchiveName(name, entry.directory)
+  if (entry.symlink && classifyName(name) !== "ignored") throw new SourceLink()
 
   if (entry.directory) {
     diagnostics.directoryRecords += 1
@@ -539,6 +540,19 @@ const pageFromArchiveEntry = (
   if (pages.length >= context.limits.maxPageCount) throw new LimitExceeded()
   pages.push({ name, format, declaredBytes: safeStatNumber(entry.uncompressedSize, context.limits.maxMemberUncompressedBytes) })
   diagnostics.supportedPages += 1
+}
+
+const validateArchiveEntryHeader = async (entry: Entry, context: AnalysisContext): Promise<void> => {
+  if (entry.directory) return
+  checkBudget(context)
+  // zip.js's maintained header-only mode checks the local header, data
+  // descriptor and bounded entry range without constructing a writer or
+  // reading/decompressing member payload bytes.
+  await entry.getData(new WritableStream(), {
+    checkOverlappingEntryOnly: true,
+    signal: context.signal
+  })
+  checkBudget(context)
 }
 
 const analyzeArchive = async (
@@ -603,6 +617,7 @@ const analyzeArchive = async (
         message: publicMessage("encrypted"),
         diagnostics: diagnosticsOf(diagnostics)
       })
+      await validateArchiveEntryHeader(entry, context)
       pageFromArchiveEntry(entry, pages, diagnostics, context)
     }
     if (diagnostics.unsupportedPages > 0 || pages.length === 0) {

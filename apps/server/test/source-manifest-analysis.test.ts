@@ -5,7 +5,11 @@ const ioInstrumentation = vi.hoisted(() => ({
   readBlocked: false,
   readStarted: undefined as (() => void) | undefined,
   releaseRead: undefined as (() => void) | undefined,
+  closeBlocked: false,
+  closeStarted: undefined as (() => void) | undefined,
+  releaseClose: undefined as (() => void) | undefined,
   closeCount: 0,
+  readCalls: [] as Array<{ readonly position: number; readonly length: number }>,
   openedFlags: [] as Array<number | string>,
   writeCount: 0
 }))
@@ -24,6 +28,11 @@ vi.mock("node:fs/promises", async () => {
         get(target, property, receiver) {
           if (property === "read") {
             return async (...readArgs: Array<unknown>) => {
+              const length = Number(readArgs[2])
+              const position = Number(readArgs[3])
+              if (Number.isSafeInteger(position) && Number.isSafeInteger(length)) {
+                ioInstrumentation.readCalls.push({ position, length })
+              }
               if (!ioInstrumentation.readBlocked) {
                 ioInstrumentation.readBlocked = true
                 ioInstrumentation.readStarted?.()
@@ -36,8 +45,15 @@ vi.mock("node:fs/promises", async () => {
           }
           if (property === "close") {
             return async () => {
+              if (ioInstrumentation.closeBlocked) {
+                ioInstrumentation.closeStarted?.()
+                await new Promise<void>((resolve) => {
+                  ioInstrumentation.releaseClose = resolve
+                })
+                ioInstrumentation.closeBlocked = false
+              }
+              await close()
               ioInstrumentation.closeCount += 1
-              return close()
             }
           }
           return Reflect.get(target, property, receiver)
@@ -77,7 +93,11 @@ afterEach(async () => {
   ioInstrumentation.readBlocked = false
   ioInstrumentation.readStarted = undefined
   ioInstrumentation.releaseRead = undefined
+  ioInstrumentation.closeBlocked = false
+  ioInstrumentation.closeStarted = undefined
+  ioInstrumentation.releaseClose = undefined
   ioInstrumentation.closeCount = 0
+  ioInstrumentation.readCalls.length = 0
   ioInstrumentation.openedFlags.length = 0
   ioInstrumentation.writeCount = 0
   for (const root of temporaryRoots.splice(0)) await rm(root, { recursive: true, force: true })
@@ -98,7 +118,8 @@ const makeZip = async (
     readonly bytes?: Uint8Array
     readonly options?: ZipWriterAddDataOptions
   }>,
-  options?: ZipWriterConstructorOptions
+  options?: ZipWriterConstructorOptions,
+  comment?: Uint8Array
 ): Promise<Buffer> => {
   const blobWriter = new BlobWriter("application/zip")
   const writer = new ZipWriter(blobWriter, options)
@@ -106,7 +127,7 @@ const makeZip = async (
     if (entry.bytes === undefined) await writer.add(entry.name, undefined, entry.options)
     else await writer.add(entry.name, new Uint8ArrayReader(entry.bytes), entry.options)
   }
-  const blob = (await writer.close()) as Blob
+  const blob = (await writer.close(comment)) as Blob
   const bytes = Buffer.from(await blob.arrayBuffer())
   await writeFile(path, bytes)
   return bytes
@@ -354,6 +375,42 @@ describe("bounded source manifest analysis", () => {
     })
     expect((await candidateError(encrypted)).code).toBe("encrypted")
 
+    const malformedLocal = join(root, "malformed-local.zip")
+    const malformedLocalBytes = await makeZip(malformedLocal, [{ name: "1.jpg", bytes: pageBytes }])
+    const localHeader = malformedLocalBytes.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]))
+    expect(localHeader).toBeGreaterThanOrEqual(0)
+    malformedLocalBytes[localHeader + 30] = "2".charCodeAt(0)
+    await writeFile(malformedLocal, malformedLocalBytes)
+    expect((await candidateError(malformedLocal)).code).toBe("structural-corruption")
+
+    const invalidOffset = join(root, "invalid-offset.zip")
+    const invalidOffsetBytes = await makeZip(invalidOffset, [{ name: "1.jpg", bytes: pageBytes }])
+    const invalidOffsetCentral = invalidOffsetBytes.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]))
+    expect(invalidOffsetCentral).toBeGreaterThanOrEqual(0)
+    invalidOffsetBytes.writeUInt32LE(invalidOffsetBytes.length + 1, invalidOffsetCentral + 42)
+    await writeFile(invalidOffset, invalidOffsetBytes)
+    expect((await candidateError(invalidOffset)).code).toBe("structural-corruption")
+
+    const overlapping = join(root, "overlapping.zip")
+    const overlappingBytes = await makeZip(overlapping, [
+      { name: "1.jpg", bytes: pageBytes },
+      { name: "2.jpg", bytes: pageBytes }
+    ])
+    const firstCentral = overlappingBytes.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]))
+    const secondCentral = overlappingBytes.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]), firstCentral + 1)
+    expect(firstCentral).toBeGreaterThanOrEqual(0)
+    expect(secondCentral).toBeGreaterThan(firstCentral)
+    overlappingBytes.writeUInt32LE(overlappingBytes.readUInt32LE(firstCentral + 42), secondCentral + 42)
+    await writeFile(overlapping, overlappingBytes)
+    expect((await candidateError(overlapping)).code).toBe("structural-corruption")
+
+    const symlinkArchive = join(root, "page-symlink.zip")
+    await makeZip(symlinkArchive, [
+      { name: "1.jpg", bytes: pageBytes },
+      { name: "2.jpg", bytes: Buffer.from("1.jpg", "utf8"), options: { unixMode: 0o120777 } }
+    ])
+    expect((await candidateError(symlinkArchive)).code).toBe("source-link")
+
     const corrupt = join(root, "corrupt.zip")
     const corruptBytes = await makeZip(corrupt, [{ name: "1.jpg", bytes: pageBytes }])
     const eocd = Buffer.from([0x50, 0x4b, 0x05, 0x06])
@@ -362,6 +419,33 @@ describe("bounded source manifest analysis", () => {
     corruptBytes[eocdIndex] = 0
     await writeFile(corrupt, corruptBytes)
     expect((await candidateError(corrupt)).code).toBe("structural-corruption")
+  })
+
+  it("uses zip.js header-only validation without reading page payload bytes", async () => {
+    const root = await makeTempRoot()
+    const archive = join(root, "header-only.zip")
+    const payload = Uint8Array.from({ length: 128 * 1024 }, (_, index) => (index * 73 + 19) & 0xff)
+    const archiveBytes = await makeZip(
+      archive,
+      [{ name: "1.jpg", bytes: payload }],
+      { compressionMethod: 0 },
+      new Uint8Array(65_535)
+    )
+    const localHeader = archiveBytes.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]))
+    const centralHeader = archiveBytes.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]))
+    expect(localHeader).toBeGreaterThanOrEqual(0)
+    expect(centralHeader).toBeGreaterThanOrEqual(0)
+    const dataStart = localHeader + 30 + archiveBytes.readUInt16LE(localHeader + 26) + archiveBytes.readUInt16LE(localHeader + 28)
+    const dataEnd = dataStart + archiveBytes.readUInt32LE(centralHeader + 20)
+
+    ioInstrumentation.enabled = true
+    ioInstrumentation.readBlocked = true
+    const manifest = await analyze(archive)
+
+    expect(manifest.pages).toHaveLength(1)
+    expect(ioInstrumentation.readCalls.filter(({ position, length }) =>
+      position < dataEnd && position + length > dataStart
+    )).toEqual([])
   })
 
   it("rejects empty, unsupported-only, cancelled, and over-limit candidates", async () => {
@@ -408,29 +492,49 @@ describe("bounded source manifest analysis", () => {
     const readStarted = new Promise<void>((resolve) => {
       readStartedResolve = resolve
     })
+    let closeStartedResolve!: () => void
+    const closeStarted = new Promise<void>((resolve) => {
+      closeStartedResolve = resolve
+    })
     ioInstrumentation.enabled = true
     ioInstrumentation.readStarted = readStartedResolve
+    ioInstrumentation.closeStarted = closeStartedResolve
+    ioInstrumentation.closeBlocked = true
 
-    const fiber = Effect.runFork(analyzeSourceManifest({ sourcePath: archive }))
-    await readStarted
+    let interruption: Promise<void> | undefined
+    try {
+      const fiber = Effect.runFork(analyzeSourceManifest({ sourcePath: archive }))
+      await readStarted
 
-    let interruptionFinished = false
-    const interruption = Effect.runPromise(Fiber.interrupt(fiber)).then(() => {
-      interruptionFinished = true
-    })
-    await Promise.resolve()
-    expect(interruptionFinished).toBe(false)
-    expect(ioInstrumentation.closeCount).toBe(0)
+      let interruptionFinished = false
+      interruption = Effect.runPromise(Fiber.interrupt(fiber)).then(() => {
+        interruptionFinished = true
+      })
+      await Promise.resolve()
+      expect(interruptionFinished).toBe(false)
+      expect(ioInstrumentation.closeCount).toBe(0)
 
-    ioInstrumentation.releaseRead?.()
-    await interruption
-    expect(interruptionFinished).toBe(true)
-    expect(ioInstrumentation.closeCount).toBe(1)
-    expect(ioInstrumentation.writeCount).toBe(0)
-    expect(ioInstrumentation.openedFlags).toHaveLength(1)
-    const flags = ioInstrumentation.openedFlags[0]
-    expect(typeof flags).toBe("number")
-    expect((flags as number) & (constants.O_WRONLY | constants.O_RDWR | constants.O_CREAT | constants.O_TRUNC)).toBe(0)
+      ioInstrumentation.releaseRead?.()
+      await closeStarted
+      await Promise.resolve()
+      expect(interruptionFinished).toBe(false)
+      expect(ioInstrumentation.closeCount).toBe(0)
+
+      ioInstrumentation.releaseClose?.()
+      await interruption
+      expect(interruptionFinished).toBe(true)
+      expect(ioInstrumentation.closeCount).toBe(1)
+      expect(ioInstrumentation.writeCount).toBe(0)
+      expect(ioInstrumentation.openedFlags).toHaveLength(1)
+      const flags = ioInstrumentation.openedFlags[0]
+      expect(typeof flags).toBe("number")
+      expect((flags as number) & (constants.O_WRONLY | constants.O_RDWR | constants.O_CREAT | constants.O_TRUNC)).toBe(0)
+    } finally {
+      ioInstrumentation.closeBlocked = false
+      ioInstrumentation.releaseRead?.()
+      ioInstrumentation.releaseClose?.()
+      if (interruption !== undefined) await interruption
+    }
   })
 
   it("rejects a source link and detects a direct-source change without claiming stability", async () => {
