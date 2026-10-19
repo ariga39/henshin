@@ -36,7 +36,10 @@ const connected: ConnectionStatusView = {
   reason: null
 }
 
-const reconnectClient = (getNote: () => Effect.Effect<Result<NoteView>>) => PrototypeClient.of({
+const reconnectClient = (
+  getNote: () => Effect.Effect<Result<NoteView>>,
+  loadDraftResult: Result<SavedDraft | null> = { ok: true, data: null }
+) => PrototypeClient.of({
   handshake: () => Effect.succeed({ ok: true, data: handshake }),
   connect: () => Effect.succeed({ ok: true, data: connected }),
   disconnect: () => Effect.succeed({
@@ -47,7 +50,7 @@ const reconnectClient = (getNote: () => Effect.Effect<Result<NoteView>>) => Prot
   getNote,
   editNote: () => Effect.succeed({ ok: true, data: note }),
   saveDraft: () => Effect.succeed({ ok: true, data: draft }),
-  loadDraft: () => Effect.succeed({ ok: true, data: null }),
+  loadDraft: () => Effect.succeed(loadDraftResult),
   discardDraft: () => Effect.succeed({ ok: true, data: {
     instance_id: handshake.instance_id,
     note_id: "note-1",
@@ -392,6 +395,80 @@ describe("explicit renderer load races", () => {
       form_text: "retained-local-text",
       base_revision: note.revision,
       epoch: "33333333-3333-4333-8333-333333333333"
+    })
+  })
+
+  it("retains disconnected text when no server note has been loaded yet", async () => {
+    const client = reconnectClient(() => Effect.succeed({ ok: true, data: refreshedNote }))
+    viewStore.set({
+      status: "ready",
+      connection: { state: "disconnected", instance_id: null, epoch: null, reason: "explicit_disconnect" },
+      connection_generation: 1,
+      note: null,
+      base_revision: null,
+      form_text: "",
+      form_edit_version: 0,
+      saved_draft: null
+    })
+    viewStore.editFormText("typed while disconnected")
+
+    await Effect.runPromise(Effect.provide(reconnect, Layer.succeed(PrototypeClient, client)))
+
+    expect(viewStore.getState()).toMatchObject({
+      note: refreshedNote,
+      form_text: "typed while disconnected",
+      base_revision: null
+    })
+  })
+
+  it("retains an explicitly restored empty saved draft when no server note was loaded", async () => {
+    const emptyDraft: SavedDraft = { ...draft, text: "" }
+    const client = reconnectClient(
+      () => Effect.succeed({ ok: true, data: refreshedNote }),
+      { ok: true, data: emptyDraft }
+    )
+    viewStore.set({
+      status: "ready",
+      connection: { state: "disconnected", instance_id: null, epoch: null, reason: "explicit_disconnect" },
+      connection_generation: 1,
+      note: null,
+      base_revision: null,
+      form_text: "",
+      form_edit_version: 0,
+      saved_draft: null
+    })
+
+    await Effect.runPromise(Effect.provide(loadSavedDraft, Layer.succeed(PrototypeClient, client)))
+    expect(viewStore.getState()).toMatchObject({ saved_draft: emptyDraft, form_text: "" })
+
+    await Effect.runPromise(Effect.provide(reconnect, Layer.succeed(PrototypeClient, client)))
+
+    expect(viewStore.getState()).toMatchObject({
+      note: refreshedNote,
+      form_text: "",
+      base_revision: null
+    })
+  })
+
+  it("copies a server note into a pristine empty form with no saved draft", async () => {
+    const client = reconnectClient(() => Effect.succeed({ ok: true, data: refreshedNote }))
+    viewStore.set({
+      status: "ready",
+      connection: { state: "disconnected", instance_id: null, epoch: null, reason: "explicit_disconnect" },
+      connection_generation: 1,
+      note: null,
+      base_revision: null,
+      form_text: "",
+      form_edit_version: 0,
+      saved_draft: null
+    })
+
+    await Effect.runPromise(Effect.provide(reconnect, Layer.succeed(PrototypeClient, client)))
+
+    expect(viewStore.getState()).toMatchObject({
+      note: refreshedNote,
+      form_text: refreshedNote.text,
+      base_revision: refreshedNote.revision
     })
   })
 

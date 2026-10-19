@@ -18,6 +18,14 @@ const connectedStatus = (instanceId: string, epoch: string): ConnectionStatusVie
   reason: null
 })
 
+const hasRetainedFormIntent = (state: ReturnType<typeof viewStore.getState>): boolean => {
+  if (state.saved_draft !== null) return true
+  if (state.note !== null) return state.form_text !== state.note.text
+  // With no loaded note, the initial empty form is clean. Any retained text
+  // or edit version is evidence of disconnected typing or a local edit.
+  return state.form_text !== "" || state.form_edit_version > 0
+}
+
 /**
  * Loads the note and captures the revision the form edits from. `base_revision`
  * is intentionally not rebased after a commit, so a second save from the same
@@ -29,8 +37,7 @@ const loadNoteWithOptions = (preserveFormText: boolean) => Effect.gen(function*(
   const initialState = viewStore.getState()
   const editVersionAtStart = initialState.form_edit_version
   const connectionGenerationAtStart = initialState.connection_generation
-  const initiallyDirty =
-    preserveFormText && initialState.note !== null && initialState.form_text !== initialState.note.text
+  const initiallyDirty = preserveFormText && hasRetainedFormIntent(initialState)
   yield* Effect.sync(() => viewStore.set({ status: "loading", outcome: null }))
 
   const handshake = yield* client.handshake()
