@@ -16,7 +16,11 @@ or server. No product application, first-release schema, endpoint surface,
 reader adapter, installer, or gate-level runtime test exists. Document review
 and checks of links, English prose, fences, headings, indexing, and whitespace
 establish documentation quality only. Every runtime gate below remains
-**Not run** except the specific prototype cases recorded in that evidence file.
+**Not run** except the specific prototype cases recorded in that evidence file
+and the bounded source-manifest precursor recorded in
+[source-manifests-prototype.md](../validation/source-manifests-prototype.md).
+The source-manifest record is evidence for its stated precursor scope only; it
+does not complete G3 or G4.
 
 Distinguish four stages:
 
