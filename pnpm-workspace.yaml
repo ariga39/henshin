@@ -1,0 +1,9 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Required native/binary build scripts. Explicit booleans for the pinned pnpm 11
+# `allowBuilds` form; electron downloads its runtime, esbuild links its binary.
+allowBuilds:
+  electron: true
+  esbuild: true

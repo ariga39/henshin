@@ -1,0 +1,20 @@
+{
+  "name": "@henshin/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/server.mjs",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/server.mjs"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.5",
+    "@henshin/contracts": "workspace:*",
+    "effect": "4.0.5"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}
