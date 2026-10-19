@@ -91,7 +91,11 @@ const acquire = (dbPath: string): Effect.Effect<DatabaseSync, ServerOwnershipErr
         try: () => {
           const guard = new DatabaseSync(path.join(dataDirectory, OWNER_DATABASE_NAME), { timeout: 0 })
           try {
-            guard.exec("BEGIN EXCLUSIVE;")
+            // A cooperative guard only needs the single-writer reservation.
+            // BEGIN EXCLUSIVE can make competing fresh connections race while
+            // upgrading shared locks; IMMEDIATE lets exactly one reserve the
+            // guard without evicting readers.
+            guard.exec("BEGIN IMMEDIATE;")
             return guard
           } catch (error) {
             guard.close()
