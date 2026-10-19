@@ -19,8 +19,8 @@ const connectedStatus = (instanceId: string, epoch: string): ConnectionStatusVie
 })
 
 const hasRetainedFormIntent = (state: ReturnType<typeof viewStore.getState>): boolean => {
-  if (state.saved_draft !== null) return true
   if (state.note !== null) return state.form_text !== state.note.text
+  if (state.saved_draft !== null) return true
   // With no loaded note, the initial empty form is clean. Any retained text
   // or edit version is evidence of disconnected typing or a local edit.
   return state.form_text !== "" || state.form_edit_version > 0
