@@ -1,5 +1,6 @@
 import { Schema } from "effect"
-import { NoteId, Revision, Text, Uuid } from "./ids"
+import { DraftFormId, NoteId, Revision, Text, Uuid } from "./ids"
+import type { DiscardedDraft, SavedDraft, SavedDraftAbsent } from "./note"
 
 /**
  * IPC request schemas. The renderer never supplies instance/epoch/auth: main
@@ -21,12 +22,39 @@ export const EditNoteIpcRequest = Schema.Struct({
 })
 export type EditNoteIpcRequest = typeof EditNoteIpcRequest.Type
 
+export const SaveDraftIpcRequest = Schema.Struct({
+  note_id: NoteId,
+  form_id: DraftFormId,
+  text: Text,
+  expected_local_revision: Revision,
+  base_server_revision: Revision,
+  base_epoch: Uuid
+})
+export type SaveDraftIpcRequest = typeof SaveDraftIpcRequest.Type
+
+export const LoadDraftIpcRequest = Schema.Struct({
+  note_id: NoteId,
+  form_id: DraftFormId
+})
+export type LoadDraftIpcRequest = typeof LoadDraftIpcRequest.Type
+
+export const DiscardDraftIpcRequest = Schema.Struct({
+  note_id: NoteId,
+  form_id: DraftFormId,
+  expected_local_revision: Revision
+})
+export type DiscardDraftIpcRequest = typeof DiscardDraftIpcRequest.Type
+
+export type SavedDraftIpcResult = SavedDraft | SavedDraftAbsent | null
+export type DiscardedDraftIpcResult = DiscardedDraft
+
 /** Public error shape returned across the IPC boundary. */
 export const PublicError = Schema.Struct({
   code: Schema.String,
   message: Schema.String,
   retryable: Schema.Boolean,
-  current_revision: Schema.optional(Revision)
+  current_revision: Schema.optional(Revision),
+  current_local_revision: Schema.optional(Revision)
 })
 export type PublicError = typeof PublicError.Type
 

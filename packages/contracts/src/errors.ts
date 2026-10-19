@@ -71,6 +71,29 @@ export class OperationConflict extends Schema.TaggedError<OperationConflict>()(
   { httpApiStatus: 409 }
 ) {}
 
+export class DraftConflict extends Schema.TaggedError<DraftConflict>()(
+  "DraftConflict",
+  {
+    code: Schema.Literal("draft_conflict"),
+    message: Schema.String,
+    retryable: Schema.Literal(false),
+    details: Schema.Struct({ current_local_revision: Revision }),
+    ...envelope
+  },
+  { httpApiStatus: 409 }
+) {}
+
+export class DraftStoreFull extends Schema.TaggedError<DraftStoreFull>()(
+  "DraftStoreFull",
+  {
+    code: Schema.Literal("draft_store_full"),
+    message: Schema.String,
+    retryable: Schema.Literal(false),
+    ...envelope
+  },
+  { httpApiStatus: 507 }
+) {}
+
 export class EpochChanged extends Schema.TaggedError<EpochChanged>()(
   "EpochChanged",
   {
@@ -119,6 +142,8 @@ export const PublicApiError = Schema.Union([
   NoteNotFound,
   RevisionConflict,
   OperationConflict,
+  DraftConflict,
+  DraftStoreFull,
   EpochChanged,
   InstanceMismatch,
   InternalError
