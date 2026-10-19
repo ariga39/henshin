@@ -17,6 +17,7 @@ import { PrototypeHandlers } from "./api/handlers"
 import { AuthConfig, ServerState } from "./identity"
 import { DatabaseWorker, type DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { NoteStore } from "./persistence/NoteStore"
+import { ServerOwnershipLayer, type ServerOwnershipError } from "./persistence/ServerOwnership"
 
 const MAX_BODY_BYTES = 1024 * 1024
 const BODIED_METHODS = new Set<string>(["PUT", "POST", "PATCH"])
@@ -167,7 +168,7 @@ export interface AppOptions {
  */
 export const makeAppLayer = (
   options: AppOptions
-): Layer.Layer<never, DatabaseWorkerError | ServeError, never> => {
+): Layer.Layer<never, DatabaseWorkerError | ServerOwnershipError | ServeError, never> => {
   const HandlersLayer = PrototypeHandlers.pipe(
     Layer.provide(Layer.mergeAll(NoteStore.layer, AuthenticationLayer))
   )
@@ -197,6 +198,6 @@ export const makeAppLayer = (
     Layer.provide(Layer.succeed(HttpIncomingMessage.MaxBodySize, ByteSize.mebibytes(1))),
     Layer.provide(ServerState.layer),
     Layer.provide(AuthConfig.layer(options.bearerToken)),
-    Layer.provide(DatabaseWorker.layer(options.dbPath))
+    Layer.provide(DatabaseWorker.layer(options.dbPath).pipe(Layer.provide(ServerOwnershipLayer(options.dbPath))))
   )
 }
