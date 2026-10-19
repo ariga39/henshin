@@ -1,17 +1,21 @@
 import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from "electron"
-import { Effect, ManagedRuntime, Option, Schema } from "effect"
+import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import {
+  DiscardDraftIpcRequest,
   EditNoteIpcRequest,
   GetNoteIpcRequest,
   HandshakeIpcRequest,
   IpcChannels,
+  LoadDraftIpcRequest,
   PrototypeHttpClient,
   PublicApiError,
+  SaveDraftIpcRequest,
   type PublicError
 } from "@henshin/contracts"
 import { startServerChild, type ServerChild } from "./server-child"
+import { DraftConflictError, DraftStore, DraftStoreFullError } from "./persistence/DraftStore"
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
 
@@ -31,7 +35,8 @@ interface IpcErr {
 
 let mainWindow: BrowserWindow | null = null
 let serverChild: ServerChild | null = null
-let runtime: ManagedRuntime.ManagedRuntime<PrototypeHttpClient, never> | null = null
+type MainServices = PrototypeHttpClient | DraftStore
+let runtime: ManagedRuntime.ManagedRuntime<MainServices, never> | null = null
 let session: Session | null = null
 let rendererUrl = ""
 let shutdownPromise: Promise<void> | null = null
@@ -54,6 +59,17 @@ const decodePublicError = Schema.decodeUnknownOption(PublicApiError)
  * message, stack, or internal cause never crosses the IPC boundary.
  */
 const toPublicError = (error: unknown): PublicError => {
+  if (error instanceof DraftConflictError) {
+    return {
+      code: "draft_conflict",
+      message: "saved draft changed in another window",
+      retryable: false,
+      current_local_revision: error.currentLocalRevision
+    }
+  }
+  if (error instanceof DraftStoreFullError) {
+    return { code: "draft_store_full", message: "saved draft storage is full", retryable: false }
+  }
   const decoded = decodePublicError(error)
   if (Option.isNone(decoded)) return opaqueError
   const value = decoded.value
@@ -63,6 +79,14 @@ const toPublicError = (error: unknown): PublicError => {
       message: value.message,
       retryable: value.retryable,
       current_revision: value.details.current_revision
+    }
+  }
+  if (value._tag === "DraftConflict") {
+    return {
+      code: value.code,
+      message: value.message,
+      retryable: value.retryable,
+      current_local_revision: value.details.current_local_revision
     }
   }
   return { code: value.code, message: value.message, retryable: value.retryable }
@@ -89,7 +113,7 @@ const assertTrustedSender = (event: IpcMainInvokeEvent): void => {
   }
 }
 
-const requireRuntime = (): ManagedRuntime.ManagedRuntime<PrototypeHttpClient, never> => {
+const requireRuntime = (): ManagedRuntime.ManagedRuntime<MainServices, never> => {
   if (runtime === null) throw new Error("runtime is not ready")
   return runtime
 }
@@ -167,6 +191,74 @@ const registerIpc = (): void => {
       )
     )
   })
+
+  ipcMain.handle(IpcChannels.saveDraft, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(SaveDraftIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    const request = decoded.value
+    const activeSession = requireSession()
+    return requireRuntime().runPromise(
+      toResult(
+        Effect.gen(function*() {
+          const store = yield* DraftStore
+          const draft = yield* store.save({
+            instanceId: activeSession.instanceId,
+            noteId: request.note_id,
+            formId: request.form_id,
+            text: request.text,
+            expectedLocalRevision: request.expected_local_revision,
+            baseServerRevision: request.base_server_revision,
+            baseEpoch: request.base_epoch
+          })
+          return { data: draft }
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.loadDraft, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(LoadDraftIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    const request = decoded.value
+    const activeSession = requireSession()
+    return requireRuntime().runPromise(
+      toResult(
+        Effect.gen(function*() {
+          const store = yield* DraftStore
+          const draft = yield* store.load({
+            instanceId: activeSession.instanceId,
+            noteId: request.note_id,
+            formId: request.form_id
+          })
+          return { data: draft ?? null }
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.discardDraft, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(DiscardDraftIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    const request = decoded.value
+    const activeSession = requireSession()
+    return requireRuntime().runPromise(
+      toResult(
+        Effect.gen(function*() {
+          const store = yield* DraftStore
+          const discarded = yield* store.discard({
+            instanceId: activeSession.instanceId,
+            noteId: request.note_id,
+            formId: request.form_id,
+            expectedLocalRevision: request.expected_local_revision
+          })
+          return { data: discarded }
+        })
+      )
+    )
+  })
 }
 
 const createWindow = (): void => {
@@ -215,13 +307,19 @@ const shutdown = (): Promise<void> => {
 
 const bootstrap = async (): Promise<void> => {
   const dbPath = process.env.HENSHIN_PROTOTYPE_DB ?? path.join(app.getPath("userData"), "prototype.db")
+  const clientDbPath =
+    process.env.HENSHIN_PROTOTYPE_CLIENT_DB ?? path.join(app.getPath("userData"), "prototype-client.db")
   serverChild = await startServerChild(dbPath)
 
+  const draftWorkerUrl = pathToFileURL(path.join(app.getAppPath(), "dist", "draft-worker.mjs"))
   runtime = ManagedRuntime.make(
-    PrototypeHttpClient.layer({
-      baseUrl: serverChild.baseUrl,
-      bearerToken: serverChild.bearerToken
-    })
+    Layer.merge(
+      PrototypeHttpClient.layer({
+        baseUrl: serverChild.baseUrl,
+        bearerToken: serverChild.bearerToken
+      }),
+      DraftStore.layer(clientDbPath, draftWorkerUrl)
+    )
   )
 
   // Establish the authenticated session through the typed client, so the

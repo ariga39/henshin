@@ -6,15 +6,12 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Source under test
 
-- Tested code: `65b26f7c69353dc41f0e062e6485ef3467576ec6` — `pnpm typecheck`,
-  `pnpm build`, `pnpm test` (22 server tests, 1 Electron e2e test) all pass on
-  this revision. The preceding bootstrap-redaction fix is included at
-  `0788c8a`.
-- Prototype base commit: `ec2cc9a` (first frozen install/typecheck/test pass).
-- Primary acceptance independently reran typechecking and the full suite on
-  `9e95b7a`, whose code matches the tested revision above: 12 HTTP cases, one
-  bootstrap-redaction case, nine lifecycle cases, and one real Electron test.
-  Subsequent stack integration changes only this evidence document.
+- Tested code: `8d2d7bdda2a8942f022bb15e0091976255f5cbba`.
+- Primary acceptance independently ran `pnpm typecheck` and `pnpm test` on that
+  revision: 27 Vitest tests and three real Electron tests passed. Note editing
+  and draft/server actions are disabled during current-note loading; the
+  namespace fixture waits for visible note readiness before editing.
+- Subsequent stack integration changes only this evidence document and ancestry.
 
 ## Scope and fixtures
 
@@ -70,7 +67,14 @@ All commands were run on the primary Node 24.19.0 runtime unless noted.
 | `pnpm install` | Pass (locked install, explicit `allowBuilds` for electron/esbuild) |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
 | `pnpm build` | Pass (server `dist/server.mjs` + `dist/worker.mjs`; desktop main/preload/renderer) |
-| `pnpm test` | Pass, 22 server tests plus 1/1 real Electron e2e test |
+| `pnpm test` | Pass, 27 Vitest tests plus 3/3 real Electron e2e tests |
+
+### Durable draft precursor checks
+
+The full suite above includes three real draft-worker tests, two deterministic
+renderer load/edit race tests, and the Electron draft restart and namespace
+cases. They cover the narrow synthetic-note draft slice only and do not
+replace the full G1 case 2 gate.
 
 The executed lifecycle suite awaited cleanup of its owned child processes and
 temporary database directories; no fixture process was left running by the
@@ -112,6 +116,26 @@ suite.
   increments to `9007199254740993`, reads back exactly, and a stale edit reports
   `current_revision = 9007199254740993` — beyond `Number.MAX_SAFE_INTEGER`.
 
+### Durable draft precursor cases exercised
+
+- The real desktop SQLite worker accepts 64 distinct namespace/note/form keys.
+  Discarding one key creates a retained tombstone, so a 65th key returns the
+  explicit `full` result; the discarded key and all existing drafts remain
+  unchanged by the rejected save.
+- A save for a missing key with expected local revision `7` returns a local
+  conflict at revision `0` and does not create the key.
+- A saved draft discarded at local revision `1` returns absent with revision
+  `2` after worker restart; recreating it with expected revision `2` succeeds
+  at revision `3`.
+- An explicit current-note load and an explicit saved-draft load are held behind
+  deterministic deferred responses. Text typed after each request starts is
+  retained; the completion may refresh authoritative metadata but cannot replace
+  the edited form text.
+- The namespace Electron case uses separate launches against two server
+  databases with one shared desktop database. A draft from the first verified
+  instance is absent from the second and present again when the first is
+  relaunched.
+
 ## Runtime lifecycle precursor (executed)
 
 This is a bounded G1 case 5 / G6 precursor, not completion of the full resource
@@ -136,9 +160,10 @@ gate or resource framework.
 
 ## Pending G1/G2 cases (Not run)
 
-- G1 case 2: React remount/unmount, window switching, late responses and epoch
-  change leaving one subscription and no duplicate command; draft
-  save/reload/reapply/discard across namespace switches and restart.
+- G1 case 2 remainder: React remount/unmount, live window/profile switching,
+  namespace/epoch late-response guards, subscription ownership, duplicate-command
+  prevention, and full deliberate reapplication/reconciliation. The bounded
+  saved-draft and input-race cases above are executed; they do not complete this gate.
 - G1 case 3: native reader adapter plus journal (pre-dispatch cancellation,
   accepted handoff after teardown, no automatic relaunch, event retry).
 - G1 case 4: durable task scheduling, cancellation/restart, stale-generation
@@ -156,6 +181,12 @@ gate or resource framework.
 ## Limitations
 
 - Single macOS/arm64 host; no cross-platform or packaged-ABI validation.
+- Multi-window races are emulated by stale IPC calls from one real window; no
+  multi-window harness exists in this prototype.
+- Namespace changes use separate launches and verified server instances; actual
+  connection-profile switching is not implemented here.
+- The draft capacity is exactly 64 retained keys, tombstones count toward that
+  limit, and this prototype has no compaction.
 - Prototype-only schema and API; not the first-release persistence contract.
 - The desktop spawns the server via `ELECTRON_RUN_AS_NODE`, not a packaged
   standalone runtime or installer.

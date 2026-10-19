@@ -1,8 +1,12 @@
-import type { NoteView } from "@henshin/contracts"
+import type { NoteView, SavedDraft } from "@henshin/contracts"
 
 export type Outcome =
   | { readonly kind: "committed"; readonly revision: string }
   | { readonly kind: "conflict"; readonly current_revision: string }
+  | { readonly kind: "draft_saved"; readonly local_revision: string }
+  | { readonly kind: "draft_loaded"; readonly copied: boolean }
+  | { readonly kind: "draft_discarded"; readonly local_revision: string }
+  | { readonly kind: "draft_conflict"; readonly current_local_revision: string }
   | { readonly kind: "error"; readonly message: string }
 
 export interface ViewState {
@@ -11,6 +15,10 @@ export interface ViewState {
   readonly epoch: string | null
   readonly note: NoteView | null
   readonly base_revision: string | null
+  readonly form_text: string
+  readonly form_edit_version: number
+  readonly draft_local_revision: string
+  readonly saved_draft: SavedDraft | null
   readonly outcome: Outcome | null
 }
 
@@ -20,6 +28,10 @@ const initialState: ViewState = {
   epoch: null,
   note: null,
   base_revision: null,
+  form_text: "",
+  form_edit_version: 0,
+  draft_local_revision: "0",
+  saved_draft: null,
   outcome: null
 }
 
@@ -37,6 +49,10 @@ const createViewStore = () => {
     },
     set: (patch: Partial<ViewState>): void => {
       state = { ...state, ...patch }
+      for (const listener of listeners) listener()
+    },
+    editFormText: (text: string): void => {
+      state = { ...state, form_text: text, form_edit_version: state.form_edit_version + 1 }
       for (const listener of listeners) listener()
     }
   }

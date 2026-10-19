@@ -13,5 +13,20 @@ contextBridge.exposeInMainWorld("henshinPrototype", {
     readonly text: string
     readonly expected_revision: string
     readonly operation_id: string
-  }) => ipcRenderer.invoke(IpcChannels.editNote, input)
+  }) => ipcRenderer.invoke(IpcChannels.editNote, input),
+  saveDraft: (input: {
+    readonly note_id: string
+    readonly form_id: string
+    readonly text: string
+    readonly expected_local_revision: string
+    readonly base_server_revision: string
+    readonly base_epoch: string
+  }) => ipcRenderer.invoke(IpcChannels.saveDraft, input),
+  loadDraft: (input: { readonly note_id: string; readonly form_id: string }) =>
+    ipcRenderer.invoke(IpcChannels.loadDraft, input),
+  discardDraft: (input: {
+    readonly note_id: string
+    readonly form_id: string
+    readonly expected_local_revision: string
+  }) => ipcRenderer.invoke(IpcChannels.discardDraft, input)
 })
