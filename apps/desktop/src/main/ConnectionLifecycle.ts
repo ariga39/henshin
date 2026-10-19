@@ -34,7 +34,7 @@ interface Candidate {
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 const disposeBounded = async (runtime: ManagedRuntime.ManagedRuntime<PrototypeHttpClient, never>): Promise<void> => {
-  await Promise.race([runtime.dispose(), delay(CLEANUP_DEADLINE_MS)])
+  await Promise.race([runtime.dispose().catch(() => undefined), delay(CLEANUP_DEADLINE_MS)])
 }
 
 /**

@@ -1,12 +1,23 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import { randomUUID } from "node:crypto"
-import { Deferred, Effect } from "effect"
-import { afterEach, describe, expect, it } from "vitest"
+import { Deferred, Effect, ManagedRuntime } from "effect"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { PrototypeHttpClient } from "@henshin/contracts"
 import {
   ConnectionLifecycle,
   ConnectionPausedError
 } from "../../desktop/src/main/ConnectionLifecycle"
+
+vi.mock("effect", async (importOriginal) => {
+  const effect = await importOriginal<typeof import("effect")>()
+  return {
+    ...effect,
+    ManagedRuntime: {
+      ...effect.ManagedRuntime,
+      make: vi.fn(effect.ManagedRuntime.make)
+    }
+  }
+})
 
 const INSTANCE_ID = "11111111-1111-4111-8111-111111111111"
 const EPOCH = "22222222-2222-4222-8222-222222222222"
@@ -17,11 +28,11 @@ interface Fixture {
   readonly noteReceived: Promise<void>
   readonly releaseNote: () => void
   readonly socketClosed: Promise<void>
-  readonly handshakeSocketClosed: Promise<void>
   readonly handshakeReceived: Promise<void>
-  readonly blockNextHandshake: () => void
+  readonly blockNextHandshake: () => Promise<void>
   readonly setHandshakeInstance: (instanceId: string) => void
   readonly rejectHandshake: () => void
+  readonly allowHandshake: () => void
   readonly releaseHandshake: () => void
   readonly close: () => Promise<void>
 }
@@ -46,10 +57,8 @@ const startFixture = async (holdNote: boolean): Promise<Fixture> => {
   const socketClosed = new Promise<void>((resolve) => {
     socketClosedResolve = resolve
   })
-  let handshakeSocketClosedResolve!: () => void
-  const handshakeSocketClosed = new Promise<void>((resolve) => {
-    handshakeSocketClosedResolve = resolve
-  })
+  let gatedHandshakeSocketClosed: Promise<void> | null = null
+  let gatedHandshakeSocketClosedResolve: (() => void) | null = null
   let handshakeReceivedResolve!: () => void
   const handshakeReceived = new Promise<void>((resolve) => {
     handshakeReceivedResolve = resolve
@@ -65,9 +74,11 @@ const startFixture = async (holdNote: boolean): Promise<Fixture> => {
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     requests.push(request.url ?? "")
     if (request.url === "/prototype/v1/handshake") {
-      request.socket.once("close", handshakeSocketClosedResolve)
       if (blockHandshake) {
         blockHandshake = false
+        const resolveGatedHandshakeSocketClosed = gatedHandshakeSocketClosedResolve
+        if (resolveGatedHandshakeSocketClosed === null) throw new Error("gated handshake socket was not registered")
+        request.socket.once("close", resolveGatedHandshakeSocketClosed)
         handshakeReceivedResolve()
         await handshakeGate
       }
@@ -112,16 +123,22 @@ const startFixture = async (holdNote: boolean): Promise<Fixture> => {
     noteReceived,
     releaseNote,
     socketClosed,
-    handshakeSocketClosed,
     handshakeReceived,
     blockNextHandshake: () => {
       blockHandshake = true
+      gatedHandshakeSocketClosed = new Promise<void>((resolve) => {
+        gatedHandshakeSocketClosedResolve = resolve
+      })
+      return gatedHandshakeSocketClosed
     },
     setHandshakeInstance: (instanceId) => {
       handshakeInstance = instanceId
     },
     rejectHandshake: () => {
       rejectHandshake = true
+    },
+    allowHandshake: () => {
+      rejectHandshake = false
     },
     releaseHandshake,
     close: () => {
@@ -179,11 +196,11 @@ describe("main-owned connection lifecycle", () => {
     lifecycles.push(lifecycle)
 
     await lifecycle.connect()
-    fixture.blockNextHandshake()
+    const gatedHandshakeSocketClosed = fixture.blockNextHandshake()
     const reconnect = lifecycle.connect()
     await fixture.handshakeReceived
     const disconnected = lifecycle.disconnect()
-    await fixture.handshakeSocketClosed
+    await gatedHandshakeSocketClosed
     fixture.releaseHandshake()
 
     await Promise.all([reconnect, disconnected])
@@ -224,11 +241,11 @@ describe("main-owned connection lifecycle", () => {
 
     const oldReconnect = lifecycle.connect()
     await Effect.runPromise(Deferred.await(cleanupStarted))
-    fixture.blockNextHandshake()
+    const gatedHandshakeSocketClosed = fixture.blockNextHandshake()
     const newerReconnect = lifecycle.connect()
     await fixture.handshakeReceived
     const disconnected = lifecycle.disconnect()
-    await fixture.handshakeSocketClosed
+    await gatedHandshakeSocketClosed
 
     await Effect.runPromise(Deferred.succeed(releaseCleanup, undefined))
     fixture.releaseHandshake()
@@ -305,5 +322,56 @@ describe("main-owned connection lifecycle", () => {
       )
     ).rejects.toBeInstanceOf(ConnectionPausedError)
     expect(fixture.requests.filter((url) => url === "/prototype/v1/note/note-1")).toHaveLength(0)
+  })
+
+  it("blocks on the handshake error when owned runtime disposal rejects and permits reconnect", async () => {
+    const fixture = await startFixture(false)
+    fixtures.push(fixture)
+    const lifecycle = new ConnectionLifecycle({ baseUrl: fixture.baseUrl, bearerToken: "test-token" })
+    lifecycles.push(lifecycle)
+    fixture.rejectHandshake()
+
+    const make = vi.mocked(ManagedRuntime.make)
+    const originalMake = make.getMockImplementation()
+    if (originalMake === undefined) throw new Error("ManagedRuntime.make mock has no implementation")
+    const disposeError = new Error("runtime disposal failed")
+    let rejectNextDispose = true
+    make.mockImplementation((layer, options) => {
+      const runtime = originalMake(layer, options)
+      if (rejectNextDispose) {
+        rejectNextDispose = false
+        const actualDispose = runtime.dispose
+        return {
+          ...runtime,
+          dispose: async () => {
+            await actualDispose()
+            throw disposeError
+          }
+        }
+      }
+      return runtime
+    })
+
+    try {
+      let handshakeError: unknown
+      try {
+        await lifecycle.connect()
+      } catch (error) {
+        handshakeError = error
+      }
+
+      expect(handshakeError).toMatchObject({ _tag: "HttpClientError" })
+      expect(String(handshakeError)).toContain("401")
+      expect(handshakeError).not.toBe(disposeError)
+      expect(lifecycle.getStatus()).toMatchObject({
+        state: "blocked",
+        reason: "authentication_or_network_failure"
+      })
+
+      fixture.allowHandshake()
+      await expect(lifecycle.connect()).resolves.toMatchObject({ state: "connected" })
+    } finally {
+      make.mockImplementation(originalMake)
+    }
   })
 })
