@@ -14,7 +14,7 @@ IDs are opaque random UUID text unless supplied by a source. EH gid is a validat
 
 Authority epoch is ephemeral process-start state, not an entry key or a counter restored from backup. Persist instance ID, schema version, and one stable library ID. A database schema newer than the binary supports fails startup before serving requests. Immutable IDs and retired mapping/generation identifiers are never reused.
 
-The prototype server owns the real local directory containing its database for the process lifetime. It resolves existing database-file symlinks before selecting the directory guard and opening SQLite, rejects dangling database-file symlinks, and resolves a new database through its existing parent directory. The owner holds a `BEGIN IMMEDIATE` transaction on a separate `.henshin-server-owner.sqlite` guard database, reserving its sole writer slot without requiring SQLite `EXCLUSIVE` transaction mode; acquisition occurs before the database worker and release after worker cleanup. The guard file is retained and the data directory must already exist. Hardlinks, mount aliases, NAS paths, and cross-platform lock behavior are outside this prototype contract.
+The prototype server uses the process-lifetime local directory ownership adapter described in [deployment](architecture.md#managed-local-service). Acquisition precedes the database worker and release follows its cleanup; [executed evidence](../validation/g1-g2-runtime-persistence-prototype.md#server-ownership-precursor-executed) records the measured scope and remaining limits.
 
 ## Authoritative Server Schema
 

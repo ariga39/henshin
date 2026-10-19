@@ -6,12 +6,11 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Source under test
 
-- Tested code: `6dbcd8f00e9f138f1678f892e76bde2e01d3fcc8`.
-- Primary acceptance independently ran `pnpm typecheck` and `pnpm test` on
-  `9798ae3`, whose code matches that revision: 27 Vitest tests and three real
-  Electron tests passed. The instance-isolation Electron case also passed five
-  repeated runs after the asynchronous input-race fix.
-- Subsequent stack integration changes only this evidence document.
+- Tested code: `a016244cba000e522573146f558359a5ded69f83`.
+- Primary acceptance independently ran `pnpm typecheck` and `pnpm test` on that
+  revision: 35 Vitest tests and three real Electron tests passed, including ten
+  simultaneous-first-start iterations in the ownership regression.
+- Subsequent stack integration changes only documentation and ancestry.
 
 ## Scope and fixtures
 
@@ -67,19 +66,14 @@ All commands were run on the primary Node 24.19.0 runtime unless noted.
 | `pnpm install` | Pass (locked install, explicit `allowBuilds` for electron/esbuild) |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
 | `pnpm build` | Pass (server `dist/server.mjs` + `dist/worker.mjs`; desktop main/preload/renderer) |
-| `pnpm test` | Pass, 27 Vitest tests plus 3/3 real Electron e2e tests |
+| `pnpm test` | Pass, 35 Vitest tests plus 3/3 real Electron e2e tests |
 
 ### Durable draft precursor checks
 
-These checks cover the narrow synthetic-note draft slice only; they do not
+The full suite above includes three real draft-worker tests, two deterministic
+renderer load/edit race tests, and the Electron draft restart and namespace
+cases. They cover the narrow synthetic-note draft slice only and do not
 replace the full G1 case 2 gate.
-
-| Command | Result |
-| --- | --- |
-| `pnpm typecheck` | Pass on source `6dbcd8f00e9f138f1678f892e76bde2e01d3fcc8` |
-| `pnpm build` | Pass; includes the bundled desktop draft worker |
-| `pnpm exec vitest run apps/server/test/desktop-draft-worker.test.ts apps/server/test/renderer-draft-load-race.test.ts` | Pass, 2 files and 5 tests |
-| `pnpm exec playwright test apps/desktop/e2e/prototype.spec.ts -g "does not cross-read a saved draft between verified server instances"` | Pass, 1 real Electron test |
 
 The executed lifecycle suite awaited cleanup of its owned child processes and
 temporary database directories; no fixture process was left running by the
@@ -162,6 +156,32 @@ gate or resource framework.
 - A standalone real-process bootstrap test supplies a sentinel in malformed
   input and observes a bounded nonzero exit, a safe diagnostic, and no sentinel
   or token echo in stderr.
+
+## Server ownership precursor (executed)
+
+Eight real-process cases exercise the production server entry point on Node
+24.19.0. The separate local guard database holds a `BEGIN IMMEDIATE` transaction
+for the server lifetime, reserving SQLite's single writer slot without requiring
+other connections to release their read locks. Failed contenders do not unlink
+the guard or replace its owner.
+
+- A contender exits with a redacted ownership diagnostic before readiness; the
+  existing server remains reachable and its committed note is unchanged.
+- Normal exit and `SIGKILL` release ownership. A successor retains the instance
+  and committed note while receiving a new authority epoch.
+- Ten simultaneous first-start iterations each produce one ready server and one
+  rejected contender in a fresh directory.
+- Relative paths, directory symlinks, and existing database-file symlinks select
+  the same canonical directory guard. Dangling database-file symlinks fail
+  before acquisition; missing parent directories are not created.
+- Failed database initialization releases ownership. Repairing the invalid
+  target allows a successful startup in the same directory.
+- Separate local data directories can have independent owners.
+
+The ordinary Electron integration suite also starts the owned server using its
+bundled Node runtime. Mixed-runtime contention, hardlinks, mount aliases, NAS
+locks, and hostile path changes during acquisition were not tested. This is a
+bounded G2/G6 precursor, not complete deployment or path-safety validation.
 
 ## Pending G1/G2 cases (Not run)
 
