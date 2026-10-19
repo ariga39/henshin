@@ -1,4 +1,10 @@
-import type { CommandAttempt, CommandReconciliation, NoteView, SavedDraft } from "@henshin/contracts"
+import type {
+  CommandAttempt,
+  CommandReconciliation,
+  ConnectionStatusView,
+  NoteView,
+  SavedDraft
+} from "@henshin/contracts"
 
 export type Outcome =
   | { readonly kind: "committed"; readonly revision: string }
@@ -23,6 +29,8 @@ export interface ViewState {
   readonly outcome: Outcome | null
   readonly recovery_attempts: ReadonlyArray<CommandAttempt>
   readonly recovery_result: CommandReconciliation | null
+  readonly connection: ConnectionStatusView
+  readonly connection_generation: number
 }
 
 const initialState: ViewState = {
@@ -37,8 +45,16 @@ const initialState: ViewState = {
   saved_draft: null,
   outcome: null,
   recovery_attempts: [],
-  recovery_result: null
+  recovery_result: null,
+  connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
+  connection_generation: 0
 }
+
+const sameConnection = (left: ConnectionStatusView, right: ConnectionStatusView): boolean =>
+  left.state === right.state &&
+  left.instance_id === right.instance_id &&
+  left.epoch === right.epoch &&
+  left.reason === right.reason
 
 const createViewStore = () => {
   let state: ViewState = initialState
@@ -59,6 +75,32 @@ const createViewStore = () => {
     editFormText: (text: string): void => {
       state = { ...state, form_text: text, form_edit_version: state.form_edit_version + 1 }
       for (const listener of listeners) listener()
+    },
+    setConnection: (connection: ConnectionStatusView): void => {
+      if (sameConnection(state.connection, connection)) return
+      state = {
+        ...state,
+        connection,
+        connection_generation: state.connection_generation + 1
+      }
+      for (const listener of listeners) listener()
+    },
+    beginConnectionTransition: (stateName: ConnectionStatusView["state"]): number => {
+      const connection = { ...state.connection, state: stateName }
+      state = {
+        ...state,
+        connection,
+        connection_generation: state.connection_generation + 1
+      }
+      for (const listener of listeners) listener()
+      return state.connection_generation
+    },
+    publishConnection: (connection: ConnectionStatusView, generation: number): boolean => {
+      if (state.connection_generation !== generation) return false
+      if (sameConnection(state.connection, connection)) return true
+      state = { ...state, connection }
+      for (const listener of listeners) listener()
+      return true
     }
   }
 }

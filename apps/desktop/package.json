@@ -10,6 +10,7 @@
     "start": "electron ."
   },
   "dependencies": {
+    "@effect/platform-node": "4.0.5",
     "@henshin/contracts": "workspace:*",
     "effect": "4.0.5",
     "react": "19.3.1",

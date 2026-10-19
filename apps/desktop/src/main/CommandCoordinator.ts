@@ -26,6 +26,8 @@ export interface NoteEditInput {
   readonly operationId: string
 }
 
+export type BeforeNetworkDispatch = () => void
+
 export type NoteCommandClient = Pick<
   PrototypeHttpClient["Service"],
   "editNote" | "getOperation" | "getNote"
@@ -135,7 +137,8 @@ export const executeNoteEdit = (
   client: NoteCommandClient,
   store: CommandAttemptStore["Service"],
   session: VerifiedSession,
-  input: NoteEditInput
+  input: NoteEditInput,
+  beforeDispatch?: BeforeNetworkDispatch
 ): Effect.Effect<NoteView, unknown> =>
   Effect.gen(function*() {
     const admitted = yield* store.admit(inputFor(session, input))
@@ -155,6 +158,9 @@ export const executeNoteEdit = (
     // This short local transition is part of admission. If it cannot be
     // persisted, no HTTP dispatch is attempted and the prepared row remains.
     yield* store.markSubmitted({ instanceId: session.instanceId, operationId: input.operationId })
+    if (beforeDispatch !== undefined) {
+      yield* Effect.try({ try: beforeDispatch, catch: (error) => error })
+    }
 
     const response = yield* client
       .editNote({
