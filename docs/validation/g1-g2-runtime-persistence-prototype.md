@@ -13,6 +13,10 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 - Prototype base commit: `ec2cc9a` (first frozen install/typecheck/test pass).
 - Documentation-only follow-up commits after the tested code do not require a
   retest; they leave the code revision above unchanged.
+- Durable draft precursor source: `6dbcd8f00e9f138f1678f892e76bde2e01d3fcc8` (`Guard draft loads from
+  overwriting edits`), built and typechecked with the same locked dependencies.
+  The focused worker and renderer-race checks below were executed against this
+  source tree.
 
 ## Scope and fixtures
 
@@ -70,6 +74,18 @@ All commands were run on the primary Node 24.19.0 runtime unless noted.
 | `pnpm build` | Pass (server `dist/server.mjs` + `dist/worker.mjs`; desktop main/preload/renderer) |
 | `pnpm test` | Pass, 22 server tests plus 1/1 real Electron e2e test |
 
+### Durable draft precursor checks
+
+These checks cover the narrow synthetic-note draft slice only; they do not
+replace the full G1 case 2 gate.
+
+| Command | Result |
+| --- | --- |
+| `pnpm typecheck` | Pass on source `6dbcd8f00e9f138f1678f892e76bde2e01d3fcc8` |
+| `pnpm build` | Pass; includes the bundled desktop draft worker |
+| `pnpm exec vitest run apps/server/test/desktop-draft-worker.test.ts apps/server/test/renderer-draft-load-race.test.ts` | Pass, 2 files and 5 tests |
+| `pnpm exec playwright test apps/desktop/e2e/prototype.spec.ts -g "does not cross-read a saved draft between verified server instances"` | Pass, 1 real Electron test |
+
 The executed lifecycle suite awaited cleanup of its owned child processes and
 temporary database directories; no fixture process was left running by the
 suite.
@@ -107,6 +123,26 @@ suite.
 - Exact revision arithmetic: starting from `9007199254740992` (2^53), the note
   increments to `9007199254740993`, reads back exactly, and a stale edit reports
   `current_revision = 9007199254740993` — beyond `Number.MAX_SAFE_INTEGER`.
+
+### Durable draft precursor cases exercised
+
+- The real desktop SQLite worker accepts 64 distinct namespace/note/form keys.
+  Discarding one key creates a retained tombstone, so a 65th key returns the
+  explicit `full` result; the discarded key and all existing drafts remain
+  unchanged by the rejected save.
+- A save for a missing key with expected local revision `7` returns a local
+  conflict at revision `0` and does not create the key.
+- A saved draft discarded at local revision `1` returns absent with revision
+  `2` after worker restart; recreating it with expected revision `2` succeeds
+  at revision `3`.
+- An explicit current-note load and an explicit saved-draft load are held behind
+  deterministic deferred responses. Text typed after each request starts is
+  retained; the completion may refresh authoritative metadata but cannot replace
+  the edited form text.
+- The namespace Electron case uses separate launches against two server
+  databases with one shared desktop database. A draft from the first verified
+  instance is absent from the second and present again when the first is
+  relaunched.
 
 ## Runtime lifecycle precursor (executed)
 
@@ -152,6 +188,12 @@ gate or resource framework.
 ## Limitations
 
 - Single macOS/arm64 host; no cross-platform or packaged-ABI validation.
+- Multi-window races are emulated by stale IPC calls from one real window; no
+  multi-window harness exists in this prototype.
+- Namespace changes use separate launches and verified server instances; actual
+  connection-profile switching is not implemented here.
+- The draft capacity is exactly 64 retained keys, tombstones count toward that
+  limit, and this prototype has no compaction.
 - Prototype-only schema and API; not the first-release persistence contract.
 - The desktop spawns the server via `ELECTRON_RUN_AS_NODE`, not a packaged
   standalone runtime or installer.
