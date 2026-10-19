@@ -5,6 +5,8 @@ import {
   type ElectronApplication,
   type Page
 } from "@playwright/test"
+import { randomUUID } from "node:crypto"
+import { DatabaseSync } from "node:sqlite"
 import electronPath from "electron"
 import { mkdtemp } from "node:fs/promises"
 import os from "node:os"
@@ -82,6 +84,16 @@ test("a synthetic conditional edit commits, persists across restart, and reports
     await expect(first.window.getByTestId("outcome")).toContainText("committed revision=1")
     await expect(first.window.getByTestId("committed-revision")).toHaveText("1")
 
+    // Recovery exposes the original result and a separately refreshed current
+    // note so a later deliberate reapply is an informed choice.
+    await first.window.getByTestId("load-recovery").click()
+    await first.window.getByRole("article").getByRole("button", { name: "Reconcile" }).click()
+    await expect(first.window.getByTestId("recovery-comparison")).toContainText("recovered result")
+    await expect(first.window.getByTestId("recovery-comparison")).toContainText("persisted")
+    await expect(first.window.getByTestId("recovery-comparison")).toContainText("current note")
+    await expect(first.window.getByTestId("recovery-comparison")).toContainText("revision 1")
+    await expect(first.window.getByTestId("recovery-comparison")).toContainText("lookup expiry")
+
     // A second save from the same captured revision is a stale conflict and must
     // not change committed state.
     await first.window.getByTestId("text-input").fill("conflicting")
@@ -112,6 +124,60 @@ test("a synthetic conditional edit commits, persists across restart, and reports
   // Same namespace, fresh authority epoch after restart.
   expect(observed.secondInstance).toBe(observed.firstInstance)
   expect(observed.secondEpoch).not.toBe(observed.firstEpoch)
+})
+
+test("retains an unresolved command across Electron restart and shows epoch-change comparison without replay", async () => {
+  const dbPath = await tempDbPath()
+  const clientDbPath = `${dbPath}.desktop`
+  const operationId = randomUUID()
+  let instanceId = ""
+  let oldEpoch = ""
+
+  const first = await launch(dbPath, clientDbPath)
+  try {
+    await first.window.getByTestId("load").click()
+    await expect(first.window.getByTestId("note-text")).toHaveText("hello")
+    instanceId = (await first.window.getByTestId("instance").textContent()) ?? ""
+    oldEpoch = (await first.window.getByTestId("epoch").textContent()) ?? ""
+  } finally {
+    await close(first.app)
+  }
+
+  // Seed only the unresolved durable row after the first real Electron run has
+  // created the production SQLite schema. The second run exercises main IPC,
+  // the real local worker, the fresh server epoch, and the Recovery UI.
+  const localDb = new DatabaseSync(clientDbPath)
+  const now = Date.now()
+  localDb.prepare(`
+    INSERT INTO command_attempts(
+      instance_id, operation_id, note_id, intent_text, base_revision, epoch,
+      status, created_at_ms, updated_at_ms, result_note, expires_at_ms,
+      error_code, error_message, current_revision, dismissed
+    ) VALUES(?, ?, ?, ?, ?, ?, 'submitted', ?, ?, NULL, NULL, NULL, NULL, NULL, 0)
+  `).run(instanceId, operationId, "note-1", "restart-intent", 0, oldEpoch, now, now)
+  localDb.close()
+
+  const second = await launch(dbPath, clientDbPath)
+  try {
+    await second.window.getByTestId("load").click()
+    await second.window.getByTestId("load-recovery").click()
+    const recovery = second.window.getByTestId(`recovery-${operationId}`)
+    await expect(recovery).toContainText("restart-intent")
+    await expect(recovery).toContainText("from revision 0")
+    await recovery.getByRole("button", { name: "Reconcile" }).click()
+
+    const comparison = second.window.getByTestId("recovery-comparison")
+    await expect(comparison).toContainText("original intent: “restart-intent” from revision 0")
+    await expect(comparison).toContainText("recovered result: unavailable or expired")
+    await expect(comparison).toContainText("current note: “hello” at revision 0")
+    await expect(comparison).toContainText("authority epoch changed")
+    await expect(second.window.getByTestId("epoch")).not.toHaveText(oldEpoch)
+
+    const note = await second.window.evaluate(() => window.henshinPrototype.getNote("note-1"))
+    expect(note).toMatchObject({ ok: true, data: { text: "hello", revision: "0" } })
+  } finally {
+    await close(second.app)
+  }
 })
 
 test("saves a bounded local draft across restart and preserves ABA CAS conflicts", async () => {

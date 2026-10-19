@@ -79,6 +79,18 @@ const save = (running: RunningWorker, input: Record<string, unknown>) =>
     ...input
   })
 
+const admit = (running: RunningWorker, input: Record<string, unknown>) =>
+  running.call({
+    op: "admitCommand",
+    instanceId: randomUUID(),
+    operationId: randomUUID(),
+    noteId: "note-1",
+    intentText: "intent",
+    baseRevision: "0",
+    epoch: randomUUID(),
+    ...input
+  })
+
 afterEach(async () => {
   for (const running of workers) {
     try {
@@ -184,6 +196,78 @@ describe("desktop draft SQLite worker", () => {
           baseEpoch: randomUUID()
         })
       ).resolves.toMatchObject({ kind: "saved", draft: { text: "after-restart", localRevision: "3" } })
+    } finally {
+      try {
+        await call({ op: "close" })
+      } finally {
+        await worker.terminate()
+      }
+    }
+  })
+
+  it("bounds command attempts without evicting unresolved rows and isolates namespaces", async () => {
+    const { running } = await startWorker()
+    const firstInstance = randomUUID()
+    const secondInstance = randomUUID()
+    const operationId = randomUUID()
+    const epoch = randomUUID()
+
+    await expect(
+      admit(running, { instanceId: firstInstance, operationId, epoch, intentText: "preserved" })
+    ).resolves.toMatchObject({ kind: "admitted", attempt: { status: "prepared" } })
+    await expect(
+      admit(running, { instanceId: firstInstance, operationId, epoch, intentText: "preserved" })
+    ).resolves.toMatchObject({ kind: "existing", attempt: { status: "prepared" } })
+    await expect(
+      admit(running, { instanceId: firstInstance, operationId, epoch, intentText: "changed" })
+    ).resolves.toEqual({ kind: "conflict" })
+    await expect(
+      running.call({ op: "listCommandAttempts", instanceId: secondInstance })
+    ).resolves.toEqual([])
+
+    for (let index = 1; index < 64; index += 1) {
+      await expect(admit(running, { instanceId: firstInstance })).resolves.toMatchObject({ kind: "admitted" })
+    }
+    await expect(admit(running, { instanceId: firstInstance })).resolves.toEqual({ kind: "full" })
+    await expect(running.call({ op: "getCommandAttempt", instanceId: firstInstance, operationId })).resolves.toMatchObject({
+      status: "prepared",
+      intentText: "preserved",
+      dismissed: false
+    })
+  })
+
+  it("retains command attempts across a worker restart", async () => {
+    const first = await startWorker()
+    const instanceId = randomUUID()
+    const operationId = randomUUID()
+    await expect(
+      admit(first.running, { instanceId, operationId, intentText: "restart-intent" })
+    ).resolves.toMatchObject({ kind: "admitted" })
+    await first.running.close()
+    workers.delete(first.running)
+
+    const worker = new Worker(workerUrl, { workerData: { dbPath: first.dbPath } })
+    let nextId = 1
+    const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
+    worker.on("message", (raw: WorkerResponse) => {
+      const entry = pending.get(raw.id)
+      if (entry === undefined) return
+      pending.delete(raw.id)
+      if (raw.ok) entry.resolve(raw.value)
+      else entry.reject(new Error(raw.error ?? "draft worker request failed"))
+    })
+    const call = (request: Record<string, unknown>): Promise<unknown> => {
+      const id = nextId++
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject })
+        worker.postMessage({ id, request })
+      })
+    }
+    try {
+      await expect(call({ op: "getCommandAttempt", instanceId, operationId })).resolves.toMatchObject({
+        status: "prepared",
+        intentText: "restart-intent"
+      })
     } finally {
       try {
         await call({ op: "close" })

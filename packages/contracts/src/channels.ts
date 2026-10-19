@@ -8,5 +8,8 @@ export const IpcChannels = {
   editNote: "henshin-prototype:edit-note",
   saveDraft: "henshin-prototype:save-draft",
   loadDraft: "henshin-prototype:load-draft",
-  discardDraft: "henshin-prototype:discard-draft"
+  discardDraft: "henshin-prototype:discard-draft",
+  listCommandAttempts: "henshin-prototype:list-command-attempts",
+  reconcileCommand: "henshin-prototype:reconcile-command",
+  dismissCommand: "henshin-prototype:dismiss-command"
 } as const

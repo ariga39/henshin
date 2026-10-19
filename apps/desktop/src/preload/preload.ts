@@ -28,5 +28,10 @@ contextBridge.exposeInMainWorld("henshinPrototype", {
     readonly note_id: string
     readonly form_id: string
     readonly expected_local_revision: string
-  }) => ipcRenderer.invoke(IpcChannels.discardDraft, input)
+  }) => ipcRenderer.invoke(IpcChannels.discardDraft, input),
+  listCommandAttempts: () => ipcRenderer.invoke(IpcChannels.listCommandAttempts, {}),
+  reconcileCommand: (operationId: string) =>
+    ipcRenderer.invoke(IpcChannels.reconcileCommand, { operation_id: operationId }),
+  dismissCommand: (operationId: string) =>
+    ipcRenderer.invoke(IpcChannels.dismissCommand, { operation_id: operationId })
 })
