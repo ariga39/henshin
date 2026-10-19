@@ -556,7 +556,17 @@ describe("main command-attempt coordinator", () => {
 
     expect(Result.isSuccess(result.dispatchResult)).toBe(true)
     expect(result.attempt?.status).toBe("succeeded")
-    expect(result.recovered.requires_reconciliation).toBe(true)
+    expect(result.recovered.server_result).toEqual({
+      operation_id: operationId,
+      note: {
+        note_id: "note-1",
+        text: "race-after-commit",
+        revision: "1"
+      },
+      expires_at_ms: expect.any(Number)
+    })
+    expect(result.recovered.requires_reconciliation).toBe(false)
+    expect(result.recovered.reconciliation_reason).toBe("complete")
     expect(result.recovered.current_note).toEqual({
       note_id: "note-1",
       text: "race-after-commit",
