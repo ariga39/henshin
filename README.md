@@ -21,6 +21,8 @@ dependencies, and NAS access still require validation.
 This repository also contains one focused, isolated runtime/persistence
 prototype. It is not a runnable product client or server, does not implement the
 first-release schema or API, and does not claim any gate complete.
+The separately isolated source-manifest precursor has current executed evidence
+in [docs/validation/source-manifests-prototype.md](docs/validation/source-manifests-prototype.md).
 
 ## Runtime persistence prototype
 
