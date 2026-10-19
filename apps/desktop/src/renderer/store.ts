@@ -91,7 +91,7 @@ const createViewStore = () => {
         ...state,
         connection,
         status:
-          stateName === "disconnected" && state.status === "loading"
+          state.status === "loading"
             ? state.note === null
               ? "idle"
               : "ready"

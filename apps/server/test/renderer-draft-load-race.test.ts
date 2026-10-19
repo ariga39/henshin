@@ -233,6 +233,80 @@ describe("explicit renderer load races", () => {
     })
   })
 
+  it("abandons a cached load when reconnect fails and fences its late response", async () => {
+    const pendingNote = deferred<Result<NoteView>>()
+    let getNoteStartedResolve!: () => void
+    const getNoteStarted = new Promise<void>((resolve) => {
+      getNoteStartedResolve = resolve
+    })
+    const blocked: ConnectionStatusView = {
+      state: "blocked",
+      instance_id: null,
+      epoch: null,
+      reason: "authentication_or_network_failure"
+    }
+    const client = PrototypeClient.of({
+      handshake: () => Effect.succeed({ ok: true, data: handshake }),
+      connect: () => Effect.succeed({
+        ok: false,
+        error: { code: "authentication_required", message: "authentication required", retryable: false }
+      }),
+      disconnect: () => Effect.succeed({
+        ok: true,
+        data: { state: "disconnected", instance_id: handshake.instance_id, epoch: null, reason: "explicit_disconnect" }
+      }),
+      connectionStatus: () => Effect.succeed({ ok: true, data: blocked }),
+      getNote: () => {
+        getNoteStartedResolve()
+        return Effect.promise(() => pendingNote.promise)
+      },
+      editNote: () => Effect.succeed({ ok: true, data: note }),
+      saveDraft: () => Effect.succeed({ ok: true, data: draft }),
+      loadDraft: () => Effect.succeed({ ok: true, data: null }),
+      discardDraft: () => Effect.succeed({ ok: true, data: {
+        instance_id: handshake.instance_id,
+        note_id: "note-1",
+        form_id: "synthetic-note",
+        local_revision: "1"
+      } }),
+      listCommandAttempts: () => Effect.succeed({ ok: true, data: [] }),
+      reconcileCommand: () => Effect.succeed({ ok: false, error: { code: "not_used", message: "not used", retryable: false } }),
+      dismissCommand: () => Effect.succeed({ ok: false, error: { code: "not_used", message: "not used", retryable: false } })
+    })
+
+    viewStore.set({
+      status: "ready",
+      connection: { state: "disconnected", instance_id: handshake.instance_id, epoch: null, reason: "explicit_disconnect" },
+      connection_generation: 1,
+      instance_id: handshake.instance_id,
+      epoch: handshake.epoch,
+      note,
+      base_revision: note.revision,
+      form_text: "retained-local-text",
+      form_edit_version: 1
+    })
+
+    const oldLoad = Effect.runPromise(Effect.provide(loadNote, Layer.succeed(PrototypeClient, client)))
+    await getNoteStarted
+    expect(viewStore.getState().status).toBe("loading")
+
+    await Effect.runPromise(Effect.provide(reconnect, Layer.succeed(PrototypeClient, client)))
+    pendingNote.resolve({ ok: true, data: refreshedNote })
+    await oldLoad
+
+    expect(viewStore.getState()).toMatchObject({
+      status: "ready",
+      connection: blocked,
+      note,
+      base_revision: note.revision,
+      form_text: "retained-local-text",
+      outcome: { kind: "error", message: "authentication required" }
+    })
+
+    viewStore.editFormText("draft remains available")
+    expect(viewStore.getState().form_text).toBe("draft remains available")
+  })
+
   it("fences a held recovery response during a connection transition", async () => {
     const pendingRecovery = deferred<Result<ReadonlyArray<never>>>()
     const client = PrototypeClient.of({
