@@ -64,7 +64,7 @@ hard-cancel an in-flight native I/O operation.
 
 Public failures are typed and redact native paths and raw operating-system
 errors. The evidence includes `invalid-portable-path`, `unsupported-name`,
-`missing-target`, `source-link`, `root-changed`, `directory-limit`,
+`invalid-root`, `source-link`, `root-changed`, `directory-limit`,
 `location-unavailable`, and `location-overlap` outcomes. No archive payload or
 image bytes are read. The source-byte before/after assertion proves only that
 the fixture content was unchanged; it is not a syscall audit.
@@ -83,4 +83,8 @@ hostile-swap protection, or immunity to unknown NAS aliases/mount changes.
 The focused native suite recorded 10/10 passing cases at the implementation
 commit. The independently accepted broader verification was 108 Vitest tests
 in 11 files plus 6 Electron tests, with typecheck and build passing; those
-results do not expand this precursor's scope. Full G3 remains **Not run**.
+results do not expand this precursor's scope. The cooperative deadline and
+source-root/source-root overlap are implemented but were not triggered by
+these ten fixtures. The case-alias outcome was observed on the tested
+case-insensitive volume; a case-sensitive volume may report `missing-target`.
+Full G3 remains **Not run**.
