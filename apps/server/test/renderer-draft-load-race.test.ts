@@ -36,6 +36,29 @@ const connected: ConnectionStatusView = {
   reason: null
 }
 
+const reconnectClient = (getNote: () => Effect.Effect<Result<NoteView>>) => PrototypeClient.of({
+  handshake: () => Effect.succeed({ ok: true, data: handshake }),
+  connect: () => Effect.succeed({ ok: true, data: connected }),
+  disconnect: () => Effect.succeed({
+    ok: true,
+    data: { state: "disconnected", instance_id: handshake.instance_id, epoch: null, reason: "explicit_disconnect" }
+  }),
+  connectionStatus: () => Effect.succeed({ ok: true, data: connected }),
+  getNote,
+  editNote: () => Effect.succeed({ ok: true, data: note }),
+  saveDraft: () => Effect.succeed({ ok: true, data: draft }),
+  loadDraft: () => Effect.succeed({ ok: true, data: null }),
+  discardDraft: () => Effect.succeed({ ok: true, data: {
+    instance_id: handshake.instance_id,
+    note_id: "note-1",
+    form_id: "synthetic-note",
+    local_revision: "1"
+  } }),
+  listCommandAttempts: () => Effect.succeed({ ok: true, data: [] }),
+  reconcileCommand: () => Effect.succeed({ ok: false, error: { code: "not_used", message: "not used", retryable: false } }),
+  dismissCommand: () => Effect.succeed({ ok: false, error: { code: "not_used", message: "not used", retryable: false } })
+})
+
 const deferred = <A>() => {
   let resolve!: (value: A) => void
   const promise = new Promise<A>((complete) => {
@@ -273,6 +296,64 @@ describe("explicit renderer load races", () => {
       form_text: "retained-local-text",
       base_revision: note.revision,
       epoch: "33333333-3333-4333-8333-333333333333"
+    })
+  })
+
+  it("copies a refreshed server note into a clean form after reconnect", async () => {
+    const client = reconnectClient(() => Effect.succeed({ ok: true, data: refreshedNote }))
+    viewStore.set({
+      status: "ready",
+      connection: { state: "disconnected", instance_id: handshake.instance_id, epoch: null, reason: "explicit_disconnect" },
+      connection_generation: 1,
+      instance_id: handshake.instance_id,
+      epoch: handshake.epoch,
+      note,
+      base_revision: note.revision,
+      form_text: note.text,
+      form_edit_version: 0
+    })
+
+    await Effect.runPromise(Effect.provide(reconnect, Layer.succeed(PrototypeClient, client)))
+
+    expect(viewStore.getState()).toMatchObject({
+      note: refreshedNote,
+      form_text: refreshedNote.text,
+      base_revision: refreshedNote.revision
+    })
+  })
+
+  it("retains text typed during a reconnect read and keeps its old edit base", async () => {
+    const pendingNote = deferred<Result<NoteView>>()
+    let getNoteStartedResolve!: () => void
+    const getNoteStarted = new Promise<void>((resolve) => {
+      getNoteStartedResolve = resolve
+    })
+    const client = reconnectClient(() => {
+      getNoteStartedResolve()
+      return Effect.promise(() => pendingNote.promise)
+    })
+    viewStore.set({
+      status: "ready",
+      connection: { state: "disconnected", instance_id: handshake.instance_id, epoch: null, reason: "explicit_disconnect" },
+      connection_generation: 1,
+      instance_id: handshake.instance_id,
+      epoch: handshake.epoch,
+      note,
+      base_revision: note.revision,
+      form_text: note.text,
+      form_edit_version: 0
+    })
+
+    const reconnecting = Effect.runPromise(Effect.provide(reconnect, Layer.succeed(PrototypeClient, client)))
+    await getNoteStarted
+    viewStore.editFormText("typed-during-reconnect")
+    pendingNote.resolve({ ok: true, data: refreshedNote })
+    await reconnecting
+
+    expect(viewStore.getState()).toMatchObject({
+      note: refreshedNote,
+      form_text: "typed-during-reconnect",
+      base_revision: note.revision
     })
   })
 

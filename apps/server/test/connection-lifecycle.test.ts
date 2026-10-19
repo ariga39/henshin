@@ -265,4 +265,45 @@ describe("main-owned connection lifecycle", () => {
       reason: "authentication_or_network_failure"
     })
   })
+
+  it("blocks an explicit authentication failure without mutation or namespace loss", async () => {
+    const fixture = await startFixture(false)
+    fixtures.push(fixture)
+    const lifecycle = new ConnectionLifecycle({ baseUrl: fixture.baseUrl, bearerToken: "test-token" })
+    lifecycles.push(lifecycle)
+    await lifecycle.connect()
+    await lifecycle.disconnect()
+
+    fixture.rejectHandshake()
+    await expect(lifecycle.connect()).rejects.toThrow()
+
+    expect(lifecycle.getStatus()).toMatchObject({
+      state: "blocked",
+      instance_id: INSTANCE_ID,
+      epoch: null,
+      reason: "authentication_or_network_failure"
+    })
+    expect(lifecycle.getNamespace()).toBe(INSTANCE_ID)
+    expect(lifecycle.getSession()).toBeNull()
+    await expect(
+      lifecycle.run(
+        clientEffect(
+          Effect.gen(function*() {
+            const client = yield* PrototypeHttpClient
+            return yield* client.editNote({
+              params: { id: "note-1" },
+              payload: {
+                operation_id: randomUUID(),
+                expected_revision: "0",
+                text: "must-not-send",
+                instance_id: INSTANCE_ID,
+                epoch: EPOCH
+              }
+            })
+          })
+        )
+      )
+    ).rejects.toBeInstanceOf(ConnectionPausedError)
+    expect(fixture.requests.filter((url) => url === "/prototype/v1/note/note-1")).toHaveLength(0)
+  })
 })
