@@ -1,5 +1,12 @@
 import { Context, Effect, Layer } from "effect"
-import type { HandshakeView, NoteView, PublicError } from "@henshin/contracts"
+import type {
+  DiscardedDraft,
+  HandshakeView,
+  NoteView,
+  PublicError,
+  SavedDraft,
+  SavedDraftAbsent
+} from "@henshin/contracts"
 
 export type Result<A> =
   | { readonly ok: true; readonly data: A }
@@ -16,6 +23,29 @@ export interface PrototypeBridge {
   handshake(): Promise<Result<HandshakeView>>
   getNote(noteId: string): Promise<Result<NoteView>>
   editNote(input: EditNoteInput): Promise<Result<NoteView>>
+  saveDraft(input: SaveDraftInput): Promise<Result<SavedDraft>>
+  loadDraft(input: LoadDraftInput): Promise<Result<SavedDraft | SavedDraftAbsent | null>>
+  discardDraft(input: DiscardDraftInput): Promise<Result<DiscardedDraft>>
+}
+
+export interface SaveDraftInput {
+  readonly note_id: string
+  readonly form_id: string
+  readonly text: string
+  readonly expected_local_revision: string
+  readonly base_server_revision: string
+  readonly base_epoch: string
+}
+
+export interface LoadDraftInput {
+  readonly note_id: string
+  readonly form_id: string
+}
+
+export interface DiscardDraftInput {
+  readonly note_id: string
+  readonly form_id: string
+  readonly expected_local_revision: string
 }
 
 declare global {
@@ -52,6 +82,9 @@ export class PrototypeClient extends Context.Service<
     readonly handshake: () => Effect.Effect<Result<HandshakeView>>
     readonly getNote: (noteId: string) => Effect.Effect<Result<NoteView>>
     readonly editNote: (input: EditNoteInput) => Effect.Effect<Result<NoteView>>
+    readonly saveDraft: (input: SaveDraftInput) => Effect.Effect<Result<SavedDraft>>
+    readonly loadDraft: (input: LoadDraftInput) => Effect.Effect<Result<SavedDraft | SavedDraftAbsent | null>>
+    readonly discardDraft: (input: DiscardDraftInput) => Effect.Effect<Result<DiscardedDraft>>
   }
 >()("henshin/desktop/renderer/PrototypeClient") {
   static readonly layer = Layer.succeed(
@@ -59,7 +92,10 @@ export class PrototypeClient extends Context.Service<
     PrototypeClient.of({
       handshake: () => callIpc(() => window.henshinPrototype.handshake()),
       getNote: (noteId) => callIpc(() => window.henshinPrototype.getNote(noteId)),
-      editNote: (input) => callIpc(() => window.henshinPrototype.editNote(input))
+      editNote: (input) => callIpc(() => window.henshinPrototype.editNote(input)),
+      saveDraft: (input) => callIpc(() => window.henshinPrototype.saveDraft(input)),
+      loadDraft: (input) => callIpc(() => window.henshinPrototype.loadDraft(input)),
+      discardDraft: (input) => callIpc(() => window.henshinPrototype.discardDraft(input))
     })
   )
 }

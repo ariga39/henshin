@@ -3,6 +3,7 @@ import { PrototypeClient } from "./client"
 import { viewStore } from "./store"
 
 export const NOTE_ID = "note-1"
+export const FORM_ID = "synthetic-note"
 
 const newOperationId = (): string => crypto.randomUUID()
 
@@ -39,6 +40,7 @@ export const loadNote = Effect.gen(function*() {
       epoch: handshake.data.epoch,
       note: note.data,
       base_revision: note.data.revision,
+      form_text: note.data.text,
       outcome: null
     })
   )
@@ -76,3 +78,106 @@ export const saveNote = (text: string) =>
       )
     }
   })
+
+export const saveLocalDraft = Effect.gen(function*() {
+  const client = yield* PrototypeClient
+  const state = viewStore.getState()
+  if (state.base_revision === null || state.epoch === null || state.instance_id === null) {
+    yield* Effect.sync(() =>
+      viewStore.set({ outcome: { kind: "error", message: "load the current note before saving a local draft" } })
+    )
+    return
+  }
+  const result = yield* client.saveDraft({
+    note_id: NOTE_ID,
+    form_id: FORM_ID,
+    text: state.form_text,
+    expected_local_revision: state.draft_local_revision,
+    base_server_revision: state.base_revision,
+    base_epoch: state.epoch
+  })
+  if (result.ok) {
+    yield* Effect.sync(() =>
+      viewStore.set({
+        saved_draft: result.data,
+        draft_local_revision: result.data.local_revision,
+        outcome: { kind: "draft_saved", local_revision: result.data.local_revision }
+      })
+    )
+  } else if (result.error.code === "draft_conflict") {
+    yield* Effect.sync(() =>
+      viewStore.set({
+        outcome: {
+          kind: "draft_conflict",
+          current_local_revision: result.error.current_local_revision ?? "unknown"
+        }
+      })
+    )
+  } else {
+    yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+  }
+})
+
+export const loadSavedDraft = Effect.gen(function*() {
+  const client = yield* PrototypeClient
+  const result = yield* client.loadDraft({ note_id: NOTE_ID, form_id: FORM_ID })
+  if (!result.ok) {
+    yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+    return
+  }
+  const draft = result.data
+  if (draft === null) {
+    yield* Effect.sync(() =>
+      viewStore.set({ saved_draft: null, outcome: { kind: "error", message: "no saved local draft" } })
+    )
+    return
+  }
+  if (!("text" in draft)) {
+    yield* Effect.sync(() =>
+      viewStore.set({
+        saved_draft: null,
+        draft_local_revision: draft.local_revision,
+        outcome: { kind: "error", message: "no saved local draft" }
+      })
+    )
+    return
+  }
+  yield* Effect.sync(() =>
+    viewStore.set({
+      saved_draft: draft,
+      draft_local_revision: draft.local_revision,
+      form_text: draft.text,
+      outcome: { kind: "draft_loaded" }
+    })
+  )
+})
+
+export const discardSavedDraft = Effect.gen(function*() {
+  const client = yield* PrototypeClient
+  const state = viewStore.getState()
+  const result = yield* client.discardDraft({
+    note_id: NOTE_ID,
+    form_id: FORM_ID,
+    expected_local_revision: state.draft_local_revision
+  })
+  if (result.ok) {
+    yield* Effect.sync(() =>
+      viewStore.set({
+        saved_draft: null,
+        draft_local_revision: result.data.local_revision,
+        outcome: { kind: "draft_discarded", local_revision: result.data.local_revision }
+      })
+    )
+  } else if (result.error.code === "draft_conflict") {
+    yield* Effect.sync(() =>
+      viewStore.set({
+        outcome: {
+          kind: "draft_conflict",
+          current_local_revision: result.error.current_local_revision ?? "unknown"
+        }
+      })
+    )
+  } else {
+    yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+  }
+})

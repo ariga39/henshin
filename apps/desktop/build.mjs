@@ -20,6 +20,18 @@ await build({
   logLevel: "info"
 })
 
+// Main-owned local draft SQLite worker. It is a separate file because worker
+// threads must load an executable module rather than a renderer bundle.
+await build({
+  entryPoints: [path.join(dir, "src/main/persistence/draft-worker.ts")],
+  outfile: path.join(dist, "draft-worker.mjs"),
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node22",
+  logLevel: "info"
+})
+
 // Sandboxed preload: CJS, only Electron and the dependency-free channel names.
 await build({
   entryPoints: [path.join(dir, "src/preload/preload.ts")],
