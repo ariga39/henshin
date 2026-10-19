@@ -1,10 +1,23 @@
 import { NodeRuntime } from "@effect/platform-node"
-import { Layer } from "effect"
+import { Effect, Layer } from "effect"
 import { makeAppLayer } from "./app"
+import { DatabaseWorkerError } from "./persistence/DatabaseWorker"
+import { canonicalizeDatabasePath, ServerOwnershipError } from "./persistence/ServerOwnership"
 
 interface Bootstrap {
   readonly bearerToken: string
   readonly dbPath: string
+}
+
+const startupDiagnostic = (error: unknown): string | undefined => {
+  if (error instanceof ServerOwnershipError) return error.message
+  if (error instanceof DatabaseWorkerError) {
+    return "server startup failed at database: database initialization failed"
+  }
+  if (typeof error === "object" && error !== null && "_tag" in error && error._tag === "ServeError") {
+    return "server startup failed at readiness: server is unavailable"
+  }
+  return undefined
 }
 
 /**
@@ -35,12 +48,43 @@ const main = async () => {
   // Closing the private parent channel is a shutdown request, so a crashed
   // desktop never leaves an unmanaged server behind.
   process.stdin.resume()
-  const requestShutdown = () => process.kill(process.pid, "SIGTERM")
+  let startupFailed = false
+  const requestShutdown = () => {
+    if (!startupFailed) process.kill(process.pid, "SIGTERM")
+  }
   process.stdin.on("end", requestShutdown)
   process.stdin.on("close", requestShutdown)
 
-  const appLayer = makeAppLayer({ dbPath: bootstrap.dbPath, bearerToken: bootstrap.bearerToken })
-  NodeRuntime.runMain(Layer.launch(appLayer), { disableErrorReporting: true })
+  const failStartup = (diagnostic: string | undefined): void => {
+    startupFailed = true
+    if (diagnostic !== undefined) console.error(diagnostic)
+    process.stdin.destroy()
+    process.exitCode = 1
+  }
+
+  let dbPath: string
+  try {
+    dbPath = await canonicalizeDatabasePath(bootstrap.dbPath)
+  } catch (error) {
+    failStartup(
+      error instanceof ServerOwnershipError
+        ? error.message
+        : "server startup failed at data-directory: data directory is unavailable"
+    )
+    return
+  }
+
+  const appLayer = makeAppLayer({ dbPath, bearerToken: bootstrap.bearerToken })
+  NodeRuntime.runMain(
+    Layer.launch(appLayer).pipe(
+      Effect.tapError((error) =>
+        Effect.sync(() => {
+          failStartup(startupDiagnostic(error))
+        })
+      )
+    ),
+    { disableErrorReporting: true }
+  )
 }
 
 void main().catch(() => {
