@@ -12,10 +12,25 @@ export type NoteRow = typeof NoteRow.Type
 export const ReadNoteResult = Schema.NullOr(NoteRow)
 export type ReadNoteResult = typeof ReadNoteResult.Type
 
+export const OperationResultRow = Schema.Struct({
+  operationId: Uuid,
+  note: NoteRow,
+  expiresAtMs: Schema.Int
+})
+export type OperationResultRow = typeof OperationResultRow.Type
+
+export const OperationLookupOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("found"), result: OperationResultRow }),
+  Schema.Struct({ kind: Schema.Literal("expired") })
+])
+export type OperationLookupOutcome = typeof OperationLookupOutcome.Type
+
 export const CommitOutcome = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("committed"), note: NoteRow }),
-  Schema.Struct({ kind: Schema.Literal("replayed"), note: NoteRow }),
+  Schema.Struct({ kind: Schema.Literal("committed"), result: OperationResultRow }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), result: OperationResultRow }),
   Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("operation_expired") }),
+  Schema.Struct({ kind: Schema.Literal("storage_full") }),
   Schema.Struct({ kind: Schema.Literal("revision_conflict"), currentRevision: Revision }),
   Schema.Struct({ kind: Schema.Literal("not_found") })
 ])
@@ -28,6 +43,11 @@ export type CommitOutcome = typeof CommitOutcome.Type
 export const WorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("init") }),
   Schema.Struct({ op: Schema.Literal("readNote"), noteId: NoteId }),
+  Schema.Struct({
+    op: Schema.Literal("readOperation"),
+    operationId: Uuid,
+    epoch: Uuid
+  }),
   Schema.Struct({
     op: Schema.Literal("commitNote"),
     noteId: NoteId,
