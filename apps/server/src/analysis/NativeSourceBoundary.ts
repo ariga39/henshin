@@ -1,7 +1,7 @@
 import { lstat, opendir, realpath } from "node:fs/promises"
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path"
 
-const textDecoder = new TextDecoder("utf-8", { fatal: true })
+const textDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
 
 /**
  * Development-host native precursor only. It has no server sibling-claim data,
