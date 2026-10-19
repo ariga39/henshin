@@ -1,4 +1,4 @@
-import type { NoteView, SavedDraft } from "@henshin/contracts"
+import type { CommandAttempt, CommandReconciliation, NoteView, SavedDraft } from "@henshin/contracts"
 
 export type Outcome =
   | { readonly kind: "committed"; readonly revision: string }
@@ -7,6 +7,7 @@ export type Outcome =
   | { readonly kind: "draft_loaded"; readonly copied: boolean }
   | { readonly kind: "draft_discarded"; readonly local_revision: string }
   | { readonly kind: "draft_conflict"; readonly current_local_revision: string }
+  | { readonly kind: "reconciled"; readonly requires_reconciliation: boolean }
   | { readonly kind: "error"; readonly message: string }
 
 export interface ViewState {
@@ -20,6 +21,8 @@ export interface ViewState {
   readonly draft_local_revision: string
   readonly saved_draft: SavedDraft | null
   readonly outcome: Outcome | null
+  readonly recovery_attempts: ReadonlyArray<CommandAttempt>
+  readonly recovery_result: CommandReconciliation | null
 }
 
 const initialState: ViewState = {
@@ -32,7 +35,9 @@ const initialState: ViewState = {
   form_edit_version: 0,
   draft_local_revision: "0",
   saved_draft: null,
-  outcome: null
+  outcome: null,
+  recovery_attempts: [],
+  recovery_result: null
 }
 
 const createViewStore = () => {
