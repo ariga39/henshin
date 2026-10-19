@@ -2,15 +2,17 @@
 
 Status: **Prototype pass** for the executed cases below. This is not a gate
 completion: every other G1/G2 case remains **Not run** and is listed at the end.
+The current operation-results acceptance is recorded in the linked evidence.
 The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Source under test
 
-- Tested code: `a016244cba000e522573146f558359a5ded69f83`.
-- Primary acceptance independently ran `pnpm typecheck` and `pnpm test` on that
-  revision: 35 Vitest tests and three real Electron tests passed, including ten
-  simultaneous-first-start iterations in the ownership regression.
-- Subsequent stack integration changes only documentation and ancestry.
+- Current operation-results source: `8350c34adcaf432461d16034ca6c40b8fa852724`;
+  see [operation-results prototype evidence](operation-results-prototype.md).
+- Primary independently accepted that source with `pnpm typecheck` and
+  `pnpm test`: 40 Vitest tests and three real Electron tests passed.
+- Historical precursor source: `a016244cba000e522573146f558359a5ded69f83`;
+  the earlier counts and cases below remain anchored to that revision.
 
 ## Scope and fixtures
 
@@ -60,6 +62,8 @@ and write `9223372036854775807` exactly.
 ## Executed commands and outcomes
 
 All commands were run on the primary Node 24.19.0 runtime unless noted.
+The command counts in this section are historical precursor results; current
+operation-results counts are maintained in the linked evidence above.
 
 | Command | Result |
 | --- | --- |
