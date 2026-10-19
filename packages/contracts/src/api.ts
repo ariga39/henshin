@@ -8,11 +8,13 @@ import {
   InstanceMismatch,
   InternalError,
   NoteNotFound,
+  OperationExpired,
   OperationConflict,
-  RevisionConflict
+  RevisionConflict,
+  StorageFull
 } from "./errors"
-import { NoteId } from "./ids"
-import { EditNotePayload, HandshakeData, Note } from "./note"
+import { NoteId, Uuid } from "./ids"
+import { EditNotePayload, HandshakeData, Note, OperationResult } from "./note"
 
 /**
  * Isolated synthetic prototype API. The `/prototype/v1` prefix and the
@@ -31,15 +33,29 @@ export const PrototypeApi = HttpApi.make("henshin-prototype").add(
         success: SuccessEnvelope(Note),
         error: [AuthenticationRequired, NoteNotFound, InternalError]
       }),
+      HttpApiEndpoint.get("getOperation", "/operations/:id", {
+        params: { id: Uuid },
+        query: { instance_id: Uuid, epoch: Uuid },
+        success: SuccessEnvelope(OperationResult),
+        error: [
+          AuthenticationRequired,
+          OperationExpired,
+          EpochChanged,
+          InstanceMismatch,
+          InternalError
+        ]
+      }),
       HttpApiEndpoint.put("editNote", "/note/:id", {
         params: { id: NoteId },
         payload: EditNotePayload,
-        success: SuccessEnvelope(Note),
+        success: SuccessEnvelope(OperationResult),
         error: [
           AuthenticationRequired,
           NoteNotFound,
           RevisionConflict,
           OperationConflict,
+          OperationExpired,
+          StorageFull,
           EpochChanged,
           InstanceMismatch,
           InternalError
