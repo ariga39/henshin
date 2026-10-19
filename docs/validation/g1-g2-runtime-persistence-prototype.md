@@ -7,7 +7,7 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Source under test
 
-- Current candidate source: `67a79f5e3a35c9225779b0025c2fa5313eb566e0`;
+- Current candidate source: `485718e5e36c394ce6b78cf4ffc1d7ac605a3717`;
   its focused main-owned command-attempt evidence is recorded below.
 - Accepted operation-results predecessor: `8350c34adcaf432461d16034ca6c40b8fa852724`;
   see [operation-results prototype evidence](operation-results-prototype.md).
@@ -29,7 +29,7 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 ## Current main-owned command-attempt slice
 
 The focused implementation is recorded at code commit
-`67a79f5e3a35c9225779b0025c2fa5313eb566e0`. It is an additional prototype
+`485718e5e36c394ce6b78cf4ffc1d7ac605a3717`. It is an additional prototype
 precursor, not completion of the G1 gate or a production command contract.
 
 Final candidate checks on that source were:
@@ -37,10 +37,10 @@ Final candidate checks on that source were:
 | Check | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass; contracts, server, and desktop |
-| `pnpm test` | Pass; build, 52 Vitest tests in 7 files, and 4 real Electron tests |
+| `pnpm test` | Pass; build, 56 Vitest tests in 8 files, and 4 real Electron tests |
 
 Primary independently accepted this candidate with the same typecheck, build,
-and full-suite result: 52 Vitest tests and 4 Electron tests passed.
+and full-suite result: 56 Vitest tests and 4 Electron tests passed.
 
 The executed command-attempt cases include:
 
@@ -71,6 +71,12 @@ The executed command-attempt cases include:
   cancellation. Terminal succeeded/rejected rows become eligible for bounded
   cleanup after seven days; unresolved rows become eligible only after explicit
   dismissal, while undismissed unresolved rows are not evicted.
+- Real worker tests verify that SQLite auto-rollback preserves the original
+  failure, dismissal hides but retains records, seven-day cleanup removes
+  eligible terminal/dismissed records, and undismissed unresolved records
+  survive compaction. Retryable server storage failures remain unresolved;
+  repeating the same operation does not dispatch again. Dismissing a selected
+  recovery record clears its comparison without clearing another record.
 - A real Electron restart opens a retained unresolved row through main IPC,
   observes a changed authority epoch, fetches the current note without
   mutation, and renders original intent/base revision, historical result or
