@@ -70,7 +70,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/contracts
       '@zip.js/zip.js':
-        specifier: ^2.24.0
+        specifier: 2.24.0
         version: 2.24.0
       effect:
         specifier: 4.0.5

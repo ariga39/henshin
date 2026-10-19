@@ -324,7 +324,19 @@ const errorCode = (error: unknown): ManifestCandidateErrorCode => {
   return "read-failure"
 }
 
-const candidateErrorOf = (error: unknown): ManifestCandidateError => {
+const candidateErrorOf = (error: unknown, signal?: AbortSignal): ManifestCandidateError => {
+  if (signal?.aborted) {
+    return new ManifestCandidateError({
+      code: "cancelled",
+      message: publicMessage("cancelled"),
+      diagnostics: {
+        supportedPages: 0,
+        unsupportedPages: 0,
+        ignoredEntries: 0,
+        directoryRecords: 0
+      }
+    })
+  }
   if (error instanceof ManifestCandidateError) return error
   const code = errorCode(error)
   return new ManifestCandidateError({
@@ -733,7 +745,8 @@ interface DirectObservation {
 
 const readDirectObservation = async (
   sourcePath: string,
-  context: AnalysisContext
+  context: AnalysisContext,
+  rootAfterEnumeration: boolean
 ): Promise<DirectObservation> => {
   const root = await observePath(sourcePath, context)
   if (!root.isDirectory()) throw new Error("source is not a directory")
@@ -794,15 +807,17 @@ const readDirectObservation = async (
     }
   }
   checkBudget(context)
-  return { root, entries, pages, diagnostics: diagnosticsOf(diagnostics) }
+  const observedRoot = rootAfterEnumeration ? await observePath(sourcePath, context) : root
+  if (!observedRoot.isDirectory()) throw new SourceChanged()
+  return { root: observedRoot, entries, pages, diagnostics: diagnosticsOf(diagnostics) }
 }
 
 const analyzeDirectory = async (
   sourcePath: string,
   context: AnalysisContext
 ): Promise<SourceManifest> => {
-  const first = await readDirectObservation(sourcePath, context)
-  const second = await readDirectObservation(sourcePath, context)
+  const first = await readDirectObservation(sourcePath, context, false)
+  const second = await readDirectObservation(sourcePath, context, true)
   if (
     !sameStats(first.root, second.root) ||
     first.entries.size !== second.entries.size ||
@@ -858,7 +873,7 @@ export const analyzeSourceManifest = (
     const analysis = analyze({ ...input, signal })
     const settled = analysis.then(
       (manifest) => resume(Effect.succeed(manifest)),
-      (error) => resume(Effect.fail(candidateErrorOf(error)))
+      (error) => resume(Effect.fail(candidateErrorOf(error, signal)))
     )
     // Effect interruption aborts the cooperative signal and waits here for
     // analyze() to settle. This closes the ZIP reader and file handle before
