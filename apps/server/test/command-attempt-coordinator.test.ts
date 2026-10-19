@@ -6,7 +6,7 @@ import os from "node:os"
 import path from "node:path"
 import { Effect, Layer, Result } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
-import { PrototypeHttpClient, type NoteView } from "@henshin/contracts"
+import { PrototypeHttpClient, StorageFull, type NoteView } from "@henshin/contracts"
 import {
   CommandAttemptStore,
   type CommandAttemptInput
@@ -904,6 +904,59 @@ describe("main command-attempt coordinator", () => {
     expect(result.dispatches).toBe(0)
     expect(result.note.data).toEqual({ note_id: "note-1", text: "hello", revision: "0" })
     expect(Result.isFailure(result.operation)).toBe(true)
+  })
+
+  it("keeps a retryable storage-full outcome unresolved without replaying the PUT", async () => {
+    const server = await startOwnedServer()
+    const localDbPath = await makeLocalDbPath()
+    const operationId = randomUUID()
+
+    const result = await withServices(
+      server,
+      localDbPath,
+      Effect.gen(function*() {
+        const client = yield* PrototypeHttpClient
+        const store = yield* CommandAttemptStore
+        let dispatches = 0
+        const storageFullClient: NoteCommandClient = {
+          ...client,
+          editNote: (() => {
+            dispatches += 1
+            return Effect.fail(new StorageFull({
+              code: "storage_full503",
+              message: "operation result storage is full; retry with the same operation id",
+              retryable: true,
+              request_id: randomUUID()
+            })) as unknown as ReturnType<NoteCommandClient["editNote"]>
+          }) as NoteCommandClient["editNote"]
+        }
+        const input = {
+          noteId: "note-1",
+          text: "retryable-storage-full",
+          expectedRevision: "0",
+          operationId
+        }
+        const first = yield* executeNoteEdit(
+          storageFullClient,
+          store,
+          sessionFor(server),
+          input
+        ).pipe(Effect.result)
+        const second = yield* executeNoteEdit(
+          storageFullClient,
+          store,
+          sessionFor(server),
+          input
+        ).pipe(Effect.result)
+        const attempt = yield* store.get({ instanceId: server.instanceId, operationId })
+        return { dispatches, first, second, attempt }
+      })
+    )
+
+    expect(Result.isFailure(result.first)).toBe(true)
+    expect(Result.isFailure(result.second)).toBe(true)
+    expect(result.attempt?.status).toBe("unresolved")
+    expect(result.dispatches).toBe(1)
   })
 
   it("retains an unresolved intent across server restart and only reads after epoch change", async () => {
