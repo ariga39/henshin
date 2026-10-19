@@ -7,7 +7,7 @@ not a product client or server.
 
 ## Source under test
 
-- Current candidate source: `8375cf5235adfe636218cdc14b80d563af2f9db7`.
+- Current candidate source: `52ab0e041b36eb7389e06142629ffdefbf8d52a0`.
 
 ## Scope and fixtures
 
@@ -52,7 +52,9 @@ The executed command-attempt cases include:
   stream. The production coordinator retains the unresolved attempt, performs
   read-only status/current-note reconciliation, and recovers the single
   revision. A controlled real-proxy race also proves stale unresolved
-  bookkeeping cannot downgrade the terminal SQLite state.
+  bookkeeping cannot downgrade the terminal SQLite state. Recovery returns the
+  winning durable result and reports reconciliation complete when concurrent
+  dispatch succeeds after the status query observed an absent result.
 - A successful server lookup whose local terminal persistence fails remains
   unresolved and is reported as `persistence_failed`. An unresolved attempt
   whose same-epoch operation result is expired or unknown remains read-only and
