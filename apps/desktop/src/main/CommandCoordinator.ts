@@ -321,12 +321,24 @@ export const reconcileNoteCommand = (
         const saved = yield* store
           .markUnresolved({ instanceId: session.instanceId, operationId })
           .pipe(Effect.result)
-        if (Result.isSuccess(saved)) attempt = saved.success
-        reconciliationReason = Result.isSuccess(saved)
-          ? status.kind === "expired"
-            ? "operation_expired"
-            : "query_unavailable"
-          : "persistence_failed"
+        if (Result.isSuccess(saved)) {
+          attempt = saved.success
+          // A concurrent dispatcher may have durably won before this
+          // unresolved transition. Recompute the outcome from the row the
+          // conditional transition actually returned instead of retaining
+          // the stale absence observed by reconciliation.
+          const persistedResult = storedOperationResult(attempt)
+          if (persistedResult !== null) {
+            serverResult = persistedResult
+            reconciliationReason = "complete"
+          } else {
+            reconciliationReason = status.kind === "expired"
+              ? "operation_expired"
+              : "query_unavailable"
+          }
+        } else {
+          reconciliationReason = "persistence_failed"
+        }
       }
     }
 
