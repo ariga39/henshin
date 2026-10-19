@@ -2,6 +2,7 @@ import { Context, Effect, Layer } from "effect"
 import type {
   CommandAttempt,
   CommandReconciliation,
+  ConnectionStatusView,
   DiscardedDraft,
   HandshakeView,
   NoteView,
@@ -23,6 +24,9 @@ export interface EditNoteInput {
 
 export interface PrototypeBridge {
   handshake(): Promise<Result<HandshakeView>>
+  connect(): Promise<Result<ConnectionStatusView>>
+  disconnect(): Promise<Result<ConnectionStatusView>>
+  connectionStatus(): Promise<Result<ConnectionStatusView>>
   getNote(noteId: string): Promise<Result<NoteView>>
   editNote(input: EditNoteInput): Promise<Result<NoteView>>
   saveDraft(input: SaveDraftInput): Promise<Result<SavedDraft>>
@@ -85,6 +89,9 @@ export class PrototypeClient extends Context.Service<
   PrototypeClient,
   {
     readonly handshake: () => Effect.Effect<Result<HandshakeView>>
+    readonly connect: () => Effect.Effect<Result<ConnectionStatusView>>
+    readonly disconnect: () => Effect.Effect<Result<ConnectionStatusView>>
+    readonly connectionStatus: () => Effect.Effect<Result<ConnectionStatusView>>
     readonly getNote: (noteId: string) => Effect.Effect<Result<NoteView>>
     readonly editNote: (input: EditNoteInput) => Effect.Effect<Result<NoteView>>
     readonly saveDraft: (input: SaveDraftInput) => Effect.Effect<Result<SavedDraft>>
@@ -99,6 +106,9 @@ export class PrototypeClient extends Context.Service<
     PrototypeClient,
     PrototypeClient.of({
       handshake: () => callIpc(() => window.henshinPrototype.handshake()),
+      connect: () => callIpc(() => window.henshinPrototype.connect()),
+      disconnect: () => callIpc(() => window.henshinPrototype.disconnect()),
+      connectionStatus: () => callIpc(() => window.henshinPrototype.connectionStatus()),
       getNote: (noteId) => callIpc(() => window.henshinPrototype.getNote(noteId)),
       editNote: (input) => callIpc(() => window.henshinPrototype.editNote(input)),
       saveDraft: (input) => callIpc(() => window.henshinPrototype.saveDraft(input)),
