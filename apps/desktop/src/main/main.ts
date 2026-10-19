@@ -177,7 +177,7 @@ const registerIpc = (): void => {
       toResult(
         Effect.gen(function*() {
           const client = yield* PrototypeHttpClient
-          return yield* client.editNote({
+          const result = yield* client.editNote({
             params: { id: request.note_id },
             payload: {
               operation_id: request.operation_id,
@@ -187,6 +187,7 @@ const registerIpc = (): void => {
               epoch: activeSession.epoch
             }
           })
+          return { ...result, data: result.data.note }
         })
       )
     )

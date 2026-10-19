@@ -95,6 +95,44 @@ const chunkedPut = (server: RunningServer, payload: string): Promise<RawResponse
     write()
   })
 
+/**
+ * Drops the response stream as soon as the real server emits response
+ * headers. Headers are emitted only after the worker transaction commits, so
+ * this models a reply lost after upstream commit without a test-only server
+ * branch.
+ */
+const dropPutResponse = (server: RunningServer, payload: string): Promise<void> =>
+  new Promise((resolve, reject) => {
+    let responseStarted = false
+    const request = http.request(
+      {
+        host: "127.0.0.1",
+        port: Number(new URL(server.baseUrl).port),
+        method: "PUT",
+        path: "/prototype/v1/note/note-1",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${server.bearerToken}`
+        }
+      },
+      (response) => {
+        responseStarted = true
+        if ((response.statusCode ?? 0) !== 200) {
+          response.resume()
+          reject(new Error(`expected committed edit response, got HTTP ${response.statusCode ?? 0}`))
+          return
+        }
+        response.destroy()
+        resolve()
+      }
+    )
+    request.on("error", (error) => {
+      if (responseStarted) resolve()
+      else reject(error)
+    })
+    request.end(payload)
+  })
+
 describe("prototype HTTP boundary", () => {
   it("rejects missing and invalid bearer tokens without disclosing namespace or epoch", async () => {
     const server = await start()
@@ -107,6 +145,16 @@ describe("prototype HTTP boundary", () => {
     expect(missingBody.epoch).toBeUndefined()
     expect(JSON.stringify(missingBody)).not.toContain(server.instanceId)
     expect(JSON.stringify(missingBody)).not.toContain(server.epoch)
+
+    const status = await fetch(
+      `${server.baseUrl}/prototype/v1/operations/${randomUUID()}?instance_id=${server.instanceId}&epoch=${server.epoch}`
+    )
+    expect(status.status).toBe(401)
+    const statusBody = (await status.json()) as Record<string, unknown>
+    expect(statusBody.instance_id).toBeUndefined()
+    expect(statusBody.epoch).toBeUndefined()
+    expect(JSON.stringify(statusBody)).not.toContain(server.instanceId)
+    expect(JSON.stringify(statusBody)).not.toContain(server.epoch)
 
     const invalid = await fetch(`${server.baseUrl}/prototype/v1/handshake`, {
       headers: { authorization: "Bearer not-the-token" }
@@ -142,7 +190,9 @@ describe("prototype HTTP boundary", () => {
     expect(result.edited.epoch).toBe(result.handshake.epoch)
     expect(result.edited.request_id).toMatch(UUID_PATTERN)
     expect(result.edited.server_time).toBeGreaterThan(0)
-    expect(result.edited.data).toEqual({ note_id: "note-1", text: "first", revision: "1" })
+    expect(result.edited.data.note).toEqual({ note_id: "note-1", text: "first", revision: "1" })
+    expect(result.edited.data.operation_id).toBeDefined()
+    expect(result.edited.data.expires_at_ms).toBeGreaterThan(Date.now())
     expect(result.read.data).toEqual({ note_id: "note-1", text: "first", revision: "1" })
   })
 
@@ -242,9 +292,390 @@ describe("prototype HTTP boundary", () => {
       })
     )
 
-    expect(result.first.data).toEqual({ note_id: "note-1", text: "same", revision: "1" })
-    expect(result.replay.data).toEqual({ note_id: "note-1", text: "same", revision: "1" })
+    expect(result.first.data).toEqual(result.replay.data)
+    expect(result.first.data.note).toEqual({ note_id: "note-1", text: "same", revision: "1" })
     expect(result.conflict._tag).toBe("OperationConflict")
+  })
+
+  it("recovers an exactly committed result after the real reply transport is dropped", async () => {
+    const server = await start()
+    const operationId = randomUUID()
+    const handshake = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* PrototypeHttpClient
+        return yield* client.handshake()
+      })
+    )
+
+    await dropPutResponse(
+      server,
+      JSON.stringify({
+        operation_id: operationId,
+        expected_revision: "0",
+        text: "lost-reply",
+        instance_id: handshake.instance_id,
+        epoch: handshake.epoch
+      })
+    )
+
+    const result = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* PrototypeHttpClient
+        const recovered = yield* client.getOperation({
+          params: { id: operationId },
+          query: { instance_id: handshake.instance_id, epoch: handshake.epoch }
+        })
+        const later = yield* client.editNote({
+          params: { id: "note-1" },
+          payload: {
+            operation_id: randomUUID(),
+            expected_revision: "1",
+            text: "later",
+            instance_id: handshake.instance_id,
+            epoch: handshake.epoch
+          }
+        })
+        const original = yield* client.getOperation({
+          params: { id: operationId },
+          query: { instance_id: handshake.instance_id, epoch: handshake.epoch }
+        })
+        return { recovered, later, original }
+      })
+    )
+
+    expect(result.recovered.data).toEqual(result.original.data)
+    expect(result.recovered.data.note).toEqual({
+      note_id: "note-1",
+      text: "lost-reply",
+      revision: "1"
+    })
+    expect(result.recovered.data.expires_at_ms).toBeGreaterThan(Date.now())
+    expect(result.later.data.note).toEqual({ note_id: "note-1", text: "later", revision: "2" })
+  })
+
+  it("requires the current namespace and epoch for operation status without mutating", async () => {
+    const server = await start()
+    const result = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* PrototypeHttpClient
+        const handshake = yield* client.handshake()
+        const committed = yield* client.editNote({
+          params: { id: "note-1" },
+          payload: {
+            operation_id: randomUUID(),
+            expected_revision: "0",
+            text: "status-check",
+            instance_id: handshake.instance_id,
+            epoch: handshake.epoch
+          }
+        })
+        const unknown = yield* client
+          .getOperation({
+            params: { id: randomUUID() },
+            query: { instance_id: handshake.instance_id, epoch: handshake.epoch }
+          })
+          .pipe(Effect.flip)
+        const wrongEpoch = yield* client
+          .getOperation({
+            params: { id: committed.data.operation_id },
+            query: { instance_id: handshake.instance_id, epoch: randomUUID() }
+          })
+          .pipe(Effect.flip)
+        const wrongInstance = yield* client
+          .getOperation({
+            params: { id: committed.data.operation_id },
+            query: { instance_id: randomUUID(), epoch: handshake.epoch }
+          })
+          .pipe(Effect.flip)
+        const read = yield* client.getNote({ params: { id: "note-1" } })
+        return { committed, unknown, wrongEpoch, wrongInstance, read }
+      })
+    )
+
+    expect(result.unknown._tag).toBe("OperationExpired")
+    expect(result.wrongEpoch._tag).toBe("EpochChanged")
+    expect(result.wrongInstance._tag).toBe("InstanceMismatch")
+    expect(result.read.data).toEqual({ note_id: "note-1", text: "status-check", revision: "1" })
+  })
+
+  it("returns operation_expired for an expired row without compacting during lookup", async () => {
+    const server = await start()
+    const committed = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* PrototypeHttpClient
+        const handshake = yield* client.handshake()
+        const result = yield* client.editNote({
+          params: { id: "note-1" },
+          payload: {
+            operation_id: randomUUID(),
+            expected_revision: "0",
+            text: "will-expire",
+            instance_id: handshake.instance_id,
+            epoch: handshake.epoch
+          }
+        })
+        return { handshake, result }
+      })
+    )
+
+    const database = new DatabaseSync(server.dbPath)
+    try {
+      database
+        .prepare("UPDATE operation_results SET created_at_ms = 0 WHERE epoch = ? AND operation_id = ?")
+        .run(committed.handshake.epoch, committed.result.data.operation_id)
+    } finally {
+      database.close()
+    }
+
+    const outcome = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* PrototypeHttpClient
+        const error = yield* client
+          .getOperation({
+            params: { id: committed.result.data.operation_id },
+            query: {
+              instance_id: committed.handshake.instance_id,
+              epoch: committed.handshake.epoch
+            }
+          })
+          .pipe(Effect.flip)
+        const replay = yield* client
+          .editNote({
+            params: { id: "note-1" },
+            payload: {
+              operation_id: committed.result.data.operation_id,
+              expected_revision: "0",
+              text: "will-expire",
+              instance_id: committed.handshake.instance_id,
+              epoch: committed.handshake.epoch
+            }
+          })
+          .pipe(Effect.flip)
+        const read = yield* client.getNote({ params: { id: "note-1" } })
+        return { error, replay, read }
+      })
+    )
+
+    const check = new DatabaseSync(server.dbPath)
+    try {
+      const row = check
+        .prepare("SELECT COUNT(*) AS count FROM operation_results WHERE operation_id = ?")
+        .get(committed.result.data.operation_id) as { count: number }
+      expect(row.count).toBe(1)
+    } finally {
+      check.close()
+    }
+    expect(outcome.error._tag).toBe("OperationExpired")
+    expect(outcome.replay._tag).toBe("OperationExpired")
+    expect(outcome.read.data).toEqual({ note_id: "note-1", text: "will-expire", revision: "1" })
+  })
+
+  it("fills the shipped 64-row cap, preserves replay at capacity, and compacts before admission", async () => {
+    const server = await start()
+    const result = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* PrototypeHttpClient
+        const handshake = yield* client.handshake()
+        const firstOperationId = randomUUID()
+        const first = yield* client.editNote({
+          params: { id: "note-1" },
+          payload: {
+            operation_id: firstOperationId,
+            expected_revision: "0",
+            text: "row-1",
+            instance_id: handshake.instance_id,
+            epoch: handshake.epoch
+          }
+        })
+        for (let revision = 1; revision < 64; revision += 1) {
+          yield* client.editNote({
+            params: { id: "note-1" },
+            payload: {
+              operation_id: randomUUID(),
+              expected_revision: String(revision),
+              text: `row-${revision + 1}`,
+              instance_id: handshake.instance_id,
+              epoch: handshake.epoch
+            }
+          })
+        }
+        const full = yield* client
+          .editNote({
+            params: { id: "note-1" },
+            payload: {
+              operation_id: randomUUID(),
+              expected_revision: "64",
+              text: "rejected",
+              instance_id: handshake.instance_id,
+              epoch: handshake.epoch
+            }
+          })
+          .pipe(Effect.flip)
+        const replay = yield* client.editNote({
+          params: { id: "note-1" },
+          payload: {
+            operation_id: firstOperationId,
+            expected_revision: "0",
+            text: "row-1",
+            instance_id: handshake.instance_id,
+            epoch: handshake.epoch
+          }
+        })
+        const beforeCompaction = yield* client.getNote({ params: { id: "note-1" } })
+
+        const database = new DatabaseSync(server.dbPath)
+        try {
+          database
+            .prepare(
+              "UPDATE operation_results SET created_at_ms = 0 WHERE epoch = ? AND operation_id = ?"
+            )
+            .run(handshake.epoch, firstOperationId)
+        } finally {
+          database.close()
+        }
+
+        const compacted = yield* client.editNote({
+          params: { id: "note-1" },
+          payload: {
+            operation_id: randomUUID(),
+            expected_revision: "64",
+            text: "row-65",
+            instance_id: handshake.instance_id,
+            epoch: handshake.epoch
+          }
+        })
+        return { first, full, replay, beforeCompaction, compacted }
+      })
+    )
+
+    expect(result.full._tag).toBe("StorageFull")
+    expect(result.replay.data).toEqual(result.first.data)
+    expect(result.beforeCompaction.data).toEqual({
+      note_id: "note-1",
+      text: "row-64",
+      revision: "64"
+    })
+    expect(result.compacted.data.note).toEqual({
+      note_id: "note-1",
+      text: "row-65",
+      revision: "65"
+    })
+  })
+
+  it("makes bounded progress through 130 obsolete rows without evicting a live result", async () => {
+    const server = await start()
+    const result = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* PrototypeHttpClient
+        const handshake = yield* client.handshake()
+        const live = yield* client.editNote({
+          params: { id: "note-1" },
+          payload: {
+            operation_id: randomUUID(),
+            expected_revision: "0",
+            text: "live-result",
+            instance_id: handshake.instance_id,
+            epoch: handshake.epoch
+          }
+        })
+
+        const database = new DatabaseSync(server.dbPath)
+        const legacyEpoch = randomUUID()
+        const insert = database.prepare(
+          "INSERT INTO operation_results(epoch, operation_id, payload, result, created_at_ms) VALUES(?, ?, ?, ?, ?)"
+        )
+        try {
+          for (let index = 0; index < 130; index += 1) {
+            insert.run(
+              legacyEpoch,
+              randomUUID(),
+              JSON.stringify({
+                expected_revision: "0",
+                note_id: "note-1",
+                text: `legacy-${index}`
+              }),
+              JSON.stringify({
+                note_id: "note-1",
+                text: `legacy-${index}`,
+                revision: "1"
+              }),
+              Date.now()
+            )
+          }
+        } finally {
+          database.close()
+        }
+
+        const admissionOperationId = randomUUID()
+        const rejected = yield* client
+          .editNote({
+            params: { id: "note-1" },
+            payload: {
+              operation_id: admissionOperationId,
+              expected_revision: "1",
+              text: "admitted-after-cleanup",
+              instance_id: handshake.instance_id,
+              epoch: handshake.epoch
+            }
+          })
+          .pipe(Effect.flip)
+
+        const afterFirstCleanup = new DatabaseSync(server.dbPath)
+        let remainingRows: number
+        try {
+          remainingRows = (
+            afterFirstCleanup.prepare("SELECT COUNT(*) AS count FROM operation_results").get() as {
+              count: number
+            }
+          ).count
+        } finally {
+          afterFirstCleanup.close()
+        }
+
+        const liveReplay = yield* client.editNote({
+          params: { id: "note-1" },
+          payload: {
+            operation_id: live.data.operation_id,
+            expected_revision: "0",
+            text: "live-result",
+            instance_id: handshake.instance_id,
+            epoch: handshake.epoch
+          }
+        })
+        const admitted = yield* client.editNote({
+          params: { id: "note-1" },
+          payload: {
+            operation_id: admissionOperationId,
+            expected_revision: "1",
+            text: "admitted-after-cleanup",
+            instance_id: handshake.instance_id,
+            epoch: handshake.epoch
+          }
+        })
+        const liveStatus = yield* client.getOperation({
+          params: { id: live.data.operation_id },
+          query: { instance_id: handshake.instance_id, epoch: handshake.epoch }
+        })
+        return { live, rejected, remainingRows, liveReplay, admitted, liveStatus }
+      })
+    )
+
+    expect(result.rejected._tag).toBe("StorageFull")
+    expect(result.remainingRows).toBe(67)
+    expect(result.liveReplay.data).toEqual(result.live.data)
+    expect(result.liveStatus.data).toEqual(result.live.data)
+    expect(result.admitted.data.note).toEqual({
+      note_id: "note-1",
+      text: "admitted-after-cleanup",
+      revision: "2"
+    })
   })
 
   it("rejects a non-canonical or out-of-range revision and over-long text at the boundary", async () => {
@@ -345,7 +776,7 @@ describe("prototype HTTP boundary", () => {
       })
     )
 
-    expect(result.edited.data.revision).toBe("1")
+    expect(result.edited.data.note.revision).toBe("1")
     expect(result.read.data.text).toBe(text)
   })
 
@@ -373,7 +804,7 @@ describe("prototype HTTP boundary", () => {
       })
     )
 
-    expect(result.edited.data.revision).toBe("1")
+    expect(result.edited.data.note.revision).toBe("1")
     expect(result.read.data.text).toBe(text)
   })
 
@@ -442,7 +873,7 @@ describe("prototype HTTP boundary", () => {
     )
 
     expect(result.before.data.revision).toBe("9007199254740992")
-    expect(result.committed.data.revision).toBe("9007199254740993")
+    expect(result.committed.data.note.revision).toBe("9007199254740993")
     expect(result.after.data.revision).toBe("9007199254740993")
     expect(result.conflict._tag).toBe("RevisionConflict")
     if (result.conflict._tag === "RevisionConflict") {
@@ -452,9 +883,10 @@ describe("prototype HTTP boundary", () => {
 
   it("persists committed state across restart and issues a fresh epoch for the same instance", async () => {
     const dbPath = await makeTempDbPath()
+    const operationId = randomUUID()
 
     const first = await start(dbPath)
-    await withClient(
+    const firstResult = await withClient(
       first,
       Effect.gen(function*() {
         const client = yield* PrototypeHttpClient
@@ -462,13 +894,14 @@ describe("prototype HTTP boundary", () => {
         yield* client.editNote({
           params: { id: "note-1" },
           payload: {
-            operation_id: randomUUID(),
+            operation_id: operationId,
             expected_revision: "0",
             text: "persisted",
             instance_id: handshake.instance_id,
             epoch: handshake.epoch
           }
         })
+        return handshake
       })
     )
     await first.stop()
@@ -480,12 +913,19 @@ describe("prototype HTTP boundary", () => {
         const client = yield* PrototypeHttpClient
         const handshake = yield* client.handshake()
         const read = yield* client.getNote({ params: { id: "note-1" } })
-        return { handshake, read }
+        const oldEpoch = yield* client
+          .getOperation({
+            params: { id: operationId },
+            query: { instance_id: firstResult.instance_id, epoch: firstResult.epoch }
+          })
+          .pipe(Effect.flip)
+        return { handshake, read, oldEpoch }
       })
     )
 
     expect(result.read.data).toEqual({ note_id: "note-1", text: "persisted", revision: "1" })
     expect(result.handshake.instance_id).toBe(first.instanceId)
     expect(second.epoch).not.toBe(first.epoch)
+    expect(result.oldEpoch._tag).toBe("EpochChanged")
   })
 })

@@ -71,6 +71,28 @@ export class OperationConflict extends Schema.TaggedError<OperationConflict>()(
   { httpApiStatus: 409 }
 ) {}
 
+export class OperationExpired extends Schema.TaggedError<OperationExpired>()(
+  "OperationExpired",
+  {
+    code: Schema.Literal("operation_expired"),
+    message: Schema.String,
+    retryable: Schema.Literal(false),
+    ...envelope
+  },
+  { httpApiStatus: 410 }
+) {}
+
+export class StorageFull extends Schema.TaggedError<StorageFull>()(
+  "StorageFull",
+  {
+    code: Schema.Literal("storage_full503"),
+    message: Schema.String,
+    retryable: Schema.Literal(true),
+    ...envelope
+  },
+  { httpApiStatus: 503 }
+) {}
+
 export class DraftConflict extends Schema.TaggedError<DraftConflict>()(
   "DraftConflict",
   {
@@ -142,6 +164,8 @@ export const PublicApiError = Schema.Union([
   NoteNotFound,
   RevisionConflict,
   OperationConflict,
+  OperationExpired,
+  StorageFull,
   DraftConflict,
   DraftStoreFull,
   EpochChanged,

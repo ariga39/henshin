@@ -52,6 +52,18 @@ export const EditNotePayload = Schema.Struct({
 })
 export type EditNotePayload = typeof EditNotePayload.Type
 
+/**
+ * The durable result of a note mutation. The same shape is returned by the
+ * mutation and by the operation-status query so a recovered reply is
+ * equivalent at the typed boundary.
+ */
+export const OperationResult = Schema.Struct({
+  operation_id: Uuid,
+  note: Note,
+  expires_at_ms: Schema.Int
+})
+export type OperationResult = typeof OperationResult.Type
+
 export const HandshakeData = Schema.Struct({
   api_version: Schema.String,
   capabilities: Schema.Array(Schema.String)

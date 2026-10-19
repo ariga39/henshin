@@ -5,10 +5,12 @@ import {
   InstanceMismatch,
   InternalError,
   NoteNotFound,
+  OperationExpired,
   OperationConflict,
   PrototypeApi,
   RequestContext,
-  RevisionConflict
+  RevisionConflict,
+  StorageFull
 } from "@henshin/contracts"
 import { ServerState } from "../identity"
 import { NoteStore } from "../persistence/NoteStore"
@@ -30,6 +32,16 @@ export const PrototypeHandlers = HttpApiBuilder.group(PrototypeApi, "prototype",
       request_id: requestId,
       server_time: Date.now(),
       data
+    })
+
+    const operationResult = (result: {
+      readonly operationId: string
+      readonly note: { readonly note_id: string; readonly text: string; readonly revision: string }
+      readonly expiresAtMs: number
+    }) => ({
+      operation_id: result.operationId,
+      note: result.note,
+      expires_at_ms: result.expiresAtMs
     })
 
     const internalError = (requestId: string) =>
@@ -67,6 +79,41 @@ export const PrototypeHandlers = HttpApiBuilder.group(PrototypeApi, "prototype",
           return envelope(ctx.request_id, note)
         })
       )
+      .handle("getOperation", ({ params, query }) =>
+        Effect.gen(function*() {
+          const ctx = yield* RequestContext
+          if (query.instance_id !== server.instanceId) {
+            return yield* new InstanceMismatch({
+              code: "instance_mismatch",
+              message: "instance mismatch",
+              retryable: false,
+              ...base(ctx.request_id)
+            })
+          }
+          if (query.epoch !== server.epoch) {
+            return yield* new EpochChanged({
+              code: "epoch_changed",
+              message: "epoch changed",
+              retryable: true,
+              ...base(ctx.request_id)
+            })
+          }
+
+          const outcome = yield* store
+            .readOperation({ operationId: params.id, epoch: server.epoch })
+            .pipe(Effect.mapError(() => internalError(ctx.request_id)))
+
+          if (outcome.kind === "expired") {
+            return yield* new OperationExpired({
+              code: "operation_expired",
+              message: "operation result is unavailable; reconcile before retrying",
+              retryable: false,
+              ...base(ctx.request_id)
+            })
+          }
+          return envelope(ctx.request_id, operationResult(outcome.result))
+        })
+      )
       .handle("editNote", ({ params, payload }) =>
         Effect.gen(function*() {
           const ctx = yield* RequestContext
@@ -100,12 +147,26 @@ export const PrototypeHandlers = HttpApiBuilder.group(PrototypeApi, "prototype",
           switch (outcome.kind) {
             case "committed":
             case "replayed":
-              return envelope(ctx.request_id, outcome.note)
+              return envelope(ctx.request_id, operationResult(outcome.result))
             case "operation_conflict":
               return yield* new OperationConflict({
                 code: "operation_conflict",
                 message: "operation id reused with a different payload",
                 retryable: false,
+                ...base(ctx.request_id)
+              })
+            case "operation_expired":
+              return yield* new OperationExpired({
+                code: "operation_expired",
+                message: "operation result is unavailable; reconcile before retrying",
+                retryable: false,
+                ...base(ctx.request_id)
+              })
+            case "storage_full":
+              return yield* new StorageFull({
+                code: "storage_full503",
+                message: "operation result storage is full; retry with the same operation id",
+                retryable: true,
                 ...base(ctx.request_id)
               })
             case "revision_conflict":
