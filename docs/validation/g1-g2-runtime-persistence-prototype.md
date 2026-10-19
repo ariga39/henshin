@@ -6,17 +6,12 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Source under test
 
-- Tested code: `65b26f7c69353dc41f0e062e6485ef3467576ec6` — `pnpm typecheck`,
-  `pnpm build`, `pnpm test` (22 server tests, 1 Electron e2e test) all pass on
-  this revision. The preceding bootstrap-redaction fix is included at
-  `0788c8a`.
-- Prototype base commit: `ec2cc9a` (first frozen install/typecheck/test pass).
-- Documentation-only follow-up commits after the tested code do not require a
-  retest; they leave the code revision above unchanged.
-- Durable draft precursor source: `6dbcd8f00e9f138f1678f892e76bde2e01d3fcc8` (`Guard draft loads from
-  overwriting edits`), built and typechecked with the same locked dependencies.
-  The focused worker and renderer-race checks below were executed against this
-  source tree.
+- Tested code: `6dbcd8f00e9f138f1678f892e76bde2e01d3fcc8`.
+- Primary acceptance independently ran `pnpm typecheck` and `pnpm test` on
+  `9798ae3`, whose code matches that revision: 27 Vitest tests and three real
+  Electron tests passed. The instance-isolation Electron case also passed five
+  repeated runs after the asynchronous input-race fix.
+- Subsequent stack integration changes only this evidence document.
 
 ## Scope and fixtures
 
@@ -72,7 +67,7 @@ All commands were run on the primary Node 24.19.0 runtime unless noted.
 | `pnpm install` | Pass (locked install, explicit `allowBuilds` for electron/esbuild) |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
 | `pnpm build` | Pass (server `dist/server.mjs` + `dist/worker.mjs`; desktop main/preload/renderer) |
-| `pnpm test` | Pass, 22 server tests plus 1/1 real Electron e2e test |
+| `pnpm test` | Pass, 27 Vitest tests plus 3/3 real Electron e2e tests |
 
 ### Durable draft precursor checks
 
@@ -92,6 +87,8 @@ suite.
 
 ## Cases exercised
 
+- Malformed bootstrap input containing a sentinel credential exits within the
+  test deadline with a fixed redacted diagnostic and without echoing the input.
 - Renderer Effect operation through the typed preload/main client reaches the
   independent server and a SQLite worker transaction; a tagged
   `revision_conflict` round-trips to the UI without private details.
@@ -168,9 +165,10 @@ gate or resource framework.
 
 ## Pending G1/G2 cases (Not run)
 
-- G1 case 2: React remount/unmount, window switching, late responses and epoch
-  change leaving one subscription and no duplicate command; draft
-  save/reload/reapply/discard across namespace switches and restart.
+- G1 case 2 remainder: React remount/unmount, live window/profile switching,
+  namespace/epoch late-response guards, subscription ownership, duplicate-command
+  prevention, and full deliberate reapplication/reconciliation. The bounded
+  saved-draft and input-race cases above are executed; they do not complete this gate.
 - G1 case 3: native reader adapter plus journal (pre-dispatch cancellation,
   accepted handoff after teardown, no automatic relaunch, event retry).
 - G1 case 4: durable task scheduling, cancellation/restart, stale-generation
