@@ -45,8 +45,9 @@ The HTTP boundary cases exercised:
   still replays identically at capacity.
 - A fixture with 130 obsolete rows reclaims 64 rows and commits
   `storage_full503` on the first attempt (131 rows become 67), then reclaims
-  the remaining obsolete batch and admits the same operation ID on the next
-  attempt. The live current-epoch result remains replayable throughout.
+  another 64 rows on the next attempt, leaving two obsolete rows plus the live
+  result before admitting the same operation ID. The live current-epoch result
+  remains replayable throughout.
 
 Exact revision arithmetic, stale-revision conflicts, canonical
 `operation_conflict`, and same-operation ordering remain covered by the same
