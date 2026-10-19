@@ -107,7 +107,7 @@ const toPublicError = (error: unknown): PublicError => {
   if (error instanceof CommandAttemptStoreFullError) {
     return {
       code: "command_attempt_store_full",
-      message: "unresolved command recovery storage is full; reconcile or dismiss an attempt",
+      message: "command recovery storage is full (64 retained attempts); terminal and dismissed attempts become cleanup-eligible after seven days, while unresolved attempts require reconciliation or dismissal",
       retryable: false
     }
   }

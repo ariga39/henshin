@@ -19,6 +19,15 @@ const COMMAND_ATTEMPT_COMPACTION_BATCH = 64
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const db = new DatabaseSync(dbPath)
 
+const rollbackIfActive = (): void => {
+  if (!db.isTransaction) return
+  try {
+    db.exec("ROLLBACK")
+  } catch {
+    // Preserve the operation's original failure if rollback itself fails.
+  }
+}
+
 db.exec("PRAGMA journal_mode = WAL")
 db.exec("PRAGMA synchronous = FULL")
 db.exec("PRAGMA foreign_keys = ON")
@@ -295,7 +304,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
         db.exec("COMMIT")
         return { kind: "saved", draft }
       } catch (error) {
-        db.exec("ROLLBACK")
+        rollbackIfActive()
         throw error
       }
     }
@@ -338,7 +347,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
           localRevision
         }
       } catch (error) {
-        db.exec("ROLLBACK")
+        rollbackIfActive()
         throw error
       }
     }
@@ -382,7 +391,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
         if (attempt === undefined) throw new Error("admitted command attempt was not readable")
         return { kind: "admitted", attempt }
       } catch (error) {
-        db.exec("ROLLBACK")
+        rollbackIfActive()
         throw error
       }
     }
@@ -400,7 +409,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
         if (attempt === undefined) throw new Error("submitted command attempt was not readable")
         return { kind: "updated", attempt }
       } catch (error) {
-        db.exec("ROLLBACK")
+        rollbackIfActive()
         throw error
       }
     }
@@ -418,7 +427,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
         if (attempt === undefined) throw new Error("unresolved command attempt was not readable")
         return { kind: "updated", attempt }
       } catch (error) {
-        db.exec("ROLLBACK")
+        rollbackIfActive()
         throw error
       }
     }
@@ -442,7 +451,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
         if (attempt === undefined) throw new Error("succeeded command attempt was not readable")
         return { kind: "updated", attempt }
       } catch (error) {
-        db.exec("ROLLBACK")
+        rollbackIfActive()
         throw error
       }
     }
@@ -467,7 +476,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
         if (attempt === undefined) throw new Error("rejected command attempt was not readable")
         return { kind: "updated", attempt }
       } catch (error) {
-        db.exec("ROLLBACK")
+        rollbackIfActive()
         throw error
       }
     }
@@ -489,7 +498,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
         if (attempt === undefined) throw new Error("dismissed command attempt was not readable")
         return { kind: "updated", attempt }
       } catch (error) {
-        db.exec("ROLLBACK")
+        rollbackIfActive()
         throw error
       }
     }
