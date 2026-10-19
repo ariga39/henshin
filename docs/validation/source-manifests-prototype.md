@@ -1,7 +1,7 @@
 # Source Manifest Prototype Evidence
 
-Status: **Focused bounded prototype evidence** for exact commit
-`3b00535a014b6bfb19e35ea562a45a5772ae73e5`. This is a G3/G4 precursor, not
+Status: **Focused bounded prototype evidence** for source commit
+`8eed2746f17424802b497ac508535c99183a31b0`. This is a G3/G4 precursor, not
 completion of either gate or of the production indexer.
 
 ## Scope
@@ -28,7 +28,8 @@ asserts the library error and its structural-corruption result; native EACCES/EI
 failures remain redacted read-failure results regardless of words in the path.
 
 Names are preserved as decoded member names, with CP437 and declared UTF-8
-handling supplied by zip.js. Unsafe names, lossy decoding, exact duplicates,
+handling supplied by zip.js. Leading U+FEFF is preserved in direct names,
+EFS names, and Unicode-path extras. Unsafe names, lossy decoding, exact duplicates,
 encryption, malformed structure, archive page-suffixed symlinks, zero pages,
 and finite-limit violations are rejected. Directories use lossless buffer-name
 enumeration and reject page-suffixed symlink children. Natural ordering is
@@ -71,16 +72,17 @@ and page/read limits, plus a positive deadline expiring during a held read.
 
 ## Executed evidence
 
-Primary independently accepted the exact candidate commit with:
+Primary independently accepted the source commit above with the checks below.
+The subsequent evidence commit changes documentation only.
 
 | Check | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass |
 | `pnpm build` | Pass |
-| `pnpm test` | Pass; 98 Vitest tests and 6 Electron tests |
+| `pnpm test` | Pass; 100 Vitest tests and 6 Electron tests |
 | Read-only sample probe | 3 ZIP samples; aggregate 726014572 bytes; complete manifests of 148, 201, and 299 pages |
 
-The sample probe recorded process-inclusive times of 138 ms, 166 ms, and 173
+The sample probe recorded process-inclusive times of 128 ms, 150 ms, and 152
 ms. Its before/after source observations were unchanged size and mtime only;
 they do not establish quiet-interval stability or snapshot semantics. Sample
 filenames, paths, and contents are intentionally not recorded.
