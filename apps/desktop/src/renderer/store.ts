@@ -90,6 +90,12 @@ const createViewStore = () => {
       state = {
         ...state,
         connection,
+        status:
+          stateName === "disconnected" && state.status === "loading"
+            ? state.note === null
+              ? "idle"
+              : "ready"
+            : state.status,
         connection_generation: state.connection_generation + 1
       }
       for (const listener of listeners) listener()
