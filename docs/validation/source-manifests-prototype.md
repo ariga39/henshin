@@ -1,7 +1,7 @@
 # Source Manifest Prototype Evidence
 
 Status: **Focused bounded prototype evidence** for exact commit
-`a10fe88ed13be95eab53f77b4e6ccce38bde0db3`. This is a G3/G4 precursor, not
+`3b00535a014b6bfb19e35ea562a45a5772ae73e5`. This is a G3/G4 precursor, not
 completion of either gate or of the production indexer.
 
 ## Scope
@@ -14,7 +14,7 @@ extensions are outside the page manifest. Recognized unsupported page formats
 produce an unsupported-pages error with bounded diagnostic counts rather than
 partial success.
 
-Archive enumeration uses `@zip.js/zip.js` 2.24.0. Its maintained
+Archive enumeration uses exact-pinned `@zip.js/zip.js` 2.24.0. Its maintained
 `checkOverlappingEntryOnly` path is invoked with an inert writer and the
 cooperative signal to validate local-header, data-descriptor, entry-range, and
 overlap structure without deliberately streaming or decompressing page
@@ -63,6 +63,12 @@ deadline or stalled-I/O guarantee is claimed. Interruption is wired through
 Effect and the caller signal, and an instrumented local fixture proves that the
 interrupted fiber does not complete until its owned file handle close settles.
 
+Cancellation during the zip.js header-read boundary is classified as cancelled
+after owned cleanup. Directory after-observations are captured after the
+second enumeration; a deterministic mutation fixture verifies that boundary.
+Small fixtures exercise archive, entry, metadata, member, cumulative-byte,
+and page/read limits, plus a positive deadline expiring during a held read.
+
 ## Executed evidence
 
 Primary independently accepted the exact candidate commit with:
@@ -71,10 +77,10 @@ Primary independently accepted the exact candidate commit with:
 | --- | --- |
 | `pnpm typecheck` | Pass |
 | `pnpm build` | Pass |
-| `pnpm test` | Pass; 85 Vitest tests and 5 Electron tests |
+| `pnpm test` | Pass; 98 Vitest tests and 6 Electron tests |
 | Read-only sample probe | 3 ZIP samples; aggregate 726014572 bytes; complete manifests of 148, 201, and 299 pages |
 
-The sample probe recorded process-inclusive times of 128 ms, 150 ms, and 149
+The sample probe recorded process-inclusive times of 138 ms, 166 ms, and 173
 ms. Its before/after source observations were unchanged size and mtime only;
 they do not establish quiet-interval stability or snapshot semantics. Sample
 filenames, paths, and contents are intentionally not recorded.
