@@ -104,6 +104,10 @@ describe("renderer recovery dismissal", () => {
 
     viewStore.set({
       status: "ready",
+      instance_id: handshake.instance_id,
+      epoch: handshake.epoch,
+      note,
+      base_revision: note.revision,
       connection: connected,
       connection_generation: 0,
       recovery_attempts: [matchingAttempt, otherAttempt],
