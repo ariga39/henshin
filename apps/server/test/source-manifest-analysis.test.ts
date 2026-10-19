@@ -11,7 +11,8 @@ const ioInstrumentation = vi.hoisted(() => ({
   closeCount: 0,
   readCalls: [] as Array<{ readonly position: number; readonly length: number }>,
   openedFlags: [] as Array<number | string>,
-  writeCount: 0
+  writeCount: 0,
+  openFailure: undefined as { readonly code: string; readonly message: string } | undefined
 }))
 
 vi.mock("node:fs/promises", async () => {
@@ -19,6 +20,11 @@ vi.mock("node:fs/promises", async () => {
   return {
     ...actual,
     open: async (...args: Array<unknown>) => {
+      if (ioInstrumentation.openFailure !== undefined) {
+        const error = new Error(ioInstrumentation.openFailure.message)
+        Object.assign(error, { code: ioInstrumentation.openFailure.code })
+        throw error
+      }
       const handle = await (actual.open as (...input: Array<unknown>) => Promise<import("node:fs/promises").FileHandle>)(...args)
       if (!ioInstrumentation.enabled) return handle
       ioInstrumentation.openedFlags.push(args[1] as number | string)
@@ -75,7 +81,10 @@ import { Effect, Fiber } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   BlobWriter,
+  ERR_OVERLAPPING_ENTRY,
+  ERR_UNSUPPORTED_COMPRESSION,
   Uint8ArrayReader,
+  ZipReader,
   ZipWriter,
   type ZipWriterAddDataOptions,
   type ZipWriterConstructorOptions
@@ -100,6 +109,7 @@ afterEach(async () => {
   ioInstrumentation.readCalls.length = 0
   ioInstrumentation.openedFlags.length = 0
   ioInstrumentation.writeCount = 0
+  ioInstrumentation.openFailure = undefined
   for (const root of temporaryRoots.splice(0)) await rm(root, { recursive: true, force: true })
 })
 
@@ -391,17 +401,82 @@ describe("bounded source manifest analysis", () => {
     await writeFile(invalidOffset, invalidOffsetBytes)
     expect((await candidateError(invalidOffset)).code).toBe("structural-corruption")
 
+    const unsupportedMethod = join(root, "unsupported-method.zip")
+    const unsupportedMethodBytes = await makeZip(unsupportedMethod, [{ name: "1.jpg", bytes: pageBytes }])
+    const unsupportedMethodLocal = unsupportedMethodBytes.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]))
+    const unsupportedMethodCentral = unsupportedMethodBytes.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]))
+    expect(unsupportedMethodLocal).toBeGreaterThanOrEqual(0)
+    expect(unsupportedMethodCentral).toBeGreaterThanOrEqual(0)
+    unsupportedMethodBytes.writeUInt16LE(99, unsupportedMethodLocal + 8)
+    unsupportedMethodBytes.writeUInt16LE(99, unsupportedMethodCentral + 10)
+    await writeFile(unsupportedMethod, unsupportedMethodBytes)
+    const rawMethodReader = new ZipReader(new Uint8ArrayReader(unsupportedMethodBytes), {
+      strictness: "strict",
+      filenameValidation: "tolerant",
+      checkLocalDirectory: true,
+      checkLocalFilename: true
+    })
+    try {
+      await (async () => {
+        for await (const entry of rawMethodReader.getEntriesGenerator()) {
+          if (entry.directory) continue
+          await entry.getData(new WritableStream(), { checkOverlappingEntryOnly: true })
+        }
+      })()
+      throw new Error("expected zip.js unsupported-compression sentinel")
+    } catch (error) {
+      expect(error).toMatchObject({ message: ERR_UNSUPPORTED_COMPRESSION })
+    } finally {
+      await rawMethodReader.close()
+    }
+    expect((await candidateError(unsupportedMethod)).code).toBe("structural-corruption")
+
     const overlapping = join(root, "overlapping.zip")
-    const overlappingBytes = await makeZip(overlapping, [
-      { name: "1.jpg", bytes: pageBytes },
-      { name: "2.jpg", bytes: pageBytes }
-    ])
+    const overlappingBytes = await makeZip(
+      overlapping,
+      [
+        { name: "1.jpg", bytes: pageBytes },
+        { name: "2.jpg", bytes: pageBytes }
+      ],
+      { dataDescriptor: false, bufferedWrite: true }
+    )
+    const firstLocal = overlappingBytes.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]))
+    const secondLocal = overlappingBytes.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]), firstLocal + 1)
     const firstCentral = overlappingBytes.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]))
     const secondCentral = overlappingBytes.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]), firstCentral + 1)
+    expect(firstLocal).toBeGreaterThanOrEqual(0)
+    expect(secondLocal).toBeGreaterThan(firstLocal)
     expect(firstCentral).toBeGreaterThanOrEqual(0)
     expect(secondCentral).toBeGreaterThan(firstCentral)
-    overlappingBytes.writeUInt32LE(overlappingBytes.readUInt32LE(firstCentral + 42), secondCentral + 42)
+    const firstDataOffset = firstLocal + 30 + overlappingBytes.readUInt16LE(firstLocal + 26) + overlappingBytes.readUInt16LE(firstLocal + 28)
+    const secondLocalOffset = overlappingBytes.readUInt32LE(secondCentral + 42)
+    expect(secondLocalOffset).toBe(secondLocal)
+    const overlappingSize = secondLocalOffset - firstDataOffset + 1
+    expect(overlappingSize).toBeGreaterThan(0)
+    overlappingBytes.writeUInt32LE(overlappingSize, firstLocal + 18)
+    overlappingBytes.writeUInt32LE(overlappingSize, firstLocal + 22)
+    overlappingBytes.writeUInt32LE(overlappingSize, firstCentral + 20)
+    overlappingBytes.writeUInt32LE(overlappingSize, firstCentral + 24)
     await writeFile(overlapping, overlappingBytes)
+    const rawReader = new ZipReader(new Uint8ArrayReader(overlappingBytes), {
+      strictness: "strict",
+      filenameValidation: "tolerant",
+      checkLocalDirectory: true,
+      checkLocalFilename: true
+    })
+    try {
+      await (async () => {
+        for await (const entry of rawReader.getEntriesGenerator()) {
+          if (entry.directory) continue
+          await entry.getData(new WritableStream(), { checkOverlappingEntryOnly: true })
+        }
+      })()
+      throw new Error("expected zip.js overlap sentinel")
+    } catch (error) {
+      expect(error).toMatchObject({ message: ERR_OVERLAPPING_ENTRY })
+    } finally {
+      await rawReader.close()
+    }
     expect((await candidateError(overlapping)).code).toBe("structural-corruption")
 
     const symlinkArchive = join(root, "page-symlink.zip")
@@ -419,6 +494,21 @@ describe("bounded source manifest analysis", () => {
     corruptBytes[eocdIndex] = 0
     await writeFile(corrupt, corruptBytes)
     expect((await candidateError(corrupt)).code).toBe("structural-corruption")
+  })
+
+  it("keeps filesystem failures as read failures despite archive-like messages", async () => {
+    const root = await makeTempRoot()
+    for (const failure of [
+      { name: "archive-eacces.zip", code: "EACCES", message: "archive permission denied" },
+      { name: "encrypted-eio.zip", code: "EIO", message: "encrypted archive I/O failure" }
+    ]) {
+      const source = join(root, failure.name)
+      await writeFile(source, Buffer.from("fixture"))
+      ioInstrumentation.openFailure = failure
+      const error = await candidateError(source)
+      expect(error.code).toBe("read-failure")
+      expect(error.message).toBe("candidate could not be read")
+    }
   })
 
   it("uses zip.js header-only validation without reading page payload bytes", async () => {

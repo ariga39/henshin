@@ -5,6 +5,22 @@ import type { Stats } from "node:fs"
 import { basename, extname, join } from "node:path"
 import { Effect, Schema } from "effect"
 import {
+  ERR_AMBIGUOUS_ARCHIVE,
+  ERR_BAD_FORMAT,
+  ERR_CENTRAL_DIRECTORY_NOT_FOUND,
+  ERR_ENCRYPTED,
+  ERR_ENCRYPTED_CENTRAL_DIRECTORY,
+  ERR_ENTRY_DATA_OUT_OF_BOUNDS,
+  ERR_EOCDR_LOCATOR_ZIP64_NOT_FOUND,
+  ERR_EOCDR_NOT_FOUND,
+  ERR_EXTRAFIELD_ZIP64_NOT_FOUND,
+  ERR_LOCAL_FILE_HEADER_NOT_FOUND,
+  ERR_OVERLAPPING_ENTRY,
+  ERR_SPLIT_ZIP_FILE,
+  ERR_UNSUPPORTED_COMPRESSION,
+  ERR_UNSUPPORTED_ENCRYPTION,
+  ERR_UNSUPPORTED_FORMAT,
+  ERR_UNSUPPORTED_UINT64,
   Reader,
   ZipReader,
   type Entry,
@@ -232,6 +248,28 @@ class Encrypted extends Error {
   }
 }
 
+const ENCRYPTED_ARCHIVE_ERRORS = new Set([
+  ERR_ENCRYPTED,
+  ERR_ENCRYPTED_CENTRAL_DIRECTORY,
+  ERR_UNSUPPORTED_ENCRYPTION
+])
+
+const STRUCTURAL_ARCHIVE_ERRORS = new Set([
+  ERR_AMBIGUOUS_ARCHIVE,
+  ERR_BAD_FORMAT,
+  ERR_CENTRAL_DIRECTORY_NOT_FOUND,
+  ERR_ENTRY_DATA_OUT_OF_BOUNDS,
+  ERR_EOCDR_LOCATOR_ZIP64_NOT_FOUND,
+  ERR_EOCDR_NOT_FOUND,
+  ERR_EXTRAFIELD_ZIP64_NOT_FOUND,
+  ERR_LOCAL_FILE_HEADER_NOT_FOUND,
+  ERR_OVERLAPPING_ENTRY,
+  ERR_SPLIT_ZIP_FILE,
+  ERR_UNSUPPORTED_COMPRESSION,
+  ERR_UNSUPPORTED_FORMAT,
+  ERR_UNSUPPORTED_UINT64
+])
+
 const ManifestLimitsSchema = Schema.Struct({
   maxArchiveBytes: Schema.Natural,
   maxEntryCount: Schema.Natural,
@@ -299,6 +337,19 @@ const candidateErrorOf = (error: unknown): ManifestCandidateError => {
       directoryRecords: 0
     }
   })
+}
+
+const hasErrorCode = (error: unknown): boolean =>
+  typeof error === "object" && error !== null && "code" in error
+
+const archiveErrorCode = (error: unknown): "encrypted" | "structural-corruption" | undefined => {
+  // Native filesystem errors may contain archive/encrypted words in their
+  // messages. zip.js archive errors are Error(sentinel) values without a
+  // filesystem code, so only exact exported sentinels are classified here.
+  if (hasErrorCode(error) || !(error instanceof Error)) return undefined
+  if (ENCRYPTED_ARCHIVE_ERRORS.has(error.message)) return "encrypted"
+  if (STRUCTURAL_ARCHIVE_ERRORS.has(error.message)) return "structural-corruption"
+  return undefined
 }
 
 const checkBudget = (context: AnalysisContext): void => {
@@ -651,20 +702,9 @@ const analyzeArchive = async (
       error instanceof Encrypted ||
       error instanceof LimitExceeded
     ) throw error
-    const code =
-      typeof error === "object" && error !== null && "code" in error
-        ? String((error as { readonly code: unknown }).code)
-        : ""
-    const message = error instanceof Error ? error.message.toLowerCase() : ""
-    if (code.includes("ENCRYPTED") || message.includes("encrypted")) throw new Encrypted()
-    if (
-      code.startsWith("ERR_") ||
-      message.includes("central directory") ||
-      message.includes("end of central") ||
-      message.includes("local file header") ||
-      message.includes("zip64") ||
-      message.includes("archive")
-    ) throw new StructuralCorruption()
+    const archiveCode = archiveErrorCode(error)
+    if (archiveCode === "encrypted") throw new Encrypted()
+    if (archiveCode === "structural-corruption") throw new StructuralCorruption()
     throw error
   } finally {
     if (reader !== undefined) {
