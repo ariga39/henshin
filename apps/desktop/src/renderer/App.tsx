@@ -14,7 +14,9 @@ const outcomeText = (state: ReturnType<typeof viewStore.getState>): string => {
     case "draft_saved":
       return `local draft saved revision=${outcome.local_revision}`
     case "draft_loaded":
-      return "local draft loaded into form; refresh before server reapply"
+      return outcome.copied
+        ? "local draft loaded into form; refresh before server reapply"
+        : "local draft retained; form changed while loading"
     case "draft_discarded":
       return `local draft discarded revision=${outcome.local_revision}`
     case "draft_conflict":
@@ -51,7 +53,7 @@ export const App = () => {
         id="text-input"
         data-testid="text-input"
         value={state.form_text}
-        onChange={(event) => viewStore.set({ form_text: event.target.value })}
+        onChange={(event) => viewStore.editFormText(event.target.value)}
       />
       <button data-testid="load" onClick={() => void runtime.runPromise(loadNote)}>
         Load current note

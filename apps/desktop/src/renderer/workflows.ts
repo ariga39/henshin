@@ -15,6 +15,7 @@ const newOperationId = (): string => crypto.randomUUID()
  */
 export const loadNote = Effect.gen(function*() {
   const client = yield* PrototypeClient
+  const editVersionAtStart = viewStore.getState().form_edit_version
   yield* Effect.sync(() => viewStore.set({ status: "loading", outcome: null }))
 
   const handshake = yield* client.handshake()
@@ -33,17 +34,18 @@ export const loadNote = Effect.gen(function*() {
     return
   }
 
-  yield* Effect.sync(() =>
+  yield* Effect.sync(() => {
+    const copied = viewStore.getState().form_edit_version === editVersionAtStart
     viewStore.set({
       status: "ready",
       instance_id: handshake.data.instance_id,
       epoch: handshake.data.epoch,
       note: note.data,
       base_revision: note.data.revision,
-      form_text: note.data.text,
+      ...(copied ? { form_text: note.data.text } : {}),
       outcome: null
     })
-  )
+  })
 })
 
 export const saveNote = (text: string) =>
@@ -120,6 +122,7 @@ export const saveLocalDraft = Effect.gen(function*() {
 
 export const loadSavedDraft = Effect.gen(function*() {
   const client = yield* PrototypeClient
+  const editVersionAtStart = viewStore.getState().form_edit_version
   const result = yield* client.loadDraft({ note_id: NOTE_ID, form_id: FORM_ID })
   if (!result.ok) {
     yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
@@ -142,14 +145,15 @@ export const loadSavedDraft = Effect.gen(function*() {
     )
     return
   }
-  yield* Effect.sync(() =>
+  yield* Effect.sync(() => {
+    const copied = viewStore.getState().form_edit_version === editVersionAtStart
     viewStore.set({
       saved_draft: draft,
       draft_local_revision: draft.local_revision,
-      form_text: draft.text,
-      outcome: { kind: "draft_loaded" }
+      ...(copied ? { form_text: draft.text } : {}),
+      outcome: { kind: "draft_loaded", copied }
     })
-  )
+  })
 })
 
 export const discardSavedDraft = Effect.gen(function*() {
