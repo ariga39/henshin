@@ -6,12 +6,11 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Source under test
 
-- Tested code: `8d2d7bdda2a8942f022bb15e0091976255f5cbba`.
+- Tested code: `a016244cba000e522573146f558359a5ded69f83`.
 - Primary acceptance independently ran `pnpm typecheck` and `pnpm test` on that
-  revision: 27 Vitest tests and three real Electron tests passed. Note editing
-  and draft/server actions are disabled during current-note loading; the
-  namespace fixture waits for visible note readiness before editing.
-- Subsequent stack integration changes only this evidence document and ancestry.
+  revision: 35 Vitest tests and three real Electron tests passed, including ten
+  simultaneous-first-start iterations in the ownership regression.
+- Subsequent stack integration changes only documentation and ancestry.
 
 ## Scope and fixtures
 
@@ -67,7 +66,7 @@ All commands were run on the primary Node 24.19.0 runtime unless noted.
 | `pnpm install` | Pass (locked install, explicit `allowBuilds` for electron/esbuild) |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
 | `pnpm build` | Pass (server `dist/server.mjs` + `dist/worker.mjs`; desktop main/preload/renderer) |
-| `pnpm test` | Pass, 27 Vitest tests plus 3/3 real Electron e2e tests |
+| `pnpm test` | Pass, 35 Vitest tests plus 3/3 real Electron e2e tests |
 
 ### Durable draft precursor checks
 
@@ -157,6 +156,32 @@ gate or resource framework.
 - A standalone real-process bootstrap test supplies a sentinel in malformed
   input and observes a bounded nonzero exit, a safe diagnostic, and no sentinel
   or token echo in stderr.
+
+## Server ownership precursor (executed)
+
+Eight real-process cases exercise the production server entry point on Node
+24.19.0. The separate local guard database holds a `BEGIN IMMEDIATE` transaction
+for the server lifetime, reserving SQLite's single writer slot without requiring
+other connections to release their read locks. Failed contenders do not unlink
+the guard or replace its owner.
+
+- A contender exits with a redacted ownership diagnostic before readiness; the
+  existing server remains reachable and its committed note is unchanged.
+- Normal exit and `SIGKILL` release ownership. A successor retains the instance
+  and committed note while receiving a new authority epoch.
+- Ten simultaneous first-start iterations each produce one ready server and one
+  rejected contender in a fresh directory.
+- Relative paths, directory symlinks, and existing database-file symlinks select
+  the same canonical directory guard. Dangling database-file symlinks fail
+  before acquisition; missing parent directories are not created.
+- Failed database initialization releases ownership. Repairing the invalid
+  target allows a successful startup in the same directory.
+- Separate local data directories can have independent owners.
+
+The ordinary Electron integration suite also starts the owned server using its
+bundled Node runtime. Mixed-runtime contention, hardlinks, mount aliases, NAS
+locks, and hostile path changes during acquisition were not tested. This is a
+bounded G2/G6 precursor, not complete deployment or path-safety validation.
 
 ## Pending G1/G2 cases (Not run)
 
