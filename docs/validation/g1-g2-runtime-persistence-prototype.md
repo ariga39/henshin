@@ -7,7 +7,7 @@ not a product client or server.
 
 ## Source under test
 
-- Current candidate source: `11861fdc019ef5367c543c3d3fdb294d507b7760`.
+- Current candidate source: `707291215b09c4ad9a2b6ec1195228a6d7f20e2a`.
 
 ## Scope and fixtures
 
@@ -32,10 +32,10 @@ Final candidate checks on that source were:
 | Check | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass; contracts, server, and desktop |
-| `pnpm test` | Pass; build, 82 Vitest tests in 9 files, and 6 real Electron tests |
+| `pnpm test` | Pass; build, 83 Vitest tests in 9 files, and 6 real Electron tests |
 
 Primary independently accepted this exact source with pinned Node 24.19.0:
-typecheck, build, and the full suite passed with 82 Vitest tests in 9 files and
+typecheck, build, and the full suite passed with 83 Vitest tests in 9 files and
 6 real Electron tests.
 
 The executed command-attempt cases include:
@@ -119,6 +119,10 @@ draft/recovery replies survive network transitions while changed-instance
 replies remain fenced. Real lifecycle tests interrupt both an in-flight PUT
 and held terminal persistence, then verify unresolved storage and no replay.
 
+Failed handshakes retain their original error and settle to blocked even if
+owned-runtime disposal rejects. The gated handshake cleanup fixtures observe
+the specific blocked handshake socket rather than an earlier connection.
+
 ## Environment
 
 - macOS 26.7.1 (build 25G241), arm64.
@@ -162,7 +166,7 @@ their current results are:
 | Command | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
-| `pnpm test` | Pass; build, 82 Vitest tests in 9 files, and 6 real Electron tests |
+| `pnpm test` | Pass; build, 83 Vitest tests in 9 files, and 6 real Electron tests |
 
 ### Durable draft precursor checks
 
