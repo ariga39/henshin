@@ -8,6 +8,8 @@ import {
   WorkerResponse,
   type CommitOutcome,
   type NoteRow,
+  type OperationLookupOutcome,
+  type OperationResultRow,
   type WorkerRequest
 } from "./worker-protocol"
 
@@ -29,6 +31,10 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
+/** Shipped prototype policy: seven days and 64 retained rows per database. */
+const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const MAX_OPERATION_RESULTS = 64
+const COMPACTION_BATCH = 64
 
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const db = new DatabaseSync(dbPath)
@@ -60,12 +66,23 @@ db.exec(`
 const selectNote = db.prepare("SELECT note_id, text, revision FROM prototype_note WHERE note_id = ?")
 selectNote.setReadBigInts(true)
 const selectOperation = db.prepare(
-  "SELECT payload, result FROM operation_results WHERE epoch = ? AND operation_id = ?"
+  "SELECT payload, result, created_at_ms FROM operation_results WHERE epoch = ? AND operation_id = ?"
 )
 const updateNote = db.prepare("UPDATE prototype_note SET text = ?, revision = ? WHERE note_id = ?")
 const insertOperation = db.prepare(
   "INSERT INTO operation_results(epoch, operation_id, payload, result, created_at_ms) VALUES(?, ?, ?, ?, ?)"
 )
+const countOperations = db.prepare("SELECT COUNT(*) AS count FROM operation_results")
+const compactOperations = db.prepare(`
+  DELETE FROM operation_results
+  WHERE rowid IN (
+    SELECT rowid
+    FROM operation_results
+    WHERE created_at_ms + ? <= ? OR epoch <> ?
+    ORDER BY created_at_ms ASC, rowid ASC
+    LIMIT ?
+  )
+`)
 
 let closed = false
 
@@ -75,6 +92,35 @@ const readNoteRow = (noteId: string): NoteRow | undefined => {
     | undefined
   if (row === undefined) return undefined
   return { note_id: row.note_id, text: row.text, revision: row.revision.toString() }
+}
+
+const operationResult = (
+  operationId: string,
+  note: NoteRow,
+  createdAtMs: number
+): OperationResultRow => ({
+  operationId,
+  note,
+  expiresAtMs: createdAtMs + RESULT_RETENTION_MS
+})
+
+const readOperation = (
+  request: Extract<WorkerRequest, { op: "readOperation" }>
+): OperationLookupOutcome => {
+  const row = selectOperation.get(request.epoch, request.operationId) as
+    | { payload: string; result: string; created_at_ms: number }
+    | undefined
+  if (row === undefined || row.created_at_ms + RESULT_RETENTION_MS <= Date.now()) {
+    return { kind: "expired" }
+  }
+  return {
+    kind: "found",
+    result: operationResult(
+      request.operationId,
+      JSON.parse(row.result) as NoteRow,
+      row.created_at_ms
+    )
+  }
 }
 
 const commitNote = (request: Extract<WorkerRequest, { op: "commitNote" }>): CommitOutcome => {
@@ -87,7 +133,7 @@ const commitNote = (request: Extract<WorkerRequest, { op: "commitNote" }>): Comm
   db.exec("BEGIN IMMEDIATE")
   try {
     const existing = selectOperation.get(request.epoch, request.operationId) as
-      | { payload: string; result: string }
+      | { payload: string; result: string; created_at_ms: number }
       | undefined
 
     if (existing !== undefined) {
@@ -95,8 +141,19 @@ const commitNote = (request: Extract<WorkerRequest, { op: "commitNote" }>): Comm
         db.exec("ROLLBACK")
         return { kind: "operation_conflict" }
       }
+      if (existing.created_at_ms + RESULT_RETENTION_MS <= Date.now()) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_expired" }
+      }
       db.exec("COMMIT")
-      return { kind: "replayed", note: JSON.parse(existing.result) as NoteRow }
+      return {
+        kind: "replayed",
+        result: operationResult(
+          request.operationId,
+          JSON.parse(existing.result) as NoteRow,
+          existing.created_at_ms
+        )
+      }
     }
 
     const current = readNoteRow(request.noteId)
@@ -109,18 +166,33 @@ const commitNote = (request: Extract<WorkerRequest, { op: "commitNote" }>): Comm
       return { kind: "revision_conflict", currentRevision: current.revision }
     }
 
+    // Reclaim only expired rows or rows from an obsolete authority epoch.
+    // This is bounded and runs before admission; current-epoch unexpired
+    // results are never evicted to make room for a new mutation.
+    compactOperations.run(RESULT_RETENTION_MS, Date.now(), request.epoch, COMPACTION_BATCH)
+    const operationCount = (countOperations.get() as { count: number }).count
+    if (operationCount >= MAX_OPERATION_RESULTS) {
+      // Cleanup is safe independently of the rejected mutation. Commit only
+      // this bounded reclamation so a legacy store with many obsolete rows
+      // can make progress across repeated storage_full responses; the note
+      // and the requested operation result remain unchanged.
+      db.exec("COMMIT")
+      return { kind: "storage_full" }
+    }
+
     const revision = (BigInt(current.revision) + 1n).toString()
     const note: NoteRow = { note_id: request.noteId, text: request.text, revision }
+    const createdAtMs = Date.now()
     updateNote.run(note.text, BigInt(revision), note.note_id)
     insertOperation.run(
       request.epoch,
       request.operationId,
       canonicalPayload,
       JSON.stringify(note),
-      Date.now()
+      createdAtMs
     )
     db.exec("COMMIT")
-    return { kind: "committed", note }
+    return { kind: "committed", result: operationResult(request.operationId, note, createdAtMs) }
   } catch (error) {
     db.exec("ROLLBACK")
     throw error
@@ -147,6 +219,8 @@ const handle = (request: WorkerRequest): unknown => {
     }
     case "readNote":
       return readNoteRow(request.noteId) ?? null
+    case "readOperation":
+      return readOperation(request)
     case "commitNote":
       return commitNote(request)
     case "close":
