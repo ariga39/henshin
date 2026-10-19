@@ -49,6 +49,7 @@ export const EditNoteIpcRequest = Schema.Struct({
   note_id: NoteId,
   text: Text,
   expected_revision: Revision,
+  base_epoch: Uuid,
   operation_id: Uuid
 })
 export type EditNoteIpcRequest = typeof EditNoteIpcRequest.Type

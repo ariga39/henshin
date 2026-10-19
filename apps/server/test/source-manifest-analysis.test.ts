@@ -8,6 +8,9 @@ const ioInstrumentation = vi.hoisted(() => ({
   closeBlocked: false,
   closeStarted: undefined as (() => void) | undefined,
   releaseClose: undefined as (() => void) | undefined,
+  readAfter: undefined as ((position: number, length: number) => void) | undefined,
+  opendirCount: 0,
+  afterSecondDirectoryOpen: undefined as (() => void | Promise<void>) | undefined,
   closeCount: 0,
   readCalls: [] as Array<{ readonly position: number; readonly length: number }>,
   openedFlags: [] as Array<number | string>,
@@ -19,6 +22,14 @@ vi.mock("node:fs/promises", async () => {
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")
   return {
     ...actual,
+    opendir: async (...args: Array<unknown>) => {
+      const directory = await (actual.opendir as (...input: Array<unknown>) => Promise<import("node:fs").Dir>)(...args)
+      ioInstrumentation.opendirCount += 1
+      if (ioInstrumentation.opendirCount === 2) {
+        await ioInstrumentation.afterSecondDirectoryOpen?.()
+      }
+      return directory
+    },
     open: async (...args: Array<unknown>) => {
       if (ioInstrumentation.openFailure !== undefined) {
         const error = new Error(ioInstrumentation.openFailure.message)
@@ -46,7 +57,9 @@ vi.mock("node:fs/promises", async () => {
                   ioInstrumentation.releaseRead = resolve
                 })
               }
-              return read(...readArgs as Parameters<typeof handle.read>)
+              const result = await read(...readArgs as Parameters<typeof handle.read>)
+              ioInstrumentation.readAfter?.(position, length)
+              return result
             }
           }
           if (property === "close") {
@@ -105,6 +118,9 @@ afterEach(async () => {
   ioInstrumentation.closeBlocked = false
   ioInstrumentation.closeStarted = undefined
   ioInstrumentation.releaseClose = undefined
+  ioInstrumentation.readAfter = undefined
+  ioInstrumentation.opendirCount = 0
+  ioInstrumentation.afterSecondDirectoryOpen = undefined
   ioInstrumentation.closeCount = 0
   ioInstrumentation.readCalls.length = 0
   ioInstrumentation.openedFlags.length = 0
@@ -253,6 +269,8 @@ describe("bounded source manifest analysis", () => {
       "页10.png"
     ])
     expect(manifest.diagnostics).toMatchObject({ supportedPages: 8, unsupportedPages: 0 })
+    expect(manifest.before.entryCount).toBe(11)
+    expect(manifest.after.entryCount).toBe(11)
     expect(before).toEqual(after)
   })
 
@@ -362,6 +380,10 @@ describe("bounded source manifest analysis", () => {
     const unsafe = join(root, "unsafe.zip")
     await makeZip(unsafe, [{ name: "../outside.jpg", bytes: pageBytes }])
     expect((await candidateError(unsafe)).code).toBe("unsafe-name")
+
+    const nulName = join(root, "nul-name.zip")
+    await makeZip(nulName, [{ name: "nul\u0000name.jpg", bytes: pageBytes }])
+    expect((await candidateError(nulName)).code).toBe("unsafe-name")
 
     const duplicate = join(root, "duplicate.zip")
     const duplicateBytes = await makeZip(duplicate, [
@@ -574,6 +596,88 @@ describe("bounded source manifest analysis", () => {
     expect(cancelled.code).toBe("cancelled")
   })
 
+  it("enforces finite archive limits at and below their boundaries", async () => {
+    const root = await makeTempRoot()
+    const single = join(root, "single.zip")
+    const singleBytes = await makeZip(single, [{ name: "1.jpg", bytes: pageBytes }])
+
+    expect((await analyze(single, { maxArchiveBytes: singleBytes.length })).pages).toHaveLength(1)
+    expect((await candidateError(single, { maxArchiveBytes: singleBytes.length - 1 })).code).toBe("limit-exceeded")
+    expect((await candidateError(single, { maxNameAndMetadataBytes: 1 })).code).toBe("limit-exceeded")
+    expect((await analyze(single, { maxDeclaredUncompressedBytes: pageBytes.length })).pages).toHaveLength(1)
+    expect((await candidateError(single, { maxDeclaredUncompressedBytes: pageBytes.length - 1 })).code).toBe("limit-exceeded")
+    expect((await analyze(single, { maxMemberUncompressedBytes: pageBytes.length })).pages).toHaveLength(1)
+    expect((await candidateError(single, { maxMemberUncompressedBytes: pageBytes.length - 1 })).code).toBe("limit-exceeded")
+    expect((await candidateError(single, { deadlineMs: 0 })).code).toBe("deadline-exceeded")
+
+    const double = join(root, "double.zip")
+    await makeZip(double, [
+      { name: "1.jpg", bytes: pageBytes },
+      { name: "2.jpg", bytes: pageBytes }
+    ])
+    expect((await analyze(double, { maxEntryCount: 2 })).pages).toHaveLength(2)
+    expect((await candidateError(double, { maxEntryCount: 1 })).code).toBe("limit-exceeded")
+    expect((await analyze(double, { maxDeclaredUncompressedBytes: pageBytes.length * 2 })).pages).toHaveLength(2)
+    expect((await candidateError(double, { maxDeclaredUncompressedBytes: pageBytes.length * 2 - 1 })).code).toBe("limit-exceeded")
+  })
+
+  it("normalizes a zip.js abort after the owned archive cleanup", async () => {
+    const root = await makeTempRoot()
+    const archive = join(root, "abort-boundary.zip")
+    await makeZip(archive, [{ name: "1.jpg", bytes: pageBytes }])
+    const controller = new AbortController()
+    let abortHookFired = false
+    ioInstrumentation.enabled = true
+    ioInstrumentation.readBlocked = true
+    ioInstrumentation.readAfter = (position, length) => {
+      if (position === 0 && length === 30) {
+        ioInstrumentation.readAfter = undefined
+        abortHookFired = true
+        controller.abort()
+      }
+    }
+
+    const error = await (async () => {
+      try {
+        await Effect.runPromise(analyzeSourceManifest({ sourcePath: archive, signal: controller.signal }))
+        throw new Error("expected cancellation")
+      } catch (caught) {
+        return caught as ManifestCandidateError
+      }
+    })()
+
+    expect(error.code).toBe("cancelled")
+    expect(abortHookFired).toBe(true)
+    expect(ioInstrumentation.closeCount).toBe(1)
+    expect(ioInstrumentation.writeCount).toBe(0)
+  })
+
+  it("enforces a positive deadline after a bounded native read", async () => {
+    const root = await makeTempRoot()
+    const archive = join(root, "deadline-boundary.zip")
+    await makeZip(archive, [{ name: "1.jpg", bytes: pageBytes }])
+    let readStartedResolve!: () => void
+    const readStarted = new Promise<void>((resolve) => {
+      readStartedResolve = resolve
+    })
+    let nowValue = 1_000
+    const now = vi.spyOn(Date, "now").mockImplementation(() => nowValue)
+    ioInstrumentation.enabled = true
+    ioInstrumentation.readStarted = readStartedResolve
+
+    try {
+      const analysis = candidateError(archive, { deadlineMs: 1 })
+      await readStarted
+      nowValue = 1_001
+      ioInstrumentation.releaseRead?.()
+      expect((await analysis).code).toBe("deadline-exceeded")
+      expect(ioInstrumentation.closeCount).toBe(1)
+    } finally {
+      ioInstrumentation.releaseRead?.()
+      now.mockRestore()
+    }
+  })
+
   it("awaits interrupted archive cleanup before the fiber completes and never opens for writing", async () => {
     const root = await makeTempRoot()
     const archive = join(root, "interrupted.zip")
@@ -627,18 +731,14 @@ describe("bounded source manifest analysis", () => {
     }
   })
 
-  it("rejects a source link and detects a direct-source change without claiming stability", async () => {
+  it("rejects a source link and detects a direct-source change during the second pass", async () => {
     const root = await makeTempRoot()
     const source = join(root, "changing")
     await (await import("node:fs/promises")).mkdir(source)
-    for (let index = 0; index < 1_500; index += 1) {
-      await writeFile(join(source, `${index}.jpg`), pageBytes)
-    }
-    const change = setTimeout(() => {
-      void utimes(source, new Date(), new Date(Date.now() + 2_000))
-    }, 0)
+    await writeFile(join(source, "1.jpg"), pageBytes)
+    ioInstrumentation.afterSecondDirectoryOpen = () =>
+      utimes(source, new Date(), new Date(Date.now() + 2_000))
     const changed = await candidateError(source)
-    clearTimeout(change)
     expect(changed.code).toBe("source-changed")
 
     const link = join(root, "link")

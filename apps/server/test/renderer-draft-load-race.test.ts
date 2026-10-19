@@ -8,6 +8,8 @@ import {
   loadNote,
   loadRecovery,
   loadSavedDraft,
+  saveLocalDraft,
+  saveNote,
   reconnect
 } from "../../desktop/src/renderer/workflows"
 import { viewStore } from "../../desktop/src/renderer/store"
@@ -77,6 +79,7 @@ const resetView = () => {
     epoch: null,
     note: null,
     base_revision: null,
+    base_epoch: null,
     form_text: "",
     form_edit_version: 0,
     draft_local_revision: "0",
@@ -285,6 +288,7 @@ describe("explicit renderer load races", () => {
       epoch: handshake.epoch,
       note,
       base_revision: note.revision,
+      base_epoch: handshake.epoch,
       form_text: "retained-local-text",
       form_edit_version: 1
     })
@@ -302,6 +306,7 @@ describe("explicit renderer load races", () => {
       connection: blocked,
       note,
       base_revision: note.revision,
+      base_epoch: handshake.epoch,
       form_text: "retained-local-text",
       outcome: { kind: "error", message: "authentication required" }
     })
@@ -383,6 +388,7 @@ describe("explicit renderer load races", () => {
       epoch: handshake.epoch,
       note,
       base_revision: note.revision,
+      base_epoch: handshake.epoch,
       form_text: "retained-local-text",
       form_edit_version: 1
     })
@@ -394,8 +400,106 @@ describe("explicit renderer load races", () => {
       note: refreshedNote,
       form_text: "retained-local-text",
       base_revision: note.revision,
+      base_epoch: handshake.epoch,
       epoch: "33333333-3333-4333-8333-333333333333"
     })
+  })
+
+  it("does not dispatch retained text when reconnect changed the authority epoch", async () => {
+    let editCalls = 0
+    const client = PrototypeClient.of({
+      handshake: () => Effect.succeed({ ok: true, data: { ...handshake, epoch: "33333333-3333-4333-8333-333333333333" } }),
+      connect: () => Effect.succeed({
+        ok: true,
+        data: { state: "connected", instance_id: handshake.instance_id, epoch: "33333333-3333-4333-8333-333333333333", reason: null }
+      }),
+      disconnect: () => Effect.succeed({
+        ok: true,
+        data: { state: "disconnected", instance_id: handshake.instance_id, epoch: null, reason: "explicit_disconnect" }
+      }),
+      connectionStatus: () => Effect.succeed({ ok: true, data: connected }),
+      getNote: () => Effect.succeed({ ok: true, data: refreshedNote }),
+      editNote: () => {
+        editCalls += 1
+        return Effect.succeed({ ok: true, data: refreshedNote })
+      },
+      saveDraft: () => Effect.succeed({ ok: true, data: draft }),
+      loadDraft: () => Effect.succeed({ ok: true, data: null }),
+      discardDraft: () => Effect.succeed({ ok: true, data: {
+        instance_id: handshake.instance_id,
+        note_id: "note-1",
+        form_id: "synthetic-note",
+        local_revision: "1"
+      } }),
+      listCommandAttempts: () => Effect.succeed({ ok: true, data: [] }),
+      reconcileCommand: () => Effect.succeed({ ok: false, error: { code: "not_used", message: "not used", retryable: false } }),
+      dismissCommand: () => Effect.succeed({ ok: false, error: { code: "not_used", message: "not used", retryable: false } })
+    })
+
+    viewStore.set({
+      status: "ready",
+      instance_id: handshake.instance_id,
+      epoch: "33333333-3333-4333-8333-333333333333",
+      note: refreshedNote,
+      base_revision: note.revision,
+      base_epoch: handshake.epoch,
+      form_text: "retained-local-text",
+      form_edit_version: 1,
+      connection: connected
+    })
+
+    await Effect.runPromise(Effect.provide(saveNote("retained-local-text"), Layer.succeed(PrototypeClient, client)))
+
+    expect(editCalls).toBe(0)
+    expect(viewStore.getState()).toMatchObject({
+      form_text: "retained-local-text",
+      base_revision: note.revision,
+      base_epoch: handshake.epoch,
+      outcome: { kind: "error", message: "reload the current note before saving after reconnect" }
+    })
+  })
+
+  it("publishes a deferred local draft save across a same-instance transition", async () => {
+    const pendingSave = deferred<Result<SavedDraft>>()
+    const client = reconnectClient(() => Effect.succeed({ ok: true, data: note }))
+    const saveInputs: Array<{ readonly expected_local_revision: string }> = []
+    let saveCall = 0
+    const localClient = PrototypeClient.of({
+      ...client,
+      saveDraft: (input) => {
+        saveCall += 1
+        saveInputs.push(input)
+        return saveCall === 1
+          ? Effect.promise(() => pendingSave.promise)
+          : Effect.succeed({ ok: true, data: { ...draft, text: "deferred-local-draft", local_revision: "5" } })
+      }
+    })
+    viewStore.set({
+      status: "ready",
+      instance_id: handshake.instance_id,
+      epoch: handshake.epoch,
+      note,
+      base_revision: note.revision,
+      base_epoch: handshake.epoch,
+      form_text: "deferred-local-draft",
+      connection: connected
+    })
+
+    const saving = Effect.runPromise(Effect.provide(saveLocalDraft, Layer.succeed(PrototypeClient, localClient)))
+    await Promise.resolve()
+    viewStore.beginConnectionTransition("disconnected")
+    pendingSave.resolve({ ok: true, data: { ...draft, text: "deferred-local-draft", local_revision: "4" } })
+    await saving
+
+    expect(viewStore.getState()).toMatchObject({
+      saved_draft: { text: "deferred-local-draft", local_revision: "4" },
+      draft_local_revision: "4",
+      outcome: { kind: "draft_saved", local_revision: "4" }
+    })
+
+    await Effect.runPromise(Effect.provide(saveLocalDraft, Layer.succeed(PrototypeClient, localClient)))
+    expect(saveInputs.map((input) => input.expected_local_revision)).toEqual(["0", "4"])
+    expect(viewStore.getState().draft_local_revision).toBe("5")
   })
 
   it("retains disconnected text when no server note has been loaded yet", async () => {
@@ -427,12 +531,13 @@ describe("explicit renderer load races", () => {
       () => Effect.succeed({ ok: true, data: refreshedNote }),
       { ok: true, data: emptyDraft }
     )
+    viewStore.setConnection(connected)
+    viewStore.beginConnectionTransition("disconnected")
     viewStore.set({
       status: "ready",
-      connection: { state: "disconnected", instance_id: null, epoch: null, reason: "explicit_disconnect" },
-      connection_generation: 1,
       note: null,
       base_revision: null,
+      base_epoch: null,
       form_text: "",
       form_edit_version: 0,
       saved_draft: null
@@ -446,7 +551,8 @@ describe("explicit renderer load races", () => {
     expect(viewStore.getState()).toMatchObject({
       note: refreshedNote,
       form_text: "",
-      base_revision: null
+      base_revision: emptyDraft.base_server_revision,
+      base_epoch: emptyDraft.base_epoch
     })
   })
 

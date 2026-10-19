@@ -7,7 +7,7 @@ not a product client or server.
 
 ## Source under test
 
-- Current candidate source: `d4c9a448a1e820a041763d7e09e5fa1ef3a2de1c`.
+- Current candidate source: `11861fdc019ef5367c543c3d3fdb294d507b7760`.
 
 ## Scope and fixtures
 
@@ -32,11 +32,11 @@ Final candidate checks on that source were:
 | Check | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass; contracts, server, and desktop |
-| `pnpm test` | Pass; build, 72 Vitest tests in 8 files, and 5 real Electron tests |
+| `pnpm test` | Pass; build, 82 Vitest tests in 9 files, and 6 real Electron tests |
 
 Primary independently accepted this exact source with pinned Node 24.19.0:
-typecheck, build, and the full suite passed with 72 Vitest tests in 8 files and
-5 real Electron tests.
+typecheck, build, and the full suite passed with 82 Vitest tests in 9 files and
+6 real Electron tests.
 
 The executed command-attempt cases include:
 
@@ -67,6 +67,10 @@ The executed command-attempt cases include:
   cancellation. Terminal succeeded/rejected rows become eligible for bounded
   cleanup after seven days; unresolved rows become eligible only after explicit
   dismissal, while undismissed unresolved rows are not evicted.
+- The integrated command-attempt regressions verify original SQLite errors
+  after auto-rollback, seven-day terminal/dismissed retention, non-eviction of
+  undismissed unresolved records, and clearing only a dismissed comparison.
+  Retryable storage failures remain unresolved without redispatch.
 - A real Electron restart opens a retained unresolved row through main IPC,
   observes a changed authority epoch, fetches the current note without
   mutation, and renders original intent/base revision, historical result or
@@ -107,6 +111,13 @@ cases remain outside this prototype. The bounded explicit Disconnect and
 Reconnect lifecycle above is executed. The loopback and Electron checks require
 the permitted host environment; sandboxed loopback binding is not evidence of
 a product failure.
+
+The reviewed connection fixes also preserve the form’s original base epoch.
+Typed edit IPC rejects a stale base epoch before admission or HTTP dispatch,
+including after Electron restart with a retained draft. Same-instance local
+draft/recovery replies survive network transitions while changed-instance
+replies remain fenced. Real lifecycle tests interrupt both an in-flight PUT
+and held terminal persistence, then verify unresolved storage and no replay.
 
 ## Environment
 
@@ -151,7 +162,7 @@ their current results are:
 | Command | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
-| `pnpm test` | Pass; build, 72 Vitest tests in 8 files, and 5 real Electron tests |
+| `pnpm test` | Pass; build, 82 Vitest tests in 9 files, and 6 real Electron tests |
 
 ### Durable draft precursor checks
 
