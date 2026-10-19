@@ -237,6 +237,7 @@ test("does not cross-read a saved draft between verified server instances", asyn
   const first = await launch(firstServerDb, clientDbPath)
   try {
     await first.window.getByTestId("load").click()
+    await expect(first.window.getByTestId("note-text")).toHaveText("hello")
     await first.window.getByTestId("text-input").fill("instance-one")
     await first.window.getByTestId("save-local-draft").click()
     await expect(first.window.getByTestId("outcome")).toContainText("local draft saved revision=1")
@@ -247,6 +248,7 @@ test("does not cross-read a saved draft between verified server instances", asyn
   const second = await launch(secondServerDb, clientDbPath)
   try {
     await second.window.getByTestId("load").click()
+    await expect(second.window.getByTestId("note-text")).toHaveText("hello")
     await second.window.getByTestId("load-local-draft").click()
     await expect(second.window.getByTestId("outcome")).toHaveText("error no saved local draft")
     await expect(second.window.getByTestId("text-input")).toHaveValue("hello")
@@ -257,6 +259,7 @@ test("does not cross-read a saved draft between verified server instances", asyn
   const firstAgain = await launch(firstServerDb, clientDbPath)
   try {
     await firstAgain.window.getByTestId("load").click()
+    await expect(firstAgain.window.getByTestId("note-text")).toHaveText("hello")
     await firstAgain.window.getByTestId("load-local-draft").click()
     await expect(firstAgain.window.getByTestId("text-input")).toHaveValue("instance-one")
   } finally {
