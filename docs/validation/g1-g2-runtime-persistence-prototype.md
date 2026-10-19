@@ -7,7 +7,7 @@ not a product client or server.
 
 ## Source under test
 
-- Current candidate source: `8cbf06d314fa28d420f46ea6234d5850cc5579c6`.
+- Current candidate source: `11861fdc019ef5367c543c3d3fdb294d507b7760`.
 
 ## Scope and fixtures
 
@@ -32,11 +32,11 @@ Final candidate checks on that source were:
 | Check | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass; contracts, server, and desktop |
-| `pnpm test` | Pass; build, 76 Vitest tests in 9 files, and 5 real Electron tests |
+| `pnpm test` | Pass; build, 82 Vitest tests in 9 files, and 6 real Electron tests |
 
 Primary independently accepted this exact source with pinned Node 24.19.0:
-typecheck, build, and the full suite passed with 76 Vitest tests in 9 files and
-5 real Electron tests.
+typecheck, build, and the full suite passed with 82 Vitest tests in 9 files and
+6 real Electron tests.
 
 The executed command-attempt cases include:
 
@@ -112,6 +112,13 @@ Reconnect lifecycle above is executed. The loopback and Electron checks require
 the permitted host environment; sandboxed loopback binding is not evidence of
 a product failure.
 
+The reviewed connection fixes also preserve the form’s original base epoch.
+Typed edit IPC rejects a stale base epoch before admission or HTTP dispatch,
+including after Electron restart with a retained draft. Same-instance local
+draft/recovery replies survive network transitions while changed-instance
+replies remain fenced. Real lifecycle tests interrupt both an in-flight PUT
+and held terminal persistence, then verify unresolved storage and no replay.
+
 ## Environment
 
 - macOS 26.7.1 (build 25G241), arm64.
@@ -155,7 +162,7 @@ their current results are:
 | Command | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
-| `pnpm test` | Pass; build, 76 Vitest tests in 9 files, and 5 real Electron tests |
+| `pnpm test` | Pass; build, 82 Vitest tests in 9 files, and 6 real Electron tests |
 
 ### Durable draft precursor checks
 

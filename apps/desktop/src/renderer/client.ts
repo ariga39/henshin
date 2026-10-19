@@ -19,6 +19,7 @@ export interface EditNoteInput {
   readonly note_id: string
   readonly text: string
   readonly expected_revision: string
+  readonly base_epoch: string
   readonly operation_id: string
 }
 
