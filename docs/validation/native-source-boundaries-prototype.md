@@ -1,7 +1,7 @@
 # Native Source Boundary Precursor
 
 Status: **bounded macOS development-host precursor evidence**, not a G3
-completion claim. The implementation is recorded at commit `7853bde` in
+completion claim. The implementation is recorded at commit `7853bde6b01cf38acf2ef5602b30751fd3edf217` in
 [`NativeSourceBoundary.ts`](../../apps/server/src/analysis/NativeSourceBoundary.ts)
 with focused cases in
 [`native-source-boundary.test.ts`](../../apps/server/test/native-source-boundary.test.ts).
@@ -56,7 +56,7 @@ changes mounts.
 
 The default finite limits are 10,000 entries per enumerated directory, 1 MiB
 of directory-entry name bytes per component enumeration, a 1 MiB logical path,
-and 1,024 logical segments. An operation has one cooperative 5-second
+and 1,024 logical segments. Candidate resolution has one cooperative 5-second
 deadline shared by component enumeration and the final native canonical/root
 checks. Limits reject non-positive, non-finite, fractional, or unsafe-integer
 overrides before filesystem work. The deadline is cooperative; it does not
