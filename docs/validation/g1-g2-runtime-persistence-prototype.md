@@ -11,8 +11,10 @@ The prototype is a synthetic, isolated slice, not a product client or server.
   this revision. The preceding bootstrap-redaction fix is included at
   `0788c8a`.
 - Prototype base commit: `ec2cc9a` (first frozen install/typecheck/test pass).
-- Documentation-only follow-up commits after the tested code do not require a
-  retest; they leave the code revision above unchanged.
+- Primary acceptance independently reran typechecking and the full suite on
+  `9e95b7a`, whose code matches the tested revision above: 12 HTTP cases, one
+  bootstrap-redaction case, nine lifecycle cases, and one real Electron test.
+  Subsequent stack integration changes only this evidence document.
 
 ## Scope and fixtures
 
@@ -76,6 +78,8 @@ suite.
 
 ## Cases exercised
 
+- Malformed bootstrap input containing a sentinel credential exits within the
+  test deadline with a fixed redacted diagnostic and without echoing the input.
 - Renderer Effect operation through the typed preload/main client reaches the
   independent server and a SQLite worker transaction; a tagged
   `revision_conflict` round-trips to the UI without private details.
