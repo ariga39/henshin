@@ -127,6 +127,7 @@ export const StagedDiscoveryRow = Schema.Struct({
 export type StagedDiscoveryRow = typeof StagedDiscoveryRow.Type
 
 export const ScanStartOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("active_scan_conflict"), taskId: Uuid, policyRevision: Revision }),
   Schema.Struct({ kind: Schema.Literal("created"), task: ScanTaskRow }),
   Schema.Struct({ kind: Schema.Literal("replayed"), task: ScanTaskRow }),
   Schema.Struct({ kind: Schema.Literal("active"), task: ScanTaskRow }),
@@ -207,12 +208,7 @@ export const WorkerRequest = Schema.Union([
   Schema.Struct({
     op: Schema.Literal("finishScan"),
     taskId: Uuid,
-    status: Schema.Union([
-      Schema.Literal("succeeded"),
-      Schema.Literal("completed_with_errors"),
-      Schema.Literal("failed"),
-      Schema.Literal("interrupted")
-    ]),
+    status: Schema.Union([Schema.Literal("succeeded"), Schema.Literal("completed_with_errors"), Schema.Literal("failed")]),
     directoriesVisited: Schema.Natural,
     candidatesDiscovered: Schema.Natural,
     candidatesAnalyzed: Schema.Natural,

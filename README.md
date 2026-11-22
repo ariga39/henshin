@@ -68,12 +68,6 @@ edited. Saving is enabled only after the current path has its own successful
 preview; the server rechecks the preview identity and source/output separation
 before durable registration. Saved labels and paths are listed on startup.
 
-For a saved root, choose `Preview books`, confirm the checked `Hold new
-discoveries for review` mode, and select `Start manual scan`. The desktop polls
-the durable task and staged discoveries, showing progress, readiness or analysis
-errors, and the held state. Reopening the desktop reloads the task and staged
-results; this flow never accepts a book into Library.
-
 ### Run the synthetic prototype explicitly
 
 ```sh

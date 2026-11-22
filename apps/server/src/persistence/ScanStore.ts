@@ -27,6 +27,7 @@ export interface StartManualScanInput {
 }
 
 export type ScanStartResult =
+  | { readonly kind: "active_scan_conflict"; readonly taskId: string; readonly policyRevision: string }
   | { readonly kind: "created"; readonly task: ScanTask }
   | { readonly kind: "replayed"; readonly task: ScanTask }
   | { readonly kind: "active"; readonly task: ScanTask }
@@ -48,7 +49,7 @@ export interface StageDiscoveryInput {
 
 export interface FinishScanInput {
   readonly taskId: string
-  readonly status: "succeeded" | "completed_with_errors" | "failed" | "interrupted"
+  readonly status: "succeeded" | "completed_with_errors" | "failed"
   readonly directoriesVisited: number
   readonly candidatesDiscovered: number
   readonly candidatesAnalyzed: number

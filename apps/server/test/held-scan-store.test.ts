@@ -33,8 +33,8 @@ it("restores an interrupted task with its staged discovery still held", async ()
       yield* scans.markRunning(taskId)
       yield* roots.commitPolicy({ rootId, epoch, operationId: randomUUID(), expectedPolicyRevision: "0",
         command: { type: "exclude", exclusion: { path: "skip.zip", scope: "exact" } } })
-      expect((yield* scans.start({ ...request, operationId: randomUUID(), expectedPolicyRevision: "1" })).kind)
-        .toBe("policy_revision_conflict")
+      expect(yield* scans.start({ ...request, operationId: randomUUID(), expectedPolicyRevision: "1" }))
+        .toEqual({ kind: "active_scan_conflict", taskId, policyRevision: "0" })
       yield* scans.recordDiscovery(taskId, {
         status: "complete", directories_visited: 1, entries_observed: 1, candidate_count: 1,
         candidate_sample_truncated: false, excluded_links: [], excluded_link_count: 0,
@@ -48,7 +48,16 @@ it("restores an interrupted task with its staged discovery still held", async ()
 
     await Effect.runPromise(Effect.gen(function*() {
       const scans = yield* ScanStore
+      const prior = yield* scans.readTask(taskId)
+      if (!prior) throw new Error("expected the original scan")
+      const nextEpoch = yield* scans.start({ taskId: randomUUID(), operationId: randomUUID(), epoch: randomUUID(),
+        rootId: prior.root_id, expectedMappingRevision: prior.mapping_revision, expectedPolicyRevision: "1" })
+      expect(nextEpoch.kind).toBe("created")
       yield* scans.recoverInterrupted()
+      expect((yield* Effect.result(scans.markRunning(taskId)))._tag).toBe("Failure")
+      expect((yield* Effect.result(scans.stage({ taskId, rootId: prior.root_id, candidateId: randomUUID(),
+        relativePath: "late.cbz", kind: "archive", analysisStatus: "error", manifest: null, analysisError: null })))._tag)
+        .toBe("Failure")
       const task = yield* scans.readTask(taskId)
       expect(task).toMatchObject({ status: "interrupted", hold_new_discoveries: true, directories_visited: 1,
         candidates_discovered: 1, analysis_error_count: 1, review_needed_count: 1, coverage: { status: "complete" } })

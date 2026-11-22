@@ -12,9 +12,6 @@ import type {
   RootPreviewRequest,
   RootCommandIpcRequest,
   RootRegistrationRequest,
-  ScanTask,
-  ScanTaskSubmission,
-  StagedDiscovery,
   ServerRoot,
   ServerRootList,
   SavedDraftAbsent
@@ -71,7 +68,6 @@ declare global {
   interface Window {
     readonly henshinPrototype: PrototypeBridge
     readonly henshinRootPreview: RootPreviewBridge
-  readonly henshinScanReview: ScanReviewBridge
   }
 }
 
@@ -79,12 +75,7 @@ export interface RootPreviewBridge {
   preview(input: RootPreviewRequest): Promise<Result<RootPreviewResult>>
   list(): Promise<Result<ServerRootList>>
   save(input: RootRegistrationRequest): Promise<Result<ServerRoot>>
-  command(input: RootCommandIpcRequest): Promise<Result<ServerRoot | ScanTaskSubmission>>
-}
-
-export interface ScanReviewBridge {
-  listTasks(): Promise<Result<ReadonlyArray<ScanTask>>>
-  candidates(): Promise<Result<ReadonlyArray<StagedDiscovery>>>
+  command(input: RootCommandIpcRequest): Promise<Result<ServerRoot>>
 }
 
 /**
@@ -151,7 +142,7 @@ export class RootPreviewClient extends Context.Service<
     readonly preview: (input: RootPreviewRequest) => Effect.Effect<Result<RootPreviewResult>>
     readonly list: () => Effect.Effect<Result<ServerRootList>>
     readonly save: (input: RootRegistrationRequest) => Effect.Effect<Result<ServerRoot>>
-    readonly command: (input: RootCommandIpcRequest) => Effect.Effect<Result<ServerRoot | ScanTaskSubmission>>
+    readonly command: (input: RootCommandIpcRequest) => Effect.Effect<Result<ServerRoot>>
   }
 >()("henshin/desktop/renderer/RootPreviewClient") {
   static readonly layer = Layer.succeed(
@@ -161,22 +152,6 @@ export class RootPreviewClient extends Context.Service<
       list: () => callIpc(() => window.henshinRootPreview.list()),
       save: (input) => callIpc(() => window.henshinRootPreview.save(input)),
       command: (input) => callIpc(() => window.henshinRootPreview.command(input))
-    })
-  )
-}
-
-export class ScanReviewClient extends Context.Service<
-  ScanReviewClient,
-  {
-    readonly listTasks: () => Effect.Effect<Result<ReadonlyArray<ScanTask>>>
-    readonly candidates: () => Effect.Effect<Result<ReadonlyArray<StagedDiscovery>>>
-  }
->()("henshin/desktop/renderer/ScanReviewClient") {
-  static readonly layer = Layer.succeed(
-    ScanReviewClient,
-    ScanReviewClient.of({
-      listTasks: () => callIpc(() => window.henshinScanReview.listTasks()),
-      candidates: () => callIpc(() => window.henshinScanReview.candidates())
     })
   )
 }
