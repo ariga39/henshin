@@ -1,19 +1,11 @@
 import { Context, Effect, Layer, Option, Schema } from "effect"
-import { EntryResolution, INDEXED_ROOT_SAMPLE_LIMIT, IndexedRootSamplePage, LibraryEntryPage } from "@henshin/contracts"
+import { LibraryEntryPage } from "@henshin/contracts"
 import { DatabaseWorker, DatabaseWorkerError } from "./DatabaseWorker"
-import {
-  AcceptedThumbnailEntryRow,
-  IndexedRootSamplePageRow,
-  LibraryEntryPageRow,
-  LibraryEntryResolutionRow,
-  LibrarySummaryRow
-} from "./worker-protocol"
+import { AcceptedThumbnailEntryRow, LibraryEntryPageRow, LibrarySummaryRow } from "./worker-protocol"
 
 const decodeSummary = Schema.decodeUnknownOption(LibrarySummaryRow)
 const decodePage = Schema.decodeUnknownOption(LibraryEntryPageRow)
 const decodeAcceptedThumbnailEntry = Schema.decodeUnknownOption(Schema.NullOr(AcceptedThumbnailEntryRow))
-const decodeIndexedRootSamples = Schema.decodeUnknownOption(IndexedRootSamplePageRow)
-const decodeResolution = Schema.decodeUnknownOption(LibraryEntryResolutionRow)
 
 const decodeOrFail = <A>(decoder: (value: unknown) => Option.Option<A>, value: unknown, message: string): Effect.Effect<A, DatabaseWorkerError> => {
   const decoded = decoder(value)
@@ -27,9 +19,7 @@ export class LibraryStore extends Context.Service<
   {
     readonly summary: () => Effect.Effect<typeof LibrarySummaryRow.Type, DatabaseWorkerError>
     readonly page: (input: { readonly pageSize: number; readonly cursor: string | null }) => Effect.Effect<LibraryEntryPage, DatabaseWorkerError>
-    readonly indexedRootSamples: (rootId: string) => Effect.Effect<IndexedRootSamplePage, DatabaseWorkerError>
     readonly acceptedThumbnailEntry: (entryId: string) => Effect.Effect<typeof AcceptedThumbnailEntryRow.Type | null, DatabaseWorkerError>
-    readonly resolution: (entryId: string) => Effect.Effect<EntryResolution | null, DatabaseWorkerError>
   }
 >()("henshin/server/LibraryStore") {
   static readonly layer: Layer.Layer<LibraryStore, never, DatabaseWorker> = Layer.effect(
@@ -52,19 +42,7 @@ export class LibraryStore extends Context.Service<
       }).pipe(
         Effect.flatMap((value) => decodeOrFail(decodeAcceptedThumbnailEntry, value, "invalid accepted thumbnail entry"))
       )
-      const indexedRootSamples = (rootId: string) => worker.call({
-        op: "listIndexedRootSamples",
-        rootId,
-        sampleLimit: 33
-      }).pipe(
-        Effect.flatMap((value) => decodeOrFail(decodeIndexedRootSamples, value, "invalid indexed root samples result")),
-        Effect.map((page) => ({ root_id: rootId, sample_limit: INDEXED_ROOT_SAMPLE_LIMIT, ...page }))
-      )
-      const resolution = (entryId: string) => worker.call({ op: "readEntryResolution", entryId }).pipe(
-        Effect.flatMap((value) => decodeOrFail(decodeResolution, value, "invalid entry resolution")),
-        Effect.map((row) => row === null ? null : row)
-      )
-      return LibraryStore.of({ acceptedThumbnailEntry, indexedRootSamples, resolution, summary, page })
+      return LibraryStore.of({ acceptedThumbnailEntry, summary, page })
     })
   )
 }

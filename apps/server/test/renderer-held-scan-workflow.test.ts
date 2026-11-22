@@ -7,12 +7,11 @@ import type {
   StagedDiscovery
 } from "@henshin/contracts"
 import { afterEach, describe, expect, it } from "vitest"
-import { LibraryClient, LocalMappingClient, RootPreviewClient, ScanReviewClient, type Result } from "../../desktop/src/renderer/client"
+import { LibraryClient, RootPreviewClient, ScanReviewClient, type Result } from "../../desktop/src/renderer/client"
 import {
   loadRootWorkspace,
   loadLibrary,
   retryScanResults,
-  releaseHeldDiscovery,
   startManualScan,
   startHeldScan,
   watchHeldScans
@@ -116,14 +115,6 @@ const resetView = () => {
     scan_error: null,
     scan_start_status: "idle",
     scan_start_error: null,
-    scan_release_status: "idle",
-    scan_release_candidate_id: null,
-    scan_release_root_id: null,
-    scan_release_operation_id: null,
-    scan_release_candidate_version: null,
-    scan_release_mapping_revision: null,
-    scan_release_policy_revision: null,
-    scan_release_error: null,
     scan_hold_new_discoveries: false,
     screen: "setup",
     library_entries: [],
@@ -131,7 +122,6 @@ const resetView = () => {
     library_has_more: false,
     library_status: "idle",
     library_error: null,
-    library_cover_generation: 0,
     library_scan_status: "idle",
     library_scan_error: null,
     library_scan_task: null
@@ -141,18 +131,16 @@ const resetView = () => {
 afterEach(resetView)
 
 const run = <A>(
-  effect: Effect.Effect<A, unknown, RootPreviewClient | ScanReviewClient | LibraryClient | LocalMappingClient>,
+  effect: Effect.Effect<A, unknown, RootPreviewClient | ScanReviewClient | LibraryClient>,
   rootClient: RootPreviewClient["Service"],
   scanClient: ScanReviewClient["Service"],
-  libraryClient: LibraryClient["Service"] = libraryClientWith(),
-  localMappingClient: LocalMappingClient["Service"] = localMappingClientWith()
+  libraryClient: LibraryClient["Service"] = libraryClientWith()
 ) => Effect.runPromise(Effect.provide(
   effect,
   Layer.mergeAll(
     Layer.succeed(RootPreviewClient, rootClient),
     Layer.succeed(ScanReviewClient, scanClient),
-    Layer.succeed(LibraryClient, libraryClient),
-    Layer.succeed(LocalMappingClient, localMappingClient)
+    Layer.succeed(LibraryClient, libraryClient)
   )
 ))
 
@@ -167,196 +155,17 @@ const rootClientWith = (overrides: Partial<RootPreviewClient["Service"]> = {}): 
 const scanClientWith = (overrides: Partial<ScanReviewClient["Service"]> = {}): ScanReviewClient["Service"] => ScanReviewClient.of({
   listTasks: () => Effect.succeed({ ok: true, data: [] }),
   candidates: () => Effect.succeed({ ok: true, data: [] }),
-  release: () => Effect.succeed({ ok: true, data: {
-    operation_id: "77777777-7777-4777-8777-777777777777",
-    candidate: { ...candidate, candidate_version: 2, hold_state: "eligible" }
-  } }),
   ...overrides
 })
 
 function libraryClientWith(overrides: Partial<LibraryClient["Service"]> = {}): LibraryClient["Service"] {
   return LibraryClient.of({
     search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "0" } }),
-    getThumbnail: () => Effect.succeed({ ok: false as const, error: { code: "thumbnail_missing", message: "not used", retryable: false } }),
     ...overrides
   })
 }
 
-const localMappingClientWith = (overrides: Partial<LocalMappingClient["Service"]> = {}): LocalMappingClient["Service"] =>
-  LocalMappingClient.of({
-    preview: () => Effect.succeed({ ok: true as const, data: null }),
-    list: () => Effect.succeed({ ok: true as const, data: [] }),
-    activate: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
-    ...overrides
-  })
-
 describe("held scan renderer workflows", () => {
-  it("releases one held discovery using the current candidate and root fences", async () => {
-    let releaseInput: Parameters<ScanReviewClient["Service"]["release"]>[0] | undefined
-    const released = { ...candidate, candidate_version: 2, hold_state: "eligible" as const }
-    const scanClient = scanClientWith({
-      release: (input) => {
-        releaseInput = input
-        return Effect.succeed({ ok: true, data: {
-          operation_id: input.operation_id,
-          candidate: released
-        } })
-      }
-    })
-    viewStore.set({ root_saved_roots: [root], staged_discoveries: [candidate], scan_status: "ready" })
-
-    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
-
-    expect(releaseInput).toMatchObject({
-      candidate_id: candidate.candidate_id,
-      root_id: root.root_id,
-      expected_candidate_version: candidate.candidate_version,
-      expected_mapping_revision: root.mapping_revision,
-      expected_policy_revision: root.policy_revision,
-      command: { type: "release-hold" }
-    })
-    expect(viewStore.getState().staged_discoveries).toEqual([released])
-    expect(viewStore.getState().scan_release_status).toBe("idle")
-    expect(viewStore.getState().scan_release_operation_id).toBeNull()
-  })
-
-  it("uses a fresh operation after a released candidate is held again", async () => {
-    const releaseInputs: Array<Parameters<ScanReviewClient["Service"]["release"]>[0]> = []
-    const scanClient = scanClientWith({
-      release: (input) => {
-        releaseInputs.push(input)
-        return Effect.succeed({ ok: true, data: {
-          operation_id: input.operation_id,
-          candidate: {
-            ...candidate,
-            candidate_version: 2,
-            hold_state: "eligible" as const
-          }
-        } })
-      }
-    })
-    viewStore.set({ root_saved_roots: [root], staged_discoveries: [candidate], scan_status: "ready" })
-
-    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
-    const reheld = { ...candidate, candidate_version: 3, hold_state: "held" as const }
-    viewStore.set({ staged_discoveries: [reheld] })
-    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
-
-    expect(releaseInputs).toHaveLength(2)
-    expect(releaseInputs[1]).toMatchObject({
-      expected_candidate_version: reheld.candidate_version,
-      expected_mapping_revision: root.mapping_revision,
-      expected_policy_revision: root.policy_revision
-    })
-    expect(releaseInputs[1]?.operation_id).not.toBe(releaseInputs[0]?.operation_id)
-  })
-
-  it("retries an unknown release outcome only while the command is identical", async () => {
-    const releaseInputs: Array<Parameters<ScanReviewClient["Service"]["release"]>[0]> = []
-    let calls = 0
-    const scanClient = scanClientWith({
-      release: (input) => {
-        releaseInputs.push(input)
-        calls += 1
-        return calls <= 2
-          ? Effect.succeed(scanError)
-          : Effect.succeed({ ok: true, data: {
-              operation_id: input.operation_id,
-              candidate: { ...candidate, candidate_version: 2, hold_state: "eligible" as const }
-            } })
-      }
-    })
-    viewStore.set({ root_saved_roots: [root], staged_discoveries: [candidate], scan_status: "ready" })
-
-    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
-    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
-
-    expect(releaseInputs[1]).toEqual(releaseInputs[0])
-
-    const changedCandidate = { ...candidate, candidate_version: 2, hold_state: "held" as const }
-    viewStore.set({ staged_discoveries: [changedCandidate] })
-    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
-
-    expect(releaseInputs[2]?.operation_id).not.toBe(releaseInputs[0]?.operation_id)
-    expect(releaseInputs[2]?.expected_candidate_version).toBe(changedCandidate.candidate_version)
-  })
-
-  it("retains a definite release failure after refresh removes the candidate", async () => {
-    const scanClient = scanClientWith({
-      candidates: () => Effect.succeed({ ok: true, data: [] }),
-      release: () => Effect.succeed({
-        ok: false,
-        error: {
-          code: "revision_conflict",
-          message: "discovery changed; refresh Review before releasing it",
-          retryable: false,
-          current_revision: "2"
-        }
-      })
-    })
-    viewStore.set({ root_saved_roots: [root], staged_discoveries: [candidate], scan_status: "ready" })
-
-    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
-
-    expect(viewStore.getState()).toMatchObject({
-      scan_release_status: "error",
-      scan_release_candidate_id: candidate.candidate_id,
-      scan_release_error: "discovery changed; refresh Review before releasing it",
-      staged_discoveries: []
-    })
-  })
-
-  it("stores reconnect guidance and permits a successful second release", async () => {
-    const releaseInputs: Array<Parameters<ScanReviewClient["Service"]["release"]>[0]> = []
-    let calls = 0
-    const released = { ...candidate, candidate_version: 2, hold_state: "eligible" as const }
-    const scanClient = scanClientWith({
-      release: (input) => {
-        releaseInputs.push(input)
-        calls += 1
-        return calls === 1
-          ? Effect.succeed({
-              ok: false,
-              error: { code: "epoch_changed", message: "authority epoch changed", retryable: true }
-            })
-          : Effect.succeed({ ok: true, data: { operation_id: input.operation_id, candidate: released } })
-      }
-    })
-    viewStore.set({ root_saved_roots: [root], staged_discoveries: [candidate], scan_status: "ready" })
-
-    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
-    expect(viewStore.getState().scan_release_error).toBe("authority epoch changed. Reconnect before retrying the release.")
-
-    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
-
-    expect(releaseInputs[1]?.operation_id).not.toBe(releaseInputs[0]?.operation_id)
-    expect(viewStore.getState()).toMatchObject({
-      scan_release_status: "idle",
-      scan_release_error: null,
-      staged_discoveries: [released]
-    })
-  })
-
-  it("clears unknown release feedback when fresh results show the target released", async () => {
-    const scanClient = scanClientWith({ release: () => Effect.succeed(scanError) })
-    viewStore.set({ root_saved_roots: [root], staged_discoveries: [candidate], scan_status: "ready" })
-
-    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
-    const released = { ...candidate, candidate_version: 2, hold_state: "eligible" as const }
-    const refreshedScanClient = scanClientWith({
-      candidates: () => Effect.succeed({ ok: true, data: [released] })
-    })
-    await run(retryScanResults, rootClientWith(), refreshedScanClient)
-
-    expect(viewStore.getState()).toMatchObject({
-      scan_release_status: "idle",
-      scan_release_candidate_id: null,
-      scan_release_operation_id: null,
-      scan_release_error: null,
-      staged_discoveries: [released]
-    })
-  })
-
   it("starts from the policy revision observed by the saved-root preview", async () => {
     let commandInput: RootCommandIpcRequest | undefined
     const submitted = task("succeeded")
@@ -732,13 +541,11 @@ describe("held scan renderer workflows", () => {
     })
 
     await run(loadLibrary(), rootClientWith(), scanClientWith(), libraryClient)
-    expect(viewStore.getState().library_cover_generation).toBe(1)
     await run(loadLibrary(), rootClientWith(), scanClientWith(), libraryClient)
     expect(viewStore.getState()).toMatchObject({
       library_status: "error",
       library_error: "refresh failed",
-      library_entries: [existing],
-      library_cover_generation: 1
+      library_entries: [existing]
     })
 
     await run(loadLibrary(true), rootClientWith(), scanClientWith(), libraryClient)
@@ -746,8 +553,7 @@ describe("held scan renderer workflows", () => {
       library_status: "ready",
       library_entries: [existing, appended],
       library_has_more: false,
-      library_cursor: null,
-      library_cover_generation: 1
+      library_cursor: null
     })
   })
 })

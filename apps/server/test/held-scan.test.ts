@@ -146,44 +146,6 @@ describe("durable held manual scan", () => {
     expect(replay.data).toEqual(release.data)
     expect((await listCandidates(server)).find((candidate) => candidate.relative_path === "book-b")?.hold_state).toBe("held")
 
-    const heldAgain = await withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      return yield* client.command({
-        params: { id: root.data.root_id },
-        payload: {
-          operation_id: randomUUID(),
-          instance_id: server.instanceId,
-          epoch: server.epoch,
-          expected_mapping_revision: root.data.mapping_revision,
-          expected_policy_revision: root.data.policy_revision,
-          command: { type: "start-scan", mode: "manual", hold_new_discoveries: true }
-        }
-      })
-    }))
-    if (!("task" in heldAgain.data)) throw new Error("expected re-hold scan task submission")
-    expect((await waitForTerminal(server, heldAgain.data.task.task_id)).status).toBe("succeeded")
-
-    const reheldCandidates = await listCandidates(server)
-    const reheld = reheldCandidates.find((candidate) => candidate.relative_path === "book-a")
-    if (reheld === undefined) throw new Error("expected released discovery to be held again")
-    expect(reheld).toMatchObject({ hold_state: "held", candidate_version: 3 })
-    const secondReleasePayload = {
-      ...releasePayload,
-      operation_id: randomUUID(),
-      expected_candidate_version: reheld.candidate_version
-    }
-    expect(secondReleasePayload.operation_id).not.toBe(releasePayload.operation_id)
-    const secondRelease = await withReviewClient(server, Effect.gen(function*() {
-      const client = yield* ReviewHttpClient
-      return yield* client.command({ params: { id: reheld.candidate_id }, payload: secondReleasePayload })
-    }))
-    expect(secondRelease.data.candidate).toMatchObject({
-      relative_path: "book-a",
-      hold_state: "eligible",
-      candidate_version: 4
-    })
-    expect((await listCandidates(server)).find((candidate) => candidate.relative_path === "book-b")?.hold_state).toBe("held")
-
     await server.stop()
     const restarted = await startServer(server.dbPath)
     servers.push(restarted)

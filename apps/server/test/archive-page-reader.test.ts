@@ -45,4 +45,27 @@ describe("bounded archive page reads", () => {
       readArchivePages(path.join(root, "missing.cbz"), ["001.png"], { signal: controller.signal })
     ).rejects.toThrow()
   })
+
+  it("consumes members in order and stops after the first successful consumer", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-archive-pages-lazy-"))
+    roots.push(root)
+    const archive = path.join(root, "book.cbz")
+    const writer = new ZipWriter(new BlobWriter("application/zip"))
+    await writer.add("001.png", new Uint8ArrayReader(new Uint8Array([1])), { compressionMethod: 0 })
+    await writer.add("002.png", new Uint8ArrayReader(new Uint8Array([2])), { compressionMethod: 0 })
+    await writer.add("003.png", new Uint8ArrayReader(new Uint8Array([3])), { compressionMethod: 0 })
+    const blob = await writer.close()
+    await writeFile(archive, Buffer.from(await blob.arrayBuffer()))
+
+    const seen: Array<string> = []
+    const result = await readArchivePages(archive, ["001.png", "002.png", "003.png"], {
+      expectedEntryCount: 3,
+      onPage: async (name) => {
+        seen.push(name)
+        return name === "002.png"
+      }
+    })
+    expect(seen).toEqual(["001.png", "002.png"])
+    expect(result.pages.size).toBe(0)
+  })
 })

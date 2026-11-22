@@ -1,8 +1,7 @@
 import { Context, Layer } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
 import { HttpApiClient, HttpApiMiddleware } from "effect/http-api"
-import { LibraryApi, PrototypeApi, ReviewApi, ServerApi, TaskApi, ThumbnailApi } from "./api"
-import { OpenEventApi } from "./open-event-api"
+import { LibraryApi, PrototypeApi, ReviewApi, ServerApi, TaskApi } from "./api"
 import { Authentication } from "./auth"
 
 /**
@@ -119,49 +118,6 @@ export class LibraryHttpClient extends Context.Service<
     return Layer.effect(
       LibraryHttpClient,
       HttpApiClient.make(LibraryApi, {
-        transformClient: (client) => client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
-      })
-    ).pipe(Layer.provide(AuthenticationClient), Layer.provide(options.transportLayer ?? FetchHttpClient.layer))
-  }
-}
-
-export class ThumbnailHttpClient extends Context.Service<
-  ThumbnailHttpClient,
-  HttpApiClient.ForApi<typeof ThumbnailApi>
->()("henshin/http/ThumbnailHttpClient") {
-  static readonly layer = (options: {
-    readonly baseUrl: string
-    readonly bearerToken: string
-    readonly transportLayer?: Layer.Layer<HttpClient.HttpClient>
-  }): Layer.Layer<ThumbnailHttpClient> => {
-    const AuthenticationClient = HttpApiMiddleware.layerClient(Authentication, ({ next, request }) =>
-      next(HttpClientRequest.bearerToken(request, options.bearerToken))
-    )
-    return Layer.effect(
-      ThumbnailHttpClient,
-      HttpApiClient.make(ThumbnailApi, {
-        transformClient: (client) => client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
-      })
-    ).pipe(Layer.provide(AuthenticationClient), Layer.provide(options.transportLayer ?? FetchHttpClient.layer))
-  }
-}
-
-/** Authenticated client for durable accepted-reader event delivery. */
-export class OpenEventHttpClient extends Context.Service<
-  OpenEventHttpClient,
-  HttpApiClient.ForApi<typeof OpenEventApi>
->()("henshin/http/OpenEventHttpClient") {
-  static readonly layer = (options: {
-    readonly baseUrl: string
-    readonly bearerToken: string
-    readonly transportLayer?: Layer.Layer<HttpClient.HttpClient>
-  }): Layer.Layer<OpenEventHttpClient> => {
-    const AuthenticationClient = HttpApiMiddleware.layerClient(Authentication, ({ next, request }) =>
-      next(HttpClientRequest.bearerToken(request, options.bearerToken))
-    )
-    return Layer.effect(
-      OpenEventHttpClient,
-      HttpApiClient.make(OpenEventApi, {
         transformClient: (client) => client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
       })
     ).pipe(Layer.provide(AuthenticationClient), Layer.provide(options.transportLayer ?? FetchHttpClient.layer))

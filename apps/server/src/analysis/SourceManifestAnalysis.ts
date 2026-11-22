@@ -26,7 +26,6 @@ import {
   type Entry,
   type ZipReaderConstructorOptions
 } from "@zip.js/zip.js"
-import { compareNaturalPageNames } from "@henshin/contracts"
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
 const textEncoder = new TextEncoder()
@@ -237,6 +236,13 @@ class LimitExceeded extends Error {
   }
 }
 
+class ArchiveMemberReadFailure extends Error {
+  constructor() {
+    super("archive member could not be read")
+    this.name = "ArchiveMemberReadFailure"
+  }
+}
+
 class StructuralCorruption extends Error {
   constructor() {
     super("archive structure is invalid")
@@ -423,8 +429,68 @@ const compareUtf8 = (left: Uint8Array, right: Uint8Array): number => {
   return left.length - right.length
 }
 
+const codePoints = (value: string): ReadonlyArray<number> => Array.from(value, (char) => char.codePointAt(0) as number)
+
+const naturalCompare = (left: string, right: string): number => {
+  const leftPoints = codePoints(left)
+  const rightPoints = codePoints(right)
+  let leftIndex = 0
+  let rightIndex = 0
+
+  while (leftIndex < leftPoints.length && rightIndex < rightPoints.length) {
+    const leftPoint = leftPoints[leftIndex]
+    const rightPoint = rightPoints[rightIndex]
+    const leftDigit = leftPoint >= 0x30 && leftPoint <= 0x39
+    const rightDigit = rightPoint >= 0x30 && rightPoint <= 0x39
+
+    if (leftDigit && rightDigit) {
+      const leftStart = leftIndex
+      const rightStart = rightIndex
+      while (
+        leftIndex < leftPoints.length &&
+        leftPoints[leftIndex] >= 0x30 &&
+        leftPoints[leftIndex] <= 0x39
+      ) leftIndex += 1
+      while (
+        rightIndex < rightPoints.length &&
+        rightPoints[rightIndex] >= 0x30 &&
+        rightPoints[rightIndex] <= 0x39
+      ) rightIndex += 1
+
+      const leftDigits = leftPoints.slice(leftStart, leftIndex).map((point) => point - 0x30)
+      const rightDigits = rightPoints.slice(rightStart, rightIndex).map((point) => point - 0x30)
+      const leftNonZero = leftDigits.findIndex((digit) => digit !== 0)
+      const rightNonZero = rightDigits.findIndex((digit) => digit !== 0)
+      const leftSignificant = leftNonZero < 0 ? [0] : leftDigits.slice(leftNonZero)
+      const rightSignificant = rightNonZero < 0 ? [0] : rightDigits.slice(rightNonZero)
+      if (leftSignificant.length !== rightSignificant.length) {
+        return leftSignificant.length - rightSignificant.length
+      }
+      for (let index = 0; index < leftSignificant.length; index += 1) {
+        if (leftSignificant[index] !== rightSignificant[index]) {
+          return leftSignificant[index] - rightSignificant[index]
+        }
+      }
+      continue
+    }
+
+    if (leftPoint !== rightPoint) return leftPoint - rightPoint
+    leftIndex += 1
+    rightIndex += 1
+  }
+
+  if (leftIndex === leftPoints.length && rightIndex !== rightPoints.length) return -1
+  if (rightIndex === rightPoints.length && leftIndex !== leftPoints.length) return 1
+  return compareUtf8(utf8Bytes(left), utf8Bytes(right))
+}
+
 const sortPages = (pages: Array<ManifestPage>): void => {
-  pages.sort((left, right) => compareNaturalPageNames(left.name, right.name))
+  const names = new Map(pages.map((page) => [page.name, utf8Bytes(page.name)]))
+  pages.sort((left, right) => {
+    const comparison = naturalCompare(left.name, right.name)
+    if (comparison !== 0) return comparison
+    return compareUtf8(names.get(left.name) as Uint8Array, names.get(right.name) as Uint8Array)
+  })
 }
 
 const sameNumber = (left: number, right: number): boolean => Object.is(left, right)
@@ -849,6 +915,8 @@ export const readArchivePages = async (
     readonly limits?: Partial<ManifestLimits>
     readonly maxPageBytes?: number
     readonly signal?: AbortSignal
+    readonly onPage?: (name: string, bytes: Uint8Array) => Promise<boolean>
+    readonly expectedEntryCount?: number
   }
 ): Promise<ArchivePageReadResult> => {
   const combined = combineLimits(options?.limits)
@@ -900,7 +968,7 @@ export const readArchivePages = async (
         await entry.getData(new WritableStream<Uint8Array>({
           write(chunk) {
             checkBudget(context)
-            if (chunk.length > bytes.length - offset) throw new LimitExceeded()
+            if (chunk.length > bytes.length - offset) throw new ArchiveMemberReadFailure()
             bytes.set(chunk, offset)
             offset += chunk.length
           }
@@ -911,8 +979,12 @@ export const readArchivePages = async (
           checkOverlappingEntryOnly: false,
           checkOverlappingEntry: true
         })
-        if (offset !== bytes.length) throw new SourceChanged()
-        pages.set(entry.filename, bytes)
+        if (offset !== bytes.length) throw new ArchiveMemberReadFailure()
+        if (options?.onPage !== undefined) {
+          if (await options.onPage(entry.filename, bytes)) break
+        } else {
+          pages.set(entry.filename, bytes)
+        }
       } catch (error) {
         if (context.signal?.aborted) throw new ProbeInterruption("cancelled")
         if (error instanceof ProbeInterruption || error instanceof LimitExceeded || error instanceof SourceChanged) {
@@ -930,7 +1002,7 @@ export const readArchivePages = async (
         kind: "archive",
         bytes: sourceBytes,
         mtimeMs: afterStats.mtimeMs,
-        entryCount,
+        entryCount: options?.expectedEntryCount ?? entryCount,
         observationToken: JSON.stringify(statToken(afterStats))
       }
     }
