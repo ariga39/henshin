@@ -6,7 +6,6 @@ import type {
   DiscardedDraft,
   HandshakeView,
   LibraryEntryPage,
-  LibraryView,
   NoteView,
   PublicError,
   SavedDraft,
@@ -91,7 +90,6 @@ export interface ScanReviewBridge {
 }
 
 export interface LibraryBridge {
-  get(): Promise<Result<LibraryView>>
   search(input: { readonly page_size?: number; readonly cursor?: string }): Promise<Result<LibraryEntryPage>>
 }
 
@@ -192,14 +190,12 @@ export class ScanReviewClient extends Context.Service<
 export class LibraryClient extends Context.Service<
   LibraryClient,
   {
-    readonly get: () => Effect.Effect<Result<LibraryView>>
     readonly search: (input: { readonly page_size?: number; readonly cursor?: string }) => Effect.Effect<Result<LibraryEntryPage>>
   }
 >()("henshin/desktop/renderer/LibraryClient") {
   static readonly layer = Layer.succeed(
     LibraryClient,
     LibraryClient.of({
-      get: () => callIpc(() => window.henshinLibrary.get()),
       search: (input) => callIpc(() => window.henshinLibrary.search(input))
     })
   )
