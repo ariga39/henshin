@@ -3,10 +3,10 @@ import os from "node:os"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
 import sharp from "sharp"
-import { Effect } from "effect"
+import { Effect, Result } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import { BlobWriter, Uint8ArrayReader, ZipWriter } from "@zip.js/zip.js"
-import { LibraryHttpClient, ServerHttpClient, TaskHttpClient, type ScanTask } from "@henshin/contracts"
+import { LibraryHttpClient, ServerHttpClient, TaskHttpClient, ThumbnailHttpClient, type ScanTask } from "@henshin/contracts"
 import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
 
 const servers: Array<RunningServer> = []
@@ -105,6 +105,19 @@ describe("accepted default thumbnails", () => {
       return yield* client.search({ payload: { page_size: 200 } })
     }))
     expect(page.data.entries).toHaveLength(2)
+    const coldKey = page.data.entries[0]?.cover?.key
+    if (!coldKey) throw new Error("expected a cover reference")
+    const simultaneous = await Effect.runPromise(Effect.gen(function*() {
+      const client = yield* ThumbnailHttpClient
+      return yield* Effect.all(
+        Array.from({ length: 4 }, () => Effect.result(client.get({ params: { key: coldKey } }))),
+        { concurrency: "unbounded" }
+      )
+    }).pipe(Effect.provide(ThumbnailHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken }))))
+    expect(simultaneous.some(Result.isSuccess)).toBe(true)
+    expect(simultaneous.some((result) =>
+      Result.isFailure(result) && result.failure._tag === "ThumbnailUpdating"
+    )).toBe(true)
     for (const entry of page.data.entries) {
       expect(entry.cover).not.toBeNull()
       const key = entry.cover?.key

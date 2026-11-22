@@ -7,7 +7,6 @@ import {
   RootScanCommand
 } from "./root"
 import { LibrarySearchRequest } from "./library"
-import { ThumbnailKey } from "./thumbnail"
 import type {
   CommandAttempt,
   CommandReconciliation,
@@ -124,8 +123,6 @@ export const HandshakeView = Schema.Struct({
 export type HandshakeView = typeof HandshakeView.Type
 
 export const RootPreviewIpcRequest = RootPreviewRequest
-export const LocalMappingPreviewIpcRequest = Schema.Struct({ root_id: Uuid })
-export type LocalMappingPreviewIpcRequest = typeof LocalMappingPreviewIpcRequest.Type
 export const RootListIpcRequest = Schema.Struct({})
 export type RootListIpcRequest = typeof RootListIpcRequest.Type
 export const RootSaveIpcRequest = RootRegistrationRequest
@@ -150,13 +147,9 @@ export const RootCommandIpcRequest = Schema.Union([
   })
 ])
 export type RootCommandIpcRequest = typeof RootCommandIpcRequest.Type
-export type LocalMappingPreviewIpcResult = import("./root").LocalMappingPreview | null
 
 export const LibrarySearchIpcRequest = LibrarySearchRequest
 export type LibrarySearchIpcRequest = typeof LibrarySearchIpcRequest.Type
-
-export const ThumbnailGetIpcRequest = Schema.Struct({ key: ThumbnailKey })
-export type ThumbnailGetIpcRequest = typeof ThumbnailGetIpcRequest.Type
 
 export const TaskListIpcRequest = Schema.Struct({})
 export type TaskListIpcRequest = typeof TaskListIpcRequest.Type

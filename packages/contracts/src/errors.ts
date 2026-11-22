@@ -228,7 +228,7 @@ export class ThumbnailUpdating extends Schema.TaggedError<ThumbnailUpdating>()(
     retryable: Schema.Literal(true),
     ...envelope
   },
-  { httpApiStatus: 202 }
+  { httpApiStatus: 503 }
 ) {}
 
 /**

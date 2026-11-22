@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron"
+import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from "electron"
 import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
@@ -13,10 +13,7 @@ import {
   HandshakeIpcRequest,
   IpcChannels,
   LibraryHttpClient,
-  LocalMappingPreviewIpcRequest,
   LibrarySearchIpcRequest,
-  ThumbnailGetIpcRequest,
-  ThumbnailHttpClient,
   LoadDraftIpcRequest,
   ListCommandAttemptsIpcRequest,
   PrototypeHttpClient,
@@ -36,7 +33,6 @@ import {
   type PublicError,
   type RootPreviewResult
 } from "@henshin/contracts"
-import { inspectLocalMapping, LocalMappingUnavailableError } from "./LocalMappingPreview"
 import { startServerChild, type ServerChild } from "./server-child"
 import { DraftConflictError, DraftStore, DraftStoreFullError } from "./persistence/DraftStore"
 import {
@@ -100,13 +96,6 @@ const decodePublicError = Schema.decodeUnknownOption(PublicApiError)
  * message, stack, or internal cause never crosses the IPC boundary.
  */
 const toPublicError = (error: unknown): PublicError => {
-  if (error instanceof LocalMappingUnavailableError) {
-    return {
-      code: "local_mapping_unavailable",
-      message: error.message,
-      retryable: true
-    }
-  }
   if (error instanceof CommandAttemptConflictError) {
     return {
       code: "operation_conflict",
@@ -191,14 +180,6 @@ const toResult = <A, R>(effect: Effect.Effect<{ readonly data: A }, unknown, R>)
     })
   )
 
-const toRawResult = <A, R>(effect: Effect.Effect<A, unknown, R>): Effect.Effect<IpcOk<A> | IpcErr, never, R> =>
-  effect.pipe(
-    Effect.match({
-      onFailure: (error) => ({ ok: false as const, error: toPublicError(error) }),
-      onSuccess: (data) => ({ ok: true as const, data })
-    })
-  )
-
 const assertTrustedSender = (event: IpcMainInvokeEvent): void => {
   if (mainWindow === null || event.sender !== mainWindow.webContents) {
     throw new Error("rejected IPC from an untrusted web contents")
@@ -240,7 +221,7 @@ const runNetworkResult = <A>(
   effect: Effect.Effect<
     IpcOk<A> | IpcErr,
     never,
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | ThumbnailHttpClient
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient
   >
 ): Promise<IpcOk<A> | IpcErr> =>
   requireConnection()
@@ -338,35 +319,6 @@ const registerIpc = (): void => {
     )
   })
 
-  ipcMain.handle(IpcChannels.localMappingPreview, async (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(LocalMappingPreviewIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    const selected = await dialog.showOpenDialog(mainWindow!, {
-      title: "Select the local collection directory",
-      properties: ["openDirectory"]
-    })
-    if (selected.canceled || selected.filePaths.length === 0) return { ok: true as const, data: null }
-    const selectedPath = selected.filePaths[0]
-    return runNetworkResult(
-      toRawResult(
-        Effect.gen(function*() {
-          const client = yield* LibraryHttpClient
-          const indexed = yield* client.indexedSamples({ params: { id: decoded.value.root_id } })
-          return yield* Effect.tryPromise({
-            try: () => inspectLocalMapping(
-              decoded.value.root_id,
-              selectedPath,
-              indexed.data.samples,
-              indexed.data.sample_truncated
-            ),
-            catch: (error) => error
-          })
-        })
-      )
-    )
-  })
-
   ipcMain.handle(IpcChannels.librarySearch, (event, raw: unknown) => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(LibrarySearchIpcRequest)(raw)
@@ -376,20 +328,6 @@ const registerIpc = (): void => {
         Effect.gen(function*() {
           const client = yield* LibraryHttpClient
           return yield* client.search({ payload: decoded.value })
-        })
-      )
-    )
-  })
-
-  ipcMain.handle(IpcChannels.thumbnailGet, (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ThumbnailGetIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    return runNetworkResult(
-      toRawResult(
-        Effect.gen(function*() {
-          const client = yield* ThumbnailHttpClient
-          return yield* client.get({ params: { key: decoded.value.key } })
         })
       )
     )
