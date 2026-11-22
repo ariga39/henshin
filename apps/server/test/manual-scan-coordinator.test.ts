@@ -62,7 +62,9 @@ it("finishes a scan with an actionable failure while preserving progress", async
       listStaged: unused,
       recordDiscovery: () => Effect.succeed(undefined),
       markRunning: () => Effect.succeed(undefined),
-      stage: () => Effect.fail(new DatabaseWorkerError({ message: "staging store unavailable" })),
+      stage: () => Effect.fail(new DatabaseWorkerError({
+        message: "scan task no longer matches the current root mapping or policy"
+      })),
       publishNormal: () => Effect.die("unused test store operation"),
       finish: (input) => Effect.sync(() => {
         terminal = input
@@ -83,8 +85,8 @@ it("finishes a scan with an actionable failure while preserving progress", async
       analysisErrorCount: 0,
       reviewNeededCount: 0,
       error: {
-        code: "scan_failed",
-        message: "scan failed unexpectedly; staged discoveries and progress were preserved. Check server diagnostics, resolve the underlying issue, and retry the scan."
+        code: "root_policy_changed",
+        message: "scan stopped because the saved root mapping or policy changed while it was running. Retry the scan to continue with the current root settings."
       },
       readinessError: null
     })
