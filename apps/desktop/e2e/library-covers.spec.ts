@@ -1,16 +1,45 @@
-import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test"
+import { _electron as electron, expect, test, type ElectronApplication, type Locator, type Page } from "@playwright/test"
 import electronPath from "electron"
+import { execFile } from "node:child_process"
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { promisify } from "node:util"
 import { fileURLToPath } from "node:url"
 
 const APP_DIR = fileURLToPath(new URL("..", import.meta.url))
 const launched: ElectronApplication[] = []
+const execFileAsync = promisify(execFile)
 const validPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64"
 )
+
+const bundledServerPid = async (app: ElectronApplication): Promise<number | null> => {
+  const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,command="])
+  const parentPid = app.process().pid
+  for (const line of stdout.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)
+    if (match !== null && Number(match[2]) === parentPid && match[3].includes("dist/server/server.mjs")) {
+      return Number(match[1])
+    }
+  }
+  return null
+}
+
+const stableImageSrc = async (image: Locator): Promise<string> => {
+  let previous: string | null = null
+  let stableReads = 0
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const current = await image.getAttribute("src")
+    if (current !== null && current === previous) stableReads += 1
+    else stableReads = 0
+    if (stableReads >= 2 && current !== null) return current
+    previous = current
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  throw new Error("cover URL did not settle")
+}
 
 const launch = async (dbPath: string): Promise<{ app: ElectronApplication; window: Page }> => {
   const app = await electron.launch({
@@ -44,7 +73,7 @@ test("renders a decoded server cover and keeps an unavailable neighbor usable", 
     await writeFile(path.join(decoded, "001.png"), validPng)
     await writeFile(path.join(unavailable, "001.png"), Buffer.from("not an image"))
 
-    const { window } = await launch(dbPath)
+    const { app, window } = await launch(dbPath)
     await expect(window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
     await window.getByTestId("root-preview-path").fill(fixtureDirectory)
     await window.getByTestId("root-preview-submit").click()
@@ -69,6 +98,16 @@ test("renders a decoded server cover and keeps an unavailable neighbor usable", 
     await window.getByTestId("library-refresh").click()
     await expect(decodedEntry.getByTestId("library-cover-image")).toBeVisible({ timeout: 30_000 })
     await expect(unavailableEntry.getByTestId("library-cover-placeholder")).toContainText("Cover unavailable")
+
+    const displayedSrc = await stableImageSrc(decodedEntry.getByTestId("library-cover-image"))
+    const serverPid = await bundledServerPid(app)
+    if (serverPid === null) throw new Error("bundled server process was not found")
+    process.kill(serverPid, "SIGTERM")
+    await expect.poll(() => bundledServerPid(app), { timeout: 5_000 }).toBeNull()
+    await window.getByTestId("library-refresh").click()
+    await expect(window.getByRole("alert")).toContainText("Could not load library")
+    await expect(decodedEntry.getByTestId("library-cover-image")).toBeVisible()
+    await expect(decodedEntry.getByTestId("library-cover-image")).toHaveAttribute("src", displayedSrc ?? "")
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })

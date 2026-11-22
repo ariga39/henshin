@@ -19,6 +19,8 @@ const ready = (value: number): Result<Uint8Array> => ({
   data: new Uint8Array([value])
 })
 
+const nextTurn = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
 afterEach(() => {
   vi.useRealTimers()
 })
@@ -30,7 +32,7 @@ describe("desktop library thumbnail loading", () => {
     for (const _delay of THUMBNAIL_RETRY_DELAYS_MS) load.mockResolvedValueOnce(updating)
     load.mockResolvedValueOnce(ready(7))
 
-    const request = createThumbnailLoadRequest(load)
+    const request = createThumbnailLoadRequest("delayed", load)
     await Promise.resolve()
     await Promise.resolve()
     expect(load).toHaveBeenCalledTimes(1)
@@ -44,7 +46,7 @@ describe("desktop library thumbnail loading", () => {
   it("clears a retry timer when an obsolete cover is cancelled", async () => {
     vi.useFakeTimers()
     const load = vi.fn<() => Promise<Result<Uint8Array>>>().mockResolvedValue(updating)
-    const request = createThumbnailLoadRequest(load)
+    const request = createThumbnailLoadRequest("cancelled", load)
     await Promise.resolve()
     await Promise.resolve()
     expect(load).toHaveBeenCalledTimes(1)
@@ -57,18 +59,39 @@ describe("desktop library thumbnail loading", () => {
   it("does not exceed the server render concurrency limit", async () => {
     const pending: Array<(result: Result<Uint8Array>) => void> = []
     const load = vi.fn(() => new Promise<Result<Uint8Array>>((resolve) => pending.push(resolve)))
-    const requests = Array.from({ length: 5 }, () => createThumbnailLoadRequest(load))
+    const requests = Array.from({ length: 5 }, (_, index) => createThumbnailLoadRequest(`cover-${index}`, load))
 
-    await Promise.resolve()
+    await nextTurn()
     expect(load).toHaveBeenCalledTimes(4)
 
     pending.slice(0, 4).forEach((resolve) => resolve(ready(1)))
-    await Promise.resolve()
-    await Promise.resolve()
-    await Promise.resolve()
+    await nextTurn()
     expect(load).toHaveBeenCalledTimes(5)
 
     pending[4]?.(ready(5))
     await expect(Promise.all(requests.map((request) => request.promise))).resolves.toHaveLength(5)
+  })
+
+  it("coalesces a replacement while a cancelled native request is still active", async () => {
+    const pending: Array<(result: Result<Uint8Array>) => void> = []
+    const load = vi.fn(() => new Promise<Result<Uint8Array>>((resolve) => pending.push(resolve)))
+    const obsolete = createThumbnailLoadRequest("same-cover", load)
+    await nextTurn()
+    obsolete.cancel()
+
+    const replacement = createThumbnailLoadRequest("same-cover", load)
+    const otherRequests = Array.from({ length: 4 }, (_, index) =>
+      createThumbnailLoadRequest(`other-${index}`, load)
+    )
+    await nextTurn()
+    expect(load).toHaveBeenCalledTimes(4)
+
+    pending[0]?.(ready(1))
+    await nextTurn()
+    expect(load).toHaveBeenCalledTimes(5)
+
+    pending.slice(1).forEach((resolve) => resolve(ready(2)))
+    await expect(replacement.promise).resolves.toEqual(ready(1))
+    await expect(Promise.all(otherRequests.map((request) => request.promise))).resolves.toHaveLength(4)
   })
 })

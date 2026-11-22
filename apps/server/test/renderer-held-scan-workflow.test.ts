@@ -549,7 +549,7 @@ describe("held scan renderer workflows", () => {
       library_status: "error",
       library_error: "refresh failed",
       library_entries: [existing],
-      library_cover_generation: 2
+      library_cover_generation: 1
     })
 
     await run(loadLibrary(true), rootClientWith(), scanClientWith(), libraryClient)
@@ -558,7 +558,7 @@ describe("held scan renderer workflows", () => {
       library_entries: [existing, appended],
       library_has_more: false,
       library_cursor: null,
-      library_cover_generation: 2
+      library_cover_generation: 1
     })
   })
 })

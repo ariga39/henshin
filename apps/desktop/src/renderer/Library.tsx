@@ -81,7 +81,7 @@ const LibraryCover = ({
         setCover({ key, request, status: "unavailable", src: null })
       }
     }
-    const loadRequest = createThumbnailLoadRequest(() => runtime.runPromise(
+    const loadRequest = createThumbnailLoadRequest(key, () => runtime.runPromise(
       Effect.gen(function*() {
         const client = yield* LibraryClient
         return yield* client.getThumbnail(key)
