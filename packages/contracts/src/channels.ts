@@ -8,6 +8,8 @@ export const IpcChannels = {
   rootSave: "henshin:root-save",
   rootCommand: "henshin:root-command",
   localMappingPreview: "henshin:local-mapping-preview",
+  localMappingList: "henshin:local-mapping-list",
+  localMappingActivate: "henshin:local-mapping-activate",
   readerProfileList: "henshin:reader-profile-list",
   readerSelectExecutable: "henshin:reader-select-executable",
   readerProfileSave: "henshin:reader-profile-save",
