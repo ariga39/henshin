@@ -84,6 +84,9 @@ const normalScanQuietIntervalMs = (): number => {
   return Number.isSafeInteger(configured) && configured > 0 ? configured : NORMAL_SCAN_QUIET_INTERVAL_MS
 }
 
+const deferredPathsMessage = (label: string, paths: ReadonlyArray<string>, total: number): string =>
+  `${label}: ${paths.join(", ")}${total > paths.length ? ` (+${total - paths.length} more)` : ""}`
+
 const rootObservation = (root: ServerRootRow): SourceRootObservation => ({
   selectedPath: root.selectedPath,
   canonicalPath: root.canonicalPath,
@@ -299,6 +302,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
     let readinessError: { readonly code: string; readonly message: string } | null = null
     let unstableCandidateCount = 0
     let allocationDeferred = false
+    let deferredReviewNeededCount: number | undefined
     if (!task.hold_new_discoveries && coverage.status === "complete") {
       let verifiedAnalyzed = 0
       let verifiedErrors = 0
@@ -384,9 +388,15 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
             break
           case "allocation_deferred":
             allocationDeferred = true
+            deferredReviewNeededCount = published.reviewNeededCount
             readinessError = {
               code: "allocation_deferred",
-              message: `automatic allocation was deferred for ${published.missingPaths.length + published.changedPaths.length} occupied path(s); ${published.excludedPaths.length} occupied path(s) were excluded by policy`
+              message: [
+                "automatic allocation was deferred",
+                deferredPathsMessage("missing occupied paths", published.missingPaths, published.missingPathCount),
+                deferredPathsMessage("changed occupied paths", published.changedPaths, published.changedPathCount),
+                `${published.excludedPathCount} occupied path(s) excluded by policy`
+              ].join("; ")
             }
             break
           case "root_not_found":
@@ -400,9 +410,10 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
       }
     }
 
+    const reviewNeededCount = deferredReviewNeededCount ?? (yield* stagedCountForRoot(store, task.root_id))
     progress = {
       ...progress,
-      reviewNeededCount: yield* stagedCountForRoot(store, task.root_id)
+      reviewNeededCount
     }
     const hasErrors = progress.analysisErrorCount > 0 || coverage.status === "partial" || unstableCandidateCount > 0 || allocationDeferred
     const failed = readinessError !== null && readinessError.code !== "allocation_deferred"
