@@ -265,9 +265,7 @@ export const ScanManifestObservation = Schema.Struct({
   kind: Schema.Union([Schema.Literal("directory"), Schema.Literal("archive")]),
   bytes: Schema.Natural,
   mtime_ms: Schema.Number,
-  entry_count: Schema.Natural,
-  /** Stable lightweight token; older persisted manifests may omit it. */
-  observation_token: Schema.optional(Schema.String)
+  entry_count: Schema.Natural
 })
 export type ScanManifestObservation = typeof ScanManifestObservation.Type
 

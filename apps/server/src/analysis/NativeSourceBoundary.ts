@@ -436,16 +436,6 @@ export const DEFAULT_SOURCE_DISCOVERY_LIMITS: SourceDiscoveryLimits = {
   maxCandidates: 64
 }
 
-/**
- * Bounded discovery budget for an explicit manual scan. Root previews keep the
- * smaller default/sample budget so preview latency is independent of scan size.
- */
-export const MANUAL_SCAN_SOURCE_DISCOVERY_LIMITS = {
-  maxDirectories: 10_000,
-  maxCandidates: 10_000,
-  deadlineMs: 60_000
-} satisfies Partial<SourceDiscoveryLimits>
-
 export type SourceDiscoveryIssueCode =
   | "directory-limit"
   | "location-unavailable"

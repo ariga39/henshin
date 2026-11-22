@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld("henshinScanReview", {
 })
 
 contextBridge.exposeInMainWorld("henshinLibrary", {
+  get: () => ipcRenderer.invoke(IpcChannels.libraryGet, {}),
   search: (input: { readonly page_size?: number; readonly cursor?: string }) =>
     ipcRenderer.invoke(IpcChannels.librarySearch, input)
 })

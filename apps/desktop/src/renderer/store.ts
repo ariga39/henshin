@@ -70,7 +70,6 @@ export interface ViewState {
   readonly library_status: "idle" | "loading" | "ready" | "error"
   readonly library_error: string | null
   readonly library_scan_status: "idle" | "starting" | "started" | "error"
-  readonly library_scan_error: string | null
   readonly library_scan_task: ScanTask | null
 }
 
@@ -122,7 +121,6 @@ const initialState: ViewState = {
   library_status: "idle",
   library_error: null,
   library_scan_status: "idle",
-  library_scan_error: null,
   library_scan_task: null
 }
 
