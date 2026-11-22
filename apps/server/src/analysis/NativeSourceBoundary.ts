@@ -339,7 +339,7 @@ const verifyFinalCandidate = async (
       return failure("candidate-changed")
     }
   } catch (error) {
-    return isMissing(error) ? failure("candidate-changed") : failure("location-unavailable")
+    return isMissing(error) ? failure("missing-target") : failure("location-unavailable")
   }
   return success(undefined)
 }

@@ -17,6 +17,7 @@ import {
   RootPreviewUnavailable,
   ActiveScanConflict,
   CandidateNotFound,
+  EntryNotFound,
   TaskNotFound,
   StorageFull,
   ThumbnailMissing,
@@ -45,6 +46,7 @@ import {
 } from "./library"
 import { ReviewCandidateCommandRequest, ReviewCommandResult } from "./review"
 import { ThumbnailKey } from "./thumbnail"
+import { EntryResolution, EntryResolutionQuery } from "./library"
 
 /**
  * Isolated synthetic prototype API. The `/prototype/v1` prefix and the
@@ -211,6 +213,12 @@ export const LibraryApi = HttpApi.make("henshin-library").add(
         params: { id: Uuid },
         success: SuccessEnvelope(IndexedRootSamplePage),
         error: [AuthenticationRequired, RootNotFound, InternalError]
+      }),
+      HttpApiEndpoint.get("resolution", "/entries/:id/resolution", {
+        params: { id: Uuid },
+        query: EntryResolutionQuery,
+        success: SuccessEnvelope(EntryResolution),
+        error: [AuthenticationRequired, EntryNotFound, InvalidRequest, InternalError]
       })
     )
     .prefix("/api/v1")

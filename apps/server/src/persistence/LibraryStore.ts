@@ -1,17 +1,21 @@
-import { Context, Effect, Layer, Option, Schema } from "effect"
-import { INDEXED_ROOT_SAMPLE_LIMIT, IndexedRootSamplePage, LibraryEntryPage } from "@henshin/contracts"
+import { Context, Data, Effect, Layer, Option, Schema } from "effect"
+import { EntryResolution, INDEXED_ROOT_SAMPLE_LIMIT, IndexedRootSamplePage, LibraryEntryPage } from "@henshin/contracts"
 import { DatabaseWorker, DatabaseWorkerError } from "./DatabaseWorker"
 import {
   AcceptedThumbnailEntryRow,
   IndexedRootSamplePageRow,
   LibraryEntryPageRow,
+  LibraryEntryResolutionResult,
   LibrarySummaryRow
 } from "./worker-protocol"
 
 const decodeSummary = Schema.decodeUnknownOption(LibrarySummaryRow)
 const decodePage = Schema.decodeUnknownOption(LibraryEntryPageRow)
+const decodeResolution = Schema.decodeUnknownOption(LibraryEntryResolutionResult)
 const decodeAcceptedThumbnailEntry = Schema.decodeUnknownOption(Schema.NullOr(AcceptedThumbnailEntryRow))
 const decodeIndexedRootSamples = Schema.decodeUnknownOption(IndexedRootSamplePageRow)
+
+export class InvalidLibraryEntryResolutionCursor extends Data.TaggedError("InvalidLibraryEntryResolutionCursor")<{}> {}
 
 const decodeOrFail = <A>(decoder: (value: unknown) => Option.Option<A>, value: unknown, message: string): Effect.Effect<A, DatabaseWorkerError> => {
   const decoded = decoder(value)
@@ -26,6 +30,11 @@ export class LibraryStore extends Context.Service<
     readonly summary: () => Effect.Effect<typeof LibrarySummaryRow.Type, DatabaseWorkerError>
     readonly page: (input: { readonly pageSize: number; readonly cursor: string | null }) => Effect.Effect<LibraryEntryPage, DatabaseWorkerError>
     readonly indexedRootSamples: (rootId: string) => Effect.Effect<IndexedRootSamplePage, DatabaseWorkerError>
+    readonly resolution: (input: {
+      readonly entryId: string
+      readonly siblingCursor?: string
+      readonly siblingClaimsRevision?: string
+    }) => Effect.Effect<EntryResolution | null, DatabaseWorkerError | InvalidLibraryEntryResolutionCursor>
     readonly acceptedThumbnailEntry: (entryId: string) => Effect.Effect<typeof AcceptedThumbnailEntryRow.Type | null, DatabaseWorkerError>
   }
 >()("henshin/server/LibraryStore") {
@@ -43,6 +52,26 @@ export class LibraryStore extends Context.Service<
       }).pipe(
         Effect.flatMap((value) => decodeOrFail(decodePage, value, "invalid library entry page"))
       )
+      const resolution = (input: {
+        readonly entryId: string
+        readonly siblingCursor?: string
+        readonly siblingClaimsRevision?: string
+      }): Effect.Effect<EntryResolution | null, DatabaseWorkerError | InvalidLibraryEntryResolutionCursor> => worker.call({
+          op: "readEntryResolution",
+          entryId: input.entryId,
+          siblingCursor: input.siblingCursor,
+          siblingClaimsRevision: input.siblingClaimsRevision
+        }).pipe(
+        Effect.mapError((error): DatabaseWorkerError | InvalidLibraryEntryResolutionCursor => error),
+        Effect.flatMap((value): Effect.Effect<EntryResolution | null, DatabaseWorkerError | InvalidLibraryEntryResolutionCursor> => {
+          const decoded = decodeResolution(value)
+          if (Option.isNone(decoded)) return Effect.fail(new DatabaseWorkerError({ message: "invalid entry resolution" }))
+          const result = decoded.value
+          return result !== null && typeof result === "object" && "kind" in result && result.kind === "invalid_cursor"
+            ? Effect.fail(new InvalidLibraryEntryResolutionCursor())
+            : Effect.succeed(result as EntryResolution | null)
+        })
+      )
       const acceptedThumbnailEntry = (entryId: string) => worker.call({
         op: "readAcceptedThumbnailEntry",
         entryId
@@ -57,7 +86,7 @@ export class LibraryStore extends Context.Service<
         Effect.flatMap((value) => decodeOrFail(decodeIndexedRootSamples, value, "invalid indexed root samples result")),
         Effect.map((page) => ({ root_id: rootId, sample_limit: INDEXED_ROOT_SAMPLE_LIMIT, ...page }))
       )
-      return LibraryStore.of({ acceptedThumbnailEntry, indexedRootSamples, summary, page })
+      return LibraryStore.of({ acceptedThumbnailEntry, indexedRootSamples, resolution, summary, page })
     })
   )
 }

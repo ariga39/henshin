@@ -1,8 +1,8 @@
 import { Effect } from "effect"
-import { InternalError, LibraryApi, RequestContext, RootNotFound } from "@henshin/contracts"
+import { EntryNotFound, InternalError, InvalidRequest, LibraryApi, RequestContext, RootNotFound } from "@henshin/contracts"
 import { HttpApiBuilder } from "effect/http-api"
 import { ServerState } from "../identity"
-import { LibraryStore } from "../persistence/LibraryStore"
+import { InvalidLibraryEntryResolutionCursor, LibraryStore } from "../persistence/LibraryStore"
 import { RootStore } from "../persistence/RootStore"
 
 const errorBase = (server: ServerState["Service"], requestId: string) => ({
@@ -120,6 +120,55 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
             ...errorBase(server, context.request_id),
             server_time: Date.now(),
             data: page
+          }
+        })
+      )
+      .handle("resolution", ({ params, query }) =>
+        Effect.gen(function*() {
+          const context = yield* RequestContext
+          const hasCursor = query.sibling_cursor !== undefined
+          const hasRevision = query.sibling_claims_revision !== undefined
+          if (hasCursor !== hasRevision) {
+            return yield* new InvalidRequest({
+              code: "invalid_request",
+              message: "sibling cursor and sibling claims revision must be supplied together",
+              retryable: false,
+              details: { field: "sibling_cursor" },
+              ...errorBase(server, context.request_id)
+            })
+          }
+          const resolution = yield* library.resolution({
+            entryId: params.id,
+            siblingCursor: query.sibling_cursor,
+            siblingClaimsRevision: query.sibling_claims_revision
+          }).pipe(
+            Effect.mapError((error) => error instanceof InvalidLibraryEntryResolutionCursor
+              ? new InvalidRequest({
+                code: "invalid_request",
+                message: "sibling cursor is invalid or stale; restart sibling claims",
+                retryable: false,
+                details: { field: "sibling_cursor" },
+                ...errorBase(server, context.request_id)
+              })
+              : new InternalError({
+                code: "internal_error",
+                message: "internal error",
+                retryable: false,
+                ...errorBase(server, context.request_id)
+              }))
+          )
+          if (resolution === null) {
+            return yield* new EntryNotFound({
+              code: "not_found",
+              message: "library entry not found",
+              retryable: false,
+              ...errorBase(server, context.request_id)
+            })
+          }
+          return {
+            ...errorBase(server, context.request_id),
+            server_time: Date.now(),
+            data: resolution
           }
         })
       )

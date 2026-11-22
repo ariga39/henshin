@@ -231,6 +231,17 @@ export class ThumbnailMissing extends Schema.TaggedError<ThumbnailMissing>()(
   { httpApiStatus: 404 }
 ) {}
 
+export class EntryNotFound extends Schema.TaggedError<EntryNotFound>()(
+  "EntryNotFound",
+  {
+    code: Schema.Literal("not_found"),
+    message: Schema.String,
+    retryable: Schema.Literal(false),
+    ...envelope
+  },
+  { httpApiStatus: 404 }
+) {}
+
 export class ThumbnailUpdating extends Schema.TaggedError<ThumbnailUpdating>()(
   "ThumbnailUpdating",
   {
@@ -268,6 +279,7 @@ export const PublicApiError = Schema.Union([
   ActiveScanConflict,
   TaskNotFound,
   CandidateNotFound,
+  EntryNotFound,
   InternalError
 ])
 export type PublicApiError = typeof PublicApiError.Type

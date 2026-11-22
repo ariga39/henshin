@@ -253,6 +253,20 @@ describe("native source boundary precursor", () => {
     expect(result).toMatchObject({ ok: true, value: { kind: "archive" } })
   })
 
+  it("reports an accepted candidate deleted before resolution as missing-target", async () => {
+    const root = await makeTempRoot()
+    const sourceRoot = join(root, "collection")
+    const archive = join(sourceRoot, "book.zip")
+    await mkdir(sourceRoot)
+    await writeFile(archive, Buffer.from("archive"))
+    const observation = await selectedRoot(sourceRoot)
+    await unlink(archive)
+    expect(await resolveSourceCandidate(observation, "book.zip")).toMatchObject({
+      ok: false,
+      code: "missing-target"
+    })
+  })
+
   it("does not mutate archive bytes during boundary validation", async () => {
     const root = await makeTempRoot()
     const sourceRoot = join(root, "collection")

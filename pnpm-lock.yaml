@@ -81,6 +81,9 @@ importers:
       sharp:
         specifier: ^0.34.5
         version: 0.34.5
+      unicode-case-folding:
+        specifier: 1.1.2
+        version: 1.1.2
     devDependencies:
       esbuild:
         specifier: 0.28.2
@@ -887,6 +890,9 @@ packages:
     resolution: {integrity: sha512-XtuDWVdqTLr3NAxm2ly9/hU6kUsJOgGh1RASzMBbsw6aWCOaQzHdW+QQDfdERjfJ2V5vL5pRPa4RetO9UfivDg==}
     engines: {node: '>=22.19.0'}
 
+  unicode-case-folding@1.1.2:
+    resolution: {integrity: sha512-03vMM1kVkJbiSIPDW1D0hu42prq3Pe000yC5PaNMjhBJQxDuhAfh+R1V4TXXL21adjBqj7fUtBjZuWCRmiOQQQ==}
+
   vite@8.3.4:
     resolution: {integrity: sha512-IftLE8phJhdNRIGNEV4JCCvfNScoZQVfcXaN8TQropWGJtOHcu+iAB9pHcuGvmEb/kddw0LBe/jS8ztdC6xdiQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
@@ -1583,6 +1589,8 @@ snapshots:
     optional: true
 
   undici@8.12.2: {}
+
+  unicode-case-folding@1.1.2: {}
 
   vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2):
     dependencies:
