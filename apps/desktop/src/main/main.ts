@@ -15,6 +15,8 @@ import {
   HandshakeIpcRequest,
   IpcChannels,
   LibraryHttpClient,
+  OpenEventHttpClient,
+  ListOpenJournalIpcRequest,
   LibrarySearchIpcRequest,
   LoadDraftIpcRequest,
   ListCommandAttemptsIpcRequest,
@@ -56,6 +58,8 @@ import {
   reconcileNoteCommand
 } from "./CommandCoordinator"
 import { LocalDatabaseWorker } from "./persistence/LocalDatabaseWorker"
+import { OpenJournalStore } from "./persistence/OpenJournalStore"
+import { drainOpenEvents } from "./OpenEventDelivery"
 import {
   ReaderProfileConflictError,
   ReaderProfileNotFoundError,
@@ -98,7 +102,7 @@ interface IpcErr {
 
 let mainWindow: BrowserWindow | null = null
 let serverChild: ServerChild | null = null
-type MainServices = DraftStore | CommandAttemptStore | ReaderProfileStore
+type MainServices = DraftStore | CommandAttemptStore | OpenJournalStore | ReaderProfileStore
 let runtime: ManagedRuntime.ManagedRuntime<MainServices, never> | null = null
 let connection: ConnectionLifecycle | null = null
 let rendererUrl = ""
@@ -299,11 +303,59 @@ const requireConnection = (): ConnectionLifecycle => {
   return connection
 }
 
+const notifyOpenJournalChanged = (): void => {
+  if (mainWindow !== null && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IpcChannels.openJournalChanged)
+  }
+}
+
+const deliverPendingOpenEvents = async (): Promise<void> => {
+  const activeConnection = connection
+  if (activeConnection === null) return
+  const session = activeConnection.getSession()
+  if (session === null) return
+  const generation = activeConnection.currentGeneration()
+  if (generation === null) return
+  try {
+    const store = await requireRuntime().runPromise(Effect.gen(function*() {
+      return yield* OpenJournalStore
+    }))
+    const client: OpenEventHttpClient["Service"] = {
+      batch: (request) => Effect.tryPromise({
+        try: () => activeConnection.run(
+          Effect.gen(function*() {
+            const authenticatedClient = yield* OpenEventHttpClient
+            return yield* authenticatedClient.batch(request)
+          })
+        ),
+        // ConnectionLifecycle.run rejects with its own authority errors as
+        // well as the HTTP client's declared failures; drainOpenEvents treats
+        // both as runtime delivery outcomes.
+        catch: (error) => error as never
+      })
+    }
+    const result = await Effect.runPromise(drainOpenEvents(store, client, session, {
+      isActive: () => activeConnection.currentGeneration() === generation
+    }))
+    if (result.missingResults) {
+      console.warn("open event delivery stopped after an incomplete server response")
+    }
+  } catch (error) {
+    // A lost response, paused connection, or local write failure leaves the
+    // immutable event pending. The active generation retries transient errors;
+    // a changed generation exposes the residual journal through the refresh
+    // notification and the next deliberate reconnect retries it.
+    console.warn("open event delivery stopped with pending journal entries", error)
+  } finally {
+    notifyOpenJournalChanged()
+  }
+}
+
 const runNetworkResult = <A>(
   effect: Effect.Effect<
     IpcOk<A> | IpcErr,
     never,
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient
   >
 ): Promise<IpcOk<A> | IpcErr> =>
   requireConnection()
@@ -739,7 +791,10 @@ const registerIpc = (): void => {
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return requireConnection()
       .connect()
-      .then(connectionStatusResult)
+      .then((status) => {
+        void deliverPendingOpenEvents()
+        return connectionStatusResult(status)
+      })
       .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
   })
 
@@ -755,6 +810,25 @@ const registerIpc = (): void => {
     const decoded = Schema.decodeUnknownOption(ConnectionStatusIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return connectionStatusResult(requireConnection().getStatus())
+  })
+
+  ipcMain.handle(IpcChannels.listOpenJournal, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ListOpenJournalIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    try {
+      const instanceId = requireNamespace()
+      return requireRuntime().runPromise(
+        toResult(
+          Effect.gen(function*() {
+            const journal = yield* OpenJournalStore
+            return { data: yield* journal.list(instanceId) }
+          })
+        )
+      )
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
   })
 
   ipcMain.handle(IpcChannels.getNote, (event, raw: unknown) => {
@@ -1044,6 +1118,7 @@ const bootstrap = async (): Promise<void> => {
     Layer.mergeAll(
       DraftStore.layerFromWorker,
       CommandAttemptStore.layerFromWorker,
+      OpenJournalStore.layerFromWorker,
       ReaderProfileStore.layerFromWorker
     ).pipe(Layer.provide(localWorker))
   )
@@ -1055,6 +1130,7 @@ const bootstrap = async (): Promise<void> => {
     bearerToken: serverChild.bearerToken
   })
   await connection.connect()
+  void deliverPendingOpenEvents()
 
   registerIpc()
   createWindow()

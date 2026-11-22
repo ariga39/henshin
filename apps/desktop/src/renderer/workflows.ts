@@ -893,6 +893,22 @@ export const loadConnectionStatus = Effect.gen(function*() {
   const result = yield* client.connectionStatus()
   if (result.ok) {
     yield* Effect.sync(() => viewStore.publishConnection(result.data, connectionGeneration))
+    yield* loadOpenJournal
+  }
+})
+
+export const loadOpenJournal = Effect.gen(function*() {
+  const client = yield* PrototypeClient
+  if (client.listOpenJournal === undefined) return
+  const initialState = viewStore.getState()
+  const connectionGeneration = initialState.connection_generation
+  const ownerInstanceId = verifiedInstanceId(initialState)
+  const result = yield* client.listOpenJournal()
+  if (result.ok) {
+    if (!isCurrent(connectionGeneration) || verifiedInstanceId(viewStore.getState()) !== ownerInstanceId) return
+    yield* Effect.sync(() => viewStore.set({ open_journal: result.data }))
+  } else if (isCurrent(connectionGeneration) && verifiedInstanceId(viewStore.getState()) === ownerInstanceId) {
+    yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
   }
 })
 
@@ -1165,5 +1181,6 @@ export const reconnect = Effect.gen(function*() {
   if (!isCurrent(connectionGeneration)) return
   yield* Effect.sync(() => viewStore.publishConnection(result.data, connectionGeneration))
   if (!isCurrent(connectionGeneration)) return
+  yield* loadOpenJournal
   yield* loadNoteWithOptions(true)
 })
