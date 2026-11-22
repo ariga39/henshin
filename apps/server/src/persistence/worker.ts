@@ -42,6 +42,7 @@ const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
 const MAX_POLICY_OPERATION_RESULTS = 1024
 const COMPACTION_BATCH = 64
+const MAX_REPORTED_DEFERRED_PATHS = 32
 
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const db = new DatabaseSync(dbPath)
@@ -310,15 +311,16 @@ const selectStagedDiscoveries = db.prepare(
 )
 selectStagedDiscoveries.setReadBigInts(true)
 const selectStaged = db.prepare(
-  "SELECT candidate_id, candidate_version, task_id, analysis_status FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
+  "SELECT candidate_id, candidate_version, task_id, analysis_status, hold_state FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
 selectStaged.setReadBigInts(true)
-const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted'")
+const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC")
 const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ? AND state = 'accepted'")
 const insertEntry = db.prepare(
   "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, ?, ?, ?)"
 )
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
+const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
 const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
 const selectLibraryEntries = (cursor: string | null, limit: number) => cursor === null
   ? db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision FROM library_entries ORDER BY entry_id ASC LIMIT ?").all(limit)
@@ -341,7 +343,7 @@ const selectScanFence = db.prepare(`
 `)
 selectScanFence.setReadBigInts(true)
 const upsertStagedDiscovery = db.prepare(
-  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = CASE WHEN staged_discoveries.hold_state = 'held' THEN 'held' ELSE excluded.hold_state END, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
+  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = excluded.hold_state, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
 )
 const recoverScanTasks = db.prepare(
   "UPDATE scan_tasks SET status = CASE WHEN status = 'queued' THEN 'failed' ELSE 'interrupted' END, error_code = 'server_restart', error_message = CASE WHEN status = 'queued' THEN 'scan did not start before server restart' ELSE 'scan interrupted by server restart' END, updated_at_ms = ? WHERE status IN ('queued', 'running')"
@@ -834,28 +836,36 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
   try {
     requireCurrentScanFence(request.taskId, request.rootId)
     const existing = selectStaged.get(request.rootId, request.relativePath) as
-      | { candidate_id: string; candidate_version: bigint; task_id: string; analysis_status: string }
+      | { candidate_id: string; candidate_version: bigint; task_id: string; analysis_status: string; hold_state: string }
       | undefined
-    upsertStagedDiscovery.run(
-      existing?.candidate_id ?? request.candidateId,
-      request.taskId,
-      request.rootId,
-      request.relativePath,
-      request.kind,
-      existing === undefined ? 1n : existing.candidate_version + 1n,
-      request.holdState,
-      request.analysisStatus,
-      request.manifestJson,
-      request.analysisErrorJson,
-      Date.now()
-    )
+    const accepted = selectEntry.get(request.rootId, request.relativePath)
+    const unchangedHeldScan = request.holdState === "held" && request.analysisStatus === "ready"
+      && accepted !== undefined && accepted.kind === request.kind && accepted.manifest_json === request.manifestJson
+    if (unchangedHeldScan) {
+      if (existing !== undefined) deleteStaged.run(existing.candidate_id)
+    } else {
+      const held = accepted === undefined && (request.holdState === "held" || existing?.hold_state === "held")
+      upsertStagedDiscovery.run(
+        existing?.candidate_id ?? request.candidateId,
+        request.taskId,
+        request.rootId,
+        request.relativePath,
+        request.kind,
+        existing === undefined ? 1n : existing.candidate_version + 1n,
+        held ? "held" : "eligible",
+        request.analysisStatus,
+        request.manifestJson,
+        request.analysisErrorJson,
+        Date.now()
+      )
+    }
     const priorStatus = existing?.task_id === request.taskId ? existing.analysis_status : undefined
     requireScanTransition(db.prepare(`UPDATE scan_tasks SET
       candidates_analyzed = candidates_analyzed + ?, analysis_error_count = analysis_error_count + ?,
       review_needed_count = review_needed_count + ?, updated_at_ms = ? WHERE task_id = ? AND root_id = ? AND status = 'running'`).run(
       Number(request.analysisStatus === "ready") - Number(priorStatus === "ready"),
       Number(request.analysisStatus === "error") - Number(priorStatus === "error"),
-      Number(priorStatus === undefined), Date.now(), request.taskId, request.rootId
+      Number(!unchangedHeldScan && priorStatus === undefined), Date.now(), request.taskId, request.rootId
     ))
     db.exec("COMMIT")
   } catch (error) {
@@ -1005,8 +1015,20 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
     }
     if (changed) bumpLibraryRevision.run()
     if (missingPaths.length > 0 || changedPaths.length > 0) {
+      const stagedPaths = (selectStagedPathsForRoot.all(request.rootId) as unknown as ReadonlyArray<{ relative_path: string }>)
+        .map((row) => row.relative_path)
+      const reviewPaths = new Set([...stagedPaths, ...missingPaths, ...changedPaths])
       db.exec("COMMIT")
-      return { kind: "allocation_deferred", missingPaths, changedPaths, excludedPaths }
+      return {
+        kind: "allocation_deferred",
+        missingPaths: missingPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
+        changedPaths: changedPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
+        excludedPaths: excludedPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
+        missingPathCount: missingPaths.length,
+        changedPathCount: changedPaths.length,
+        excludedPathCount: excludedPaths.length,
+        reviewNeededCount: reviewPaths.size
+      }
     }
     db.exec("COMMIT")
     return { kind: "published" }
