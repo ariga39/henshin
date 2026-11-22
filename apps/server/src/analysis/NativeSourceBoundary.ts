@@ -423,6 +423,50 @@ export const resolveSourceCandidate = async (
   return failure("unsupported-candidate")
 }
 
+/**
+ * Resolves one direct image from an already validated image-directory
+ * candidate. The manifest name is treated as a native directory entry name,
+ * never as a path, and the result is rechecked for links and replacement.
+ */
+export const resolveSourcePage = async (
+  candidate: ResolvedSourceCandidate,
+  pageName: string,
+  options?: ResolveSourceCandidateOptions
+): Promise<NativeBoundaryResult<{ readonly nativePath: string }>> => {
+  const limits = mergedLimits(options?.limits)
+  if (limits === undefined || candidate.kind !== "image-directory") return failure("unsupported-candidate")
+  if (
+    pageName.length === 0 ||
+    pageName === "." ||
+    pageName === ".." ||
+    pageName.includes("/") ||
+    pageName.includes("\\") ||
+    pageName.includes("\u0000") ||
+    new TextEncoder().encode(pageName).byteLength > limits.maxDirectoryNameBytes
+  ) return failure("invalid-portable-path")
+
+  const context: OperationContext = { limits, deadlineAt: Date.now() + limits.deadlineMs }
+  const before = checkOperationDeadline(context)
+  if (!before.ok) return before
+  const pagePath = join(candidate.nativePath, pageName)
+  try {
+    const stats = await lstat(pagePath, { bigint: true })
+    const afterStat = checkOperationDeadline(context)
+    if (!afterStat.ok) return afterStat
+    if (stats.isSymbolicLink()) return failure("source-link")
+    if (!stats.isFile()) return failure("unsupported-candidate")
+    const canonicalPage = await realpath(pagePath)
+    const afterRealpath = checkOperationDeadline(context)
+    if (!afterRealpath.ok) return afterRealpath
+    if (!containsByComponents(candidate.nativePath, canonicalPage)) return failure("source-link")
+    const canonicalStats = await lstat(canonicalPage, { bigint: true })
+    if (!sameIdentity(identityOf(stats), identityOf(canonicalStats))) return failure("candidate-changed")
+    return success({ nativePath: pagePath })
+  } catch (error) {
+    return isMissing(error) ? failure("missing-target") : failure("location-unavailable")
+  }
+}
+
 export interface SourceDiscoveryLimits extends NativeBoundaryLimits {
   /** Maximum number of directories visited, including the observed root. */
   readonly maxDirectories: number

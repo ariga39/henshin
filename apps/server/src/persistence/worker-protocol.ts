@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import { RootExclusions, RootPolicyCommand } from "@henshin/contracts/root"
+import { ThumbnailReference } from "@henshin/contracts/thumbnail"
 import { OpenEvent, OpenEventOutcome } from "@henshin/contracts/event"
 
 /** A persisted prototype note row, always with a canonical decimal revision. */
@@ -138,9 +139,20 @@ export const LibraryEntryRow = Schema.Struct({
   page_count: Schema.Natural,
   state: Schema.Literal("accepted"),
   content_version: Revision,
-  location_revision: Revision
+  location_revision: Revision,
+  cover: Schema.NullOr(ThumbnailReference)
 })
 export type LibraryEntryRow = typeof LibraryEntryRow.Type
+
+export const AcceptedThumbnailEntryRow = Schema.Struct({
+  entry_id: Uuid,
+  root_id: Uuid,
+  relative_path: Schema.String,
+  kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  content_version: Revision,
+  manifest_json: Schema.String
+})
+export type AcceptedThumbnailEntryRow = typeof AcceptedThumbnailEntryRow.Type
 
 export const LibrarySummaryRow = Schema.Struct({
   library_id: Uuid,
@@ -295,6 +307,7 @@ export const WorkerRequest = Schema.Union([
   }),
   Schema.Struct({ op: Schema.Literal("readLibrary") }),
   Schema.Struct({ op: Schema.Literal("listLibraryEntries"), pageSize: Schema.Natural, cursor: Schema.NullOr(Uuid) }),
+  Schema.Struct({ op: Schema.Literal("readAcceptedThumbnailEntry"), entryId: Uuid }),
   Schema.Struct({ op: Schema.Literal("acceptOpenEvents"), events: Schema.Array(OpenEvent) }),
   Schema.Struct({
     op: Schema.Literal("finishScan"),

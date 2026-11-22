@@ -11,7 +11,8 @@
     "./ids": "./src/ids.ts",
     "./note": "./src/note.ts",
     "./open-event-api": "./src/open-event-api.ts",
-    "./root": "./src/root.ts"
+    "./root": "./src/root.ts",
+    "./thumbnail": "./src/thumbnail.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"
