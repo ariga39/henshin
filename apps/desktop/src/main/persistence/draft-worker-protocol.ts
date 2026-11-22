@@ -1,6 +1,37 @@
 import { Schema } from "effect"
 import { DraftFormId, NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
+import {
+  ReaderEntryFormat,
+  ReaderLaunchMode,
+  ReaderTargetMode
+} from "@henshin/contracts"
 import { CommandAttemptStatus } from "@henshin/contracts/note"
+
+export const ReaderProfileRow = Schema.Struct({
+  profileId: Uuid,
+  revision: Revision,
+  name: Schema.String,
+  launchMode: ReaderLaunchMode,
+  supportedFormats: Schema.Array(ReaderEntryFormat),
+  targetMode: ReaderTargetMode,
+  executablePath: Schema.NullOr(Schema.String),
+  argumentTokens: Schema.Array(Schema.String)
+})
+export type ReaderProfileRow = typeof ReaderProfileRow.Type
+
+export const ReaderProfileRows = Schema.Array(ReaderProfileRow)
+export type ReaderProfileRows = typeof ReaderProfileRows.Type
+
+export const ReaderProfileReadResult = Schema.NullOr(ReaderProfileRow)
+export type ReaderProfileReadResult = typeof ReaderProfileReadResult.Type
+
+export const ReaderProfileWriteOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("saved"), profile: ReaderProfileRow }),
+  Schema.Struct({ kind: Schema.Literal("conflict"), currentRevision: Revision }),
+  Schema.Struct({ kind: Schema.Literal("not_found") }),
+  Schema.Struct({ kind: Schema.Literal("full") })
+])
+export type ReaderProfileWriteOutcome = typeof ReaderProfileWriteOutcome.Type
 
 export const DraftRow = Schema.Struct({
   instanceId: Uuid,
@@ -78,6 +109,19 @@ export const CommandAttemptNote = Schema.Struct({
 export type CommandAttemptNote = typeof CommandAttemptNote.Type
 
 export const DraftWorkerRequest = Schema.Union([
+  Schema.Struct({ op: Schema.Literal("listReaderProfiles") }),
+  Schema.Struct({ op: Schema.Literal("getReaderProfile"), profileId: Uuid }),
+  Schema.Struct({
+    op: Schema.Literal("saveReaderProfile"),
+    profileId: Uuid,
+    expectedRevision: Revision,
+    name: Schema.String,
+    launchMode: ReaderLaunchMode,
+    supportedFormats: Schema.Array(ReaderEntryFormat),
+    targetMode: ReaderTargetMode,
+    executablePath: Schema.NullOr(Schema.String),
+    argumentTokens: Schema.Array(Schema.String)
+  }),
   Schema.Struct({ op: Schema.Literal("load"), instanceId: Uuid, noteId: NoteId, formId: DraftFormId }),
   Schema.Struct({
     op: Schema.Literal("save"),

@@ -24,6 +24,7 @@ import {
   Reader,
   ZipReader,
   type Entry,
+  type FileEntry,
   type ZipReaderConstructorOptions
 } from "@zip.js/zip.js"
 
@@ -939,6 +940,7 @@ export const readArchivePages = async (
     if (!openedStats.isFile() || !sameStats(sourceStats, openedStats)) throw new SourceChanged()
     reader = new ZipReader(new SourceFileReader(file, sourceBytes, context), archiveOptions)
     const requested = new Set(pageNames)
+    const selected = new Map<string, FileEntry>()
     const pages = new Map<string, Uint8Array>()
     const names = new Set<string>()
     let entryCount = 0
@@ -961,7 +963,15 @@ export const readArchivePages = async (
       names.add(entry.filename)
       if (entry.encrypted) throw new Encrypted()
       if (!requested.has(entry.filename) || entry.directory || entry.symlink || declared > maxPageBytes) continue
+      selected.set(entry.filename, entry)
+    }
 
+    // The accepted manifest owns cover order, not the archive's central-directory order.
+    // Keep only Entry handles here; payloads remain lazy and are read one at a time.
+    for (const pageName of pageNames) {
+      const entry = selected.get(pageName)
+      if (entry === undefined) continue
+      const declared = safeStatNumber(entry.uncompressedSize, combined.maxMemberUncompressedBytes)
       const bytes = new Uint8Array(declared)
       let offset = 0
       try {
@@ -981,9 +991,9 @@ export const readArchivePages = async (
         })
         if (offset !== bytes.length) throw new ArchiveMemberReadFailure()
         if (options?.onPage !== undefined) {
-          if (await options.onPage(entry.filename, bytes)) break
+          if (await options.onPage(pageName, bytes)) break
         } else {
-          pages.set(entry.filename, bytes)
+          pages.set(pageName, bytes)
         }
       } catch (error) {
         if (context.signal?.aborted) throw new ProbeInterruption("cancelled")
