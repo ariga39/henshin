@@ -116,7 +116,11 @@ const resetView = () => {
     scan_start_error: null,
     scan_release_status: "idle",
     scan_release_candidate_id: null,
+    scan_release_root_id: null,
     scan_release_operation_id: null,
+    scan_release_candidate_version: null,
+    scan_release_mapping_revision: null,
+    scan_release_policy_revision: null,
     scan_release_error: null,
     scan_hold_new_discoveries: false
   })
@@ -181,6 +185,68 @@ describe("held scan renderer workflows", () => {
     })
     expect(viewStore.getState().staged_discoveries).toEqual([released])
     expect(viewStore.getState().scan_release_status).toBe("idle")
+    expect(viewStore.getState().scan_release_operation_id).toBeNull()
+  })
+
+  it("uses a fresh operation after a released candidate is held again", async () => {
+    const releaseInputs: Array<Parameters<ScanReviewClient["Service"]["release"]>[0]> = []
+    const scanClient = scanClientWith({
+      release: (input) => {
+        releaseInputs.push(input)
+        return Effect.succeed({ ok: true, data: {
+          operation_id: input.operation_id,
+          candidate: {
+            ...candidate,
+            candidate_version: 2,
+            hold_state: "eligible" as const
+          }
+        } })
+      }
+    })
+    viewStore.set({ root_saved_roots: [root], staged_discoveries: [candidate], scan_status: "ready" })
+
+    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
+    const reheld = { ...candidate, candidate_version: 3, hold_state: "held" as const }
+    viewStore.set({ staged_discoveries: [reheld] })
+    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
+
+    expect(releaseInputs).toHaveLength(2)
+    expect(releaseInputs[1]).toMatchObject({
+      expected_candidate_version: reheld.candidate_version,
+      expected_mapping_revision: root.mapping_revision,
+      expected_policy_revision: root.policy_revision
+    })
+    expect(releaseInputs[1]?.operation_id).not.toBe(releaseInputs[0]?.operation_id)
+  })
+
+  it("retries an unknown release outcome only while the command is identical", async () => {
+    const releaseInputs: Array<Parameters<ScanReviewClient["Service"]["release"]>[0]> = []
+    let calls = 0
+    const scanClient = scanClientWith({
+      release: (input) => {
+        releaseInputs.push(input)
+        calls += 1
+        return calls <= 2
+          ? Effect.succeed(scanError)
+          : Effect.succeed({ ok: true, data: {
+              operation_id: input.operation_id,
+              candidate: { ...candidate, candidate_version: 2, hold_state: "eligible" as const }
+            } })
+      }
+    })
+    viewStore.set({ root_saved_roots: [root], staged_discoveries: [candidate], scan_status: "ready" })
+
+    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
+    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
+
+    expect(releaseInputs[1]).toEqual(releaseInputs[0])
+
+    const changedCandidate = { ...candidate, candidate_version: 2, hold_state: "held" as const }
+    viewStore.set({ staged_discoveries: [changedCandidate] })
+    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
+
+    expect(releaseInputs[2]?.operation_id).not.toBe(releaseInputs[0]?.operation_id)
+    expect(releaseInputs[2]?.expected_candidate_version).toBe(changedCandidate.candidate_version)
   })
 
   it("starts from the policy revision observed by the saved-root preview", async () => {
