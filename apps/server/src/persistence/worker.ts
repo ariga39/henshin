@@ -313,17 +313,14 @@ const selectStaged = db.prepare(
   "SELECT candidate_id, candidate_version, task_id, analysis_status FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
 selectStaged.setReadBigInts(true)
-const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ?")
-const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ?")
 const selectAcceptedThumbnailEntry = db.prepare(
   "SELECT entry_id, root_id, relative_path, kind, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
 )
 selectAcceptedThumbnailEntry.setReadBigInts(true)
+const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted'")
+const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ? AND state = 'accepted'")
 const insertEntry = db.prepare(
   "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, ?, ?, ?)"
-)
-const updateEntry = db.prepare(
-  "UPDATE library_entries SET source_path = ?, kind = ?, title = ?, page_count = ?, manifest_json = ?, updated_at_ms = ? WHERE entry_id = ?"
 )
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
 const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
@@ -899,30 +896,29 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
   const observed = new Set(request.observedCandidatePaths)
   db.exec("BEGIN IMMEDIATE")
   try {
-    const root = db.prepare(
-      "SELECT library_id, selected_path, mapping_revision, policy_revision FROM server_roots WHERE root_id = ?"
-    ).get(request.rootId) as {
-      library_id: string
-      selected_path: string
-      mapping_revision: bigint
-      policy_revision: bigint
-    } | undefined
+    const root = rootById(request.rootId)
     if (root === undefined) {
       db.exec("ROLLBACK")
       return { kind: "root_not_found" }
     }
-    if (root.mapping_revision.toString() !== request.mappingRevision) {
+    if (root.mappingRevision !== request.mappingRevision) {
       db.exec("ROLLBACK")
       return { kind: "mapping_revision_conflict" }
     }
-    if (root.policy_revision.toString() !== request.expectedPolicyRevision) {
+    if (root.policyRevision !== request.expectedPolicyRevision) {
       db.exec("ROLLBACK")
       return { kind: "policy_revision_conflict" }
     }
 
+    const isExcluded = (relativePath: string): boolean => root.exclusions.some(
+      (exclusion) => exclusion.scope === "exact"
+        ? exclusion.path === relativePath
+        : relativePath === exclusion.path || relativePath.startsWith(`${exclusion.path}/`)
+    )
     const existingPaths = (selectEntriesForRoot.all(request.rootId) as unknown as ReadonlyArray<{ relative_path: string }>)
       .map((row) => row.relative_path)
-    const allocationAllowed = existingPaths.every((relativePath) => observed.has(relativePath))
+    const missingPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && !isExcluded(relativePath))
+    const excludedPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && isExcluded(relativePath))
     const staged = db.prepare(
       "SELECT candidate_id, relative_path, kind, manifest_json FROM staged_discoveries WHERE task_id = ? AND root_id = ? AND hold_state = 'eligible' AND analysis_status = 'ready' ORDER BY relative_path ASC"
     ).all(request.taskId, request.rootId) as unknown as ReadonlyArray<{
@@ -931,13 +927,21 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       kind: "archive" | "image-directory"
       manifest_json: string | null
     }>
-    let changed = false
+    const sourcePathFor = (relativePath: string): string => join(root.selectedPath, ...relativePath.split("/"))
+    const changedPaths: Array<string> = []
+    const existingForCandidate = new Map<string, {
+      entry_id: string
+      manifest_json: string
+      kind: "archive" | "image-directory"
+      title: string
+      source_path: string
+    }>()
     for (const candidate of staged) {
       if (!observed.has(candidate.relative_path) || candidate.manifest_json === null) continue
       const manifest = JSON.parse(candidate.manifest_json) as { pages?: ReadonlyArray<unknown> }
       const pageCount = Array.isArray(manifest.pages) ? manifest.pages.length : 0
       if (pageCount === 0) continue
-      const sourcePath = join(root.selected_path, ...candidate.relative_path.split("/"))
+      const sourcePath = sourcePathFor(candidate.relative_path)
       const title = titleForCandidate(candidate.relative_path, candidate.kind)
       const existing = selectEntry.get(request.rootId, candidate.relative_path) as {
         entry_id: string
@@ -947,25 +951,44 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
         source_path: string
       } | undefined
       if (existing !== undefined) {
+        existingForCandidate.set(candidate.relative_path, existing)
         if (
           existing.manifest_json !== candidate.manifest_json ||
           existing.kind !== candidate.kind ||
           existing.title !== title ||
           existing.source_path !== sourcePath
         ) {
-          updateEntry.run(sourcePath, candidate.kind, title, pageCount, candidate.manifest_json, Date.now(), existing.entry_id)
-          changed = true
+          changedPaths.push(candidate.relative_path)
         }
-        deleteStaged.run(candidate.candidate_id)
+      }
+    }
+    let changed = false
+    for (const candidate of staged) {
+      if (!observed.has(candidate.relative_path) || candidate.manifest_json === null) continue
+      const manifest = JSON.parse(candidate.manifest_json) as { pages?: ReadonlyArray<unknown> }
+      const pageCount = Array.isArray(manifest.pages) ? manifest.pages.length : 0
+      if (pageCount === 0) continue
+      const existing = existingForCandidate.get(candidate.relative_path)
+      if (existing !== undefined) {
+        const title = titleForCandidate(candidate.relative_path, candidate.kind)
+        if (
+          existing.manifest_json === candidate.manifest_json &&
+          existing.kind === candidate.kind &&
+          existing.title === title &&
+          existing.source_path === sourcePathFor(candidate.relative_path)
+        ) {
+          deleteStaged.run(candidate.candidate_id)
+        }
         continue
       }
-      if (!allocationAllowed) continue
+      if (missingPaths.length > 0 || changedPaths.length > 0) continue
+      const title = titleForCandidate(candidate.relative_path, candidate.kind)
       insertEntry.run(
         randomUUID(),
-        root.library_id,
+        root.libraryId,
         request.rootId,
         candidate.relative_path,
-        sourcePath,
+        sourcePathFor(candidate.relative_path),
         candidate.kind,
         title,
         BigInt(pageCount),
@@ -977,6 +1000,10 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       changed = true
     }
     if (changed) bumpLibraryRevision.run()
+    if (missingPaths.length > 0 || changedPaths.length > 0) {
+      db.exec("COMMIT")
+      return { kind: "allocation_deferred", missingPaths, changedPaths, excludedPaths }
+    }
     db.exec("COMMIT")
     return { kind: "published" }
   } catch (error) {
