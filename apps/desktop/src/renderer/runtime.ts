@@ -1,9 +1,9 @@
 import { Layer, ManagedRuntime } from "effect"
-import { PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
+import { PrototypeClient, ReaderProfileClient, RootPreviewClient, ScanReviewClient } from "./client"
 
 /**
  * One renderer runtime, created once outside component render.
  */
 export const runtime = ManagedRuntime.make(
-  Layer.mergeAll(PrototypeClient.layer, RootPreviewClient.layer, ScanReviewClient.layer)
+  Layer.mergeAll(PrototypeClient.layer, ReaderProfileClient.layer, RootPreviewClient.layer, ScanReviewClient.layer)
 )

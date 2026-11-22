@@ -17,7 +17,10 @@ import type {
   StagedDiscovery,
   ServerRoot,
   ServerRootList,
-  SavedDraftAbsent
+  SavedDraftAbsent,
+  ReaderExecutableSelectionIpcResult,
+  ReaderProfile,
+  ReaderProfileSaveIpcRequest
 } from "@henshin/contracts"
 
 export type Result<A> =
@@ -72,7 +75,14 @@ declare global {
     readonly henshinPrototype: PrototypeBridge
     readonly henshinRootPreview: RootPreviewBridge
   readonly henshinScanReview: ScanReviewBridge
+    readonly henshinReaderProfiles: ReaderProfileBridge
   }
+}
+
+export interface ReaderProfileBridge {
+  list(): Promise<Result<ReadonlyArray<ReaderProfile>>>
+  selectExecutable(): Promise<Result<ReaderExecutableSelectionIpcResult>>
+  save(input: ReaderProfileSaveIpcRequest): Promise<Result<ReaderProfile>>
 }
 
 export interface RootPreviewBridge {
@@ -177,6 +187,24 @@ export class ScanReviewClient extends Context.Service<
     ScanReviewClient.of({
       listTasks: () => callIpc(() => window.henshinScanReview.listTasks()),
       candidates: () => callIpc(() => window.henshinScanReview.candidates())
+    })
+  )
+}
+
+export class ReaderProfileClient extends Context.Service<
+  ReaderProfileClient,
+  {
+    readonly list: () => Effect.Effect<Result<ReadonlyArray<ReaderProfile>>>
+    readonly selectExecutable: () => Effect.Effect<Result<ReaderExecutableSelectionIpcResult>>
+    readonly save: (input: ReaderProfileSaveIpcRequest) => Effect.Effect<Result<ReaderProfile>>
+  }
+>()("henshin/desktop/renderer/ReaderProfileClient") {
+  static readonly layer = Layer.succeed(
+    ReaderProfileClient,
+    ReaderProfileClient.of({
+      list: () => callIpc(() => window.henshinReaderProfiles.list()),
+      selectExecutable: () => callIpc(() => window.henshinReaderProfiles.selectExecutable()),
+      save: (input) => callIpc(() => window.henshinReaderProfiles.save(input))
     })
   )
 }

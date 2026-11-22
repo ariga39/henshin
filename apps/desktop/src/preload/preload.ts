@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type {
+  ReaderProfileSaveIpcRequest,
   RootCommandIpcRequest,
   RootPreviewRequest,
   RootRegistrationRequest
@@ -17,6 +18,12 @@ contextBridge.exposeInMainWorld("henshinRootPreview", {
 contextBridge.exposeInMainWorld("henshinScanReview", {
   listTasks: () => ipcRenderer.invoke(IpcChannels.taskList, {}),
   candidates: () => ipcRenderer.invoke(IpcChannels.reviewCandidates, {})
+})
+
+contextBridge.exposeInMainWorld("henshinReaderProfiles", {
+  list: () => ipcRenderer.invoke(IpcChannels.readerProfileList, {}),
+  selectExecutable: () => ipcRenderer.invoke(IpcChannels.readerSelectExecutable, {}),
+  save: (input: ReaderProfileSaveIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileSave, input)
 })
 
 if (new URLSearchParams(window.location.search).get("mode") === "prototype") {
