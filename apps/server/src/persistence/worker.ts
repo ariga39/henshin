@@ -1093,7 +1093,9 @@ const indexedRootSamples = (
         relative_path: row.relative_path,
         kind: row.kind,
         format_evidence: formats,
-        size_bytes: manifest.value.after.bytes
+        size_bytes: row.kind === "archive"
+          ? manifest.value.after.bytes
+          : manifest.value.pages.reduce((total, page) => total + page.declared_bytes, 0)
       }
     }),
     sample_truncated: rows.length > 32,
