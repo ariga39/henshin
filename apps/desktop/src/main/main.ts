@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from "electron"
-import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
+import { Duration, Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import {
@@ -14,6 +14,8 @@ import {
   IpcChannels,
   LibraryHttpClient,
   LibrarySearchIpcRequest,
+  ThumbnailGetIpcRequest,
+  ThumbnailHttpClient,
   LoadDraftIpcRequest,
   ListCommandAttemptsIpcRequest,
   PrototypeHttpClient,
@@ -54,6 +56,7 @@ import {
 } from "./ConnectionLifecycle"
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
+const THUMBNAIL_NETWORK_DEADLINE = Duration.seconds(12)
 
 interface Session {
   readonly instanceId: string
@@ -180,6 +183,14 @@ const toResult = <A, R>(effect: Effect.Effect<{ readonly data: A }, unknown, R>)
     })
   )
 
+const toRawResult = <A, R>(effect: Effect.Effect<A, unknown, R>): Effect.Effect<IpcOk<A> | IpcErr, never, R> =>
+  effect.pipe(
+    Effect.match({
+      onFailure: (error) => ({ ok: false as const, error: toPublicError(error) }),
+      onSuccess: (data) => ({ ok: true as const, data })
+    })
+  )
+
 const assertTrustedSender = (event: IpcMainInvokeEvent): void => {
   if (mainWindow === null || event.sender !== mainWindow.webContents) {
     throw new Error("rejected IPC from an untrusted web contents")
@@ -221,11 +232,12 @@ const runNetworkResult = <A>(
   effect: Effect.Effect<
     IpcOk<A> | IpcErr,
     never,
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient
-  >
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | ThumbnailHttpClient
+  >,
+  timeout?: Duration.Duration
 ): Promise<IpcOk<A> | IpcErr> =>
   requireConnection()
-    .run(effect)
+    .run(effect, timeout)
     .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
 
 const connectionStatusResult = (status: ConnectionStatusView): IpcOk<ConnectionStatusView> => ({
@@ -330,6 +342,21 @@ const registerIpc = (): void => {
           return yield* client.search({ payload: decoded.value })
         })
       )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.thumbnailGet, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ThumbnailGetIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return runNetworkResult(
+      toRawResult(
+        Effect.gen(function*() {
+          const client = yield* ThumbnailHttpClient
+          return yield* client.get({ params: { key: decoded.value.key } })
+        })
+      ),
+      THUMBNAIL_NETWORK_DEADLINE
     )
   })
 

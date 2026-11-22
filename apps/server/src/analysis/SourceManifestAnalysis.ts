@@ -895,13 +895,23 @@ const analyze = async (input: AnalyzeSourceManifestInput): Promise<SourceManifes
   return analyzeArchive(input.sourcePath, stats, context)
 }
 
-/** Reads one already-accepted archive member without extracting the archive. */
-export const readArchivePage = async (
+/** Reads selected already-accepted archive members without extracting the archive. */
+export interface ArchivePageReadResult {
+  readonly pages: ReadonlyMap<string, Uint8Array>
+  readonly after: SourceObservation
+}
+
+export const readArchivePages = async (
   sourcePath: string,
-  pageName: string,
-  limits?: Partial<ManifestLimits>
-): Promise<Uint8Array> => {
-  const combined = combineLimits(limits)
+  pageNames: ReadonlyArray<string>,
+  options?: {
+    readonly limits?: Partial<ManifestLimits>
+    readonly maxPageBytes?: number
+  }
+): Promise<ArchivePageReadResult> => {
+  const combined = combineLimits(options?.limits)
+  const maxPageBytes = options?.maxPageBytes ?? combined.maxMemberUncompressedBytes
+  if (!Number.isSafeInteger(maxPageBytes) || maxPageBytes <= 0) throw new LimitExceeded()
   const context: AnalysisContext = {
     limits: combined,
     deadlineAt: Date.now() + combined.deadlineMs
@@ -917,13 +927,31 @@ export const readArchivePage = async (
     const openedStats = await file.stat({ bigint: false })
     if (!openedStats.isFile() || !sameStats(sourceStats, openedStats)) throw new SourceChanged()
     reader = new ZipReader(new SourceFileReader(file, sourceBytes, context), archiveOptions)
-    let result: Uint8Array | undefined
+    const requested = new Set(pageNames)
+    const pages = new Map<string, Uint8Array>()
+    const names = new Set<string>()
+    let entryCount = 0
+    let metadataBytes = 0
+    let declaredBytes = 0
     for await (const entry of reader.getEntriesGenerator()) {
       checkBudget(context)
-      if (entry.filename !== pageName) continue
-      if (entry.directory || entry.symlink || entry.encrypted) throw new SourceChanged()
-      const declaredBytes = safeStatNumber(entry.uncompressedSize, combined.maxMemberUncompressedBytes)
-      const bytes = new Uint8Array(declaredBytes)
+      entryCount += 1
+      if (entryCount > combined.maxEntryCount) throw new LimitExceeded()
+      if (
+        reader.directoryLength !== undefined &&
+        reader.directoryLength > combined.maxCentralDirectoryBytes
+      ) throw new LimitExceeded()
+      metadataBytes += entry.rawFilename.length + entry.rawExtraField.length + entry.rawComment.length + 64
+      if (metadataBytes > combined.maxNameAndMetadataBytes) throw new LimitExceeded()
+      const declared = safeStatNumber(entry.uncompressedSize, combined.maxMemberUncompressedBytes)
+      declaredBytes += declared
+      if (declaredBytes > combined.maxDeclaredUncompressedBytes) throw new LimitExceeded()
+      if (names.has(entry.filename)) throw new DuplicateName()
+      names.add(entry.filename)
+      if (entry.encrypted) throw new Encrypted()
+      if (!requested.has(entry.filename) || entry.directory || entry.symlink || declared > maxPageBytes) continue
+
+      const bytes = new Uint8Array(declared)
       let offset = 0
       await entry.getData(new WritableStream<Uint8Array>({
         write(chunk) {
@@ -940,16 +968,57 @@ export const readArchivePage = async (
         checkOverlappingEntry: true
       })
       if (offset !== bytes.length) throw new SourceChanged()
-      result = bytes
-      break
+      pages.set(entry.filename, bytes)
     }
     const afterStats = await observePath(sourcePath, context)
     if (!afterStats.isFile() || !sameStats(sourceStats, afterStats)) throw new SourceChanged()
-    if (result === undefined) throw new Error("accepted archive member is missing")
-    return result
+    return {
+      pages,
+      after: {
+        kind: "archive",
+        bytes: sourceBytes,
+        mtimeMs: afterStats.mtimeMs,
+        entryCount,
+        observationToken: JSON.stringify(statToken(afterStats))
+      }
+    }
   } finally {
     if (reader !== undefined) await reader.close().catch(() => undefined)
     if (file !== undefined) await closeQuietly(file)
+  }
+}
+
+/** Rechecks accepted source evidence without decoding page payloads. */
+export const recheckSourceObservation = async (
+  sourcePath: string,
+  sourceKind: "directory" | "archive",
+  expectedEntryCount: number,
+  limits?: Partial<ManifestLimits>
+): Promise<SourceObservation> => {
+  const combined = combineLimits(limits)
+  const context: AnalysisContext = {
+    limits: combined,
+    deadlineAt: Date.now() + combined.deadlineMs
+  }
+  const stats = await observePath(sourcePath, context)
+  if (sourceKind === "archive") {
+    if (!stats.isFile()) throw new SourceChanged()
+    return {
+      kind: "archive",
+      bytes: safeStatNumber(stats.size, combined.maxArchiveBytes),
+      mtimeMs: stats.mtimeMs,
+      entryCount: expectedEntryCount,
+      observationToken: JSON.stringify(statToken(stats))
+    }
+  }
+  if (!stats.isDirectory()) throw new SourceChanged()
+  const observed = await readDirectObservation(sourcePath, context, false)
+  return {
+    kind: "directory",
+    bytes: 0,
+    mtimeMs: observed.root.mtimeMs,
+    entryCount: observed.entries.size,
+    observationToken: directObservationToken(observed.root, observed.entries)
   }
 }
 
