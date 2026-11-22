@@ -313,13 +313,10 @@ const selectStaged = db.prepare(
   "SELECT candidate_id, candidate_version, task_id, analysis_status FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
 selectStaged.setReadBigInts(true)
-const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ?")
-const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ?")
+const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted'")
+const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ? AND state = 'accepted'")
 const insertEntry = db.prepare(
   "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, ?, ?, ?)"
-)
-const updateEntry = db.prepare(
-  "UPDATE library_entries SET source_path = ?, kind = ?, title = ?, page_count = ?, manifest_json = ?, updated_at_ms = ? WHERE entry_id = ?"
 )
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
 const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
@@ -333,11 +330,21 @@ const updateScanRunning = db.prepare("UPDATE scan_tasks SET status = 'running', 
 const updateScanTask = db.prepare(
   "UPDATE scan_tasks SET status = ?, directories_visited = ?, candidates_discovered = ?, candidates_analyzed = ?, analysis_error_count = ?, review_needed_count = ?, coverage_json = ?, readiness_error_code = ?, readiness_error_message = ?, error_code = ?, error_message = ?, updated_at_ms = ? WHERE task_id = ? AND status IN ('running', 'queued')"
 )
+const selectScanFence = db.prepare(`
+  SELECT t.mapping_revision AS captured_mapping_revision,
+    json_extract(t.command_payload, '$.expected_policy_revision') AS captured_policy_revision,
+    r.mapping_revision AS current_mapping_revision,
+    r.policy_revision AS current_policy_revision
+  FROM scan_tasks t
+  JOIN server_roots r ON r.root_id = t.root_id
+  WHERE t.task_id = ? AND t.root_id = ? AND t.status = 'running'
+`)
+selectScanFence.setReadBigInts(true)
 const upsertStagedDiscovery = db.prepare(
   "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = CASE WHEN staged_discoveries.hold_state = 'held' THEN 'held' ELSE excluded.hold_state END, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
 )
 const recoverScanTasks = db.prepare(
-  "UPDATE scan_tasks SET status = 'interrupted', error_code = 'server_restart', error_message = 'scan interrupted by server restart', updated_at_ms = ? WHERE status IN ('queued', 'running')"
+  "UPDATE scan_tasks SET status = CASE WHEN status = 'queued' THEN 'failed' ELSE 'interrupted' END, error_code = 'server_restart', error_message = CASE WHEN status = 'queued' THEN 'scan did not start before server restart' ELSE 'scan interrupted by server restart' END, updated_at_ms = ? WHERE status IN ('queued', 'running')"
 )
 const selectRootPolicyOperation = db.prepare(
   "SELECT payload, result, created_at_ms FROM root_policy_operations WHERE epoch = ? AND operation_id = ?"
@@ -805,9 +812,27 @@ const requireScanTransition = (result: { changes: number | bigint }): void => {
   if (Number(result.changes) !== 1) throw new Error("scan task is no longer active for this operation")
 }
 
+const requireCurrentScanFence = (taskId: string, rootId: string): void => {
+  const row = selectScanFence.get(taskId, rootId) as {
+    captured_mapping_revision: bigint
+    captured_policy_revision: string | null
+    current_mapping_revision: bigint
+    current_policy_revision: bigint
+  } | undefined
+  if (
+    row === undefined ||
+    row.captured_policy_revision === null ||
+    row.captured_mapping_revision !== row.current_mapping_revision ||
+    row.captured_policy_revision !== row.current_policy_revision.toString()
+  ) {
+    throw new Error("scan task no longer matches the current root mapping or policy")
+  }
+}
+
 const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }>): void => {
   db.exec("BEGIN IMMEDIATE")
   try {
+    requireCurrentScanFence(request.taskId, request.rootId)
     const existing = selectStaged.get(request.rootId, request.relativePath) as
       | { candidate_id: string; candidate_version: bigint; task_id: string; analysis_status: string }
       | undefined
@@ -875,30 +900,29 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
   const observed = new Set(request.observedCandidatePaths)
   db.exec("BEGIN IMMEDIATE")
   try {
-    const root = db.prepare(
-      "SELECT library_id, selected_path, mapping_revision, policy_revision FROM server_roots WHERE root_id = ?"
-    ).get(request.rootId) as {
-      library_id: string
-      selected_path: string
-      mapping_revision: bigint
-      policy_revision: bigint
-    } | undefined
+    const root = rootById(request.rootId)
     if (root === undefined) {
       db.exec("ROLLBACK")
       return { kind: "root_not_found" }
     }
-    if (root.mapping_revision.toString() !== request.mappingRevision) {
+    if (root.mappingRevision !== request.mappingRevision) {
       db.exec("ROLLBACK")
       return { kind: "mapping_revision_conflict" }
     }
-    if (root.policy_revision.toString() !== request.expectedPolicyRevision) {
+    if (root.policyRevision !== request.expectedPolicyRevision) {
       db.exec("ROLLBACK")
       return { kind: "policy_revision_conflict" }
     }
 
+    const isExcluded = (relativePath: string): boolean => root.exclusions.some(
+      (exclusion) => exclusion.scope === "exact"
+        ? exclusion.path === relativePath
+        : relativePath === exclusion.path || relativePath.startsWith(`${exclusion.path}/`)
+    )
     const existingPaths = (selectEntriesForRoot.all(request.rootId) as unknown as ReadonlyArray<{ relative_path: string }>)
       .map((row) => row.relative_path)
-    const allocationAllowed = existingPaths.every((relativePath) => observed.has(relativePath))
+    const missingPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && !isExcluded(relativePath))
+    const excludedPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && isExcluded(relativePath))
     const staged = db.prepare(
       "SELECT candidate_id, relative_path, kind, manifest_json FROM staged_discoveries WHERE task_id = ? AND root_id = ? AND hold_state = 'eligible' AND analysis_status = 'ready' ORDER BY relative_path ASC"
     ).all(request.taskId, request.rootId) as unknown as ReadonlyArray<{
@@ -907,13 +931,21 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       kind: "archive" | "image-directory"
       manifest_json: string | null
     }>
-    let changed = false
+    const sourcePathFor = (relativePath: string): string => join(root.selectedPath, ...relativePath.split("/"))
+    const changedPaths: Array<string> = []
+    const existingForCandidate = new Map<string, {
+      entry_id: string
+      manifest_json: string
+      kind: "archive" | "image-directory"
+      title: string
+      source_path: string
+    }>()
     for (const candidate of staged) {
       if (!observed.has(candidate.relative_path) || candidate.manifest_json === null) continue
       const manifest = JSON.parse(candidate.manifest_json) as { pages?: ReadonlyArray<unknown> }
       const pageCount = Array.isArray(manifest.pages) ? manifest.pages.length : 0
       if (pageCount === 0) continue
-      const sourcePath = join(root.selected_path, ...candidate.relative_path.split("/"))
+      const sourcePath = sourcePathFor(candidate.relative_path)
       const title = titleForCandidate(candidate.relative_path, candidate.kind)
       const existing = selectEntry.get(request.rootId, candidate.relative_path) as {
         entry_id: string
@@ -923,25 +955,44 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
         source_path: string
       } | undefined
       if (existing !== undefined) {
+        existingForCandidate.set(candidate.relative_path, existing)
         if (
           existing.manifest_json !== candidate.manifest_json ||
           existing.kind !== candidate.kind ||
           existing.title !== title ||
           existing.source_path !== sourcePath
         ) {
-          updateEntry.run(sourcePath, candidate.kind, title, pageCount, candidate.manifest_json, Date.now(), existing.entry_id)
-          changed = true
+          changedPaths.push(candidate.relative_path)
         }
-        deleteStaged.run(candidate.candidate_id)
+      }
+    }
+    let changed = false
+    for (const candidate of staged) {
+      if (!observed.has(candidate.relative_path) || candidate.manifest_json === null) continue
+      const manifest = JSON.parse(candidate.manifest_json) as { pages?: ReadonlyArray<unknown> }
+      const pageCount = Array.isArray(manifest.pages) ? manifest.pages.length : 0
+      if (pageCount === 0) continue
+      const existing = existingForCandidate.get(candidate.relative_path)
+      if (existing !== undefined) {
+        const title = titleForCandidate(candidate.relative_path, candidate.kind)
+        if (
+          existing.manifest_json === candidate.manifest_json &&
+          existing.kind === candidate.kind &&
+          existing.title === title &&
+          existing.source_path === sourcePathFor(candidate.relative_path)
+        ) {
+          deleteStaged.run(candidate.candidate_id)
+        }
         continue
       }
-      if (!allocationAllowed) continue
+      if (missingPaths.length > 0 || changedPaths.length > 0) continue
+      const title = titleForCandidate(candidate.relative_path, candidate.kind)
       insertEntry.run(
         randomUUID(),
-        root.library_id,
+        root.libraryId,
         request.rootId,
         candidate.relative_path,
-        sourcePath,
+        sourcePathFor(candidate.relative_path),
         candidate.kind,
         title,
         BigInt(pageCount),
@@ -953,6 +1004,10 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       changed = true
     }
     if (changed) bumpLibraryRevision.run()
+    if (missingPaths.length > 0 || changedPaths.length > 0) {
+      db.exec("COMMIT")
+      return { kind: "allocation_deferred", missingPaths, changedPaths, excludedPaths }
+    }
     db.exec("COMMIT")
     return { kind: "published" }
   } catch (error) {
@@ -992,21 +1047,35 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
 }
 
 const finishScan = (request: Extract<WorkerRequest, { op: "finishScan" }>): void => {
-  requireScanTransition(updateScanTask.run(
-    request.status,
-    BigInt(request.directoriesVisited),
-    BigInt(request.candidatesDiscovered),
-    BigInt(request.candidatesAnalyzed),
-    BigInt(request.analysisErrorCount),
-    BigInt(request.reviewNeededCount),
-    request.coverageJson,
-    request.readinessErrorCode,
-    request.readinessErrorMessage,
-    request.errorCode,
-    request.errorMessage,
-    Date.now(),
-    request.taskId
-  ))
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    if (request.status === "succeeded" || request.status === "completed_with_errors") {
+      const task = db.prepare("SELECT root_id FROM scan_tasks WHERE task_id = ?").get(request.taskId) as
+        | { root_id: string }
+        | undefined
+      if (task === undefined) throw new Error("scan task is missing")
+      requireCurrentScanFence(request.taskId, task.root_id)
+    }
+    requireScanTransition(updateScanTask.run(
+      request.status,
+      BigInt(request.directoriesVisited),
+      BigInt(request.candidatesDiscovered),
+      BigInt(request.candidatesAnalyzed),
+      BigInt(request.analysisErrorCount),
+      BigInt(request.reviewNeededCount),
+      request.coverageJson,
+      request.readinessErrorCode,
+      request.readinessErrorMessage,
+      request.errorCode,
+      request.errorMessage,
+      Date.now(),
+      request.taskId
+    ))
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
 }
 
 const operationResult = (
