@@ -33,11 +33,15 @@ interface ResolvedEntry {
   readonly identity: string
 }
 
+type NativeLookup = (
+  parentPath: string,
+  requestedName: string
+) => Promise<Awaited<ReturnType<typeof lstat>>>
+
 type EntryResult =
   | ResolvedEntry
   | { readonly kind: "missing" }
   | { readonly kind: "unsafe" }
-  | { readonly kind: "name-equivalence" }
   | { readonly kind: "error"; readonly error: LocalError }
 
 interface InspectedSample {
@@ -51,6 +55,9 @@ const isWithin = (root: string, candidate: string): boolean => {
 }
 
 const formatFor = (name: string): string => extname(name).slice(1).toLowerCase()
+
+const identityOf = (stats: Awaited<ReturnType<typeof lstat>>): string =>
+  `${stats.dev.toString()}:${stats.ino.toString()}`
 
 const systemCode = (error: unknown): string | undefined =>
   typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
@@ -110,45 +117,33 @@ const errorSample = (sample: IndexedRootSample, error: LocalError): InspectedSam
   physicalIdentity: undefined
 })
 
-const collision = (
-  sample: IndexedRootSample,
-  collisionKind: NonNullable<LocalMappingSample["collision_kind"]>
-): InspectedSample => ({
-  sample: {
-    ...base(sample),
-    status: "collision",
-    collision_kind: collisionKind,
-    local_evidence_status: "unavailable",
-    local_error: null
-  },
-  physicalIdentity: undefined
-})
-
 const findExactEntry = async (
   parentPath: string,
   requestedName: string,
-  budget: Budget
+  budget: Budget,
+  nativeLookup: NativeLookup
 ): Promise<EntryResult> => {
   if (!checkBudget(budget)) return { kind: "error", error: "budget-exceeded" }
   let observed = 0
   let observedNameBytes = 0
-  let hasEquivalentName = false
   let exactEntry: Dirent | undefined
+  const observedEntries: Array<Dirent> = []
+  let directoryLimit = false
   try {
     const directory = await opendir(parentPath)
     for await (const entry of directory) {
       if (!checkBudget(budget)) return { kind: "error", error: "budget-exceeded" }
+      if (entry.name === requestedName) {
+        exactEntry = entry
+        break
+      }
       observed += 1
       observedNameBytes += Buffer.byteLength(entry.name)
       if (observed > MAX_DIRECTORY_ENTRIES || observedNameBytes > MAX_DIRECTORY_NAME_BYTES) {
-        return { kind: "error", error: "directory-limit" }
+        directoryLimit = true
+        break
       }
-      if (entry.name === requestedName) {
-        exactEntry = entry
-      } else if (
-        entry.name.toLowerCase() === requestedName.toLowerCase() ||
-        entry.name.normalize("NFC") === requestedName.normalize("NFC")
-      ) hasEquivalentName = true
+      observedEntries.push(entry)
     }
   } catch (error) {
     if (systemCode(error) === "ENOENT") return { kind: "missing" }
@@ -163,18 +158,38 @@ const findExactEntry = async (
         kind: "found",
         path: entryPath,
         stats,
-        identity: `${stats.dev.toString()}:${stats.ino.toString()}`
+        identity: identityOf(stats)
       }
     } catch (error) {
       return { kind: "error", error: errorFromSystem(error) }
     }
   }
-  if (hasEquivalentName) return { kind: "name-equivalence" }
   try {
-    await lstat(join(parentPath, requestedName))
-    return { kind: "name-equivalence" }
+    const nativePath = join(parentPath, requestedName)
+    const stats = await nativeLookup(parentPath, requestedName)
+    if (stats.isSymbolicLink()) return { kind: "unsafe" }
+    const identity = identityOf(stats)
+    let matchingObservedEntry: Dirent | undefined
+    for (const entry of observedEntries) {
+      if (!checkBudget(budget)) return { kind: "error", error: "budget-exceeded" }
+      try {
+        const observedStats = await lstat(join(parentPath, entry.name))
+        if (identityOf(observedStats) === identity) {
+          matchingObservedEntry = entry
+          break
+        }
+      } catch {
+        // The native lookup remains the authority if an observed sibling has vanished.
+      }
+    }
+    return {
+      kind: "found",
+      path: matchingObservedEntry === undefined ? nativePath : join(parentPath, matchingObservedEntry.name),
+      stats,
+      identity
+    }
   } catch (error) {
-    if (systemCode(error) === "ENOENT") return { kind: "missing" }
+    if (systemCode(error) === "ENOENT") return directoryLimit ? { kind: "error", error: "directory-limit" } : { kind: "missing" }
     return { kind: "error", error: errorFromSystem(error) }
   }
 }
@@ -228,20 +243,19 @@ const inspectDirectory = async (
 const inspectSample = async (
   canonicalRoot: string,
   sample: IndexedRootSample,
-  budget: Budget
+  budget: Budget,
+  nativeLookup: NativeLookup
 ): Promise<InspectedSample> => {
   if (!checkBudget(budget)) return errorSample(sample, "budget-exceeded")
   let currentPath = canonicalRoot
   const segments = sample.relative_path.split("/")
   for (const [index, segment] of segments.entries()) {
-    const entry = await findExactEntry(currentPath, segment, budget)
+    const entry = await findExactEntry(currentPath, segment, budget, nativeLookup)
     switch (entry.kind) {
       case "missing":
         return missing(sample)
       case "unsafe":
         return unsafe(sample)
-      case "name-equivalence":
-        return collision(sample, "name-equivalence")
       case "error":
         return entry.error === "unsupported" ? unsupported(sample) : errorSample(sample, entry.error)
       case "found":
@@ -267,7 +281,7 @@ const inspectSample = async (
     return systemCode(error) === "ENOENT" ? missing(sample) : errorSample(sample, errorFromSystem(error))
   }
   if (stats.isSymbolicLink()) return unsafe(sample)
-  const physicalIdentity = `${stats.dev.toString()}:${stats.ino.toString()}`
+  const physicalIdentity = identityOf(stats)
   if (sample.kind === "archive" && stats.isFile() && [".zip", ".cbz"].includes(extname(currentPath).toLowerCase())) {
     return {
       sample: {
@@ -300,14 +314,12 @@ const inspectSample = async (
   return unsupported(sample)
 }
 
-const deviceEquivalentPath = (relativePath: string): string =>
-  relativePath.split("/").map((segment) => segment.normalize("NFC").toLowerCase()).join("/")
-
 export const inspectLocalMapping = async (
   rootId: string,
   selectedPath: string,
   samples: ReadonlyArray<IndexedRootSample>,
-  sampleTruncated: boolean
+  sampleTruncated: boolean,
+  nativeLookup: NativeLookup = async (parentPath, requestedName) => lstat(join(parentPath, requestedName))
 ): Promise<LocalMappingPreview> => {
   for (const sample of samples) {
     if (Option.isNone(Schema.decodeUnknownOption(RootRelativePath)(sample.relative_path))) {
@@ -325,7 +337,7 @@ export const inspectLocalMapping = async (
   for (const sample of samples) {
     let result: InspectedSample
     try {
-      result = await inspectSample(canonicalRoot, sample, budget)
+      result = await inspectSample(canonicalRoot, sample, budget, nativeLookup)
     } catch (error) {
       result = errorSample(sample, errorFromSystem(error))
     }
@@ -349,25 +361,6 @@ export const inspectLocalMapping = async (
       inspected[index] = {
         ...result,
         sample: { ...result.sample, status: "collision", collision_kind: "physical-identity" }
-      }
-    }
-  }
-
-  const claimGroups = new Map<string, Array<number>>()
-  for (const [index, result] of inspected.entries()) {
-    const key = deviceEquivalentPath(result.sample.relative_path)
-    const group = claimGroups.get(key) ?? []
-    group.push(index)
-    claimGroups.set(key, group)
-  }
-  for (const indexes of claimGroups.values()) {
-    if (indexes.length < 2 || !indexes.some((index) => inspected[index]?.sample.collision_kind === "name-equivalence")) continue
-    for (const index of indexes) {
-      const result = inspected[index]
-      if (result === undefined || result.sample.collision_kind === "physical-identity") continue
-      inspected[index] = {
-        ...result,
-        sample: { ...result.sample, status: "collision", collision_kind: "name-equivalence" }
       }
     }
   }

@@ -1,4 +1,4 @@
-import { link, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises"
+import { link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { describe, expect, it, vi } from "vitest"
@@ -20,6 +20,12 @@ const imageSample = (relativePath: string): IndexedRootSample => ({
   format_evidence: ["jpg"],
   size_bytes: 1
 })
+
+const missingNativePath = async (): Promise<never> => {
+  const error = new Error("missing native path") as NodeJS.ErrnoException
+  error.code = "ENOENT"
+  throw error
+}
 
 describe("local mapping preview boundary", () => {
   it("rejects traversal before touching a relative target", async () => {
@@ -46,19 +52,23 @@ describe("local mapping preview boundary", () => {
     }
   })
 
-  it("reports name-equivalent and physical-identity collisions", async () => {
+  it("keeps exact and missing claims distinct on a case-sensitive volume", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-collision-"))
     try {
-      await writeFile(path.join(root, "case.cbz"), "case")
+      await writeFile(path.join(root, "A.cbz"), "case")
       await writeFile(path.join(root, "physical.cbz"), "same")
       await link(path.join(root, "physical.cbz"), path.join(root, "physical-alias.cbz"))
+      const caseSensitiveLookup = async (parentPath: string, requestedName: string) =>
+        requestedName === "a.cbz" ? missingNativePath() : lstat(path.join(parentPath, requestedName))
       const result = await inspectLocalMapping(rootId, root, [
-        sample("Case.cbz"),
+        sample("A.cbz"),
+        sample("a.cbz"),
         sample("physical.cbz"),
         sample("physical-alias.cbz")
-      ], false)
+      ], false, caseSensitiveLookup)
       expect(result.samples).toMatchObject([
-        { relative_path: "Case.cbz", status: "collision", collision_kind: "name-equivalence" },
+        { relative_path: "A.cbz", status: "found" },
+        { relative_path: "a.cbz", status: "missing" },
         { relative_path: "physical.cbz", status: "collision", collision_kind: "physical-identity" },
         { relative_path: "physical-alias.cbz", status: "collision", collision_kind: "physical-identity" }
       ])
@@ -79,22 +89,28 @@ describe("local mapping preview boundary", () => {
     }
   })
 
-  it("groups equivalent library claims according to the local directory behavior", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-claims-"))
+  it("accepts a unique native alias and collides two claims sharing its physical file", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-native-alias-"))
     try {
-      await writeFile(path.join(root, "Book.cbz"), "book")
-      await writeFile(path.join(root, "book.cbz"), "case variant")
-      const names = await readdir(root)
-      const result = await inspectLocalMapping(rootId, root, [sample("Book.cbz"), sample("book.cbz")], false)
-      expect(result.samples).toMatchObject(names.includes("Book.cbz") && names.includes("book.cbz")
-        ? [
-            { relative_path: "Book.cbz", status: "found" },
-            { relative_path: "book.cbz", status: "found" }
-          ]
-        : [
-            { relative_path: "Book.cbz", status: "collision", collision_kind: "name-equivalence" },
-            { relative_path: "book.cbz", status: "collision", collision_kind: "name-equivalence" }
-          ])
+      await writeFile(path.join(root, "book.cbz"), "book")
+      const nativeAliasLookup = async (parentPath: string, requestedName: string) =>
+        requestedName === "Book.cbz"
+          ? lstat(path.join(parentPath, "book.cbz"))
+          : lstat(path.join(parentPath, requestedName))
+      const aliasResult = await inspectLocalMapping(rootId, root, [sample("Book.cbz")], false, nativeAliasLookup)
+      expect(aliasResult.samples).toMatchObject([{ relative_path: "Book.cbz", status: "found" }])
+
+      const claimResult = await inspectLocalMapping(
+        rootId,
+        root,
+        [sample("Book.cbz"), sample("book.cbz")],
+        false,
+        nativeAliasLookup
+      )
+      expect(claimResult.samples).toMatchObject([
+        { relative_path: "Book.cbz", status: "collision", collision_kind: "physical-identity" },
+        { relative_path: "book.cbz", status: "collision", collision_kind: "physical-identity" }
+      ])
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -115,6 +131,20 @@ describe("local mapping preview boundary", () => {
         local_error: null,
         local_size_bytes: 404
       }])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("does not let the directory cap hide an exact sample", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-directory-cap-"))
+    try {
+      await writeFile(path.join(root, "0000-target.cbz"), "target")
+      for (let index = 1; index <= 4_096; index += 1) {
+        await writeFile(path.join(root, `${index.toString().padStart(4, "0")}-other.cbz`), "other")
+      }
+      const result = await inspectLocalMapping(rootId, root, [sample("0000-target.cbz")], false)
+      expect(result.samples).toMatchObject([{ relative_path: "0000-target.cbz", status: "found" }])
     } finally {
       await rm(root, { recursive: true, force: true })
     }
