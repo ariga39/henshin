@@ -42,6 +42,7 @@ const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
 const MAX_POLICY_OPERATION_RESULTS = 1024
 const COMPACTION_BATCH = 64
+const MAX_REPORTED_DEFERRED_PATHS = 32
 
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const db = new DatabaseSync(dbPath)
@@ -317,12 +318,13 @@ const selectAcceptedThumbnailEntry = db.prepare(
   "SELECT entry_id, root_id, relative_path, kind, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
 )
 selectAcceptedThumbnailEntry.setReadBigInts(true)
-const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted'")
+const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC")
 const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ? AND state = 'accepted'")
 const insertEntry = db.prepare(
   "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, ?, ?, ?)"
 )
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
+const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
 const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
 const selectLibraryEntries = (cursor: string | null, limit: number) => cursor === null
   ? db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision FROM library_entries ORDER BY entry_id ASC LIMIT ?").all(limit)
@@ -1029,8 +1031,20 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
     }
     if (changed) bumpLibraryRevision.run()
     if (missingPaths.length > 0 || changedPaths.length > 0) {
+      const stagedPaths = (selectStagedPathsForRoot.all(request.rootId) as unknown as ReadonlyArray<{ relative_path: string }>)
+        .map((row) => row.relative_path)
+      const reviewPaths = new Set([...stagedPaths, ...missingPaths, ...changedPaths])
       db.exec("COMMIT")
-      return { kind: "allocation_deferred", missingPaths, changedPaths, excludedPaths }
+      return {
+        kind: "allocation_deferred",
+        missingPaths: missingPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
+        changedPaths: changedPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
+        excludedPaths: excludedPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
+        missingPathCount: missingPaths.length,
+        changedPathCount: changedPaths.length,
+        excludedPathCount: excludedPaths.length,
+        reviewNeededCount: reviewPaths.size
+      }
     }
     db.exec("COMMIT")
     return { kind: "published" }

@@ -1,4 +1,4 @@
-import { Effect, Fiber } from "effect"
+import { Deferred, Effect, Fiber } from "effect"
 import type {
   ConnectionStatusView,
   RootPreviewRequest,
@@ -104,37 +104,105 @@ export const loadScanResults = Effect.gen(function*() {
   return yield* loadScanResultsFor(client)
 })
 
-const watchScanResultsFor = (client: ScanReviewClient["Service"], taskId?: string) => Effect.gen(function*() {
+type ScanWaitResult =
+  | { readonly ok: true; readonly task: ScanTask }
+  | { readonly ok: false; readonly message: string }
+
+type ScanWaiter = {
+  readonly registeredAtPoll: number
+  readonly deferred: Deferred.Deferred<ScanWaitResult>
+}
+
+const scanWaiters = new Map<string, Set<ScanWaiter>>()
+let scanResultsWatcher: Fiber.Fiber<void, never> | null = null
+let scanWatcherStarting: Deferred.Deferred<Fiber.Fiber<void, never>> | null = null
+let scanPollSequence = 0
+
+const completeScanWaiters = (taskId: string, result: ScanWaitResult) => Effect.gen(function*() {
+  const waiters = scanWaiters.get(taskId)
+  if (waiters === undefined) return
+  scanWaiters.delete(taskId)
+  yield* Effect.forEach(waiters, (waiter) => Deferred.succeed(waiter.deferred, result), { discard: true })
+})
+
+const failScanWaiters = (message: string) => Effect.gen(function*() {
+  const waiters = Array.from(scanWaiters.values()).flatMap((entries) => Array.from(entries))
+  scanWaiters.clear()
+  yield* Effect.forEach(waiters, (waiter) => Deferred.succeed(waiter.deferred, { ok: false, message }), { discard: true })
+})
+
+const watchScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
   while (true) {
+    const poll = scanPollSequence + 1
+    scanPollSequence = poll
     const loaded = yield* loadScanResultsFor(client)
-    if (!loaded) return
-    if (taskId === undefined) {
-      if (!viewStore.getState().scan_tasks.some(scanIsActive)) return
-    } else {
-      const task = viewStore.getState().scan_tasks.find((candidate) => candidate.task_id === taskId)
-      if (task === undefined || !scanIsActive(task)) return
+    if (!loaded) {
+      yield* failScanWaiters(viewStore.getState().scan_error ?? "could not load scan results")
+      return
     }
+
+    const tasks = viewStore.getState().scan_tasks
+    for (const [taskId, waiters] of Array.from(scanWaiters.entries())) {
+      if (!Array.from(waiters).some((waiter) => waiter.registeredAtPoll < poll)) continue
+      const task = tasks.find((candidate) => candidate.task_id === taskId)
+      if (task === undefined) {
+        yield* completeScanWaiters(taskId, { ok: false, message: "submitted scan task was not found in scan results" })
+      } else if (!scanIsActive(task)) {
+        yield* completeScanWaiters(taskId, { ok: true, task })
+      }
+    }
+
+    if (!tasks.some(scanIsActive) && scanWaiters.size === 0) return
     yield* Effect.sleep("250 millis")
   }
 })
 
-let scanResultsWatcher: Fiber.Fiber<void, never> | null = null
-
-const watchScanResults = (taskId?: string) => Effect.gen(function*() {
+const ensureScanResultsWatcher = Effect.gen(function*() {
   const existing = scanResultsWatcher
-  if (existing !== null) return yield* Fiber.join(existing)
+  if (existing !== null) return existing
+  const starting = scanWatcherStarting
+  if (starting !== null) return yield* Deferred.await(starting)
 
+  const ready = Deferred.makeUnsafe<Fiber.Fiber<void, never>>()
+  scanWatcherStarting = ready
   const client = yield* ScanReviewClient
-  const watcher = yield* Effect.forkChild(watchScanResultsFor(client, taskId))
+  const watcherRef: { current: Fiber.Fiber<void, never> | null } = { current: null }
+  const watcher = yield* Effect.forkDetach(
+    watchScanResultsFor(client).pipe(
+      Effect.ensuring(Effect.sync(() => {
+        if (scanResultsWatcher === watcherRef.current) scanResultsWatcher = null
+      }))
+    ),
+    { startImmediately: false }
+  )
+  watcherRef.current = watcher
   scanResultsWatcher = watcher
-  yield* Fiber.join(watcher).pipe(
+  scanWatcherStarting = null
+  yield* Deferred.succeed(ready, watcher)
+  return watcher
+})
+
+const waitForScanTask = (taskId: string) => Effect.gen(function*() {
+  const deferred = Deferred.makeUnsafe<ScanWaitResult>()
+  const waiter = { registeredAtPoll: scanPollSequence, deferred }
+  const waiters = scanWaiters.get(taskId) ?? new Set<ScanWaiter>()
+  waiters.add(waiter)
+  scanWaiters.set(taskId, waiters)
+  yield* ensureScanResultsWatcher
+  return yield* Deferred.await(deferred).pipe(
     Effect.ensuring(Effect.sync(() => {
-      if (scanResultsWatcher === watcher) scanResultsWatcher = null
+      const current = scanWaiters.get(taskId)
+      if (current === undefined) return
+      current.delete(waiter)
+      if (current.size === 0) scanWaiters.delete(taskId)
     }))
   )
 })
 
-export const watchHeldScans = watchScanResults()
+export const watchHeldScans = Effect.gen(function*() {
+  const watcher = yield* ensureScanResultsWatcher
+  yield* Fiber.join(watcher)
+})
 
 export const retryScanResults = Effect.gen(function*() {
   const loaded = yield* loadScanResults
@@ -149,13 +217,8 @@ export const loadRootWorkspace = Effect.gen(function*() {
 
 const watchScanTask = (taskId: string) =>
   Effect.gen(function*() {
-    while (true) {
-      yield* watchScanResults(taskId)
-      const state = viewStore.getState()
-      if (state.scan_status === "error") return
-      const task = state.scan_tasks.find((candidate) => candidate.task_id === taskId)
-      if (task === undefined || !scanIsActive(task)) return
-    }
+    const result = yield* waitForScanTask(taskId)
+    if (!result.ok) return
   })
 
 export const refreshRootPolicy = Effect.gen(function*() {
@@ -258,8 +321,18 @@ export const removeRootExclusion = (input: {
 }) => updateRootExclusion(input, "remove-exclusion")
 
 const taskError = (task: ScanTask): string | null => {
-  if (task.status !== "failed") return null
-  return task.readiness_error?.message ?? task.error?.message ?? "normal scan failed"
+  if (task.readiness_error !== null) return task.readiness_error.message
+  if (task.error !== null) return task.error.message
+  switch (task.status) {
+    case "completed_with_errors":
+      return "one or more discoveries could not be analyzed"
+    case "interrupted":
+      return "scan was interrupted before it completed"
+    case "failed":
+      return "normal scan failed"
+    default:
+      return null
+  }
 }
 
 const finishNormalScanFailure = (message: string) =>
@@ -269,7 +342,8 @@ const finishNormalScanFailure = (message: string) =>
       scan_start_status: "error",
       scan_start_error: message,
       library_scan_status: "error",
-      library_scan_error: message
+      library_scan_error: message,
+      library_scan_task: null
     }))
   })
 
@@ -352,10 +426,11 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
     yield* loadLibrary()
     const error = taskError(terminal)
     yield* Effect.sync(() => viewStore.set({
-      scan_start_status: error === null ? "idle" : "error",
-      scan_start_error: error,
-      library_scan_status: error === null ? "started" : "error",
-      library_scan_error: error
+      scan_start_status: terminal.status === "completed_with_errors" ? "idle" : error === null ? "idle" : "error",
+      scan_start_error: terminal.status === "completed_with_errors" ? null : error,
+      library_scan_status: terminal.status === "failed" || terminal.status === "interrupted" ? "error" : "started",
+      library_scan_error: error,
+      library_scan_task: terminal
     }))
   })
 
@@ -388,8 +463,7 @@ export const loadLibrary = (append = false) =>
     const cursor = append ? current.library_cursor : null
     yield* Effect.sync(() => viewStore.set({
       library_status: "loading",
-      library_error: null,
-      ...(append ? {} : { library_entries: [], library_cursor: null, library_has_more: false })
+      library_error: null
     }))
     const result = yield* client.search(cursor === null ? { page_size: 50 } : { page_size: 50, cursor })
     if (!result.ok) {
