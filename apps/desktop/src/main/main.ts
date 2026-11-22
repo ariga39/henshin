@@ -12,6 +12,8 @@ import {
   GetNoteIpcRequest,
   HandshakeIpcRequest,
   IpcChannels,
+  LibraryHttpClient,
+  LibrarySearchIpcRequest,
   LoadDraftIpcRequest,
   ListCommandAttemptsIpcRequest,
   PrototypeHttpClient,
@@ -220,7 +222,7 @@ const runNetworkResult = <A>(
   effect: Effect.Effect<
     IpcOk<A> | IpcErr,
     never,
-    PrototypeHttpClient | ServerHttpClient | TaskHttpClient | ReviewHttpClient
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient
   >
 ): Promise<IpcOk<A> | IpcErr> =>
   requireConnection()
@@ -313,6 +315,20 @@ const registerIpc = (): void => {
           }
           const { root_id, ...payload } = decoded.value
           return yield* client.command({ params: { id: root_id }, payload })
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.librarySearch, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(LibrarySearchIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* LibraryHttpClient
+          return yield* client.search({ payload: decoded.value })
         })
       )
     )

@@ -2,7 +2,7 @@ import type { RootPreviewResult, ScanTask, StagedDiscovery } from "@henshin/cont
 import { useSyncExternalStore } from "react"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { releaseHeldDiscovery, retryScanResults, startHeldScan } from "./workflows"
+import { releaseHeldDiscovery, retryScanResults, startManualScan } from "./workflows"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -39,11 +39,11 @@ export const HeldScanControls = ({ preview }: { readonly preview: RootPreviewRes
   if (!isSavedDiscovery(preview)) return null
 
   const task = latestTaskForRoot(state.scan_tasks, preview.root_id)
-  const disabled = !state.scan_hold_new_discoveries || state.scan_start_status === "loading" || (task !== null && isActive(task))
+  const disabled = state.scan_start_status === "loading" || (task !== null && isActive(task))
   return (
     <section aria-labelledby="held-scan-heading" data-testid="held-scan-controls">
       <h2 id="held-scan-heading">Manual scan</h2>
-      <p data-testid="held-scan-root">Source root: {taskRootLabel(state, preview.root_id)}</p>
+      <p data-testid="held-scan-root">{taskRootLabel(state, preview.root_id)}</p>
       <label>
         <input
           data-testid="scan-hold-new-discoveries"
@@ -53,11 +53,13 @@ export const HeldScanControls = ({ preview }: { readonly preview: RootPreviewRes
         />
         Hold new discoveries for review
       </label>
-      <p>Held mode only: discovered books remain staged and no book is accepted into Library.</p>
+      <p>{state.scan_hold_new_discoveries
+        ? "Held mode: discovered books remain staged and no book is accepted into Library."
+        : "Normal mode: complete, current discoveries are accepted into Library."}</p>
       <button
         data-testid="start-held-scan"
         disabled={disabled}
-        onClick={() => void runtime.runPromise(startHeldScan(preview.root_id))}
+        onClick={() => void runtime.runPromise(startManualScan(preview.root_id))}
       >
         {state.scan_start_status === "loading" ? "Starting manual scan…" : "Start manual scan"}
       </button>

@@ -210,7 +210,7 @@ test("runs a held manual scan, reports a disappeared release, and releases anoth
     await expect(first.window.getByTestId("root-preview-candidates").locator("li")).toHaveCount(2)
 
     await expect(first.window.getByTestId("scan-hold-new-discoveries")).not.toBeChecked()
-    await expect(first.window.getByTestId("start-held-scan")).toBeDisabled()
+    await expect(first.window.getByTestId("start-held-scan")).toBeEnabled()
     await first.window.getByTestId("scan-hold-new-discoveries").check()
     await expect(first.window.getByTestId("start-held-scan")).toBeEnabled()
     await expect(first.window.getByTestId("held-scan-root")).toContainText("Held books")
@@ -263,6 +263,111 @@ test("runs a held manual scan, reports a disappeared release, and releases anoth
       .click()
     await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("hold: eligible")
     await expect(reopened.window.getByTestId("scan-release-error")).toHaveCount(0)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+  }
+})
+
+test("runs normal scans from the saved-root preview and refreshes accepted books after completion", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-normal-scan-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-normal-scan-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+
+  try {
+    for (const name of ["existing-a", "existing-b", "existing-c", "excluded-book"]) {
+      const directory = path.join(fixtureDirectory, name)
+      await mkdir(directory)
+      await writeFile(path.join(directory, "001.jpg"), name)
+    }
+
+    const first = await launch(dbPath)
+    await expect(first.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await first.window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await first.window.getByTestId("root-preview-submit").click()
+    await first.window.getByTestId("root-label").fill("Normal books")
+    await first.window.getByTestId("root-save").click()
+    await expect(first.window.getByTestId("root-saved")).toContainText("Normal books")
+
+    await first.window.getByTestId("root-saved-preview").click()
+    await expect(first.window.getByTestId("root-preview-candidates").locator("li")).toHaveCount(4)
+    const excludedCandidate = first.window
+      .getByTestId("root-preview-candidates")
+      .locator("li")
+      .filter({ hasText: "excluded-book" })
+    await excludedCandidate.getByRole("button", { name: "Exclude subtree" }).click()
+    await expect(first.window.getByTestId("root-preview-candidates").locator("li")).toHaveCount(3)
+
+    await first.window.getByTestId("scan-hold-new-discoveries").check()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("scan-task-status")).toHaveText("Status: succeeded", { timeout: 30_000 })
+    await expect(first.window.getByTestId("staged-discoveries").locator("li")).toHaveCount(3)
+    await expect(first.window.getByTestId("library-screen")).toHaveCount(0)
+
+    for (const name of ["new-book-a", "new-book-b"]) {
+      const directory = path.join(fixtureDirectory, name)
+      await mkdir(directory)
+      await writeFile(path.join(directory, "001.jpg"), name)
+    }
+
+    await first.window.getByTestId("scan-hold-new-discoveries").uncheck()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("library-screen")).toBeVisible()
+    await expect(first.window.getByTestId("library-scan-status")).toHaveText("Scan task succeeded.", { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(2, { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-entries")).toContainText("new-book-a")
+    await expect(first.window.getByTestId("library-entries")).toContainText("new-book-b")
+    const firstIds = (await first.window.getByTestId("library-entry").locator("small").allTextContents()).sort()
+    expect(firstIds).toHaveLength(2)
+
+    await first.window.getByTestId("library-setup").click()
+    await first.window.getByTestId("root-saved-preview").click()
+    await expect(first.window.getByTestId("scan-hold-new-discoveries")).not.toBeChecked()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("library-scan-status")).toHaveText("Scan task succeeded.", { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(2, { timeout: 30_000 })
+    const repeatedIds = (await first.window.getByTestId("library-entry").locator("small").allTextContents()).sort()
+    expect(repeatedIds).toEqual(firstIds)
+
+    await first.app.close()
+    const reopened = await launch(dbPath)
+    await reopened.window.getByTestId("open-library").click()
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(2, { timeout: 30_000 })
+    const restartedIds = (await reopened.window.getByTestId("library-entry").locator("small").allTextContents()).sort()
+    expect(restartedIds).toEqual(firstIds)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+  }
+})
+
+test("loads an additional Library page after a normal scan", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-pages-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-pages-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+
+  try {
+    for (let index = 0; index < 51; index += 1) {
+      const directory = path.join(fixtureDirectory, `book-${index.toString().padStart(2, "0")}`)
+      await mkdir(directory)
+      await writeFile(path.join(directory, "001.jpg"), `book-${index}`)
+    }
+
+    const first = await launch(dbPath)
+    await first.window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await first.window.getByTestId("root-preview-submit").click()
+    await first.window.getByTestId("root-label").fill("Paged books")
+    await first.window.getByTestId("root-save").click()
+    await expect(first.window.getByTestId("root-saved")).toContainText("Paged books")
+    await first.window.getByTestId("root-saved-preview").click()
+    await first.window.getByTestId("start-held-scan").click()
+
+    await expect(first.window.getByTestId("library-screen")).toBeVisible()
+    await expect(first.window.getByTestId("library-scan-status")).toHaveText("Scan task succeeded.", { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(50, { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-load-more")).toBeVisible()
+    await first.window.getByTestId("library-load-more").click()
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(51, { timeout: 30_000 })
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })
