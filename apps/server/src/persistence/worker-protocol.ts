@@ -79,6 +79,65 @@ export const CommitOutcome = Schema.Union([
 ])
 export type CommitOutcome = typeof CommitOutcome.Type
 
+const ScanStatus = Schema.Literals([
+  "queued",
+  "running",
+  "succeeded",
+  "completed_with_errors",
+  "failed",
+  "interrupted"
+])
+
+export const ScanTaskRow = Schema.Struct({
+  task_id: Uuid,
+  operation_id: Uuid,
+  epoch: Uuid,
+  root_id: Uuid,
+  mapping_revision: Revision,
+  status: ScanStatus,
+  hold_new_discoveries: Schema.Boolean,
+  directories_visited: Schema.Natural,
+  candidates_discovered: Schema.Natural,
+  candidates_analyzed: Schema.Natural,
+  analysis_error_count: Schema.Natural,
+  review_needed_count: Schema.Natural,
+  coverage_json: Schema.NullOr(Schema.String),
+  readiness_error_code: Schema.NullOr(Schema.String),
+  readiness_error_message: Schema.NullOr(Schema.String),
+  error_code: Schema.NullOr(Schema.String),
+  error_message: Schema.NullOr(Schema.String),
+  created_at_ms: Schema.Int,
+  updated_at_ms: Schema.Int
+})
+export type ScanTaskRow = typeof ScanTaskRow.Type
+
+export const StagedDiscoveryRow = Schema.Struct({
+  candidate_id: Uuid,
+  task_id: Uuid,
+  root_id: Uuid,
+  relative_path: Schema.String,
+  kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  candidate_version: Schema.Natural,
+  hold_state: Schema.Literal("held"),
+  analysis_status: Schema.Union([Schema.Literal("ready"), Schema.Literal("error")]),
+  manifest_json: Schema.NullOr(Schema.String),
+  analysis_error_json: Schema.NullOr(Schema.String),
+  updated_at_ms: Schema.Int
+})
+export type StagedDiscoveryRow = typeof StagedDiscoveryRow.Type
+
+export const ScanStartOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("active_scan_conflict"), taskId: Uuid, policyRevision: Revision }),
+  Schema.Struct({ kind: Schema.Literal("created"), task: ScanTaskRow }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), task: ScanTaskRow }),
+  Schema.Struct({ kind: Schema.Literal("active"), task: ScanTaskRow }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("root_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("mapping_revision_conflict"), currentMappingRevision: Revision }),
+  Schema.Struct({ kind: Schema.Literal("policy_revision_conflict"), currentPolicyRevision: Revision })
+])
+export type ScanStartOutcome = typeof ScanStartOutcome.Type
+
 /**
  * Worker request protocol. Validated on both sides of the worker boundary so a
  * malformed message can never reach SQLite or corrupt a caller's expectation.
@@ -118,6 +177,55 @@ export const WorkerRequest = Schema.Union([
     device: Schema.String,
     inode: Schema.String
   }),
+  Schema.Struct({
+    op: Schema.Literal("startManualScan"),
+    taskId: Uuid,
+    operationId: Uuid,
+    epoch: Uuid,
+    rootId: Uuid,
+    expectedMappingRevision: Revision,
+    expectedPolicyRevision: Revision
+  }),
+  Schema.Struct({ op: Schema.Literal("listScanTasks") }),
+  Schema.Struct({ op: Schema.Literal("readScanTask"), taskId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("listStagedDiscoveries") }),
+  Schema.Struct({
+    op: Schema.Literal("recordDiscovery"), taskId: Uuid, directories: Schema.Natural,
+    candidates: Schema.Natural, coverageJson: Schema.String
+  }),
+  Schema.Struct({ op: Schema.Literal("markScanRunning"), taskId: Uuid }),
+  Schema.Struct({
+    op: Schema.Literal("stageDiscovery"),
+    candidateId: Uuid,
+    taskId: Uuid,
+    rootId: Uuid,
+    relativePath: Schema.String,
+    kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+    analysisStatus: Schema.Union([Schema.Literal("ready"), Schema.Literal("error")]),
+    manifestJson: Schema.NullOr(Schema.String),
+    analysisErrorJson: Schema.NullOr(Schema.String)
+  }),
+  Schema.Struct({
+    op: Schema.Literal("finishScan"),
+    taskId: Uuid,
+    status: Schema.Union([
+      Schema.Literal("succeeded"),
+      Schema.Literal("completed_with_errors"),
+      Schema.Literal("failed"),
+      Schema.Literal("interrupted")
+    ]),
+    directoriesVisited: Schema.Natural,
+    candidatesDiscovered: Schema.Natural,
+    candidatesAnalyzed: Schema.Natural,
+    analysisErrorCount: Schema.Natural,
+    reviewNeededCount: Schema.Natural,
+    coverageJson: Schema.NullOr(Schema.String),
+    errorCode: Schema.NullOr(Schema.String),
+    errorMessage: Schema.NullOr(Schema.String),
+    readinessErrorCode: Schema.NullOr(Schema.String),
+    readinessErrorMessage: Schema.NullOr(Schema.String)
+  }),
+  Schema.Struct({ op: Schema.Literal("recoverScans") }),
   Schema.Struct({
     op: Schema.Literal("commitRootPolicy"),
     rootId: Uuid,

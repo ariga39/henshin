@@ -92,6 +92,49 @@ db.exec(`
     payload TEXT NOT NULL,
     result TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS scan_tasks (
+    task_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    root_id TEXT NOT NULL REFERENCES server_roots(root_id),
+    mapping_revision INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'completed_with_errors', 'failed', 'interrupted')),
+    hold_new_discoveries INTEGER NOT NULL CHECK (hold_new_discoveries = 1),
+    directories_visited INTEGER NOT NULL,
+    candidates_discovered INTEGER NOT NULL,
+    candidates_analyzed INTEGER NOT NULL,
+    analysis_error_count INTEGER NOT NULL,
+    review_needed_count INTEGER NOT NULL,
+    coverage_json TEXT,
+    readiness_error_code TEXT,
+    readiness_error_message TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    command_payload TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE (epoch, operation_id)
+  );
+  CREATE TABLE IF NOT EXISTS scan_start_aliases (
+    epoch TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    task_id TEXT NOT NULL REFERENCES scan_tasks(task_id) ON DELETE CASCADE,
+    PRIMARY KEY(epoch, operation_id)
+  );
+  CREATE TABLE IF NOT EXISTS staged_discoveries (
+    candidate_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES scan_tasks(task_id),
+    root_id TEXT NOT NULL REFERENCES server_roots(root_id),
+    relative_path TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
+    candidate_version INTEGER NOT NULL,
+    hold_state TEXT NOT NULL CHECK (hold_state = 'held'),
+    analysis_status TEXT NOT NULL CHECK (analysis_status IN ('ready', 'error')),
+    manifest_json TEXT,
+    analysis_error_json TEXT,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE (root_id, relative_path)
+  );
   CREATE TABLE IF NOT EXISTS root_policy_operations (
     epoch TEXT NOT NULL,
     operation_id TEXT NOT NULL,
@@ -155,6 +198,51 @@ const insertRoot = db.prepare(
 )
 const insertRootOperation = db.prepare(
   "INSERT INTO root_operations(operation_id, payload, result) VALUES(?, ?, ?)"
+)
+const selectScanOperation = db.prepare(
+  `SELECT task_id, command_payload FROM scan_tasks WHERE epoch = ? AND operation_id = ?
+   UNION ALL
+   SELECT t.task_id, t.command_payload FROM scan_start_aliases a JOIN scan_tasks t ON t.task_id = a.task_id
+   WHERE a.epoch = ? AND a.operation_id = ?`
+)
+const selectScanTask = db.prepare(
+  "SELECT task_id, operation_id, epoch, root_id, mapping_revision, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, created_at_ms, updated_at_ms FROM scan_tasks WHERE task_id = ?"
+)
+selectScanTask.setReadBigInts(true)
+const selectScanTasks = db.prepare(
+  "SELECT task_id, operation_id, epoch, root_id, mapping_revision, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, created_at_ms, updated_at_ms FROM scan_tasks ORDER BY created_at_ms ASC, rowid ASC"
+)
+selectScanTasks.setReadBigInts(true)
+const selectStagedDiscoveries = db.prepare(
+  "SELECT candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms FROM staged_discoveries ORDER BY updated_at_ms ASC, rowid ASC"
+)
+selectStagedDiscoveries.setReadBigInts(true)
+const selectStaged = db.prepare(
+  "SELECT candidate_id, candidate_version, task_id, analysis_status FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
+)
+selectStaged.setReadBigInts(true)
+const insertScanTask = db.prepare(
+  "INSERT INTO scan_tasks(task_id, operation_id, epoch, root_id, mapping_revision, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, command_payload, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, 'queued', 1, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)"
+)
+const updateScanRunning = db.prepare("UPDATE scan_tasks SET status = 'running', updated_at_ms = ? WHERE task_id = ? AND status = 'queued'")
+const updateScanTask = db.prepare(
+  "UPDATE scan_tasks SET status = ?, directories_visited = ?, candidates_discovered = ?, candidates_analyzed = ?, analysis_error_count = ?, review_needed_count = ?, coverage_json = ?, readiness_error_code = ?, readiness_error_message = ?, error_code = ?, error_message = ?, updated_at_ms = ? WHERE task_id = ? AND status IN ('running', 'queued')"
+)
+const selectScanFence = db.prepare(`
+  SELECT t.mapping_revision AS captured_mapping_revision,
+    json_extract(t.command_payload, '$.expected_policy_revision') AS captured_policy_revision,
+    r.mapping_revision AS current_mapping_revision,
+    r.policy_revision AS current_policy_revision
+  FROM scan_tasks t
+  JOIN server_roots r ON r.root_id = t.root_id
+  WHERE t.task_id = ? AND t.root_id = ? AND t.status = 'running'
+`)
+selectScanFence.setReadBigInts(true)
+const upsertStagedDiscovery = db.prepare(
+  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, 'held', ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = 'held', analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
+)
+const recoverScanTasks = db.prepare(
+  "UPDATE scan_tasks SET status = CASE WHEN status = 'queued' THEN 'failed' ELSE 'interrupted' END, error_code = 'server_restart', error_message = CASE WHEN status = 'queued' THEN 'scan did not start before server restart' ELSE 'scan interrupted by server restart' END, updated_at_ms = ? WHERE status IN ('queued', 'running')"
 )
 const selectRootPolicyOperation = db.prepare(
   "SELECT payload, result, created_at_ms FROM root_policy_operations WHERE epoch = ? AND operation_id = ?"
@@ -366,6 +454,162 @@ const lookupRootOperation = (
     : { kind: "operation_conflict" }
 }
 
+const scanTaskRow = (row: {
+  task_id: string
+  operation_id: string
+  epoch: string
+  root_id: string
+  mapping_revision: bigint
+  status: "queued" | "running" | "succeeded" | "completed_with_errors" | "failed" | "interrupted"
+  hold_new_discoveries: bigint
+  directories_visited: bigint
+  candidates_discovered: bigint
+  candidates_analyzed: bigint
+  analysis_error_count: bigint
+  review_needed_count: bigint
+  coverage_json: string | null
+  readiness_error_code: string | null
+  readiness_error_message: string | null
+  error_code: string | null
+  error_message: string | null
+  created_at_ms: number
+  updated_at_ms: number
+}): import("./worker-protocol").ScanTaskRow => ({
+  task_id: row.task_id,
+  operation_id: row.operation_id,
+  epoch: row.epoch,
+  root_id: row.root_id,
+  mapping_revision: row.mapping_revision.toString(),
+  status: row.status,
+  hold_new_discoveries: row.hold_new_discoveries === 1n,
+  directories_visited: Number(row.directories_visited),
+  candidates_discovered: Number(row.candidates_discovered),
+  candidates_analyzed: Number(row.candidates_analyzed),
+  analysis_error_count: Number(row.analysis_error_count),
+  review_needed_count: Number(row.review_needed_count),
+  coverage_json: row.coverage_json,
+  readiness_error_code: row.readiness_error_code,
+  readiness_error_message: row.readiness_error_message,
+  error_code: row.error_code,
+  error_message: row.error_message,
+  created_at_ms: Number(row.created_at_ms),
+  updated_at_ms: Number(row.updated_at_ms)
+})
+
+const scanTaskById = (taskId: string): import("./worker-protocol").ScanTaskRow | undefined => {
+  const row = selectScanTask.get(taskId) as Parameters<typeof scanTaskRow>[0] | undefined
+  return row === undefined ? undefined : scanTaskRow(row)
+}
+
+const scanTaskRows = (): ReadonlyArray<import("./worker-protocol").ScanTaskRow> =>
+  (selectScanTasks.all() as unknown as ReadonlyArray<Parameters<typeof scanTaskRow>[0]>).map(scanTaskRow)
+
+const stagedDiscoveryRow = (row: {
+  candidate_id: string
+  task_id: string
+  root_id: string
+  relative_path: string
+  kind: "archive" | "image-directory"
+  candidate_version: bigint
+  hold_state: "held"
+  analysis_status: "ready" | "error"
+  manifest_json: string | null
+  analysis_error_json: string | null
+  updated_at_ms: number
+}): import("./worker-protocol").StagedDiscoveryRow => ({
+  candidate_id: row.candidate_id,
+  task_id: row.task_id,
+  root_id: row.root_id,
+  relative_path: row.relative_path,
+  kind: row.kind,
+  candidate_version: Number(row.candidate_version),
+  hold_state: row.hold_state,
+  analysis_status: row.analysis_status,
+  manifest_json: row.manifest_json,
+  analysis_error_json: row.analysis_error_json,
+  updated_at_ms: Number(row.updated_at_ms)
+})
+
+const startManualScan = (
+  request: Extract<WorkerRequest, { op: "startManualScan" }>
+): import("./worker-protocol").ScanStartOutcome => {
+  const commandPayload = JSON.stringify({
+    root_id: request.rootId,
+    expected_mapping_revision: request.expectedMappingRevision,
+    expected_policy_revision: request.expectedPolicyRevision
+  })
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const existing = selectScanOperation.get(request.epoch, request.operationId, request.epoch, request.operationId) as
+      | { task_id: string; command_payload: string }
+      | undefined
+    if (existing !== undefined) {
+      if (existing.command_payload !== commandPayload) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_conflict" }
+      }
+      const task = scanTaskById(existing.task_id)
+      if (task === undefined) throw new Error("scan task is missing")
+      db.exec("COMMIT")
+      return { kind: "replayed", task }
+    }
+
+    const root = rootById(request.rootId)
+    if (root === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "root_not_found" }
+    }
+    if (root.mappingRevision !== request.expectedMappingRevision) {
+      db.exec("ROLLBACK")
+      return { kind: "mapping_revision_conflict", currentMappingRevision: root.mappingRevision }
+    }
+    if (root.policyRevision !== request.expectedPolicyRevision) {
+      db.exec("ROLLBACK")
+      return { kind: "policy_revision_conflict", currentPolicyRevision: root.policyRevision }
+    }
+
+    db.prepare(`UPDATE scan_tasks SET status = 'interrupted', updated_at_ms = ?, error_code = 'server_restart',
+      error_message = 'scan interrupted by server restart' WHERE root_id = ? AND epoch <> ?
+      AND status IN ('queued', 'running')`).run(Date.now(), request.rootId, request.epoch)
+    const active = db.prepare(
+      "SELECT task_id, command_payload, json_extract(command_payload, '$.expected_policy_revision') AS policy_revision FROM scan_tasks WHERE root_id = ? AND mapping_revision = ? AND status IN ('queued', 'running') ORDER BY created_at_ms ASC, rowid ASC LIMIT 1"
+    ).get(request.rootId, BigInt(request.expectedMappingRevision)) as { task_id: string; command_payload: string; policy_revision: string } | undefined
+    if (active !== undefined) {
+      if (active.command_payload !== commandPayload) {
+        db.exec("ROLLBACK")
+        return { kind: "active_scan_conflict", taskId: active.task_id, policyRevision: active.policy_revision }
+      }
+      db.prepare("INSERT INTO scan_start_aliases(epoch, operation_id, task_id) VALUES(?, ?, ?)").run(
+        request.epoch, request.operationId, active.task_id
+      )
+      const task = scanTaskById(active.task_id)
+      if (task === undefined) throw new Error("active scan task is missing")
+      db.exec("COMMIT")
+      return { kind: "active", task }
+    }
+
+    const taskId = request.taskId
+    const now = Date.now()
+    insertScanTask.run(
+      taskId,
+      request.operationId,
+      request.epoch,
+      request.rootId,
+      BigInt(request.expectedMappingRevision),
+      commandPayload,
+      now,
+      now
+    )
+    const task = scanTaskById(taskId)
+    if (task === undefined) throw new Error("created scan task is missing")
+    db.exec("COMMIT")
+    return { kind: "created", task }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
 const rootPolicyPayload = (input: {
   readonly rootId: string
   readonly expectedPolicyRevision: string
@@ -454,6 +698,93 @@ const commitRootPolicy = (
     )
     db.exec("COMMIT")
     return { kind: "committed", root }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const requireScanTransition = (result: { changes: number | bigint }): void => {
+  if (Number(result.changes) !== 1) throw new Error("scan task is no longer active for this operation")
+}
+
+const requireCurrentScanFence = (taskId: string, rootId: string): void => {
+  const row = selectScanFence.get(taskId, rootId) as {
+    captured_mapping_revision: bigint
+    captured_policy_revision: string | null
+    current_mapping_revision: bigint
+    current_policy_revision: bigint
+  } | undefined
+  if (
+    row === undefined ||
+    row.captured_policy_revision === null ||
+    row.captured_mapping_revision !== row.current_mapping_revision ||
+    row.captured_policy_revision !== row.current_policy_revision.toString()
+  ) {
+    throw new Error("scan task no longer matches the current root mapping or policy")
+  }
+}
+
+const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }>): void => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    requireCurrentScanFence(request.taskId, request.rootId)
+    const existing = selectStaged.get(request.rootId, request.relativePath) as
+      | { candidate_id: string; candidate_version: bigint; task_id: string; analysis_status: string }
+      | undefined
+    upsertStagedDiscovery.run(
+      existing?.candidate_id ?? request.candidateId,
+      request.taskId,
+      request.rootId,
+      request.relativePath,
+      request.kind,
+      existing === undefined ? 1n : existing.candidate_version + 1n,
+      request.analysisStatus,
+      request.manifestJson,
+      request.analysisErrorJson,
+      Date.now()
+    )
+    const priorStatus = existing?.task_id === request.taskId ? existing.analysis_status : undefined
+    requireScanTransition(db.prepare(`UPDATE scan_tasks SET
+      candidates_analyzed = candidates_analyzed + ?, analysis_error_count = analysis_error_count + ?,
+      review_needed_count = review_needed_count + ?, updated_at_ms = ? WHERE task_id = ? AND root_id = ? AND status = 'running'`).run(
+      Number(request.analysisStatus === "ready") - Number(priorStatus === "ready"),
+      Number(request.analysisStatus === "error") - Number(priorStatus === "error"),
+      Number(priorStatus === undefined), Date.now(), request.taskId, request.rootId
+    ))
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const finishScan = (request: Extract<WorkerRequest, { op: "finishScan" }>): void => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    if (request.status === "succeeded" || request.status === "completed_with_errors") {
+      const task = db.prepare("SELECT root_id FROM scan_tasks WHERE task_id = ?").get(request.taskId) as
+        | { root_id: string }
+        | undefined
+      if (task === undefined) throw new Error("scan task is missing")
+      requireCurrentScanFence(request.taskId, task.root_id)
+    }
+    requireScanTransition(updateScanTask.run(
+      request.status,
+      BigInt(request.directoriesVisited),
+      BigInt(request.candidatesDiscovered),
+      BigInt(request.candidatesAnalyzed),
+      BigInt(request.analysisErrorCount),
+      BigInt(request.reviewNeededCount),
+      request.coverageJson,
+      request.readinessErrorCode,
+      request.readinessErrorMessage,
+      request.errorCode,
+      request.errorMessage,
+      Date.now(),
+      request.taskId
+    ))
+    db.exec("COMMIT")
   } catch (error) {
     db.exec("ROLLBACK")
     throw error
@@ -607,6 +938,32 @@ const handle = (request: WorkerRequest): unknown => {
       return commitNote(request)
     case "registerRoot":
       return registerRoot(request)
+    case "startManualScan":
+      return startManualScan(request)
+    case "listScanTasks":
+      return scanTaskRows()
+    case "readScanTask":
+      return scanTaskById(request.taskId) ?? null
+    case "listStagedDiscoveries":
+      return (selectStagedDiscoveries.all() as unknown as ReadonlyArray<Parameters<typeof stagedDiscoveryRow>[0]>).map(stagedDiscoveryRow)
+    case "recordDiscovery":
+      requireScanTransition(db.prepare(`UPDATE scan_tasks SET directories_visited = ?, candidates_discovered = ?, coverage_json = ?,
+        updated_at_ms = ? WHERE task_id = ? AND status = 'running'`).run(
+        request.directories, request.candidates, request.coverageJson, Date.now(), request.taskId
+      ))
+      return null
+    case "markScanRunning":
+      requireScanTransition(updateScanRunning.run(Date.now(), request.taskId))
+      return null
+    case "stageDiscovery":
+      stageDiscovery(request)
+      return null
+    case "finishScan":
+      finishScan(request)
+      return null
+    case "recoverScans":
+      recoverScanTasks.run(Date.now())
+      return null
     case "commitRootPolicy":
       return commitRootPolicy(request)
     case "close":
