@@ -3,9 +3,11 @@ import type {
   ConnectionStatusView,
   RootPreviewRequest,
   RootPreviewResult,
-  ScanTask
+  ScanTask,
+  ReaderProfileSaveIpcRequest,
+  ReaderProfile
 } from "@henshin/contracts"
-import { PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
+import { PrototypeClient, ReaderProfileClient, RootPreviewClient, ScanReviewClient } from "./client"
 import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
@@ -60,6 +62,75 @@ export const previewRoot = (selection: RootPreviewRequest | string) =>
         })
       )
     }
+  })
+
+export const loadReaderProfiles = Effect.gen(function*() {
+  const client = yield* ReaderProfileClient
+  yield* Effect.sync(() => viewStore.set({ reader_profiles_status: "loading", reader_profiles_error: null }))
+  const result = yield* client.list()
+  if (result.ok) {
+    yield* Effect.sync(() => viewStore.set({
+      reader_profiles: result.data,
+      reader_profiles_status: "ready",
+      reader_profiles_error: null
+    }))
+  } else {
+    yield* Effect.sync(() => viewStore.set({ reader_profiles_status: "error", reader_profiles_error: result.error.message }))
+  }
+})
+
+export const selectReaderExecutable = Effect.gen(function*() {
+  const client = yield* ReaderProfileClient
+  yield* Effect.sync(() => viewStore.set({ reader_profile_selection_error: null }))
+  const result = yield* client.selectExecutable()
+  if (!result.ok) {
+    yield* Effect.sync(() => viewStore.set({ reader_profile_selection_error: result.error.message }))
+    return null
+  }
+  const selection = result.data
+  if (selection === null) return null
+  yield* Effect.sync(() => viewStore.set({
+    reader_profile_selection_handle: selection.selection_handle,
+    reader_profile_selection_name: selection.executable_name,
+    reader_profile_selection_error: null
+  }))
+  return result.data
+})
+
+export const clearReaderExecutableSelection = (): void => {
+  viewStore.set({
+    reader_profile_selection_handle: null,
+    reader_profile_selection_name: null,
+    reader_profile_selection_error: null
+  })
+}
+
+export const saveReaderProfile = (input: ReaderProfileSaveIpcRequest) =>
+  Effect.gen(function*() {
+    const client = yield* ReaderProfileClient
+    yield* Effect.sync(() => viewStore.set({ reader_profile_save_status: "loading", reader_profile_save_error: null }))
+    const result = yield* client.save(input)
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({
+        reader_profile_save_status: "error",
+        reader_profile_save_error: result.error.message
+      }))
+      return undefined
+    }
+    yield* Effect.sync(() => {
+      const current = viewStore.getState().reader_profiles
+      viewStore.set({
+        reader_profiles: current.some((profile) => profile.profile_id === result.data.profile_id)
+          ? current.map((profile) => profile.profile_id === result.data.profile_id ? result.data : profile)
+          : [...current, result.data],
+        reader_profile_save_status: "ready",
+        reader_profile_save_error: null,
+        reader_profile_selection_handle: null,
+        reader_profile_selection_name: null,
+        reader_profile_selection_error: null
+      })
+    })
+    return result.data
   })
 
 export const loadRoots = Effect.gen(function*() {

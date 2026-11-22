@@ -13,6 +13,12 @@ import type {
   SavedDraft,
   SavedDraftAbsent
 } from "./note"
+export {
+  ReaderExecutableSelectIpcRequest,
+  ReaderExecutableSelectionIpcResult,
+  ReaderProfileListIpcRequest,
+  ReaderProfileSaveIpcRequest
+} from "./reader"
 
 export const ConnectionState = Schema.Union([
   Schema.Literal("connecting"),

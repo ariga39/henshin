@@ -8,7 +8,8 @@ import type {
   ScanTask,
   StagedDiscovery,
   ServerRoot,
-  SavedDraft
+  SavedDraft,
+  ReaderProfile
 } from "@henshin/contracts"
 
 export type Outcome =
@@ -62,6 +63,14 @@ export interface ViewState {
   readonly scan_hold_new_discoveries: boolean
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
+  readonly reader_profiles: ReadonlyArray<ReaderProfile>
+  readonly reader_profiles_status: "idle" | "loading" | "ready" | "error"
+  readonly reader_profiles_error: string | null
+  readonly reader_profile_save_status: "idle" | "loading" | "ready" | "error"
+  readonly reader_profile_save_error: string | null
+  readonly reader_profile_selection_handle: string | null
+  readonly reader_profile_selection_name: string | null
+  readonly reader_profile_selection_error: string | null
 }
 
 const initialState: ViewState = {
@@ -104,7 +113,15 @@ const initialState: ViewState = {
   scan_start_error: null,
   scan_hold_new_discoveries: false,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
-  connection_generation: 0
+  connection_generation: 0,
+  reader_profiles: [],
+  reader_profiles_status: "idle",
+  reader_profiles_error: null,
+  reader_profile_save_status: "idle",
+  reader_profile_save_error: null,
+  reader_profile_selection_handle: null,
+  reader_profile_selection_name: null,
+  reader_profile_selection_error: null
 }
 
 const sameConnection = (left: ConnectionStatusView, right: ConnectionStatusView): boolean =>
