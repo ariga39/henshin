@@ -10,9 +10,12 @@ import { runtime } from "./runtime"
 import { viewStore } from "./store"
 import {
   clearReaderExecutableSelection,
+  clearReaderTestTarget,
   loadReaderProfiles,
   saveReaderProfile,
-  selectReaderExecutable
+  selectReaderExecutable,
+  selectReaderTestTarget,
+  testReaderProfile
 } from "./workflows"
 import { useSyncExternalStore } from "react"
 
@@ -79,11 +82,13 @@ export const ReaderProfiles = () => {
 
   const edit = (profile: ReaderProfile): void => {
     clearReaderExecutableSelection()
+    clearReaderTestTarget()
     setDraft(draftFor(profile))
   }
 
   const startNew = (): void => {
     clearReaderExecutableSelection()
+    clearReaderTestTarget()
     setDraft(emptyDraft())
   }
 
@@ -104,6 +109,8 @@ export const ReaderProfiles = () => {
 
   const selectedExecutable = state.reader_profile_selection_name ?? draft.executable_name
   const saving = state.reader_profile_save_status === "loading"
+  const testTarget = state.reader_profile_test_target
+  const testing = state.reader_profile_test_status === "selecting" || state.reader_profile_test_status === "launching"
   return (
     <section aria-labelledby="reader-settings-heading" data-testid="reader-settings">
       <h2 id="reader-settings-heading">This device: reader profiles</h2>
@@ -124,10 +131,48 @@ export const ReaderProfiles = () => {
                 {profile.argument_tokens.map((token, index) => <li key={`${index}-${token}`}>{token}</li>)}
               </ol>
             )}
+            <button
+              type="button"
+              data-testid={`reader-profile-preview-${profile.profile_id}`}
+              disabled={testing}
+              onClick={() => void runtime.runPromise(selectReaderTestTarget({
+                profile_id: profile.profile_id,
+                expected_revision: profile.revision
+              }))}
+            >
+              Preview test target
+            </button>
+            <button
+              type="button"
+              data-testid={`reader-profile-test-${profile.profile_id}`}
+              disabled={testing || !(
+                testTarget !== null &&
+                testTarget.profile_id === profile.profile_id &&
+                testTarget.profile_revision === profile.revision &&
+                state.reader_profile_test_status === "ready"
+              )}
+              onClick={() => {
+                if (testTarget === null) return
+                void runtime.runPromise(testReaderProfile({
+                  profile_id: profile.profile_id,
+                  expected_revision: profile.revision,
+                  selection_handle: testTarget.selection_handle
+                }))
+              }}
+            >
+              Test launch
+            </button>
             <button type="button" onClick={() => edit(profile)}>Edit</button>
           </li>
         ))}
       </ul>
+      {testTarget !== null && <p data-testid="reader-profile-test-target">Resolved test target: {testTarget.resolved_target}</p>}
+      {state.reader_profile_test_status === "accepted" && state.reader_profile_test_result !== null && (
+        <p role="status" data-testid="reader-profile-test-result">{state.reader_profile_test_result.message}</p>
+      )}
+      {state.reader_profile_test_error !== null && (
+        <p role="alert" data-testid="reader-profile-test-error">{state.reader_profile_test_error}</p>
+      )}
       <form onSubmit={(event) => { event.preventDefault(); if (!saving) void save() }}>
         <h3>{draft.profile_id === null ? "New reader profile" : `Edit ${draft.name}`}</h3>
         <label htmlFor="reader-profile-name">Name</label>

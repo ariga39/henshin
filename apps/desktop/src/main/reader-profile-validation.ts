@@ -1,5 +1,5 @@
-import { access, constants as fsConstants, lstat, open } from "node:fs/promises"
-import { extname, isAbsolute } from "node:path"
+import { access, constants as fsConstants, lstat, open, readdir } from "node:fs/promises"
+import { extname, isAbsolute, join } from "node:path"
 import type { ReaderProfileSaveIpcRequest } from "@henshin/contracts"
 
 export class ReaderProfileValidationError extends Error {
@@ -29,6 +29,33 @@ export class ReaderExecutableSelectionError extends Error {
   }
 }
 
+export class ReaderTestTargetError extends Error {
+  readonly code = "reader_test_target_invalid"
+
+  constructor(message: string) {
+    super(message)
+    this.name = "ReaderTestTargetError"
+  }
+}
+
+export class ReaderTestTargetSelectionError extends Error {
+  readonly code = "reader_test_target_selection_expired"
+
+  constructor() {
+    super("choose a test target again before launching the reader")
+    this.name = "ReaderTestTargetSelectionError"
+  }
+}
+
+export class ReaderTestLaunchError extends Error {
+  readonly code = "reader_test_launch_failed"
+
+  constructor(message: string) {
+    super(message)
+    this.name = "ReaderTestLaunchError"
+  }
+}
+
 const MAX_PROFILE_NAME_LENGTH = 128
 const MAX_ARGUMENT_TOKENS = 32
 const MAX_ARGUMENT_LENGTH = 512
@@ -51,6 +78,8 @@ const SHELL_OR_SCRIPT_EXTENSIONS = new Set([
   ".wsf",
   ".zsh"
 ])
+const ARCHIVE_EXTENSIONS = new Set([".cbz", ".zip"])
+const IMAGE_EXTENSIONS = new Set([".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"])
 
 const hasBytes = (header: Uint8Array, offset: number, bytes: ReadonlyArray<number>): boolean =>
   offset + bytes.length <= header.length && bytes.every((byte, index) => header[offset + index] === byte)
@@ -183,4 +212,61 @@ export const validateExecutablePath = async (selectedPath: string): Promise<void
   if (!isSupportedNativeExecutable(header)) {
     throw new ReaderExecutableSelectionError("the selected file is not a supported native executable")
   }
+}
+
+const validateSelectedPath = async (selectedPath: string): Promise<Awaited<ReturnType<typeof lstat>>> => {
+  if (!isAbsolute(selectedPath) || selectedPath.includes("\u0000")) {
+    throw new ReaderTestTargetError("the selected test target is not an absolute path")
+  }
+  let metadata
+  try {
+    metadata = await lstat(selectedPath)
+  } catch {
+    throw new ReaderTestTargetError("the selected test target is unavailable")
+  }
+  if (metadata.isSymbolicLink()) {
+    throw new ReaderTestTargetError("choose a regular test target, not a link")
+  }
+  try {
+    await access(selectedPath, fsConstants.R_OK)
+  } catch {
+    throw new ReaderTestTargetError("the selected test target is not readable")
+  }
+  return metadata
+}
+
+/** Resolves a native-picker selection to the exact path that a profile test may receive. */
+export const resolveReaderTestTarget = async (
+  selectedPath: string,
+  targetMode: "archive" | "directory" | "first-image"
+): Promise<string> => {
+  const metadata = await validateSelectedPath(selectedPath)
+  if (targetMode === "archive") {
+    if (!metadata.isFile() || !ARCHIVE_EXTENSIONS.has(extname(selectedPath).toLowerCase())) {
+      throw new ReaderTestTargetError("choose a readable ZIP or CBZ archive")
+    }
+    return selectedPath
+  }
+
+  if (!metadata.isDirectory()) {
+    throw new ReaderTestTargetError("choose a readable image directory")
+  }
+  if (targetMode === "directory") return selectedPath
+
+  let entries
+  try {
+    entries = await readdir(selectedPath, { withFileTypes: true })
+  } catch {
+    throw new ReaderTestTargetError("the selected image directory could not be read")
+  }
+  const firstImage = entries
+    .filter((entry) => entry.isFile() && IMAGE_EXTENSIONS.has(extname(entry.name).toLowerCase()))
+    .map((entry) => entry.name)
+    .sort((left, right) => left < right ? -1 : left > right ? 1 : 0)[0]
+  if (firstImage === undefined) {
+    throw new ReaderTestTargetError("the selected image directory has no supported image")
+  }
+  const resolved = join(selectedPath, firstImage)
+  await validateSelectedPath(resolved)
+  return resolved
 }

@@ -5,7 +5,9 @@ import type {
   RootPreviewResult,
   ScanTask,
   ReaderProfileSaveIpcRequest,
-  ReaderProfile
+  ReaderProfile,
+  ReaderProfileTestIpcRequest,
+  ReaderProfileTestTargetSelectIpcRequest
 } from "@henshin/contracts"
 import { PrototypeClient, ReaderProfileClient, RootPreviewClient, ScanReviewClient } from "./client"
 import { viewStore, type ViewState } from "./store"
@@ -105,6 +107,69 @@ export const clearReaderExecutableSelection = (): void => {
   })
 }
 
+export const selectReaderTestTarget = (input: ReaderProfileTestTargetSelectIpcRequest) =>
+  Effect.gen(function*() {
+    const client = yield* ReaderProfileClient
+    yield* Effect.sync(() => viewStore.set({
+      reader_profile_test_status: "selecting",
+      reader_profile_test_error: null,
+      reader_profile_test_result: null
+    }))
+    const result = yield* client.selectTestTarget(input)
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({
+        reader_profile_test_status: "error",
+        reader_profile_test_error: result.error.message,
+        reader_profile_test_target: null
+      }))
+      return null
+    }
+    if (result.data === null) {
+      yield* Effect.sync(() => viewStore.set({ reader_profile_test_status: "idle" }))
+      return null
+    }
+    yield* Effect.sync(() => viewStore.set({
+      reader_profile_test_target: result.data,
+      reader_profile_test_status: "ready",
+      reader_profile_test_error: null,
+      reader_profile_test_result: null
+    }))
+    return result.data
+  })
+
+export const clearReaderTestTarget = (): void => {
+  viewStore.set({
+    reader_profile_test_target: null,
+    reader_profile_test_status: "idle",
+    reader_profile_test_result: null,
+    reader_profile_test_error: null
+  })
+}
+
+export const testReaderProfile = (input: ReaderProfileTestIpcRequest) =>
+  Effect.gen(function*() {
+    const client = yield* ReaderProfileClient
+    yield* Effect.sync(() => viewStore.set({
+      reader_profile_test_status: "launching",
+      reader_profile_test_error: null,
+      reader_profile_test_result: null
+    }))
+    const result = yield* client.test(input)
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({
+        reader_profile_test_status: "error",
+        reader_profile_test_error: result.error.message
+      }))
+      return null
+    }
+    yield* Effect.sync(() => viewStore.set({
+      reader_profile_test_status: "accepted",
+      reader_profile_test_error: null,
+      reader_profile_test_result: result.data
+    }))
+    return result.data
+  })
+
 export const saveReaderProfile = (input: ReaderProfileSaveIpcRequest) =>
   Effect.gen(function*() {
     const client = yield* ReaderProfileClient
@@ -127,7 +192,11 @@ export const saveReaderProfile = (input: ReaderProfileSaveIpcRequest) =>
         reader_profile_save_error: null,
         reader_profile_selection_handle: null,
         reader_profile_selection_name: null,
-        reader_profile_selection_error: null
+        reader_profile_selection_error: null,
+        reader_profile_test_target: null,
+        reader_profile_test_status: "idle",
+        reader_profile_test_result: null,
+        reader_profile_test_error: null
       })
     })
     return result.data

@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type {
   ReaderProfileSaveIpcRequest,
+  ReaderProfileTestIpcRequest,
+  ReaderProfileTestTargetSelectIpcRequest,
   RootCommandIpcRequest,
   RootPreviewRequest,
   RootRegistrationRequest
@@ -23,7 +25,10 @@ contextBridge.exposeInMainWorld("henshinScanReview", {
 contextBridge.exposeInMainWorld("henshinReaderProfiles", {
   list: () => ipcRenderer.invoke(IpcChannels.readerProfileList, {}),
   selectExecutable: () => ipcRenderer.invoke(IpcChannels.readerSelectExecutable, {}),
-  save: (input: ReaderProfileSaveIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileSave, input)
+  save: (input: ReaderProfileSaveIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileSave, input),
+  selectTestTarget: (input: ReaderProfileTestTargetSelectIpcRequest) =>
+    ipcRenderer.invoke(IpcChannels.readerProfileTestTargetSelect, input),
+  test: (input: ReaderProfileTestIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileTest, input)
 })
 
 if (new URLSearchParams(window.location.search).get("mode") === "prototype") {

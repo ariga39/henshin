@@ -59,3 +59,35 @@ export const ReaderProfileSaveIpcRequest = Schema.Struct({
   selection_handle: Schema.NullOr(Uuid)
 })
 export type ReaderProfileSaveIpcRequest = typeof ReaderProfileSaveIpcRequest.Type
+
+export const ReaderProfileTestTargetSelectIpcRequest = Schema.Struct({
+  profile_id: Uuid,
+  expected_revision: Revision
+})
+export type ReaderProfileTestTargetSelectIpcRequest = typeof ReaderProfileTestTargetSelectIpcRequest.Type
+
+export const ReaderProfileTestTarget = Schema.Struct({
+  selection_handle: Uuid,
+  profile_id: Uuid,
+  profile_revision: Revision,
+  resolved_target: Schema.String
+})
+export type ReaderProfileTestTarget = typeof ReaderProfileTestTarget.Type
+
+export const ReaderProfileTestTargetSelectIpcResult = Schema.NullOr(ReaderProfileTestTarget)
+export type ReaderProfileTestTargetSelectIpcResult = typeof ReaderProfileTestTargetSelectIpcResult.Type
+
+export const ReaderProfileTestIpcRequest = Schema.Struct({
+  profile_id: Uuid,
+  expected_revision: Revision,
+  selection_handle: Uuid
+})
+export type ReaderProfileTestIpcRequest = typeof ReaderProfileTestIpcRequest.Type
+
+export const ReaderProfileTestResult = Schema.Struct({
+  handoff: Schema.Literal("accepted"),
+  launch_mode: ReaderLaunchMode,
+  resolved_target: Schema.String,
+  message: Schema.String
+})
+export type ReaderProfileTestResult = typeof ReaderProfileTestResult.Type
