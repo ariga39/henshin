@@ -12,12 +12,19 @@ import {
   OperationExpired,
   OperationConflict,
   RevisionConflict,
+  RootVerificationFailed,
   RootPreviewUnavailable,
   StorageFull
 } from "./errors"
 import { NoteId, Uuid } from "./ids"
 import { EditNotePayload, HandshakeData, Note, OperationResult } from "./note"
-import { RootPreview, RootPreviewRequest } from "./root"
+import {
+  RootPreview,
+  RootPreviewRequest,
+  RootRegistrationRequest,
+  ServerRoot,
+  ServerRootList
+} from "./root"
 
 /**
  * Isolated synthetic prototype API. The `/prototype/v1` prefix and the
@@ -77,10 +84,27 @@ export const PrototypeApi = HttpApi.make("henshin-prototype").add(
 export const ServerApi = HttpApi.make("henshin-server").add(
   HttpApiGroup.make("roots", { topLevel: true })
     .add(
+      HttpApiEndpoint.get("list", "/roots", {
+        success: SuccessEnvelope(ServerRootList),
+        error: [AuthenticationRequired, InternalError]
+      }),
       HttpApiEndpoint.post("preview", "/roots/preview", {
         payload: RootPreviewRequest,
         success: SuccessEnvelope(RootPreview),
         error: [AuthenticationRequired, InvalidRequest, RootPreviewUnavailable, InternalError]
+      }),
+      HttpApiEndpoint.post("save", "/roots", {
+        payload: RootRegistrationRequest,
+        success: SuccessEnvelope(ServerRoot),
+        error: [
+          AuthenticationRequired,
+          InvalidRequest,
+          OperationConflict,
+          EpochChanged,
+          InstanceMismatch,
+          RootVerificationFailed,
+          InternalError
+        ]
       })
     )
     .prefix("/api/v1")

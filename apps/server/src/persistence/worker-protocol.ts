@@ -12,6 +12,34 @@ export type NoteRow = typeof NoteRow.Type
 export const ReadNoteResult = Schema.NullOr(NoteRow)
 export type ReadNoteResult = typeof ReadNoteResult.Type
 
+export const ServerRootRow = Schema.Struct({
+  libraryId: Uuid,
+  rootId: Uuid,
+  label: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
+  selectedPath: Schema.String,
+  canonicalPath: Schema.String,
+  device: Schema.String,
+  inode: Schema.String,
+  mappingRevision: Revision,
+  state: Schema.Literal("active")
+})
+export type ServerRootRow = typeof ServerRootRow.Type
+
+export const RootRegistrationOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("registered"), root: ServerRootRow }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), root: ServerRootRow }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("root_overlap") })
+])
+export type RootRegistrationOutcome = typeof RootRegistrationOutcome.Type
+
+export const RootReplayLookup = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("not_found") }),
+  Schema.Struct({ kind: Schema.Literal("replay"), root: ServerRootRow }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") })
+])
+export type RootReplayLookup = typeof RootReplayLookup.Type
+
 export const OperationResultRow = Schema.Struct({
   operationId: Uuid,
   note: NoteRow,
@@ -43,6 +71,16 @@ export type CommitOutcome = typeof CommitOutcome.Type
 export const WorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("init") }),
   Schema.Struct({ op: Schema.Literal("readNote"), noteId: NoteId }),
+  Schema.Struct({ op: Schema.Literal("listRoots") }),
+  Schema.Struct({
+    op: Schema.Literal("lookupRootOperation"),
+    operationId: Uuid,
+    label: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
+    selectedPath: Schema.String,
+    canonicalPath: Schema.String,
+    device: Schema.String,
+    inode: Schema.String
+  }),
   Schema.Struct({
     op: Schema.Literal("readOperation"),
     operationId: Uuid,
@@ -55,6 +93,15 @@ export const WorkerRequest = Schema.Union([
     expectedRevision: Revision,
     operationId: Uuid,
     epoch: Uuid
+  }),
+  Schema.Struct({
+    op: Schema.Literal("registerRoot"),
+    operationId: Uuid,
+    label: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
+    selectedPath: Schema.String,
+    canonicalPath: Schema.String,
+    device: Schema.String,
+    inode: Schema.String
   }),
   Schema.Struct({ op: Schema.Literal("close") })
 ])

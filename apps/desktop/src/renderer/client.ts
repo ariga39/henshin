@@ -9,6 +9,9 @@ import type {
   PublicError,
   SavedDraft,
   RootPreview,
+  RootRegistrationRequest,
+  ServerRoot,
+  ServerRootList,
   SavedDraftAbsent
 } from "@henshin/contracts"
 
@@ -68,6 +71,8 @@ declare global {
 
 export interface RootPreviewBridge {
   preview(path: string): Promise<Result<RootPreview>>
+  list(): Promise<Result<ServerRootList>>
+  save(input: RootRegistrationRequest): Promise<Result<ServerRoot>>
 }
 
 /**
@@ -130,12 +135,18 @@ export class PrototypeClient extends Context.Service<
 
 export class RootPreviewClient extends Context.Service<
   RootPreviewClient,
-  { readonly preview: (path: string) => Effect.Effect<Result<RootPreview>> }
+  {
+    readonly preview: (path: string) => Effect.Effect<Result<RootPreview>>
+    readonly list: () => Effect.Effect<Result<ServerRootList>>
+    readonly save: (input: RootRegistrationRequest) => Effect.Effect<Result<ServerRoot>>
+  }
 >()("henshin/desktop/renderer/RootPreviewClient") {
   static readonly layer = Layer.succeed(
     RootPreviewClient,
     RootPreviewClient.of({
-      preview: (path) => callIpc(() => window.henshinRootPreview.preview(path))
+      preview: (path) => callIpc(() => window.henshinRootPreview.preview(path)),
+      list: () => callIpc(() => window.henshinRootPreview.list()),
+      save: (input) => callIpc(() => window.henshinRootPreview.save(input))
     })
   )
 }

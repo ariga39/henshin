@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 import { DraftFormId, NoteId, Revision, Text, Uuid } from "./ids"
-import { RootPreviewRequest } from "./root"
+import { RootPreviewRequest, RootRegistrationRequest } from "./root"
 import type {
   CommandAttempt,
   CommandReconciliation,
@@ -117,3 +117,7 @@ export const HandshakeView = Schema.Struct({
 export type HandshakeView = typeof HandshakeView.Type
 
 export const RootPreviewIpcRequest = RootPreviewRequest
+export const RootListIpcRequest = Schema.Struct({})
+export type RootListIpcRequest = typeof RootListIpcRequest.Type
+export const RootSaveIpcRequest = RootRegistrationRequest
+export type RootSaveIpcRequest = typeof RootSaveIpcRequest.Type

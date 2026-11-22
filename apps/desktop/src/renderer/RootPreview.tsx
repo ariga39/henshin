@@ -1,9 +1,12 @@
 import { useSyncExternalStore } from "react"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { previewRoot } from "./workflows"
+import { previewRoot, saveRoot } from "./workflows"
 
 const rootPreviewStatusText = (state: ReturnType<typeof viewStore.getState>): string => {
+  if (state.root_save_status === "loading") return "Saving server root…"
+  if (state.root_save_status === "error") return `Save failed: ${state.root_save_error}`
+  if (state.root_save_status === "ready") return "Server root saved."
   if (state.root_preview_status === "loading") return "Previewing directory…"
   if (state.root_preview_status === "error") {
     return `Preview failed: ${state.root_preview_error}. Check the server path and try again.`
@@ -19,6 +22,8 @@ const rootPreviewStatusText = (state: ReturnType<typeof viewStore.getState>): st
 export const RootPreviewScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   const loading = state.root_preview_status === "loading"
+  const saving = state.root_save_status === "loading"
+  const canSave = state.root_preview !== null && state.root_preview_status === "ready" && state.root_label.length > 0
   return (
     <main className="collection">
       <h1>Collection setup</h1>
@@ -35,10 +40,17 @@ export const RootPreviewScreen = () => {
           {loading ? "Previewing…" : "Preview directory"}
         </button>
       </form>
+      <label htmlFor="root-label">Root label</label>
+      <input id="root-label" data-testid="root-label" value={state.root_label}
+        disabled={saving} required spellCheck={false}
+        onChange={(event) => viewStore.set({ root_label: event.target.value, root_save_status: "idle", root_save_error: null })} />
       {state.root_preview_selected_path && (
         <h2 data-testid="root-preview-selected-path">{state.root_preview_selected_path}</h2>
       )}
       <p role="status" data-testid="root-preview-outcome">{rootPreviewStatusText(state)}</p>
+      <button data-testid="root-save" disabled={!canSave || saving} onClick={() => void runtime.runPromise(saveRoot)}>
+        {saving ? "Saving…" : "Save server root"}
+      </button>
       {state.root_preview_status === "error" && state.root_preview_selected_path === state.root_preview_path && (
         <button data-testid="root-preview-retry" onClick={() => void runtime.runPromise(previewRoot(state.root_preview_path))}>
           Retry preview
@@ -51,6 +63,18 @@ export const RootPreviewScreen = () => {
           ))}
         </ul>
       )}
+      <section aria-labelledby="saved-roots-heading">
+        <h2 id="saved-roots-heading">Saved server roots</h2>
+        {state.root_roots_status === "loading" && <p>Loading saved roots…</p>}
+        {state.root_roots_status === "error" && <p>Could not load saved roots: {state.root_roots_error}</p>}
+        <ul data-testid="root-saved-roots">
+          {state.root_saved_roots.map((root) => (
+            <li key={root.root_id} data-testid="root-saved">
+              <strong>{root.label}</strong><span> {root.selected_server_path}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
     </main>
   )
 }

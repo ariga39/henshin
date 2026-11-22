@@ -164,6 +164,17 @@ export class RootPreviewUnavailable extends Schema.TaggedError<RootPreviewUnavai
   { httpApiStatus: 503 }
 ) {}
 
+export class RootVerificationFailed extends Schema.TaggedError<RootVerificationFailed>()(
+  "RootVerificationFailed",
+  {
+    code: Schema.Literal("root_verification_failed"),
+    message: Schema.String,
+    retryable: Schema.Literal(false),
+    ...envelope
+  },
+  { httpApiStatus: 409 }
+) {}
+
 /**
  * Every public error, as a single schema. Clients map an unknown failure to the
  * public shape only when it decodes here; anything else becomes an opaque
@@ -182,6 +193,7 @@ export const PublicApiError = Schema.Union([
   EpochChanged,
   InstanceMismatch,
   RootPreviewUnavailable,
+  RootVerificationFailed,
   InternalError
 ])
 export type PublicApiError = typeof PublicApiError.Type
