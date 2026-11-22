@@ -16,6 +16,7 @@ import {
   RootVerificationFailed,
   RootPreviewUnavailable,
   ActiveScanConflict,
+  CandidateNotFound,
   TaskNotFound,
   StorageFull,
   ThumbnailMissing,
@@ -36,7 +37,13 @@ import {
   ServerRoot,
   ServerRootList
 } from "./root"
-import { LibraryEntryPage, LibrarySearchRequest, LibraryView } from "./library"
+import {
+  IndexedRootSamplePage,
+  LibraryEntryPage,
+  LibrarySearchRequest,
+  LibraryView
+} from "./library"
+import { ReviewCandidateCommandRequest, ReviewCommandResult } from "./review"
 import { ThumbnailKey } from "./thumbnail"
 
 /**
@@ -165,6 +172,23 @@ export const ReviewApi = HttpApi.make("henshin-review").add(
       HttpApiEndpoint.get("candidates", "/review/candidates", {
         success: SuccessEnvelope(StagedDiscoveryList),
         error: [AuthenticationRequired, InternalError]
+      }),
+      HttpApiEndpoint.post("command", "/review/candidates/:id/commands", {
+        params: { id: Uuid },
+        payload: ReviewCandidateCommandRequest,
+        success: SuccessEnvelope(ReviewCommandResult),
+        error: [
+          AuthenticationRequired,
+          CandidateNotFound,
+          InvalidRequest,
+          OperationConflict,
+          OperationExpired,
+          EpochChanged,
+          InstanceMismatch,
+          RevisionConflict,
+          StorageFull,
+          InternalError
+        ]
       })
     )
     .prefix("/api/v1")
@@ -182,6 +206,11 @@ export const LibraryApi = HttpApi.make("henshin-library").add(
         payload: LibrarySearchRequest,
         success: SuccessEnvelope(LibraryEntryPage),
         error: [AuthenticationRequired, InvalidRequest, InternalError]
+      }),
+      HttpApiEndpoint.get("indexedSamples", "/roots/:id/indexed-samples", {
+        params: { id: Uuid },
+        success: SuccessEnvelope(IndexedRootSamplePage),
+        error: [AuthenticationRequired, RootNotFound, InternalError]
       })
     )
     .prefix("/api/v1")

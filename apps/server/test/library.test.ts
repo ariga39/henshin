@@ -238,7 +238,7 @@ describe("normal library scan", () => {
       })
     }))
 
-    const held = await withServerClient(server, Effect.gen(function*() {
+    const submitHeld = () => withServerClient(server, Effect.gen(function*() {
       const client = yield* ServerHttpClient
       return yield* client.command({
         params: { id: root.data.root_id },
@@ -252,6 +252,7 @@ describe("normal library scan", () => {
         }
       })
     }))
+    const held = await submitHeld()
     if (!("task" in held.data)) throw new Error("expected held scan task submission")
     expect((await waitForTerminal(server, held.data.task.task_id)).status).toBe("succeeded")
 
@@ -294,6 +295,21 @@ describe("normal library scan", () => {
       "held-book-c"
     ])
     expect(staged.data.every((candidate) => candidate.hold_state === "held")).toBe(true)
+
+    await makeImageBook(fixture, "later-discovery")
+    const nextHeld = await submitHeld()
+    if (!("task" in nextHeld.data)) throw new Error("expected a new held scan")
+    expect(await waitForTerminal(server, nextHeld.data.task.task_id)).toMatchObject({
+      status: "succeeded", candidates_analyzed: 6, review_needed_count: 4
+    })
+    const reviewAfterHeld = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).candidates()
+    }))
+    expect(reviewAfterHeld.data.map((candidate) => candidate.relative_path).sort()).toEqual([
+      "held-book-a", "held-book-b", "held-book-c", "later-discovery"
+    ])
+    expect(reviewAfterHeld.data.every((candidate) => candidate.hold_state === "held")).toBe(true)
+
   })
 
   it("keeps a changed occupied path staged without changing the accepted identity", async () => {
@@ -503,5 +519,57 @@ describe("normal library scan", () => {
       return yield* client.search({ payload: { page_size: 200 } })
     }))
     expect(entries.data.entries.map((entry) => entry.relative_path).sort()).toEqual(["excluded-book", "new-book"])
+  })
+
+  it("returns bounded root-scoped indexed format and size evidence", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-mapping-samples-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "series-pages")
+    await writeFile(path.join(fixture, "series-pages", "002.png"), "second page")
+    await makeZip(path.join(fixture, "archive.cbz"))
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+          label: "Mapping samples", path: fixture, preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+
+    const submitted = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in submitted.data)) throw new Error("expected scan task")
+    expect((await waitForTerminal(server, submitted.data.task.task_id)).status).toBe("succeeded")
+
+    const samples = await withLibraryClient(server, Effect.gen(function*() {
+      const client = yield* LibraryHttpClient
+      return yield* client.indexedSamples({ params: { id: root.data.root_id } })
+    }))
+
+    expect(samples.data).toMatchObject({
+      root_id: root.data.root_id,
+      sample_limit: 32,
+      sample_truncated: false,
+      samples: [
+        { relative_path: "archive.cbz", kind: "archive", format_evidence: ["jpeg"] },
+        { relative_path: "series-pages", kind: "image-directory", format_evidence: ["jpeg", "png"] }
+      ]
+    })
+    expect(samples.data.samples.every((sample) => sample.size_bytes !== null && sample.size_bytes > 0)).toBe(true)
   })
 })

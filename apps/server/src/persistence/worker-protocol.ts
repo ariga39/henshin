@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
-import { RootExclusions, RootPolicyCommand } from "@henshin/contracts/root"
+import { RootExclusions, RootPolicyCommand, RootRelativePath } from "@henshin/contracts/root"
 import { ThumbnailReference } from "@henshin/contracts/thumbnail"
 
 /** A persisted prototype note row, always with a canonical decimal revision. */
@@ -167,6 +167,21 @@ export const LibraryEntryPageRow = Schema.Struct({
 })
 export type LibraryEntryPageRow = typeof LibraryEntryPageRow.Type
 
+export const IndexedRootSampleRow = Schema.Struct({
+  relative_path: RootRelativePath,
+  kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  format_evidence: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
+  size_bytes: Schema.NullOr(Schema.Natural)
+})
+export type IndexedRootSampleRow = typeof IndexedRootSampleRow.Type
+
+export const IndexedRootSamplePageRow = Schema.Struct({
+  samples: Schema.Array(IndexedRootSampleRow),
+  sample_truncated: Schema.Boolean,
+  library_change_revision: Revision
+})
+export type IndexedRootSamplePageRow = typeof IndexedRootSamplePageRow.Type
+
 export const NormalPublishOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("published") }),
   Schema.Struct({
@@ -184,6 +199,21 @@ export const NormalPublishOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("policy_revision_conflict") })
 ])
 export type NormalPublishOutcome = typeof NormalPublishOutcome.Type
+
+export const ReleaseHeldDiscoveryOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("committed"), candidate: StagedDiscoveryRow }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), candidate: StagedDiscoveryRow }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("operation_expired") }),
+  Schema.Struct({ kind: Schema.Literal("storage_full") }),
+  Schema.Struct({ kind: Schema.Literal("root_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("candidate_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("candidate_version_conflict"), currentCandidateVersion: Schema.Natural }),
+  Schema.Struct({ kind: Schema.Literal("mapping_revision_conflict"), currentMappingRevision: Revision }),
+  Schema.Struct({ kind: Schema.Literal("policy_revision_conflict"), currentPolicyRevision: Revision }),
+  Schema.Struct({ kind: Schema.Literal("candidate_not_held"), currentCandidateVersion: Schema.Natural })
+])
+export type ReleaseHeldDiscoveryOutcome = typeof ReleaseHeldDiscoveryOutcome.Type
 
 export const ScanStartOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("active_scan_conflict"), taskId: Uuid, policyRevision: Revision }),
@@ -274,8 +304,19 @@ export const WorkerRequest = Schema.Union([
     expectedPolicyRevision: Revision,
     observedCandidatePaths: Schema.Array(Schema.String)
   }),
+  Schema.Struct({
+    op: Schema.Literal("releaseHeldDiscovery"),
+    candidateId: Uuid,
+    rootId: Uuid,
+    operationId: Uuid,
+    epoch: Uuid,
+    expectedCandidateVersion: Schema.Natural,
+    expectedMappingRevision: Revision,
+    expectedPolicyRevision: Revision
+  }),
   Schema.Struct({ op: Schema.Literal("readLibrary") }),
   Schema.Struct({ op: Schema.Literal("listLibraryEntries"), pageSize: Schema.Natural, cursor: Schema.NullOr(Uuid) }),
+  Schema.Struct({ op: Schema.Literal("listIndexedRootSamples"), rootId: Uuid, sampleLimit: Schema.Literal(33) }),
   Schema.Struct({ op: Schema.Literal("readAcceptedThumbnailEntry"), entryId: Uuid }),
   Schema.Struct({
     op: Schema.Literal("finishScan"),

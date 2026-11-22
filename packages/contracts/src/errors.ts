@@ -209,6 +209,17 @@ export class TaskNotFound extends Schema.TaggedError<TaskNotFound>()(
   { httpApiStatus: 404 }
 ) {}
 
+export class CandidateNotFound extends Schema.TaggedError<CandidateNotFound>()(
+  "CandidateNotFound",
+  {
+    code: Schema.Literal("not_found"),
+    message: Schema.String,
+    retryable: Schema.Literal(false),
+    ...envelope
+  },
+  { httpApiStatus: 404 }
+) {}
+
 export class ThumbnailMissing extends Schema.TaggedError<ThumbnailMissing>()(
   "ThumbnailMissing",
   {
@@ -256,6 +267,7 @@ export const PublicApiError = Schema.Union([
   RootNotFound,
   ActiveScanConflict,
   TaskNotFound,
+  CandidateNotFound,
   InternalError
 ])
 export type PublicApiError = typeof PublicApiError.Type

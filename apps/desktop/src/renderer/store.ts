@@ -2,6 +2,7 @@ import type {
   CommandAttempt,
   CommandReconciliation,
   ConnectionStatusView,
+  LocalMappingPreview,
   LibraryEntry,
   NoteView,
   RootPreviewRequest,
@@ -55,6 +56,10 @@ export interface ViewState {
   readonly root_save_target_path: string | null
   readonly root_policy_status: "idle" | "loading" | "error"
   readonly root_policy_error: string | null
+  readonly local_mapping_root_id: string | null
+  readonly local_mapping_status: "idle" | "loading" | "ready" | "error"
+  readonly local_mapping_preview: LocalMappingPreview | null
+  readonly local_mapping_error: string | null
   readonly scan_tasks: ReadonlyArray<ScanTask>
   readonly staged_discoveries: ReadonlyArray<StagedDiscovery>
   readonly scan_status: "idle" | "loading" | "ready" | "error"
@@ -108,6 +113,10 @@ const initialState: ViewState = {
   root_save_target_path: null,
   root_policy_status: "idle",
   root_policy_error: null,
+  local_mapping_root_id: null,
+  local_mapping_status: "idle",
+  local_mapping_preview: null,
+  local_mapping_error: null,
   scan_tasks: [],
   staged_discoveries: [],
   scan_status: "idle",
