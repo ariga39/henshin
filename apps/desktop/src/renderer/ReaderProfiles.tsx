@@ -73,11 +73,14 @@ export const ReaderProfiles = () => {
     setDraft((current) => ({ ...current, [key]: value }))
   }
 
-  const toggleFormat = (format: ReaderEntryFormat): void => {
-    const formats = draft.supported_formats.includes(format)
-      ? draft.supported_formats.filter((candidate) => candidate !== format)
-      : [...draft.supported_formats, format]
-    update("supported_formats", formats)
+  const selectFormat = (format: ReaderEntryFormat): void => {
+    setDraft((current) => ({
+      ...current,
+      supported_formats: [format],
+      target_mode: format === "archive"
+        ? "archive"
+        : current.target_mode === "archive" ? "directory" : current.target_mode
+    }))
   }
 
   const edit = (profile: ReaderProfile): void => {
@@ -93,10 +96,14 @@ export const ReaderProfiles = () => {
   }
 
   const save = async (): Promise<void> => {
-    const selectionHandle = viewStore.getState().reader_profile_selection_handle
+    const state = viewStore.getState()
+    const selectionHandle = state.reader_profile_selection_handle
+    const currentRevision = draft.profile_id === null
+      ? draft.expected_revision
+      : state.reader_profiles.find((profile) => profile.profile_id === draft.profile_id)?.revision ?? draft.expected_revision
     const saved = await runtime.runPromise(saveReaderProfile({
       profile_id: draft.profile_id,
-      expected_revision: draft.expected_revision,
+      expected_revision: currentRevision,
       name: draft.name,
       launch_mode: draft.launch_mode,
       supported_formats: draft.supported_formats,
@@ -201,22 +208,24 @@ export const ReaderProfiles = () => {
         </select>
 
         <fieldset>
-          <legend>Supported entry formats</legend>
+          <legend>Supported entry format (choose one)</legend>
           {(["archive", "image-directory"] as const).map((format) => (
             <label key={format}>
               <input
-                type="checkbox"
+                type="radio"
+                name="reader-profile-format"
                 data-testid={`reader-format-${format}`}
                 checked={draft.supported_formats.includes(format)}
                 disabled={saving}
-                onChange={() => toggleFormat(format)}
+                onChange={() => selectFormat(format)}
               />
               {formatLabel(format)}
             </label>
           ))}
+          <small data-testid="reader-format-help">A profile targets either archives or image directories.</small>
         </fieldset>
 
-        <label htmlFor="reader-profile-target-mode">Target mode</label>
+        <label htmlFor="reader-profile-target-mode">Target mode for the selected format</label>
         <select
           id="reader-profile-target-mode"
           data-testid="reader-profile-target-mode"
@@ -224,9 +233,14 @@ export const ReaderProfiles = () => {
           disabled={saving}
           onChange={(event) => update("target_mode", event.target.value as ReaderTargetMode)}
         >
-          <option value="archive">Archive itself</option>
-          <option value="directory">Image-directory root</option>
-          <option value="first-image">First image (directories only)</option>
+          {draft.supported_formats.includes("image-directory") ? (
+            <>
+              <option value="directory">Image-directory root</option>
+              <option value="first-image">First image in directory</option>
+            </>
+          ) : (
+            <option value="archive">Archive itself</option>
+          )}
         </select>
 
         {draft.launch_mode === "explicit-executable" ? (

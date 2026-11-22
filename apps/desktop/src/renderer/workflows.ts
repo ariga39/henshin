@@ -191,7 +191,14 @@ export const saveReaderProfile = (input: ReaderProfileSaveIpcRequest) =>
     yield* Effect.sync(() => viewStore.set({ reader_profile_save_status: "loading", reader_profile_save_error: null }))
     const result = yield* client.save(input)
     if (!result.ok) {
-      if (result.error.code === "reader_profile_conflict") yield* refreshReaderProfilesAfterConflict()
+      if (result.error.code === "reader_profile_conflict") {
+        yield* refreshReaderProfilesAfterConflict()
+      } else if (result.error.code === "reader_profile_not_found") {
+        yield* loadReaderProfiles
+      }
+      if (result.error.code === "reader_executable_invalid") {
+        yield* Effect.sync(clearReaderExecutableSelection)
+      }
       yield* Effect.sync(() => viewStore.set({
         reader_profile_save_status: "error",
         reader_profile_save_error: result.error.message
