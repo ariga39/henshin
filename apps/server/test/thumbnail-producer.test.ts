@@ -144,6 +144,7 @@ const makeServices = async (
     root_id: rootId,
     relative_path: sourceKind === "directory" ? "book" : "book.cbz",
     kind: sourceKind === "directory" ? "image-directory" as const : "archive" as const,
+    state: "accepted" as const,
     content_version: "1",
     manifest_json: JSON.stringify(manifestView(manifest))
   }

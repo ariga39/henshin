@@ -4,8 +4,8 @@ import { basename, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contracts/canonical"
-import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanAnalysisError, ScanManifest } from "@henshin/contracts/root"
-import { INDEXED_ROOT_SAMPLE_LIMIT } from "@henshin/contracts"
+import { INDEXED_ROOT_SAMPLE_LIMIT, ScanManifest } from "@henshin/contracts"
+import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanAnalysisError } from "@henshin/contracts/root"
 import { caseFold } from "unicode-case-folding"
 import {
   WorkerMessage,
@@ -38,13 +38,40 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
-const CURRENT_SCHEMA_VERSION = 6
+const CURRENT_SCHEMA_VERSION = 7
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
 const MAX_POLICY_OPERATION_RESULTS = 1024
 const COMPACTION_BATCH = 64
 const MAX_REPORTED_DEFERRED_PATHS = 32
+
+const persistedManifest = (value: string, field: string): typeof ScanManifest.Type => {
+  const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
+  if (Option.isNone(decoded)) throw new Error(`invalid persisted ${field}`)
+  return decoded.value
+}
+
+const persistedAnalysisError = (value: string | null): typeof ScanAnalysisError.Type | null => {
+  if (value === null) return null
+  const decoded = Schema.decodeUnknownOption(ScanAnalysisError)(JSON.parse(value))
+  if (Option.isNone(decoded)) throw new Error("invalid persisted candidate analysis error")
+  return decoded.value
+}
+
+const replacementObservation = (
+  manifest: typeof ScanManifest.Type,
+  kind: "archive" | "image-directory"
+): import("@henshin/contracts").ReplacementObservation => ({
+  kind,
+  page_count: manifest.pages.length,
+  format_evidence: Array.from(new Set(manifest.pages.map((page) => page.format))).slice(0, 8),
+  size_bytes: kind === "archive"
+    ? manifest.after.bytes
+    : manifest.pages.reduce((total, page) => total + page.declared_bytes, 0),
+  entry_count: manifest.after.entry_count,
+  diagnostics: manifest.diagnostics
+})
 
 const resolutionParentKey = (relativePath: string): string => {
   const separator = relativePath.lastIndexOf("/")
@@ -199,7 +226,7 @@ db.exec(`
     kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
     title TEXT NOT NULL,
     page_count INTEGER NOT NULL,
-    state TEXT NOT NULL CHECK (state = 'accepted'),
+    state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending')),
     content_version INTEGER NOT NULL,
     location_revision INTEGER NOT NULL,
     decision_version INTEGER NOT NULL DEFAULT 1,
@@ -322,6 +349,62 @@ if (!db.prepare("SELECT 1 FROM pragma_table_info('root_policy_operations') WHERE
   db.prepare("UPDATE root_policy_operations SET created_at_ms = ?").run(Date.now())
 }
 
+const libraryEntriesTable = db.prepare(
+  "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'library_entries'"
+).get() as { sql: string } | undefined
+if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("replacement-pending")) {
+  db.exec("PRAGMA foreign_keys = OFF")
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    db.exec(`
+      CREATE TABLE library_entries_v7 (
+        entry_id TEXT PRIMARY KEY,
+        library_id TEXT NOT NULL REFERENCES server_library(library_id),
+        root_id TEXT NOT NULL REFERENCES server_roots(root_id),
+        relative_path TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
+        title TEXT NOT NULL,
+        page_count INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending')),
+        content_version INTEGER NOT NULL,
+        location_revision INTEGER NOT NULL,
+        decision_version INTEGER NOT NULL DEFAULT 1,
+        manifest_json TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        UNIQUE (root_id, relative_path)
+      );
+      INSERT INTO library_entries_v7
+        SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count,
+          state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms
+        FROM library_entries;
+      DROP TABLE library_entries;
+      ALTER TABLE library_entries_v7 RENAME TO library_entries;
+    `)
+    const migratedAt = Date.now()
+    const migrated = db.prepare(`
+      UPDATE library_entries
+      SET state = 'replacement-pending', updated_at_ms = ?
+      WHERE state = 'accepted'
+        AND EXISTS (
+          SELECT 1 FROM staged_discoveries s
+          WHERE s.root_id = library_entries.root_id
+            AND s.relative_path = library_entries.relative_path
+        )
+    `).run(migratedAt)
+    if (Number(migrated.changes) > 0) {
+      db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1").run()
+    }
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON")
+  }
+}
+
 const selectNote = db.prepare("SELECT note_id, text, revision FROM prototype_note WHERE note_id = ?")
 selectNote.setReadBigInts(true)
 const selectOperation = db.prepare(
@@ -378,26 +461,19 @@ const selectStagedDiscoveries = db.prepare(
 )
 selectStagedDiscoveries.setReadBigInts(true)
 const selectStaged = db.prepare(
-  "SELECT candidate_id, candidate_version, task_id, analysis_status, hold_state FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
+  "SELECT candidate_id, candidate_version, task_id, kind, analysis_status, hold_state, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
 selectStaged.setReadBigInts(true)
 const selectAcceptedThumbnailEntry = db.prepare(
-  "SELECT entry_id, root_id, relative_path, kind, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
+  "SELECT entry_id, root_id, relative_path, kind, state, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
 )
 selectAcceptedThumbnailEntry.setReadBigInts(true)
 const selectStagedById = db.prepare(
   "SELECT candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms FROM staged_discoveries WHERE candidate_id = ? AND root_id = ?"
 )
 selectStagedById.setReadBigInts(true)
-const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC")
-const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ? AND state = 'accepted'")
-const selectEntryResolution = db.prepare(
-  "SELECT entry_id, root_id, relative_path, kind, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
-)
-selectEntryResolution.setReadBigInts(true)
-const selectStagedForResolution = db.prepare(
-  "SELECT analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
-)
+const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
+const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path, state FROM library_entries WHERE root_id = ? AND relative_path = ? AND state IN ('accepted', 'replacement-pending')")
 const selectResolutionSiblingClaims = db.prepare(
   "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
 )
@@ -425,12 +501,35 @@ const updateEntryStatistics = db.prepare(
 const insertEntry = db.prepare(
   "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?)"
 )
+const markEntryPending = db.prepare(
+  "UPDATE library_entries SET state = 'replacement-pending', updated_at_ms = ? WHERE entry_id = ? AND state = 'accepted'"
+)
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
 const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
 const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
-const selectLibraryEntries = (cursor: string | null, limit: number) => cursor === null
-  ? db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision FROM library_entries ORDER BY entry_id ASC LIMIT ?").all(limit)
-  : db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision FROM library_entries WHERE entry_id > ? ORDER BY entry_id ASC LIMIT ?").all(cursor, limit)
+const selectLibraryEntries = (cursor: string | null, limit: number) => {
+  const statement = db.prepare(cursor === null
+    ? `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
+         e.page_count, e.state, e.content_version, e.location_revision,
+         CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.manifest_json ELSE NULL END AS manifest_json,
+         s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
+         s.manifest_json AS candidate_manifest_json, s.analysis_error_json AS candidate_analysis_error_json
+       FROM library_entries e
+       LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
+       WHERE e.state IN ('accepted', 'replacement-pending')
+       ORDER BY e.entry_id ASC LIMIT ?`
+    : `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
+         e.page_count, e.state, e.content_version, e.location_revision,
+         CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.manifest_json ELSE NULL END AS manifest_json,
+         s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
+         s.manifest_json AS candidate_manifest_json, s.analysis_error_json AS candidate_analysis_error_json
+       FROM library_entries e
+       LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
+       WHERE e.entry_id > ? AND e.state IN ('accepted', 'replacement-pending')
+       ORDER BY e.entry_id ASC LIMIT ?`)
+  statement.setReadBigInts(true)
+  return cursor === null ? statement.all(limit) : statement.all(cursor, limit)
+}
 const selectIndexedRootSamples = db.prepare(
   "SELECT relative_path, kind, manifest_json FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC LIMIT ?"
 )
@@ -958,12 +1057,29 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
   try {
     requireCurrentScanFence(request.taskId, request.rootId)
     const existing = selectStaged.get(request.rootId, request.relativePath) as
-      | { candidate_id: string; candidate_version: bigint; task_id: string; analysis_status: string; hold_state: string }
+      | {
+          candidate_id: string
+          candidate_version: bigint
+          task_id: string
+          kind: "archive" | "image-directory"
+          analysis_status: "ready" | "error"
+          hold_state: "held" | "eligible"
+          manifest_json: string | null
+          analysis_error_json: string | null
+        }
       | undefined
-    const accepted = selectEntry.get(request.rootId, request.relativePath)
-    const unchangedHeldScan = request.holdState === "held" && request.analysisStatus === "ready"
-      && accepted !== undefined && accepted.kind === request.kind && accepted.manifest_json === request.manifestJson
-    if (unchangedHeldScan) {
+    const accepted = selectEntry.get(request.rootId, request.relativePath) as {
+      entry_id: string
+      manifest_json: string
+      kind: "archive" | "image-directory"
+      title: string
+      source_path: string
+      state: "accepted" | "replacement-pending"
+      state: "accepted" | "replacement-pending"
+    } | undefined
+    const sameAcceptedObservation = request.analysisStatus === "ready" && request.manifestJson !== null && accepted !== undefined &&
+      accepted.state === "accepted" && accepted.kind === request.kind && accepted.manifest_json === request.manifestJson
+    if (sameAcceptedObservation) {
       if (existing !== undefined) deleteStaged.run(existing.candidate_id)
     } else {
       const held = accepted === undefined && (request.holdState === "held" || existing?.hold_state === "held")
@@ -980,6 +1096,15 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
         request.analysisErrorJson,
         Date.now()
       )
+      if (
+        accepted !== undefined &&
+        accepted.state === "accepted" &&
+        (request.analysisStatus === "error" || accepted.kind !== request.kind || accepted.manifest_json !== request.manifestJson)
+      ) {
+        if (Number(markEntryPending.run(Date.now(), accepted.entry_id).changes) === 1) bumpLibraryRevision.run()
+      } else if (accepted?.state === "replacement-pending" && existing !== undefined) {
+        bumpLibraryRevision.run()
+      }
     }
     const priorStatus = existing?.task_id === request.taskId ? existing.analysis_status : undefined
     requireScanTransition(db.prepare(`UPDATE scan_tasks SET
@@ -987,7 +1112,7 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
       review_needed_count = review_needed_count + ?, updated_at_ms = ? WHERE task_id = ? AND root_id = ? AND status = 'running'`).run(
       Number(request.analysisStatus === "ready") - Number(priorStatus === "ready"),
       Number(request.analysisStatus === "error") - Number(priorStatus === "error"),
-      Number(!unchangedHeldScan && priorStatus === undefined), Date.now(), request.taskId, request.rootId
+      Number(!sameAcceptedObservation && priorStatus === undefined), Date.now(), request.taskId, request.rootId
     ))
     db.exec("COMMIT")
   } catch (error) {
@@ -1105,9 +1230,16 @@ const entryRow = (row: {
   kind: "archive" | "image-directory"
   title: string
   page_count: bigint
-  state: "accepted"
+  state: "accepted" | "replacement-pending"
   content_version: bigint
   location_revision: bigint
+  manifest_json: string | null
+  candidate_id: string | null
+  candidate_version: bigint | null
+  candidate_kind: "archive" | "image-directory" | null
+  candidate_analysis_status: "ready" | "error" | null
+  candidate_manifest_json: string | null
+  candidate_analysis_error_json: string | null
 }): import("./worker-protocol").LibraryEntryRow => ({
   entry_id: row.entry_id,
   library_id: row.library_id,
@@ -1120,6 +1252,34 @@ const entryRow = (row: {
   state: row.state,
   content_version: row.content_version.toString(),
   location_revision: row.location_revision.toString(),
+  replacement: row.candidate_id === null || row.candidate_version === null || row.candidate_kind === null || row.candidate_analysis_status === null || row.manifest_json === null
+    ? null
+    : {
+        candidate_id: row.candidate_id,
+        candidate_version: Number(row.candidate_version),
+        old_observation: replacementObservation(persistedManifest(row.manifest_json, "accepted manifest"), row.kind),
+        candidate_observation: row.candidate_manifest_json === null
+          ? {
+              kind: row.candidate_kind,
+              page_count: 0,
+              format_evidence: [],
+              size_bytes: null,
+              entry_count: 0,
+              diagnostics: persistedAnalysisError(row.candidate_analysis_error_json)?.diagnostics ?? {
+                supported_pages: 0,
+                unsupported_pages: 0,
+                ignored_entries: 0,
+                directory_records: 0
+              },
+              analysis_status: row.candidate_analysis_status,
+              analysis_error: persistedAnalysisError(row.candidate_analysis_error_json)
+            }
+          : {
+              ...replacementObservation(persistedManifest(row.candidate_manifest_json, "candidate manifest"), row.candidate_kind),
+              analysis_status: row.candidate_analysis_status,
+              analysis_error: persistedAnalysisError(row.candidate_analysis_error_json)
+            }
+      },
   cover: {
     key: `default-v1.${row.entry_id}.${row.content_version.toString()}`,
     profile: "default-cover-v1"
@@ -1131,6 +1291,7 @@ const acceptedThumbnailEntryRow = (row: {
   root_id: string
   relative_path: string
   kind: "archive" | "image-directory"
+  state: "accepted" | "replacement-pending"
   content_version: bigint
   manifest_json: string
 }): import("./worker-protocol").AcceptedThumbnailEntryRow => ({
@@ -1138,6 +1299,7 @@ const acceptedThumbnailEntryRow = (row: {
   root_id: row.root_id,
   relative_path: row.relative_path,
   kind: row.kind,
+  state: row.state,
   content_version: row.content_version.toString(),
   manifest_json: row.manifest_json
 })
@@ -1237,6 +1399,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
         kind: "archive" | "image-directory"
         title: string
         source_path: string
+        state: "accepted" | "replacement-pending"
       } | undefined
       if (existing !== undefined) {
         existingForCandidate.set(candidate.relative_path, existing)
@@ -1273,7 +1436,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
             )
             changed = true
           }
-          deleteStaged.run(candidate.candidate_id)
+          if (existing.state === "accepted") deleteStaged.run(candidate.candidate_id)
         }
         continue
       }
@@ -1336,9 +1499,16 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
     kind: "archive" | "image-directory"
     title: string
     page_count: bigint
-    state: "accepted"
+    state: "accepted" | "replacement-pending"
     content_version: bigint
     location_revision: bigint
+    manifest_json: string | null
+    candidate_id: string | null
+    candidate_version: bigint | null
+    candidate_kind: "archive" | "image-directory" | null
+    candidate_analysis_status: "ready" | "error" | null
+    candidate_manifest_json: string | null
+    candidate_analysis_error_json: string | null
   }>
   const page = rows.slice(0, request.pageSize)
   const hasMore = rows.length > request.pageSize

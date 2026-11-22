@@ -159,4 +159,90 @@ describe("accepted default thumbnails", () => {
     expect(unknown.status).toBe(404)
     await expect(unknown.json()).resolves.toMatchObject({ code: "thumbnail_missing" })
   })
+
+  it("serves only an existing accepted cover while a replacement is pending", async () => {
+    const dbPath = await makeTempDbPath()
+    dbPaths.add(dbPath)
+    const server = await startServer(dbPath)
+    servers.push(server)
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-thumbnail-pending-"))
+    fixturePaths.add(fixture)
+    const cached = path.join(fixture, "cached")
+    const uncached = path.join(fixture, "uncached")
+    await mkdir(cached)
+    await mkdir(uncached)
+    await writeFile(path.join(cached, "001.png"), await makePage({ r: 30, g: 90, b: 220 }))
+    await writeFile(path.join(uncached, "001.png"), await makePage({ r: 30, g: 180, b: 90 }))
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected root preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: preview.data.instance_id,
+          epoch: preview.data.epoch,
+          label: "Pending thumbnail",
+          path: fixture,
+          preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+
+    const scan = async () => withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: server.instanceId,
+          epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+
+    const first = await scan()
+    if (!("task" in first.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
+    const accepted = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    const cachedEntry = accepted.data.entries.find((entry) => entry.relative_path === "cached")
+    const uncachedEntry = accepted.data.entries.find((entry) => entry.relative_path === "uncached")
+    if (cachedEntry?.cover === null || cachedEntry === undefined || uncachedEntry?.cover === null || uncachedEntry === undefined) {
+      throw new Error("expected accepted cover references")
+    }
+
+    const cachedBefore = await fetch(`${server.baseUrl}/api/v1/thumbnails/${encodeURIComponent(cachedEntry.cover.key)}`, {
+      headers: { authorization: `Bearer ${server.bearerToken}` }
+    })
+    expect(cachedBefore.status).toBe(200)
+    const acceptedBytes = Buffer.from(await cachedBefore.arrayBuffer())
+
+    await writeFile(path.join(cached, "001.png"), await makePage({ r: 220, g: 30, b: 40 }))
+    await writeFile(path.join(uncached, "001.png"), await makePage({ r: 220, g: 220, b: 30 }))
+    const replacement = await scan()
+    if (!("task" in replacement.data)) throw new Error("expected replacement scan task")
+    expect((await waitForTerminal(server, replacement.data.task.task_id)).readiness_error?.code).toBe("allocation_deferred")
+
+    const pending = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(pending.data.entries.filter((entry) => entry.state === "replacement-pending")).toHaveLength(2)
+
+    const cachedAfter = await fetch(`${server.baseUrl}/api/v1/thumbnails/${encodeURIComponent(cachedEntry.cover.key)}`, {
+      headers: { authorization: `Bearer ${server.bearerToken}` }
+    })
+    expect(cachedAfter.status).toBe(200)
+    expect(Buffer.from(await cachedAfter.arrayBuffer())).toEqual(acceptedBytes)
+
+    const uncachedAfter = await fetch(`${server.baseUrl}/api/v1/thumbnails/${encodeURIComponent(uncachedEntry.cover.key)}`, {
+      headers: { authorization: `Bearer ${server.bearerToken}` }
+    })
+    expect(uncachedAfter.status).toBe(404)
+    await expect(uncachedAfter.json()).resolves.toMatchObject({ code: "thumbnail_missing" })
+  })
 })
