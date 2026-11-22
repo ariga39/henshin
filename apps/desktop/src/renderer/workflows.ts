@@ -114,13 +114,21 @@ export const releaseHeldDiscovery = (candidateId: string) =>
       : state.root_saved_roots.find((item) => item.root_id === candidate.root_id)
     if (candidate === undefined || root === undefined || candidate.hold_state !== "held") return
 
-    const operationId = state.scan_release_candidate_id === candidateId
-      ? state.scan_release_operation_id ?? newOperationId()
-      : newOperationId()
+    const sameCommand = state.scan_release_candidate_id === candidate.candidate_id &&
+      state.scan_release_root_id === candidate.root_id &&
+      state.scan_release_operation_id !== null &&
+      state.scan_release_candidate_version === candidate.candidate_version &&
+      state.scan_release_mapping_revision === root.mapping_revision &&
+      state.scan_release_policy_revision === root.policy_revision
+    const operationId = sameCommand ? state.scan_release_operation_id : newOperationId()
     yield* Effect.sync(() => viewStore.set({
       scan_release_status: "loading",
-      scan_release_candidate_id: candidateId,
+      scan_release_candidate_id: candidate.candidate_id,
+      scan_release_root_id: candidate.root_id,
       scan_release_operation_id: operationId,
+      scan_release_candidate_version: candidate.candidate_version,
+      scan_release_mapping_revision: root.mapping_revision,
+      scan_release_policy_revision: root.policy_revision,
       scan_release_error: null
     }))
 
@@ -138,11 +146,25 @@ export const releaseHeldDiscovery = (candidateId: string) =>
         yield* loadRoots
         yield* loadScanResults
       }
+      const definiteFailure = result.error.code === "invalid_request" ||
+        result.error.code === "not_found" ||
+        result.error.code === "revision_conflict" ||
+        result.error.code === "operation_conflict" ||
+        result.error.code === "operation_expired" ||
+        result.error.code === "epoch_changed" ||
+        result.error.code === "instance_mismatch"
       yield* Effect.sync(() => viewStore.set({
         scan_release_status: "error",
-        scan_release_operation_id: result.error.code === "revision_conflict" || result.error.code === "not_found"
-          ? null
-          : operationId,
+        ...(definiteFailure
+          ? {
+              scan_release_candidate_id: null,
+              scan_release_root_id: null,
+              scan_release_operation_id: null,
+              scan_release_candidate_version: null,
+              scan_release_mapping_revision: null,
+              scan_release_policy_revision: null
+            }
+          : {}),
         scan_release_error: result.error.message
       }))
       return
@@ -155,6 +177,12 @@ export const releaseHeldDiscovery = (candidateId: string) =>
           item.candidate_id === result.data.candidate.candidate_id ? result.data.candidate : item
         ),
         scan_release_status: "idle",
+        scan_release_candidate_id: null,
+        scan_release_root_id: null,
+        scan_release_operation_id: null,
+        scan_release_candidate_version: null,
+        scan_release_mapping_revision: null,
+        scan_release_policy_revision: null,
         scan_release_error: null
       })
     })
