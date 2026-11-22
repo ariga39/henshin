@@ -21,6 +21,9 @@ interface CacheFile {
   readonly mtimeMs: number
 }
 
+const isNotFound = (error: unknown): boolean =>
+  typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
+
 const listFiles = async (directory: string): Promise<ReadonlyArray<CacheFile>> => {
   const entries = await readdir(directory, { withFileTypes: true })
   const files: Array<CacheFile> = []
@@ -78,15 +81,16 @@ export class ThumbnailCache extends Context.Service<ThumbnailCache, {
           try {
             const info = await stat(path)
             if (!info.isFile() || info.size > THUMBNAIL_MAX_BYTES) {
-              await unlink(path).catch(() => undefined)
+              await unlink(path)
               return null
             }
             const bytes = new Uint8Array(await readFile(path))
             const now = new Date()
             await utimes(path, now, now)
             return bytes
-          } catch {
-            return null
+          } catch (error) {
+            if (isNotFound(error)) return null
+            throw error
           }
         }),
         catch: () => new ThumbnailCacheError({ message: "thumbnail cache read failed" })
