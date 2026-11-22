@@ -2,6 +2,7 @@ import { Schema } from "effect"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import { RootExclusions, RootPolicyCommand } from "@henshin/contracts/root"
 import { ThumbnailReference } from "@henshin/contracts/thumbnail"
+import { OpenEvent, OpenEventOutcome } from "@henshin/contracts/event"
 
 /** A persisted prototype note row, always with a canonical decimal revision. */
 export const NoteRow = Schema.Struct({
@@ -159,6 +160,11 @@ export const LibrarySummaryRow = Schema.Struct({
 })
 export type LibrarySummaryRow = typeof LibrarySummaryRow.Type
 
+export const OpenEventBatchOutcome = Schema.Struct({
+  results: Schema.Array(OpenEventOutcome)
+})
+export type OpenEventBatchOutcome = typeof OpenEventBatchOutcome.Type
+
 export const LibraryEntryPageRow = Schema.Struct({
   entries: Schema.Array(LibraryEntryRow),
   has_more: Schema.Boolean,
@@ -302,6 +308,7 @@ export const WorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("readLibrary") }),
   Schema.Struct({ op: Schema.Literal("listLibraryEntries"), pageSize: Schema.Natural, cursor: Schema.NullOr(Uuid) }),
   Schema.Struct({ op: Schema.Literal("readAcceptedThumbnailEntry"), entryId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("acceptOpenEvents"), events: Schema.Array(OpenEvent) }),
   Schema.Struct({
     op: Schema.Literal("finishScan"),
     taskId: Uuid,
