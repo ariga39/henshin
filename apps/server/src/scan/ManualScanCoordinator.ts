@@ -8,6 +8,7 @@ import {
 } from "../analysis/SourceManifestAnalysis"
 import {
   discoverSourceRoot,
+  MANUAL_SCAN_SOURCE_DISCOVERY_LIMITS,
   revalidateSourceRoot,
   resolveSourceCandidate,
   type SourceRootObservation,
@@ -108,10 +109,18 @@ const finishUnexpected = (
   cause: Cause.Cause<unknown>
 ) => {
   const interrupted = Cause.hasInterruptsOnly(cause)
+  const rootFenceChanged = Cause.pretty(cause).includes(
+    "scan task no longer matches the current root mapping or policy"
+  )
   const error = interrupted
     ? {
         code: "scan_interrupted",
         message: "scan interrupted; staged discoveries and progress were preserved. Retry the scan after confirming the source is available."
+      }
+    : rootFenceChanged
+    ? {
+        code: "root_policy_changed",
+        message: "scan stopped because the saved root mapping or policy changed while it was running. Retry the scan to continue with the current root settings."
       }
     : {
         code: "scan_failed",
@@ -173,7 +182,10 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
     }
 
     const discovered = yield* Effect.tryPromise({
-      try: () => discoverSourceRoot(current.value, { exclusions: root.exclusions }),
+      try: () => discoverSourceRoot(current.value, {
+        limits: MANUAL_SCAN_SOURCE_DISCOVERY_LIMITS,
+        exclusions: root.exclusions
+      }),
       catch: () => undefined
     })
     if (!discovered.ok) {
@@ -196,11 +208,11 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
     progress = {
       ...progress,
       directoriesVisited: coverage.directories_visited,
-      candidatesDiscovered: discovered.value.candidates.length,
+      candidatesDiscovered: coverage.candidate_count,
       reviewNeededCount: 0,
       coverage
     }
-    yield* store.recordDiscovery(task.task_id, coverage, discovered.value.candidates.length)
+    yield* store.recordDiscovery(task.task_id, coverage, coverage.candidate_count)
 
     for (const candidate of discovered.value.candidates) {
       const resolved = yield* Effect.tryPromise({
