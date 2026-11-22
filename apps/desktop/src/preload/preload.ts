@@ -16,7 +16,18 @@ contextBridge.exposeInMainWorld("henshinRootPreview", {
       readonly device: string
       readonly inode: string
     }
-  }) => ipcRenderer.invoke(IpcChannels.rootSave, input)
+  }) => ipcRenderer.invoke(IpcChannels.rootSave, input),
+  command: (input: {
+    readonly root_id: string
+    readonly operation_id: string
+    readonly instance_id: string
+    readonly epoch: string
+    readonly expected_policy_revision: string
+    readonly command: {
+      readonly type: "exclude"
+      readonly exclusion: { readonly path: string; readonly scope: "exact" | "subtree" }
+    }
+  }) => ipcRenderer.invoke(IpcChannels.rootCommand, input)
 })
 
 if (new URLSearchParams(window.location.search).get("mode") === "prototype") {
