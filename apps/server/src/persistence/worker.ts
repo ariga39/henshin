@@ -5,6 +5,7 @@ import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalEditPayload } from "@henshin/contracts/canonical"
 import { MAX_ROOT_EXCLUSIONS, RootExclusions } from "@henshin/contracts/root"
+import { ScanManifest } from "@henshin/contracts"
 import {
   WorkerMessage,
   WorkerResponse,
@@ -327,6 +328,9 @@ const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revisio
 const selectLibraryEntries = (cursor: string | null, limit: number) => cursor === null
   ? db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision FROM library_entries ORDER BY entry_id ASC LIMIT ?").all(limit)
   : db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision FROM library_entries WHERE entry_id > ? ORDER BY entry_id ASC LIMIT ?").all(cursor, limit)
+const selectIndexedRootSamples = db.prepare(
+  "SELECT relative_path, kind, manifest_json FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC LIMIT ?"
+)
 const insertScanTask = db.prepare(
   "INSERT INTO scan_tasks(task_id, operation_id, epoch, root_id, mapping_revision, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, command_payload, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)"
 )
@@ -1070,6 +1074,33 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
   }
 }
 
+const indexedRootSamples = (
+  request: Extract<WorkerRequest, { op: "listIndexedRootSamples" }>
+): import("./worker-protocol").IndexedRootSamplePageRow => {
+  const rows = selectIndexedRootSamples.all(request.rootId, request.sampleLimit) as unknown as ReadonlyArray<{
+    relative_path: string
+    kind: "archive" | "image-directory"
+    manifest_json: string
+  }>
+  const page = rows.slice(0, 32)
+  return {
+    samples: page.map((row) => {
+      const parsed = JSON.parse(row.manifest_json) as unknown
+      const manifest = Schema.decodeUnknownOption(ScanManifest)(parsed)
+      if (Option.isNone(manifest)) throw new Error("invalid accepted manifest")
+      const formats = Array.from(new Set(manifest.value.pages.map((entry) => entry.format))).slice(0, 8)
+      return {
+        relative_path: row.relative_path,
+        kind: row.kind,
+        format_evidence: formats,
+        size_bytes: manifest.value.after.bytes
+      }
+    }),
+    sample_truncated: rows.length > 32,
+    library_change_revision: librarySummary().change_revision
+  }
+}
+
 const finishScan = (request: Extract<WorkerRequest, { op: "finishScan" }>): void => {
   db.exec("BEGIN IMMEDIATE")
   try {
@@ -1263,6 +1294,8 @@ const handle = (request: WorkerRequest): unknown => {
       return librarySummary()
     case "listLibraryEntries":
       return libraryEntries(request)
+    case "listIndexedRootSamples":
+      return indexedRootSamples(request)
     case "recordDiscovery":
       requireScanTransition(db.prepare(`UPDATE scan_tasks SET directories_visited = ?, candidates_discovered = ?, coverage_json = ?,
         updated_at_ms = ? WHERE task_id = ? AND status = 'running'`).run(
