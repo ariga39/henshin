@@ -24,6 +24,9 @@ const rootPreviewStatusText = (state: ReturnType<typeof viewStore.getState>): st
   }
   if (state.root_preview_status === "loading") return "Previewing directory…"
   if (state.root_preview_status === "error") {
+    if (state.root_preview_request && "kind" in state.root_preview_request) {
+      return `Saved collection preview failed: ${state.root_preview_error}. Retry when the collection is available.`
+    }
     return `Preview failed: ${state.root_preview_error}. Check the server path and try again.`
   }
   if (state.root_preview === null) return ""
@@ -43,7 +46,7 @@ const rootPreviewStatusText = (state: ReturnType<typeof viewStore.getState>): st
       ? "Preview is partial; some source locations could not be covered."
       : "Candidate preview is complete."
     const candidateText = coverage.candidate_sample_truncated
-      ? `Showing the first ${state.root_preview.sample_limit} candidates; more candidates are available.`
+      ? `Showing a sample of ${state.root_preview.sample_limit} candidates. More are available.`
       : null
     return [candidateText, coverageText, skipped.length > 0 ? `Skipped: ${skipped.join(", ")}.` : null]
       .filter((value): value is string => value !== null)
