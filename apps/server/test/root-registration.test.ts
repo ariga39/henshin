@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto"
 import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import { ServerHttpClient } from "@henshin/contracts"
+import type { RootPreview } from "@henshin/contracts"
 import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
 
 const servers: RunningServer[] = []
@@ -24,12 +25,14 @@ const withClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, Se
     Effect.provide(program, ServerHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken }))
   )
 
-const preview = async (server: RunningServer, selectedPath: string) =>
+const preview = async (server: RunningServer, selectedPath: string): Promise<{ readonly data: RootPreview }> =>
   withClient(
     server,
     Effect.gen(function*() {
       const client = yield* ServerHttpClient
-      return yield* client.preview({ payload: { path: selectedPath } })
+      const result = yield* client.preview({ payload: { path: selectedPath } })
+      if (!("children" in result.data)) throw new Error("expected setup preview")
+      return { data: result.data }
     })
   )
 

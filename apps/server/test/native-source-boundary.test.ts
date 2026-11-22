@@ -3,6 +3,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, describe, expect, it } from "vitest"
 import {
+  discoverSourceRoot,
   resolveSourceCandidate,
   selectSourceRoot,
   validateLocationSeparation,
@@ -262,5 +263,130 @@ describe("native source boundary precursor", () => {
     const observation = await selectedRoot(sourceRoot)
     expect((await resolveSourceCandidate(observation, "book.zip")).ok).toBe(true)
     expect(await readFile(archive)).toEqual(before)
+  })
+
+  it("discovers archives and independent direct-image directories without descending links", async () => {
+    const root = await makeTempRoot()
+    const sourceRoot = join(root, "collection")
+    const outside = join(root, "outside")
+    await mkdir(sourceRoot)
+    await mkdir(outside)
+    await writeFile(join(sourceRoot, "loose-002.png"), Buffer.from("page"))
+    await writeFile(join(sourceRoot, "loose-001.jpg"), Buffer.from("page"))
+    await writeFile(join(sourceRoot, "loose.gif"), Buffer.from("unsupported"))
+    await writeFile(join(sourceRoot, "book.CBZ"), Buffer.from("archive"))
+
+    const series = join(sourceRoot, "series")
+    const nested = join(series, "nested")
+    const unsupported = join(sourceRoot, "unsupported-only")
+    await mkdir(nested, { recursive: true })
+    await mkdir(unsupported)
+    await writeFile(join(series, "001.jpg"), Buffer.from("page"))
+    await writeFile(join(series, "notes.txt"), Buffer.from("ignored"))
+    await writeFile(join(nested, "002.webp"), Buffer.from("page"))
+    await writeFile(join(unsupported, "001.gif"), Buffer.from("unsupported"))
+
+    await mkdir(join(outside, "linked-book"))
+    await writeFile(join(outside, "linked-book", "outside.jpg"), Buffer.from("page"))
+    await symlink(join(outside, "linked-book"), join(sourceRoot, "linked-book"))
+
+    const observation = await selectedRoot(sourceRoot)
+    const result = await discoverSourceRoot(observation)
+    expect(result).toMatchObject({ ok: true })
+    if (!result.ok) throw new Error("expected source discovery")
+
+    expect(result.value.candidates.map(({ kind, relativePath, directImageCount, unsupportedDirectImageCount }) => ({
+      kind,
+      relativePath,
+      directImageCount,
+      unsupportedDirectImageCount
+    }))).toEqual([
+      { kind: "archive", relativePath: "book.CBZ", directImageCount: 0, unsupportedDirectImageCount: 0 },
+      { kind: "image-directory", relativePath: "series", directImageCount: 1, unsupportedDirectImageCount: 0 },
+      { kind: "image-directory", relativePath: "series/nested", directImageCount: 1, unsupportedDirectImageCount: 0 }
+    ])
+    expect(result.value.unassignedLooseImages).toEqual(["loose-001.jpg", "loose-002.png"])
+    expect(result.value.unassignedLooseImageCount).toBe(2)
+    expect(result.value.unsupportedLooseImages).toEqual(["loose.gif"])
+    expect(result.value.unsupportedLooseImageCount).toBe(1)
+    expect(result.value.coverage).toMatchObject({
+      status: "partial",
+      candidateCount: 3,
+      candidateSampleTruncated: false,
+      excludedLinks: ["linked-book"],
+      excludedLinkCount: 1,
+      unsupportedNames: [],
+      unsupportedNameCount: 0,
+      unsupportedDirectories: ["unsupported-only"],
+      unsupportedDirectoryCount: 1,
+      issueCount: 0,
+      issues: []
+    })
+  })
+
+  it("reports native names that cannot become portable paths without rewriting them", async () => {
+    const root = await makeTempRoot()
+    const sourceRoot = join(root, "collection")
+    await mkdir(sourceRoot)
+    await writeFile(join(sourceRoot, "C:book.zip"), Buffer.from("archive"))
+    await writeFile(join(sourceRoot, "bad\\name.zip"), Buffer.from("archive"))
+
+    const observation = await selectedRoot(sourceRoot)
+    const result = await discoverSourceRoot(observation)
+    expect(result).toMatchObject({ ok: true })
+    if (!result.ok) throw new Error("expected source discovery")
+    expect(result.value.candidates).toEqual([])
+    expect(result.value.coverage).toMatchObject({
+      status: "partial",
+      unsupportedNames: ["C:book.zip", "bad\\name.zip"],
+      unsupportedNameCount: 2,
+      issues: []
+    })
+  })
+
+  it("reports the candidate sample cap and recognized unsupported content", async () => {
+    const root = await makeTempRoot()
+    const sourceRoot = join(root, "collection")
+    await mkdir(sourceRoot)
+    await writeFile(join(sourceRoot, "unsupported.gif"), Buffer.from("unsupported"))
+    for (const name of ["one.zip", "two.zip", "three.zip"]) {
+      await writeFile(join(sourceRoot, name), Buffer.from("archive"))
+    }
+
+    const observation = await selectedRoot(sourceRoot)
+    const result = await discoverSourceRoot(observation, { limits: { maxCandidates: 2 } })
+    expect(result).toMatchObject({ ok: true })
+    if (!result.ok) throw new Error("expected bounded source discovery")
+    const sampled = result.value.candidates.map((candidate) => candidate.relativePath)
+    expect(new Set(sampled).size).toBe(2)
+    expect(["one.zip", "two.zip", "three.zip"]).toEqual(expect.arrayContaining(sampled))
+    expect(result.value.coverage).toMatchObject({
+      status: "partial",
+      candidateCount: 3,
+      candidateSampleTruncated: true
+    })
+    const uncapped = await discoverSourceRoot(observation)
+    expect(uncapped).toMatchObject({ ok: true, value: {
+      unsupportedLooseImages: ["unsupported.gif"], unsupportedLooseImageCount: 1,
+      coverage: { status: "partial" }
+    } })
+  })
+
+  it("keeps bounded discoveries explicit when nested coverage is incomplete", async () => {
+    const root = await makeTempRoot()
+    const sourceRoot = join(root, "collection")
+    await mkdir(join(sourceRoot, "first"), { recursive: true })
+    await mkdir(join(sourceRoot, "second"), { recursive: true })
+    await writeFile(join(sourceRoot, "first", "001.jpg"), Buffer.from("page"))
+    await writeFile(join(sourceRoot, "second", "001.jpg"), Buffer.from("page"))
+
+    const observation = await selectedRoot(sourceRoot)
+    const result = await discoverSourceRoot(observation, { limits: { maxDirectories: 1 } })
+    expect(result).toMatchObject({ ok: true })
+    if (!result.ok) throw new Error("expected bounded source discovery")
+    expect(result.value.coverage.status).toBe("partial")
+    expect(result.value.coverage.issues).toContainEqual({ code: "directory-limit", relativePath: "first" })
+    expect(result.value.coverage.directoriesVisited).toBe(1)
+    expect(result.value.candidates).toEqual([])
   })
 })

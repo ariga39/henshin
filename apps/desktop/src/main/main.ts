@@ -23,7 +23,8 @@ import {
   SaveDraftIpcRequest,
   ReconcileCommandIpcRequest,
   ConnectionStatusView,
-  type PublicError
+  type PublicError,
+  type RootPreviewResult
 } from "@henshin/contracts"
 import { startServerChild, type ServerChild } from "./server-child"
 import { DraftConflictError, DraftStore, DraftStoreFullError } from "./persistence/DraftStore"
@@ -226,11 +227,33 @@ const registerIpc = (): void => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(RootPreviewIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    if ("path" in decoded.value) {
+      const request = decoded.value as { readonly path: string }
+      return runNetworkResult(
+        toResult(
+          Effect.gen(function*() {
+            const client = yield* ServerHttpClient
+            return yield* client.preview({ payload: { path: request.path } }) as unknown as Effect.Effect<
+              { readonly data: RootPreviewResult },
+              unknown,
+              ServerHttpClient
+            >
+          })
+        )
+      )
+    }
+    const request = decoded.value as { readonly kind: "saved-root"; readonly root_id: string }
     return runNetworkResult(
       toResult(
         Effect.gen(function*() {
           const client = yield* ServerHttpClient
-          return yield* client.preview({ payload: { path: decoded.value.path } })
+          return yield* client.preview({
+            payload: { kind: "saved-root", root_id: request.root_id }
+          } as Parameters<typeof client.preview>[0]) as unknown as Effect.Effect<
+            { readonly data: RootPreviewResult },
+            unknown,
+            ServerHttpClient
+          >
         })
       )
     )

@@ -423,6 +423,464 @@ export const resolveSourceCandidate = async (
   return failure("unsupported-candidate")
 }
 
+export interface SourceDiscoveryLimits extends NativeBoundaryLimits {
+  /** Maximum number of directories visited, including the observed root. */
+  readonly maxDirectories: number
+  /** Maximum number of candidates returned before coverage becomes partial. */
+  readonly maxCandidates: number
+}
+
+export const DEFAULT_SOURCE_DISCOVERY_LIMITS: SourceDiscoveryLimits = {
+  ...DEFAULT_NATIVE_BOUNDARY_LIMITS,
+  maxDirectories: 1_024,
+  maxCandidates: 64
+}
+
+export type SourceDiscoveryIssueCode =
+  | "directory-limit"
+  | "location-unavailable"
+  | "missing-target"
+  | "candidate-changed"
+  | "unsupported-name"
+  | "source-link"
+
+export interface SourceDiscoveryIssue {
+  readonly code: SourceDiscoveryIssueCode
+  /** Portable location when one could be represented safely. */
+  readonly relativePath?: string
+}
+
+export interface SourceDiscoveryCandidate {
+  readonly kind: "archive" | "image-directory"
+  readonly relativePath: string
+  readonly directImageCount: number
+  readonly unsupportedDirectImageCount: number
+}
+
+export interface SourceDiscoveryCoverage {
+  readonly status: "complete" | "partial"
+  readonly directoriesVisited: number
+  readonly entriesObserved: number
+  readonly candidateCount: number
+  readonly candidateSampleTruncated: boolean
+  /** Known links are excluded, not treated as missing content. */
+  readonly excludedLinks: ReadonlyArray<string>
+  readonly excludedLinkCount: number
+  /** Native names that cannot be represented by the portable logical path model. */
+  readonly unsupportedNames: ReadonlyArray<string>
+  readonly unsupportedNameCount: number
+  readonly unsupportedDirectories: ReadonlyArray<string>
+  readonly unsupportedDirectoryCount: number
+  readonly issues: ReadonlyArray<SourceDiscoveryIssue>
+  readonly issueCount: number
+}
+
+export interface SourceRootDiscovery {
+  readonly root: SourceRootObservation
+  readonly candidates: ReadonlyArray<SourceDiscoveryCandidate>
+  /** Supported images directly under the configured root have no child entry path. */
+  readonly unassignedLooseImages: ReadonlyArray<string>
+  readonly unassignedLooseImageCount: number
+  readonly unsupportedLooseImages: ReadonlyArray<string>
+  readonly unsupportedLooseImageCount: number
+  readonly coverage: SourceDiscoveryCoverage
+}
+
+export interface DiscoverSourceRootOptions {
+  readonly limits?: Partial<SourceDiscoveryLimits>
+}
+
+const supportedImageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp"])
+const unsupportedImageExtensions = new Set([
+  ".gif",
+  ".avif",
+  ".bmp",
+  ".tif",
+  ".tiff",
+  ".jxl",
+  ".heic",
+  ".heif"
+])
+
+const sourceDiscoveryLimits = (
+  limits: Partial<SourceDiscoveryLimits> | undefined
+): SourceDiscoveryLimits | undefined => {
+  const candidate = { ...DEFAULT_SOURCE_DISCOVERY_LIMITS, ...limits }
+  return Number.isSafeInteger(candidate.maxDirectories) &&
+    candidate.maxDirectories > 0 &&
+    Number.isSafeInteger(candidate.maxCandidates) &&
+    candidate.maxCandidates > 0 &&
+    Number.isSafeInteger(candidate.maxDirectoryEntries) &&
+    candidate.maxDirectoryEntries > 0 &&
+    Number.isSafeInteger(candidate.maxDirectoryNameBytes) &&
+    candidate.maxDirectoryNameBytes > 0 &&
+    Number.isSafeInteger(candidate.maxLogicalPathBytes) &&
+    candidate.maxLogicalPathBytes > 0 &&
+    Number.isSafeInteger(candidate.maxLogicalSegments) &&
+    candidate.maxLogicalSegments > 0 &&
+    Number.isSafeInteger(candidate.deadlineMs) &&
+    candidate.deadlineMs > 0
+    ? candidate
+    : undefined
+}
+
+const discoveryNativeLimits = (
+  limits: SourceDiscoveryLimits,
+  deadlineMs = limits.deadlineMs
+): NativeBoundaryLimits => ({
+  maxDirectoryEntries: limits.maxDirectoryEntries,
+  maxDirectoryNameBytes: limits.maxDirectoryNameBytes,
+  maxLogicalPathBytes: limits.maxLogicalPathBytes,
+  maxLogicalSegments: limits.maxLogicalSegments,
+  deadlineMs
+})
+
+const utf8Compare = (left: string, right: string): number => {
+  const leftBytes = new TextEncoder().encode(left)
+  const rightBytes = new TextEncoder().encode(right)
+  const length = Math.min(leftBytes.length, rightBytes.length)
+  for (let index = 0; index < length; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index]
+  }
+  return leftBytes.length - rightBytes.length
+}
+
+const sorted = (values: ReadonlyArray<string>): ReadonlyArray<string> => [...values].sort(utf8Compare)
+
+const classifyImageName = (name: string): "supported" | "unsupported" | "other" => {
+  const extension = extname(name).toLowerCase()
+  if (supportedImageExtensions.has(extension)) return "supported"
+  if (unsupportedImageExtensions.has(extension)) return "unsupported"
+  return "other"
+}
+
+const isArchiveName = (name: string): boolean => {
+  const extension = extname(name).toLowerCase()
+  return extension === ".zip" || extension === ".cbz"
+}
+
+const discoveryIssue = (
+  code: SourceDiscoveryIssueCode,
+  relativePath?: string
+): SourceDiscoveryIssue => (relativePath === undefined ? { code } : { code, relativePath })
+
+const discoveryIssueCode = (code: NativeBoundaryErrorCode): SourceDiscoveryIssueCode => {
+  switch (code) {
+    case "directory-limit":
+    case "missing-target":
+    case "candidate-changed":
+    case "unsupported-name":
+    case "source-link":
+    case "location-unavailable":
+      return code
+    default:
+      return "location-unavailable"
+  }
+}
+
+const DISCOVERY_DIAGNOSTIC_SAMPLE_LIMIT = 32
+
+const appendSample = <T>(sample: Array<T>, value: T): void => {
+  if (sample.length < DISCOVERY_DIAGNOSTIC_SAMPLE_LIMIT) sample.push(value)
+}
+
+/**
+ * Enumerates a trusted source root without reading page or archive payloads.
+ * Each image directory reports only its direct images; nested directories are
+ * visited as independent candidates. Known links are excluded and never
+ * descended, while read/limit failures make coverage explicitly partial.
+ */
+export const discoverSourceRoot = async (
+  root: SourceRootObservation,
+  options?: DiscoverSourceRootOptions
+): Promise<NativeBoundaryResult<SourceRootDiscovery>> => {
+  const limits = sourceDiscoveryLimits(options?.limits)
+  if (limits === undefined) return failure("directory-limit")
+
+  const context: OperationContext = {
+    limits: discoveryNativeLimits(limits),
+    deadlineAt: Date.now() + limits.deadlineMs
+  }
+  const initialRoot = await revalidateSourceRoot(root, context)
+  if (!initialRoot.ok) return initialRoot
+  const candidates: Array<SourceDiscoveryCandidate> = []
+  const unassignedLooseImages: Array<string> = []
+  const unsupportedLooseImages: Array<string> = []
+  const unsupportedDirectories: Array<string> = []
+  const excludedLinks: Array<string> = []
+  const unsupportedNames: Array<string> = []
+  const issues: Array<SourceDiscoveryIssue> = []
+  let candidateCount = 0
+  let unassignedLooseImageCount = 0
+  let unsupportedLooseImageCount = 0
+  let unsupportedDirectoryCount = 0
+  let excludedLinkCount = 0
+  let unsupportedNameCount = 0
+  let issueCount = 0
+  const directories: Array<{
+    readonly relativePath: string
+    readonly nativePath: string
+    readonly identity: NativeIdentityToken
+  }> = [
+    { relativePath: "", nativePath: initialRoot.value.canonicalPath, identity: initialRoot.value.identity }
+  ]
+  let directoriesVisited = 0
+  let entriesObserved = 0
+  let partial = false
+  let stopped = false
+
+  const markPartial = (code: SourceDiscoveryIssueCode, relativePath?: string): void => {
+    partial = true
+    issueCount += 1
+    appendSample(issues, discoveryIssue(code, relativePath))
+  }
+
+  while (directories.length > 0 && !stopped) {
+    const next = directories.shift() as {
+      readonly relativePath: string
+      readonly nativePath: string
+      readonly identity: NativeIdentityToken
+    }
+    const beforeDirectory = checkOperationDeadline(context)
+    if (!beforeDirectory.ok) {
+      markPartial("directory-limit", next.relativePath || undefined)
+      break
+    }
+    if (directoriesVisited >= limits.maxDirectories) {
+      markPartial("directory-limit", next.relativePath || undefined)
+      break
+    }
+    directoriesVisited += 1
+
+    if (next.relativePath !== "") {
+      let queuedStats: Awaited<ReturnType<typeof lstat>>
+      try {
+        queuedStats = await lstat(next.nativePath, { bigint: true })
+      } catch {
+        markPartial("candidate-changed", next.relativePath)
+        continue
+      }
+      if (!queuedStats.isDirectory()) {
+        markPartial(queuedStats.isSymbolicLink() ? "source-link" : "candidate-changed", next.relativePath)
+        if (queuedStats.isSymbolicLink()) {
+          excludedLinkCount += 1
+          appendSample(excludedLinks, next.relativePath)
+        }
+        continue
+      }
+      if (!sameIdentity(identityOf(queuedStats), next.identity)) {
+        markPartial("candidate-changed", next.relativePath)
+        continue
+      }
+      const verified = await verifyFinalCandidate(initialRoot.value, {
+        name: basename(next.nativePath),
+        path: next.nativePath,
+        stats: queuedStats
+      }, context)
+      if (!verified.ok) {
+        if (verified.code === "source-link") {
+          excludedLinkCount += 1
+          appendSample(excludedLinks, next.relativePath)
+        }
+        markPartial(discoveryIssueCode(verified.code), next.relativePath)
+        continue
+      }
+    }
+
+    let directImageCount = 0
+    let unsupportedDirectImageCount = 0
+    let directoryComplete = true
+    let entryCount = 0
+    let nameBytes = 0
+    let directory: Awaited<ReturnType<typeof opendir>>
+    try {
+      directory = await opendir(next.nativePath, {
+        bufferSize: 32,
+        encoding: "buffer"
+      } as unknown as Parameters<typeof opendir>[1])
+    } catch {
+      markPartial("location-unavailable", next.relativePath || undefined)
+      continue
+    }
+
+    try {
+      for await (const entry of directory) {
+        const withinDeadline = checkOperationDeadline(context)
+        if (!withinDeadline.ok) {
+          markPartial("directory-limit", next.relativePath || undefined)
+          directoryComplete = false
+          stopped = true
+          break
+        }
+        entryCount += 1
+        entriesObserved += 1
+        if (entryCount > limits.maxDirectoryEntries) {
+          markPartial("directory-limit", next.relativePath || undefined)
+          directoryComplete = false
+          stopped = true
+          break
+        }
+
+        let name: string
+        try {
+          name = textDecoder.decode(entry.name as unknown as Uint8Array)
+        } catch {
+          markPartial("unsupported-name", next.relativePath || undefined)
+          directoryComplete = false
+          continue
+        }
+        nameBytes += (entry.name as unknown as Uint8Array).byteLength
+        if (nameBytes > limits.maxDirectoryNameBytes) {
+          markPartial("directory-limit", next.relativePath || undefined)
+          directoryComplete = false
+          stopped = true
+          break
+        }
+
+        const relativePath = next.relativePath === "" ? name : `${next.relativePath}/${name}`
+        const portable = validatePortableRelativePath(relativePath)
+        if (!portable.ok || portable.value.length > limits.maxLogicalSegments) {
+          unsupportedNameCount += 1
+          appendSample(unsupportedNames, relativePath)
+          continue
+        }
+        if (
+          new TextEncoder().encode(relativePath).byteLength > limits.maxLogicalPathBytes
+        ) {
+          markPartial("directory-limit", next.relativePath || undefined)
+          directoryComplete = false
+          continue
+        }
+
+        let stats: Awaited<ReturnType<typeof lstat>>
+        try {
+          stats = await lstat(join(next.nativePath, name), { bigint: true })
+        } catch {
+          markPartial("candidate-changed", relativePath)
+          directoryComplete = false
+          continue
+        }
+        if (stats.isSymbolicLink()) {
+          excludedLinkCount += 1
+          appendSample(excludedLinks, relativePath)
+          continue
+        }
+
+        if (stats.isDirectory()) {
+          directories.push({ relativePath, nativePath: join(next.nativePath, name), identity: identityOf(stats) })
+          continue
+        }
+
+        if (stats.isFile() && isArchiveName(name)) {
+          const verified = await verifyFinalCandidate(initialRoot.value, {
+            name,
+            path: join(next.nativePath, name),
+            stats
+          }, context)
+          if (!verified.ok) {
+            if (verified.code === "source-link") {
+              excludedLinkCount += 1
+              appendSample(excludedLinks, relativePath)
+            }
+            else markPartial(discoveryIssueCode(verified.code), relativePath)
+            continue
+          }
+          candidateCount += 1
+          if (candidates.length >= limits.maxCandidates) {
+            markPartial("directory-limit", relativePath)
+            stopped = true
+            break
+          }
+          candidates.push({
+            kind: "archive",
+            relativePath,
+            directImageCount: 0,
+            unsupportedDirectImageCount: 0
+          })
+          continue
+        }
+
+        if (!stats.isFile()) continue
+        const imageKind = classifyImageName(name)
+        if (imageKind === "supported") {
+          if (next.relativePath === "") {
+            unassignedLooseImageCount += 1
+            appendSample(unassignedLooseImages, relativePath)
+          } else directImageCount += 1
+        } else if (imageKind === "unsupported") {
+          if (next.relativePath === "") {
+            unsupportedLooseImageCount += 1
+            appendSample(unsupportedLooseImages, relativePath)
+          } else unsupportedDirectImageCount += 1
+        }
+      }
+    } catch {
+      markPartial("location-unavailable", next.relativePath || undefined)
+      directoryComplete = false
+      stopped = true
+    } finally {
+      try {
+        await directory.close()
+      } catch {
+        // Async iteration closes completed directories; a second close is harmless.
+      }
+    }
+
+    if (directoryComplete && next.relativePath !== "" && directImageCount > 0) {
+      candidateCount += 1
+      if (candidates.length >= limits.maxCandidates) {
+        markPartial("directory-limit", next.relativePath)
+        break
+      }
+      candidates.push({
+        kind: "image-directory",
+        relativePath: next.relativePath,
+        directImageCount,
+        unsupportedDirectImageCount
+      })
+    } else if (directoryComplete && next.relativePath !== "" && unsupportedDirectImageCount > 0) {
+      unsupportedDirectoryCount += 1
+      appendSample(unsupportedDirectories, next.relativePath)
+    }
+  }
+
+  const finalRoot = await revalidateSourceRoot(root, context)
+  if (!finalRoot.ok) {
+    if (finalRoot.code !== "directory-limit") return finalRoot
+    markPartial("directory-limit")
+  }
+
+  candidates.sort((left, right) => utf8Compare(left.relativePath, right.relativePath))
+  const hasUnsupportedContent = unsupportedLooseImageCount > 0 ||
+    unsupportedNameCount > 0 ||
+    unsupportedDirectoryCount > 0 ||
+    candidates.some((candidate) => candidate.unsupportedDirectImageCount > 0)
+  const discovery: SourceRootDiscovery = {
+    root: initialRoot.value,
+    candidates,
+    unassignedLooseImages: sorted(unassignedLooseImages),
+    unassignedLooseImageCount,
+    unsupportedLooseImages: sorted(unsupportedLooseImages),
+    unsupportedLooseImageCount,
+    coverage: {
+      status: partial || directories.length > 0 || hasUnsupportedContent ? "partial" : "complete",
+      directoriesVisited,
+      entriesObserved,
+      candidateCount,
+      candidateSampleTruncated: candidateCount > candidates.length,
+      excludedLinks: sorted(excludedLinks),
+      excludedLinkCount,
+      unsupportedNames: sorted(unsupportedNames),
+      unsupportedNameCount,
+      unsupportedDirectories: sorted(unsupportedDirectories),
+      unsupportedDirectoryCount,
+      issues,
+      issueCount
+    }
+  }
+  return success(discovery)
+}
+
 interface CanonicalLocation {
   readonly canonicalPath: string
   readonly kind: "source" | "writable"
