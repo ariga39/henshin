@@ -1,5 +1,5 @@
 import { build } from "esbuild"
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -15,6 +15,7 @@ const instanceB = "22222222-2222-4222-8222-222222222222"
 const instanceC = "33333333-3333-4333-8333-333333333333"
 const instanceD = "44444444-4444-4444-8444-444444444444"
 const instanceE = "55555555-5555-4555-8555-555555555555"
+const instanceF = "66666666-6666-4666-8666-666666666666"
 const rootA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 const rootB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 const rootC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
@@ -24,6 +25,8 @@ const rootF = "ffffffff-ffff-4fff-8fff-ffffffffffff"
 const rootG = "11111111-aaaa-4111-8111-111111111111"
 const rootH = "22222222-aaaa-4222-8222-222222222222"
 const rootI = "33333333-aaaa-4333-8333-333333333333"
+const rootJ = "44444444-aaaa-4444-8444-444444444444"
+const rootK = "55555555-aaaa-4555-8555-555555555555"
 
 const activate = (
   instanceId: string,
@@ -89,10 +92,14 @@ describe("local mapping store", () => {
       const linkedTargetB = path.join(linkedTargetParent, "target-b")
       const linkedAliasParent = path.join(fixtureDirectory, "linked-alias-parent")
       const linkedAlias = path.join(linkedAliasParent, "linked-root")
+      const renamedRoot = path.join(fixtureDirectory, "renamed-root")
+      const movedRoot = path.join(fixtureDirectory, "moved-root")
+      const movedRootAlias = path.join(fixtureDirectory, "moved-root-alias")
       await mkdir(linkedTargetA)
       await mkdir(linkedTargetB)
       await mkdir(linkedAliasParent)
       await symlink(linkedTargetA, linkedAlias, "dir")
+      await mkdir(renamedRoot)
       await writeFile(notDirectory, "not a directory")
       const upperCaseSibling = path.join(fixtureDirectory, "Books")
       const lowerCaseSibling = path.join(fixtureDirectory, "books")
@@ -288,6 +295,11 @@ describe("local mapping store", () => {
         )
         expect(linkedAliasParentRoot).toMatchObject({ kind: "activated", mapping: { mappingRevision: "1" } })
 
+        const renamedRootMapping = yield* store.activate(
+          activate(instanceF, rootJ, renamedRoot, renamedRoot)
+        )
+        expect(renamedRootMapping).toMatchObject({ kind: "activated", mapping: { mappingRevision: "1" } })
+
         if (process.platform === "linux") {
           const firstSibling = yield* store.activate(
             activate(instanceA, "cccccccc-cccc-4ccc-8ccc-cccccccccccc", upperCaseSibling, upperCaseSibling)
@@ -304,6 +316,8 @@ describe("local mapping store", () => {
 
       await rm(linkedAlias, { force: true })
       await symlink(linkedTargetB, linkedAlias, "dir")
+      await rename(renamedRoot, movedRoot)
+      await symlink(movedRoot, movedRootAlias, "dir")
 
       const reopened = await Effect.runPromise(
         Effect.gen(function*() {
@@ -320,6 +334,10 @@ describe("local mapping store", () => {
             activate(instanceE, rootI, linkedTargetB, linkedTargetB)
           )
           expect(retargetedRoot).toEqual({ kind: "root_conflict" })
+          const renamedAliasRoot = yield* store.activate(
+            activate(instanceF, rootK, movedRootAlias, movedRoot)
+          )
+          expect(renamedAliasRoot).toEqual({ kind: "root_conflict" })
           return yield* store.load({ instanceId: instanceA, rootId: rootA })
         }).pipe(Effect.provide(LocalMappingStore.layer(databasePath, workerUrl)), Effect.scoped)
       )

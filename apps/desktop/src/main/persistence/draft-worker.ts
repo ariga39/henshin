@@ -801,9 +801,11 @@ const refreshedMappingPathEvidence = (mapping: PersistedLocalMapping): MappingPa
   const stored = storedMappingPathEvidence(mapping)
   const selectedPath = resolveLocalPath(mapping.selected_path)
   const canonicalPath = resolveLocalPath(mapping.canonical_path)
+  const isUsableCurrentRoot = (path: ResolvedLocalPath): boolean =>
+    path.resolutionError === null && path.exact && path.directory
   return {
-    selectedPath: selectedPath.resolutionError === null ? selectedPath : stored.selectedPath,
-    canonicalPath: canonicalPath.resolutionError === null ? canonicalPath : stored.canonicalPath
+    selectedPath: isUsableCurrentRoot(selectedPath) ? selectedPath : stored.selectedPath,
+    canonicalPath: isUsableCurrentRoot(canonicalPath) ? canonicalPath : stored.canonicalPath
   }
 }
 
