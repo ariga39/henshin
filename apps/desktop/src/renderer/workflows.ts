@@ -1,6 +1,11 @@
-import { Effect } from "effect"
-import type { ConnectionStatusView, RootPreviewRequest, RootPreviewResult } from "@henshin/contracts"
-import { PrototypeClient, RootPreviewClient } from "./client"
+import { Effect, Fiber } from "effect"
+import type {
+  ConnectionStatusView,
+  RootPreviewRequest,
+  RootPreviewResult,
+  ScanTask
+} from "@henshin/contracts"
+import { PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
 import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
@@ -29,7 +34,8 @@ export const previewRoot = (selection: RootPreviewRequest | string) =>
         root_save_status: "idle",
         root_save_error: null,
         root_policy_status: "idle",
-        root_policy_error: null
+        root_policy_error: null,
+        scan_hold_new_discoveries: false
       })
     )
 
@@ -67,6 +73,70 @@ export const loadRoots = Effect.gen(function*() {
       viewStore.set({ root_roots_status: "error", root_roots_error: result.error.message })
     )
   }
+})
+
+const scanIsActive = (task: ScanTask): boolean => task.status === "queued" || task.status === "running"
+
+const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
+  yield* Effect.sync(() => viewStore.set({ scan_status: "loading", scan_error: null }))
+  const tasks = yield* client.listTasks()
+  if (!tasks.ok) {
+    yield* Effect.sync(() => viewStore.set({ scan_status: "error", scan_error: tasks.error.message }))
+    return false
+  }
+  yield* Effect.sync(() => viewStore.set({ scan_tasks: tasks.data }))
+
+  const candidates = yield* client.candidates()
+  if (!candidates.ok) {
+    yield* Effect.sync(() => viewStore.set({ scan_status: "error", scan_error: candidates.error.message }))
+    return false
+  }
+  yield* Effect.sync(() => viewStore.set({
+    staged_discoveries: candidates.data,
+    scan_status: "ready",
+    scan_error: null
+  }))
+  return true
+})
+
+export const loadScanResults = Effect.gen(function*() {
+  const client = yield* ScanReviewClient
+  return yield* loadScanResultsFor(client)
+})
+
+const watchScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
+  while (true) {
+    const loaded = yield* loadScanResultsFor(client)
+    if (!loaded || !viewStore.getState().scan_tasks.some(scanIsActive)) return
+    yield* Effect.sleep("250 millis")
+  }
+})
+
+let scanResultsWatcher: Fiber.Fiber<void, never> | null = null
+
+export const watchHeldScans = Effect.gen(function*() {
+  const existing = scanResultsWatcher
+  if (existing !== null) return yield* Fiber.join(existing)
+
+  const client = yield* ScanReviewClient
+  const watcher = yield* Effect.forkChild(watchScanResultsFor(client))
+  scanResultsWatcher = watcher
+  yield* Fiber.join(watcher).pipe(
+    Effect.ensuring(Effect.sync(() => {
+      if (scanResultsWatcher === watcher) scanResultsWatcher = null
+    }))
+  )
+})
+
+export const retryScanResults = Effect.gen(function*() {
+  const loaded = yield* loadScanResults
+  if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
+})
+
+export const loadRootWorkspace = Effect.gen(function*() {
+  yield* loadRoots
+  const loaded = yield* loadScanResults
+  if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
 })
 
 export const refreshRootPolicy = Effect.gen(function*() {
@@ -134,12 +204,16 @@ const updateRootExclusion = (input: {
       }
       return
     }
+    if ("task" in result.data) {
+      yield* Effect.sync(() => viewStore.set({ root_policy_status: "error", root_policy_error: "server returned a scan task for a policy change" }))
+      return
+    }
 
+    const updatedRoot = result.data
     yield* Effect.sync(() => {
-      const roots = viewStore.getState().root_saved_roots
       const current = viewStore.getState()
       viewStore.set({
-        root_saved_roots: roots.map((root) => root.root_id === result.data.root_id ? result.data : root),
+        root_saved_roots: current.root_saved_roots.map((root) => root.root_id === updatedRoot.root_id ? updatedRoot : root),
         ...(current.root_preview_generation === previewGeneration
           ? { root_policy_status: "idle" as const, root_policy_error: null }
           : {})
@@ -163,6 +237,51 @@ export const removeRootExclusion = (input: {
   readonly scope: "exact" | "subtree"
   readonly expectedPolicyRevision: string
 }) => updateRootExclusion(input, "remove-exclusion")
+
+export const startHeldScan = (rootId: string) =>
+  Effect.gen(function*() {
+    const client = yield* RootPreviewClient
+    const state = viewStore.getState()
+    const root = state.root_saved_roots.find((candidate) => candidate.root_id === rootId)
+    const preview = state.root_preview
+    if (root === undefined || !isSavedDiscovery(preview) || preview.root_id !== rootId) return
+    if (!state.scan_hold_new_discoveries) return
+
+    yield* Effect.sync(() => viewStore.set({ scan_start_status: "loading", scan_start_error: null }))
+    const result = yield* client.command({
+      root_id: rootId,
+      operation_id: newOperationId(),
+      instance_id: preview.instance_id,
+      epoch: preview.epoch,
+      expected_mapping_revision: root.mapping_revision,
+      expected_policy_revision: preview.policy_revision,
+      command: { type: "start-scan", mode: "manual", hold_new_discoveries: true }
+    })
+    if (!result.ok) {
+      if (result.error.code === "revision_conflict") yield* loadRoots
+      yield* Effect.sync(() => viewStore.set({ scan_start_status: "error", scan_start_error: result.error.message }))
+      return
+    }
+    if (!("task" in result.data)) {
+      yield* Effect.sync(() => viewStore.set({
+        scan_start_status: "error",
+        scan_start_error: "server returned a root policy result instead of a scan task"
+      }))
+      return
+    }
+    const submittedTask = result.data.task
+    yield* Effect.sync(() => {
+      const tasks = viewStore.getState().scan_tasks
+      viewStore.set({
+        scan_tasks: tasks.some((task) => task.task_id === submittedTask.task_id)
+          ? tasks.map((task) => task.task_id === submittedTask.task_id ? submittedTask : task)
+          : [...tasks, submittedTask],
+        scan_start_status: "idle",
+        scan_start_error: null
+      })
+    })
+    yield* watchHeldScans
+  })
 
 export const canSaveRoot = (state: ViewState): boolean => {
   const preview = state.root_preview

@@ -5,6 +5,8 @@ import type {
   NoteView,
   RootPreviewRequest,
   RootPreviewResult,
+  ScanTask,
+  StagedDiscovery,
   ServerRoot,
   SavedDraft
 } from "@henshin/contracts"
@@ -51,6 +53,13 @@ export interface ViewState {
   readonly root_save_target_path: string | null
   readonly root_policy_status: "idle" | "loading" | "error"
   readonly root_policy_error: string | null
+  readonly scan_tasks: ReadonlyArray<ScanTask>
+  readonly staged_discoveries: ReadonlyArray<StagedDiscovery>
+  readonly scan_status: "idle" | "loading" | "ready" | "error"
+  readonly scan_error: string | null
+  readonly scan_start_status: "idle" | "loading" | "error"
+  readonly scan_start_error: string | null
+  readonly scan_hold_new_discoveries: boolean
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
 }
@@ -87,6 +96,13 @@ const initialState: ViewState = {
   root_save_target_path: null,
   root_policy_status: "idle",
   root_policy_error: null,
+  scan_tasks: [],
+  staged_discoveries: [],
+  scan_status: "idle",
+  scan_error: null,
+  scan_start_status: "idle",
+  scan_start_error: null,
+  scan_hold_new_discoveries: false,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
   connection_generation: 0
 }
