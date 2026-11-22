@@ -55,7 +55,12 @@ const LibraryCover = ({ entry }: { readonly entry: LibraryEntry }) => {
     void runtime.runPromise(
       Effect.gen(function*() {
         const client = yield* LibraryClient
-        return yield* client.getThumbnail(key)
+        let result = yield* client.getThumbnail(key)
+        for (let attempt = 0; attempt < 4 && !result.ok && result.error.code === "thumbnail_updating"; attempt += 1) {
+          yield* Effect.sleep("250 millis")
+          result = yield* client.getThumbnail(key)
+        }
+        return result
       })
     ).then((result) => {
         if (cancelled || requestRef.current !== request) return
@@ -126,8 +131,8 @@ export const LibraryScreen = () => {
       {state.library_scan_status === "starting" && (
         <p role="status">Scanning saved root; accepted results will appear when the scan completes.</p>
       )}
-      {state.library_scan_status === "error" && state.library_error !== null && (
-        <p role="alert" data-testid="library-scan-error">Normal scan failed: {state.library_error}</p>
+      {state.library_scan_status === "error" && state.library_scan_error !== null && (
+        <p role="alert" data-testid="library-scan-error">Normal scan failed: {state.library_scan_error}</p>
       )}
 
       <section aria-labelledby="library-entries-heading">

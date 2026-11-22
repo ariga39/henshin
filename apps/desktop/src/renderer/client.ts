@@ -6,7 +6,6 @@ import type {
   DiscardedDraft,
   HandshakeView,
   LibraryEntryPage,
-  LibraryView,
   NoteView,
   PublicError,
   SavedDraft,
@@ -92,7 +91,6 @@ export interface ScanReviewBridge {
 }
 
 export interface LibraryBridge {
-  get(): Promise<Result<LibraryView>>
   search(input: { readonly page_size?: number; readonly cursor?: string }): Promise<Result<LibraryEntryPage>>
   getThumbnail(key: ThumbnailKey): Promise<Result<Uint8Array>>
 }
@@ -194,7 +192,6 @@ export class ScanReviewClient extends Context.Service<
 export class LibraryClient extends Context.Service<
   LibraryClient,
   {
-    readonly get: () => Effect.Effect<Result<LibraryView>>
     readonly search: (input: { readonly page_size?: number; readonly cursor?: string }) => Effect.Effect<Result<LibraryEntryPage>>
     readonly getThumbnail: (key: ThumbnailKey) => Effect.Effect<Result<Uint8Array>>
   }
@@ -202,7 +199,6 @@ export class LibraryClient extends Context.Service<
   static readonly layer = Layer.succeed(
     LibraryClient,
     LibraryClient.of({
-      get: () => callIpc(() => window.henshinLibrary.get()),
       search: (input) => callIpc(() => window.henshinLibrary.search(input)),
       getThumbnail: (key) => callIpc(() => window.henshinLibrary.getThumbnail(key))
     })
