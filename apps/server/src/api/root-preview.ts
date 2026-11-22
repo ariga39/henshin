@@ -105,12 +105,15 @@ const enumerateSavedRootCandidates = (
   root: SourceRootObservation,
   rootId: string,
   instanceId: string,
-  epoch: string
+  epoch: string,
+  policyRevision: string,
+  exclusions: ReadonlyArray<{ readonly path: string; readonly scope: "exact" | "subtree" }>
 ): Effect.Effect<SavedRootPreview, unknown> =>
   Effect.tryPromise({
     try: async () => {
       const discovered = await discoverSourceRoot(root, {
-        limits: { maxCandidates: ROOT_PREVIEW_SAMPLE_LIMIT }
+        limits: { maxCandidates: ROOT_PREVIEW_SAMPLE_LIMIT },
+        exclusions
       })
       if (!discovered.ok) throw new Error(discovered.code)
       const value = discovered.value
@@ -120,6 +123,7 @@ const enumerateSavedRootCandidates = (
         selected_server_path: root.selectedPath,
         instance_id: instanceId,
         epoch,
+        policy_revision: policyRevision,
         candidates: value.candidates.map((candidate) => ({
           relative_path: candidate.relativePath,
           kind: candidate.kind,
@@ -234,7 +238,9 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
               current.value,
               saved.rootId,
               server.instanceId,
-              server.epoch
+              server.epoch,
+              saved.policyRevision,
+              saved.exclusions
             ).pipe(Effect.mapError(() => unavailable("saved server root is unavailable or inaccessible")))
 
             return {

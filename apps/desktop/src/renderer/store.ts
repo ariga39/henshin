@@ -49,6 +49,8 @@ export interface ViewState {
   readonly root_save_error: string | null
   readonly root_save_target_label: string | null
   readonly root_save_target_path: string | null
+  readonly root_policy_status: "idle" | "loading" | "error"
+  readonly root_policy_error: string | null
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
 }
@@ -83,6 +85,8 @@ const initialState: ViewState = {
   root_save_error: null,
   root_save_target_label: null,
   root_save_target_path: null,
+  root_policy_status: "idle",
+  root_policy_error: null,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
   connection_generation: 0
 }
