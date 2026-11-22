@@ -141,6 +141,34 @@ describe("root confirmation workflow", () => {
     expect(viewStore.getState().root_saved_roots).toEqual([savedRoot])
   })
 
+  it.each(["Books", "New label"])("recovers the stored root after a lost reply and fresh confirmation as %s", async (label) => {
+    let listCalls = 0
+    let stored: ServerRoot | undefined
+    const offline = { ok: false, error: { code: "transport", message: "Reply lost", retryable: true } } as const
+    const client = RootPreviewClient.of({
+      preview: () => Effect.succeed({ ok: true, data: preview }),
+      list: () => Effect.succeed(++listCalls === 1 || !stored ? offline : { ok: true, data: [stored] }),
+      save: () => {
+        if (stored) return Effect.succeed({ ok: false, error: { code: "overlap", message: "Root overlaps", retryable: false } })
+        stored = savedRoot
+        return Effect.succeed(offline)
+      }
+    })
+    const layer = Layer.succeed(RootPreviewClient, client)
+    const refresh = () => Effect.runPromise(Effect.provide(previewRoot({ path: preview.selected_server_path }), layer))
+    const save = () => Effect.runPromise(Effect.provide(saveRoot, layer))
+    await refresh()
+    viewStore.set({ root_label: savedRoot.label })
+    await save()
+    expect(viewStore.getState().root_save_status).toBe("error")
+    await refresh()
+    viewStore.set({ root_label: label })
+    await save()
+    expect(viewStore.getState().root_saved_roots).toEqual([savedRoot])
+    expect(viewStore.getState().root_save_status).toBe(label === savedRoot.label ? "ready" : "error")
+    if (label !== savedRoot.label) expect(viewStore.getState().root_save_error).toContain("already saved as Books")
+  })
+
   it("keeps an in-flight completion attached to the confirmed path", async () => {
     const pending = deferred<Result<ServerRoot>>()
     let request: RootRegistrationRequest | undefined
