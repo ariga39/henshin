@@ -2,6 +2,7 @@ import type {
   CommandAttempt,
   CommandReconciliation,
   ConnectionStatusView,
+  LibraryEntry,
   NoteView,
   RootPreviewRequest,
   RootPreviewResult,
@@ -25,6 +26,7 @@ export type Outcome =
   | { readonly kind: "error"; readonly message: string }
 
 export interface ViewState {
+  readonly screen: "setup" | "library"
   readonly status: "idle" | "loading" | "ready" | "error"
   readonly instance_id: string | null
   readonly epoch: string | null
@@ -77,9 +79,18 @@ export interface ViewState {
   readonly reader_profile_test_status: "idle" | "selecting" | "ready" | "launching" | "accepted" | "error"
   readonly reader_profile_test_result: ReaderProfileTestResult | null
   readonly reader_profile_test_error: string | null
+  readonly library_entries: ReadonlyArray<LibraryEntry>
+  readonly library_cursor: string | null
+  readonly library_has_more: boolean
+  readonly library_status: "idle" | "loading" | "ready" | "error"
+  readonly library_error: string | null
+  readonly library_scan_status: "idle" | "starting" | "started" | "error"
+  readonly library_scan_error: string | null
+  readonly library_scan_task: ScanTask | null
 }
 
 const initialState: ViewState = {
+  screen: "setup",
   status: "idle",
   instance_id: null,
   epoch: null,
@@ -131,7 +142,15 @@ const initialState: ViewState = {
   reader_profile_test_target: null,
   reader_profile_test_status: "idle",
   reader_profile_test_result: null,
-  reader_profile_test_error: null
+  reader_profile_test_error: null,
+  library_entries: [],
+  library_cursor: null,
+  library_has_more: false,
+  library_status: "idle",
+  library_error: null,
+  library_scan_status: "idle",
+  library_scan_error: null,
+  library_scan_task: null
 }
 
 const sameConnection = (left: ConnectionStatusView, right: ConnectionStatusView): boolean =>
