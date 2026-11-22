@@ -3,11 +3,9 @@ import type {
   CommandAttempt,
   CommandReconciliation,
   ConnectionStatusView,
-  DeviceRootMapping,
   DiscardedDraft,
   HandshakeView,
   LibraryEntryPage,
-  LocalMappingActivateIpcRequest,
   LocalMappingPreviewIpcResult,
   NoteView,
   PublicError,
@@ -24,15 +22,7 @@ import type {
   ServerRoot,
   ServerRootList,
   SavedDraftAbsent,
-  ThumbnailKey,
-  ReaderExecutableSelectionIpcResult,
-  ReaderProfile,
-  ReaderProfileSaveIpcRequest,
-  ReaderProfileTestIpcRequest,
-  ReaderProfileTestResult,
-  ReaderProfileTestTarget,
-  ReaderProfileTestTargetSelectIpcRequest,
-  ReaderProfileTestTargetSelectIpcResult
+  ThumbnailKey
 } from "@henshin/contracts"
 
 export type Result<A> =
@@ -87,18 +77,9 @@ declare global {
     readonly henshinPrototype: PrototypeBridge
     readonly henshinRootPreview: RootPreviewBridge
     readonly henshinLocalMapping: LocalMappingBridge
-    readonly henshinScanReview: ScanReviewBridge
-    readonly henshinReaderProfiles: ReaderProfileBridge
     readonly henshinLibrary: LibraryBridge
+    readonly henshinScanReview: ScanReviewBridge
   }
-}
-
-export interface ReaderProfileBridge {
-  list(): Promise<Result<ReadonlyArray<ReaderProfile>>>
-  selectExecutable(): Promise<Result<ReaderExecutableSelectionIpcResult>>
-  save(input: ReaderProfileSaveIpcRequest): Promise<Result<ReaderProfile>>
-  selectTestTarget(input: ReaderProfileTestTargetSelectIpcRequest): Promise<Result<ReaderProfileTestTargetSelectIpcResult>>
-  test(input: ReaderProfileTestIpcRequest): Promise<Result<ReaderProfileTestResult>>
 }
 
 export interface RootPreviewBridge {
@@ -110,8 +91,6 @@ export interface RootPreviewBridge {
 
 export interface LocalMappingBridge {
   preview(input: { readonly root_id: string }): Promise<Result<LocalMappingPreviewIpcResult>>
-  list(input: {}): Promise<Result<ReadonlyArray<DeviceRootMapping>>>
-  activate(input: LocalMappingActivateIpcRequest): Promise<Result<DeviceRootMapping>>
 }
 
 export interface ScanReviewBridge {
@@ -207,16 +186,12 @@ export class LocalMappingClient extends Context.Service<
   LocalMappingClient,
   {
     readonly preview: (rootId: string) => Effect.Effect<Result<LocalMappingPreviewIpcResult>>
-    readonly list: () => Effect.Effect<Result<ReadonlyArray<DeviceRootMapping>>>
-    readonly activate: (input: LocalMappingActivateIpcRequest) => Effect.Effect<Result<DeviceRootMapping>>
   }
 >()("henshin/desktop/renderer/LocalMappingClient") {
   static readonly layer = Layer.succeed(
     LocalMappingClient,
     LocalMappingClient.of({
-      preview: (rootId) => callIpc(() => window.henshinLocalMapping.preview({ root_id: rootId })),
-      list: () => callIpc(() => window.henshinLocalMapping.list({})),
-      activate: (input) => callIpc(() => window.henshinLocalMapping.activate(input))
+      preview: (rootId) => callIpc(() => window.henshinLocalMapping.preview({ root_id: rootId }))
     })
   )
 }
@@ -235,28 +210,6 @@ export class ScanReviewClient extends Context.Service<
       listTasks: () => callIpc(() => window.henshinScanReview.listTasks()),
       candidates: () => callIpc(() => window.henshinScanReview.candidates()),
       release: (input) => callIpc(() => window.henshinScanReview.command(input))
-    })
-  )
-}
-
-export class ReaderProfileClient extends Context.Service<
-  ReaderProfileClient,
-  {
-    readonly list: () => Effect.Effect<Result<ReadonlyArray<ReaderProfile>>>
-    readonly selectExecutable: () => Effect.Effect<Result<ReaderExecutableSelectionIpcResult>>
-    readonly save: (input: ReaderProfileSaveIpcRequest) => Effect.Effect<Result<ReaderProfile>>
-    readonly selectTestTarget: (input: ReaderProfileTestTargetSelectIpcRequest) => Effect.Effect<Result<ReaderProfileTestTargetSelectIpcResult>>
-    readonly test: (input: ReaderProfileTestIpcRequest) => Effect.Effect<Result<ReaderProfileTestResult>>
-  }
->()("henshin/desktop/renderer/ReaderProfileClient") {
-  static readonly layer = Layer.succeed(
-    ReaderProfileClient,
-    ReaderProfileClient.of({
-      list: () => callIpc(() => window.henshinReaderProfiles.list()),
-      selectExecutable: () => callIpc(() => window.henshinReaderProfiles.selectExecutable()),
-      save: (input) => callIpc(() => window.henshinReaderProfiles.save(input)),
-      selectTestTarget: (input) => callIpc(() => window.henshinReaderProfiles.selectTestTarget(input)),
-      test: (input) => callIpc(() => window.henshinReaderProfiles.test(input))
     })
   )
 }

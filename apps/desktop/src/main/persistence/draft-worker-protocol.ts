@@ -1,6 +1,5 @@
 import { Schema } from "effect"
 import { isAbsolute } from "node:path"
-import { OpenEvent } from "@henshin/contracts/event"
 import { DraftFormId, NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import {
   ReaderEntryFormat,
@@ -142,52 +141,6 @@ export const CommandAttemptNote = Schema.Struct({
 })
 export type CommandAttemptNote = typeof CommandAttemptNote.Type
 
-export const OpenJournalStatus = Schema.Union([
-  Schema.Literal("prepared"),
-  Schema.Literal("accepted"),
-  Schema.Literal("failed"),
-  Schema.Literal("unknown")
-])
-export type OpenJournalStatus = typeof OpenJournalStatus.Type
-
-export const OpenJournalRow = Schema.Struct({
-  instanceId: Uuid,
-  actionId: Uuid,
-  entryId: Uuid,
-  deviceId: Uuid,
-  observedLocationRevision: Revision,
-  observedContentVersion: Revision,
-  status: OpenJournalStatus,
-  event: Schema.NullOr(OpenEvent),
-  failureCode: Schema.NullOr(Schema.String),
-  failureMessage: Schema.NullOr(Schema.String),
-  createdAtMs: Schema.Int,
-  updatedAtMs: Schema.Int
-})
-export type OpenJournalRow = typeof OpenJournalRow.Type
-
-export const OpenJournalRows = Schema.Array(OpenJournalRow)
-export type OpenJournalRows = typeof OpenJournalRows.Type
-
-export const OpenJournalReadResult = Schema.NullOr(OpenJournalRow)
-export type OpenJournalReadResult = typeof OpenJournalReadResult.Type
-
-export const OpenJournalAdmission = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("admitted"), entry: OpenJournalRow }),
-  Schema.Struct({ kind: Schema.Literal("existing"), entry: OpenJournalRow }),
-  Schema.Struct({ kind: Schema.Literal("conflict") }),
-  Schema.Struct({ kind: Schema.Literal("full") })
-])
-export type OpenJournalAdmission = typeof OpenJournalAdmission.Type
-
-export const OpenJournalMutation = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("updated"), entry: OpenJournalRow }),
-  Schema.Struct({ kind: Schema.Literal("existing"), entry: OpenJournalRow }),
-  Schema.Struct({ kind: Schema.Literal("not_found") }),
-  Schema.Struct({ kind: Schema.Literal("conflict") })
-])
-export type OpenJournalMutation = typeof OpenJournalMutation.Type
-
 export const DraftWorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("listReaderProfiles") }),
   Schema.Struct({ op: Schema.Literal("getReaderProfile"), profileId: Uuid }),
@@ -261,25 +214,6 @@ export const DraftWorkerRequest = Schema.Union([
     protectedWritablePaths: Schema.Array(AbsoluteLocalPath),
     activationDeadlineMs: Schema.optional(Schema.Int)
   }),
-  Schema.Struct({
-    op: Schema.Literal("prepareOpen"),
-    instanceId: Uuid,
-    actionId: Uuid,
-    entryId: Uuid,
-    deviceId: Uuid,
-    observedLocationRevision: Revision,
-    observedContentVersion: Revision
-  }),
-  Schema.Struct({ op: Schema.Literal("recordOpenAccepted"), instanceId: Uuid, actionId: Uuid, event: OpenEvent }),
-  Schema.Struct({
-    op: Schema.Literal("recordOpenFailed"),
-    instanceId: Uuid,
-    actionId: Uuid,
-    failureCode: Schema.String,
-    failureMessage: Schema.String
-  }),
-  Schema.Struct({ op: Schema.Literal("listOpenJournal"), instanceId: Uuid }),
-  Schema.Struct({ op: Schema.Literal("getOpenJournal"), instanceId: Uuid, actionId: Uuid }),
   Schema.Struct({ op: Schema.Literal("close") })
 ])
 export type DraftWorkerRequest = typeof DraftWorkerRequest.Type

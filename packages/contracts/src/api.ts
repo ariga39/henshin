@@ -17,7 +17,6 @@ import {
   RootPreviewUnavailable,
   ActiveScanConflict,
   CandidateNotFound,
-  EntryNotFound,
   TaskNotFound,
   StorageFull,
   ThumbnailMissing,
@@ -40,8 +39,6 @@ import {
 } from "./root"
 import {
   IndexedRootSamplePage,
-  EntryResolution,
-  EntryResolutionQuery,
   LibraryEntryPage,
   LibrarySearchRequest,
   LibraryView
@@ -214,12 +211,6 @@ export const LibraryApi = HttpApi.make("henshin-library").add(
         params: { id: Uuid },
         success: SuccessEnvelope(IndexedRootSamplePage),
         error: [AuthenticationRequired, RootNotFound, InternalError]
-      }),
-      HttpApiEndpoint.get("resolution", "/entries/:id/resolution", {
-        params: { id: Uuid },
-        query: EntryResolutionQuery,
-        success: SuccessEnvelope(EntryResolution),
-        error: [AuthenticationRequired, EntryNotFound, InvalidRequest, InternalError]
       })
     )
     .prefix("/api/v1")

@@ -2,7 +2,6 @@ import type {
   CommandAttempt,
   CommandReconciliation,
   ConnectionStatusView,
-  DeviceRootMapping,
   LocalMappingPreview,
   LibraryEntry,
   NoteView,
@@ -11,10 +10,7 @@ import type {
   ScanTask,
   StagedDiscovery,
   ServerRoot,
-  SavedDraft,
-  ReaderProfile,
-  ReaderProfileTestResult,
-  ReaderProfileTestTarget
+  SavedDraft
 } from "@henshin/contracts"
 
 export type Outcome =
@@ -63,13 +59,7 @@ export interface ViewState {
   readonly local_mapping_root_id: string | null
   readonly local_mapping_status: "idle" | "loading" | "ready" | "error"
   readonly local_mapping_preview: LocalMappingPreview | null
-  readonly local_mapping_preview_token: string | null
   readonly local_mapping_error: string | null
-  readonly local_mapping_list_status: "idle" | "loading" | "ready" | "error"
-  readonly local_mapping_list_error: string | null
-  readonly local_mapping_activation_status: "idle" | "loading" | "error"
-  readonly local_mapping_activation_error: string | null
-  readonly local_mappings: ReadonlyArray<DeviceRootMapping>
   readonly scan_tasks: ReadonlyArray<ScanTask>
   readonly staged_discoveries: ReadonlyArray<StagedDiscovery>
   readonly scan_status: "idle" | "loading" | "ready" | "error"
@@ -87,18 +77,6 @@ export interface ViewState {
   readonly scan_hold_new_discoveries: boolean
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
-  readonly reader_profiles: ReadonlyArray<ReaderProfile>
-  readonly reader_profiles_status: "idle" | "loading" | "ready" | "error"
-  readonly reader_profiles_error: string | null
-  readonly reader_profile_save_status: "idle" | "loading" | "ready" | "error"
-  readonly reader_profile_save_error: string | null
-  readonly reader_profile_selection_handle: string | null
-  readonly reader_profile_selection_name: string | null
-  readonly reader_profile_selection_error: string | null
-  readonly reader_profile_test_target: ReaderProfileTestTarget | null
-  readonly reader_profile_test_status: "idle" | "selecting" | "ready" | "launching" | "accepted" | "error"
-  readonly reader_profile_test_result: ReaderProfileTestResult | null
-  readonly reader_profile_test_error: string | null
   readonly library_entries: ReadonlyArray<LibraryEntry>
   readonly library_cursor: string | null
   readonly library_has_more: boolean
@@ -146,13 +124,7 @@ const initialState: ViewState = {
   local_mapping_root_id: null,
   local_mapping_status: "idle",
   local_mapping_preview: null,
-  local_mapping_preview_token: null,
   local_mapping_error: null,
-  local_mapping_list_status: "idle",
-  local_mapping_list_error: null,
-  local_mapping_activation_status: "idle",
-  local_mapping_activation_error: null,
-  local_mappings: [],
   scan_tasks: [],
   staged_discoveries: [],
   scan_status: "idle",
@@ -170,18 +142,6 @@ const initialState: ViewState = {
   scan_hold_new_discoveries: false,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
   connection_generation: 0,
-  reader_profiles: [],
-  reader_profiles_status: "idle",
-  reader_profiles_error: null,
-  reader_profile_save_status: "idle",
-  reader_profile_save_error: null,
-  reader_profile_selection_handle: null,
-  reader_profile_selection_name: null,
-  reader_profile_selection_error: null,
-  reader_profile_test_target: null,
-  reader_profile_test_status: "idle",
-  reader_profile_test_result: null,
-  reader_profile_test_error: null,
   library_entries: [],
   library_cursor: null,
   library_has_more: false,

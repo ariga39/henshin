@@ -5,6 +5,7 @@ import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { Effect } from "effect"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { localPhysicalIdentity } from "../src/main/LocalMappingPreview"
 import {
   LocalMappingStore,
   type LocalMappingActivationInput
@@ -66,7 +67,6 @@ describe("local mapping store", () => {
     const databaseDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-db-"))
     const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-fixture-"))
     try {
-      const collection = path.join(fixtureDirectory, "collection")
       const renamedCollection = path.join(fixtureDirectory, "renamed-collection")
       const collectionAlias = path.join(fixtureDirectory, "collection-alias")
       const renamedAlias = path.join(fixtureDirectory, "renamed-alias")
@@ -74,12 +74,13 @@ describe("local mapping store", () => {
       const physicalChild = path.join(physicalParent, "child")
       const physicalParentAlias = path.join(fixtureDirectory, "physical-parent-alias")
       const notDirectory = path.join(fixtureDirectory, "not-directory")
-      await mkdir(collection)
       await mkdir(renamedCollection)
       await symlink(renamedCollection, collectionAlias, "dir")
       await symlink(renamedCollection, renamedAlias, "dir")
       await mkdir(physicalChild, { recursive: true })
       await symlink(physicalParent, physicalParentAlias, "dir")
+      const protectedResolutionLoop = path.join(fixtureDirectory, "protected-resolution-loop")
+      await symlink("protected-resolution-loop", protectedResolutionLoop, "dir")
       await writeFile(notDirectory, "not a directory")
       const upperCaseSibling = path.join(fixtureDirectory, "Books")
       const lowerCaseSibling = path.join(fixtureDirectory, "books")
@@ -92,17 +93,18 @@ describe("local mapping store", () => {
       const program = Effect.gen(function*() {
         const store = yield* LocalMappingStore
 
+        expect(localPhysicalIdentity({ dev: 1, ino: 0 })).toBeUndefined()
         expect(yield* store.load({ instanceId: instanceA, rootId: rootA })).toBeUndefined()
         expect(yield* store.list(instanceA)).toEqual([])
 
-        const initial = yield* store.activate(activate(instanceA, rootA, collection, collection))
+        const initial = yield* store.activate(activate(instanceA, rootA, collectionAlias, renamedCollection))
         expect(initial).toEqual({
           kind: "activated",
           mapping: {
             instanceId: instanceA,
             rootId: rootA,
-            selectedPath: collection,
-            canonicalPath: collection,
+            selectedPath: collectionAlias,
+            canonicalPath: renamedCollection,
             mappingRevision: "1"
           }
         })
@@ -114,7 +116,7 @@ describe("local mapping store", () => {
         expect(changed).toMatchObject({ kind: "activated", mapping: { mappingRevision: "2" } })
 
         const stale = yield* store.activate(
-          activate(instanceA, rootA, collection, collection, "1")
+          activate(instanceA, rootA, collectionAlias, renamedCollection, "1")
         )
         expect(stale).toEqual({
           kind: "revision_conflict",
@@ -126,6 +128,28 @@ describe("local mapping store", () => {
             mappingRevision: "2"
           }
         })
+        expect(yield* store.load({ instanceId: instanceA, rootId: rootA })).toMatchObject({
+          selectedPath: renamedCollection,
+          canonicalPath: renamedCollection,
+          mappingRevision: "2"
+        })
+
+        const protectedResolutionRejected = yield* store.activate(
+          activate(
+            instanceA,
+            rootA,
+            renamedCollection,
+            renamedCollection,
+            "2",
+            [protectedResolutionLoop]
+          )
+        ).pipe(
+          Effect.match({
+            onFailure: () => true,
+            onSuccess: () => false
+          })
+        )
+        expect(protectedResolutionRejected).toBe(true)
         expect(yield* store.load({ instanceId: instanceA, rootId: rootA })).toMatchObject({
           selectedPath: renamedCollection,
           canonicalPath: renamedCollection,
@@ -190,7 +214,7 @@ describe("local mapping store", () => {
         expect(fileRootRejected).toBe(true)
 
         const expiredRejected = yield* store.activate(
-          activate(instanceA, rootC, collection, collection, "0", [], Date.now() - 1)
+          activate(instanceA, rootC, collectionAlias, renamedCollection, "0", [], Date.now() - 1)
         ).pipe(
           Effect.match({
             onFailure: () => true,
@@ -201,11 +225,21 @@ describe("local mapping store", () => {
         expect(yield* store.load({ instanceId: instanceA, rootId: rootC })).toBeUndefined()
 
         const otherNamespace = yield* store.activate(
-          activate(instanceB, rootB, renamedAlias, renamedAlias)
+          activate(instanceB, rootA, renamedAlias, renamedCollection)
         )
         expect(otherNamespace).toMatchObject({ kind: "activated", mapping: { mappingRevision: "1" } })
         expect(yield* store.list(instanceA)).toHaveLength(1)
         expect(yield* store.list(instanceB)).toHaveLength(1)
+        expect(yield* store.load({ instanceId: instanceA, rootId: rootA })).toMatchObject({
+          selectedPath: renamedCollection,
+          canonicalPath: renamedCollection,
+          mappingRevision: "2"
+        })
+        expect(yield* store.load({ instanceId: instanceB, rootId: rootA })).toMatchObject({
+          selectedPath: renamedAlias,
+          canonicalPath: renamedCollection,
+          mappingRevision: "1"
+        })
 
         const parentFirst = yield* store.activate(
           activate(instanceC, rootC, physicalParentAlias, physicalParentAlias)

@@ -1,12 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type {
-  LocalMappingActivateIpcRequest,
-  LocalMappingListIpcRequest,
   LocalMappingPreviewIpcRequest,
-  OpenBookIpcRequest,
-  ReaderProfileSaveIpcRequest,
-  ReaderProfileTestIpcRequest,
-  ReaderProfileTestTargetSelectIpcRequest,
   ReleaseHeldDiscoveryIpcRequest,
   RootCommandIpcRequest,
   RootPreviewRequest,
@@ -24,11 +18,7 @@ contextBridge.exposeInMainWorld("henshinRootPreview", {
 
 contextBridge.exposeInMainWorld("henshinLocalMapping", {
   preview: (input: LocalMappingPreviewIpcRequest) =>
-    ipcRenderer.invoke(IpcChannels.localMappingPreview, input),
-  list: (input: LocalMappingListIpcRequest) =>
-    ipcRenderer.invoke(IpcChannels.localMappingList, input),
-  activate: (input: LocalMappingActivateIpcRequest) =>
-    ipcRenderer.invoke(IpcChannels.localMappingActivate, input)
+    ipcRenderer.invoke(IpcChannels.localMappingPreview, input)
 })
 
 contextBridge.exposeInMainWorld("henshinScanReview", {
@@ -37,19 +27,9 @@ contextBridge.exposeInMainWorld("henshinScanReview", {
   command: (input: ReleaseHeldDiscoveryIpcRequest) => ipcRenderer.invoke(IpcChannels.reviewCommand, input)
 })
 
-contextBridge.exposeInMainWorld("henshinReaderProfiles", {
-  list: () => ipcRenderer.invoke(IpcChannels.readerProfileList, {}),
-  selectExecutable: () => ipcRenderer.invoke(IpcChannels.readerSelectExecutable, {}),
-  save: (input: ReaderProfileSaveIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileSave, input),
-  selectTestTarget: (input: ReaderProfileTestTargetSelectIpcRequest) =>
-    ipcRenderer.invoke(IpcChannels.readerProfileTestTargetSelect, input),
-  test: (input: ReaderProfileTestIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileTest, input)
-})
-
 contextBridge.exposeInMainWorld("henshinLibrary", {
   search: (input: { readonly page_size?: number; readonly cursor?: string }) =>
     ipcRenderer.invoke(IpcChannels.librarySearch, input),
-  open: (input: OpenBookIpcRequest) => ipcRenderer.invoke(IpcChannels.openBook, input),
   getThumbnail: (key: string) => ipcRenderer.invoke(IpcChannels.thumbnailGet, { key })
 })
 

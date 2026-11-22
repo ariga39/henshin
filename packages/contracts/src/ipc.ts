@@ -4,9 +4,7 @@ import {
   RootPolicyCommand,
   RootPreviewRequest,
   RootRegistrationRequest,
-  RootScanCommand,
-  DeviceRootMapping,
-  LocalMappingPreview
+  RootScanCommand
 } from "./root"
 import { LibrarySearchRequest } from "./library"
 import { ThumbnailKey } from "./thumbnail"
@@ -18,12 +16,6 @@ import type {
   SavedDraft,
   SavedDraftAbsent
 } from "./note"
-export {
-  ReaderExecutableSelectIpcRequest,
-  ReaderExecutableSelectionIpcResult,
-  ReaderProfileListIpcRequest,
-  ReaderProfileSaveIpcRequest
-} from "./reader"
 
 export const ConnectionState = Schema.Union([
   Schema.Literal("connecting"),
@@ -135,21 +127,6 @@ export type HandshakeView = typeof HandshakeView.Type
 export const RootPreviewIpcRequest = RootPreviewRequest
 export const LocalMappingPreviewIpcRequest = Schema.Struct({ root_id: Uuid })
 export type LocalMappingPreviewIpcRequest = typeof LocalMappingPreviewIpcRequest.Type
-export const LocalMappingListIpcRequest = Schema.Struct({})
-export type LocalMappingListIpcRequest = typeof LocalMappingListIpcRequest.Type
-export const LocalMappingActivateIpcRequest = Schema.Struct({
-  root_id: Uuid,
-  expected_mapping_revision: Revision,
-  preview_token: Uuid
-})
-export type LocalMappingActivateIpcRequest = typeof LocalMappingActivateIpcRequest.Type
-export const LocalMappingActivateIpcResult = DeviceRootMapping
-export type LocalMappingActivateIpcResult = typeof LocalMappingActivateIpcResult.Type
-export const LocalMappingPreviewIpcResult = Schema.NullOr(Schema.Struct({
-  preview: LocalMappingPreview,
-  preview_token: Uuid
-}))
-export type LocalMappingPreviewIpcResult = typeof LocalMappingPreviewIpcResult.Type
 export const RootListIpcRequest = Schema.Struct({})
 export type RootListIpcRequest = typeof RootListIpcRequest.Type
 export const RootSaveIpcRequest = RootRegistrationRequest
@@ -174,33 +151,13 @@ export const RootCommandIpcRequest = Schema.Union([
   })
 ])
 export type RootCommandIpcRequest = typeof RootCommandIpcRequest.Type
+export type LocalMappingPreviewIpcResult = import("./root").LocalMappingPreview | null
 
 export const LibrarySearchIpcRequest = LibrarySearchRequest
 export type LibrarySearchIpcRequest = typeof LibrarySearchIpcRequest.Type
 
 export const ThumbnailGetIpcRequest = Schema.Struct({ key: ThumbnailKey })
 export type ThumbnailGetIpcRequest = typeof ThumbnailGetIpcRequest.Type
-
-export const OpenBookIpcRequest = Schema.Struct({
-  entry_id: Uuid,
-  profile_id: Uuid,
-  action_id: Uuid
-})
-export type OpenBookIpcRequest = typeof OpenBookIpcRequest.Type
-
-export const OpenBookIpcResult = Schema.Struct({
-  action_id: Uuid,
-  entry_id: Uuid,
-  status: Schema.Union([
-    Schema.Literal("in-flight"),
-    Schema.Literal("accepted"),
-    Schema.Literal("failed"),
-    Schema.Literal("unknown")
-  ]),
-  message: Schema.String,
-  event_durable: Schema.Boolean
-})
-export type OpenBookIpcResult = typeof OpenBookIpcResult.Type
 
 export const TaskListIpcRequest = Schema.Struct({})
 export type TaskListIpcRequest = typeof TaskListIpcRequest.Type
