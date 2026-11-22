@@ -310,7 +310,7 @@ describe("native source boundary precursor", () => {
     expect(result.value.unsupportedLooseImages).toEqual(["loose.gif"])
     expect(result.value.unsupportedLooseImageCount).toBe(1)
     expect(result.value.coverage).toMatchObject({
-      status: "complete",
+      status: "partial",
       candidateCount: 3,
       candidateSampleTruncated: false,
       excludedLinks: ["linked-book"],
@@ -337,11 +337,34 @@ describe("native source boundary precursor", () => {
     if (!result.ok) throw new Error("expected source discovery")
     expect(result.value.candidates).toEqual([])
     expect(result.value.coverage).toMatchObject({
-      status: "complete",
+      status: "partial",
       unsupportedNames: ["C:book.zip", "bad\\name.zip"],
       unsupportedNameCount: 2,
       issues: []
     })
+  })
+
+  it("reports the candidate sample cap and recognized unsupported content", async () => {
+    const root = await makeTempRoot()
+    const sourceRoot = join(root, "collection")
+    await mkdir(sourceRoot)
+    await writeFile(join(sourceRoot, "unsupported.gif"), Buffer.from("unsupported"))
+    for (const name of ["one.zip", "two.zip", "three.zip"]) {
+      await writeFile(join(sourceRoot, name), Buffer.from("archive"))
+    }
+
+    const observation = await selectedRoot(sourceRoot)
+    const result = await discoverSourceRoot(observation, { limits: { maxCandidates: 2 } })
+    expect(result).toMatchObject({ ok: true })
+    if (!result.ok) throw new Error("expected bounded source discovery")
+    expect(result.value.candidates.map((candidate) => candidate.relativePath)).toEqual(["one.zip", "two.zip"])
+    expect(result.value.coverage).toMatchObject({
+      status: "partial",
+      candidateCount: 3,
+      candidateSampleTruncated: true
+    })
+    expect(result.value.unsupportedLooseImages).toEqual(["unsupported.gif"])
+    expect(result.value.unsupportedLooseImageCount).toBe(1)
   })
 
   it("keeps bounded discoveries explicit when nested coverage is incomplete", async () => {

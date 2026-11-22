@@ -13,14 +13,17 @@ export const previewRoot = (selection: RootPreviewRequest | string) =>
     const client = yield* RootPreviewClient
     const input: RootPreviewRequest = typeof selection === "string" ? { path: selection } : selection
     const requestedPath = "path" in input ? input.path : null
+    const generation = viewStore.getState().root_preview_generation + 1
     yield* Effect.sync(() =>
       viewStore.set({
-        ...(requestedPath === null ? {} : {
+        ...(requestedPath === null ? { root_preview_selected_path: null } : {
           root_preview_path: requestedPath,
           root_preview_selected_path: requestedPath
         }),
         root_preview_status: "loading",
         root_preview: null,
+        root_preview_request: input,
+        root_preview_generation: generation,
         root_preview_error: null,
         root_save_operation_id: null,
         root_save_status: "idle",
@@ -31,6 +34,7 @@ export const previewRoot = (selection: RootPreviewRequest | string) =>
     )
 
     const result = yield* client.preview(input)
+    if (viewStore.getState().root_preview_generation !== generation) return
     if (result.ok) {
       yield* Effect.sync(() =>
         viewStore.set({
