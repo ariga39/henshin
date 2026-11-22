@@ -101,14 +101,6 @@ const progressOf = (task: ScanTask): ScanProgress => ({
   coverage: task.coverage
 })
 
-const unexpectedMessage = (cause: Cause.Cause<unknown>): string => {
-  const message = Cause.prettyErrors(cause)
-    .map((error) => error.message.trim())
-    .filter((value) => value.length > 0)
-    .join("; ")
-  return message.length > 0 ? message : "unknown scan failure"
-}
-
 const finishUnexpected = (
   store: ScanStoreService,
   task: ScanTask,
@@ -123,26 +115,31 @@ const finishUnexpected = (
       }
     : {
         code: "scan_failed",
-        message: `scan failed unexpectedly: ${unexpectedMessage(cause)}. Staged discoveries and progress were preserved; retry the scan after resolving the underlying error.`
+        message: "scan failed unexpectedly; staged discoveries and progress were preserved. Check server diagnostics, resolve the underlying issue, and retry the scan."
       }
 
   return Effect.uninterruptible(
-    finish(store, {
-      taskId: task.task_id,
-      status: interrupted ? "interrupted" : "failed",
-      directoriesVisited: progress.directoriesVisited,
-      candidatesDiscovered: progress.candidatesDiscovered,
-      candidatesAnalyzed: progress.candidatesAnalyzed,
-      analysisErrorCount: progress.analysisErrorCount,
-      reviewNeededCount: progress.reviewNeededCount,
-      coverage: progress.coverage,
-      error,
-      readinessError: null
-    }).pipe(
-      Effect.catchCause((finishCause) =>
-        Effect.logError(`could not persist terminal scan status: ${unexpectedMessage(finishCause)}`)
+    Effect.gen(function*() {
+      yield* Effect.logError(
+        `held scan ${task.task_id} ${interrupted ? "interrupted" : "failed"}: ${Cause.pretty(cause)}`
       )
-    )
+      yield* finish(store, {
+        taskId: task.task_id,
+        status: interrupted ? "interrupted" : "failed",
+        directoriesVisited: progress.directoriesVisited,
+        candidatesDiscovered: progress.candidatesDiscovered,
+        candidatesAnalyzed: progress.candidatesAnalyzed,
+        analysisErrorCount: progress.analysisErrorCount,
+        reviewNeededCount: progress.reviewNeededCount,
+        coverage: progress.coverage,
+        error,
+        readinessError: null
+      }).pipe(
+        Effect.catchCause((finishCause) =>
+          Effect.logError(`could not persist terminal scan status: ${Cause.pretty(finishCause)}`)
+        )
+      )
+    })
   )
 }
 
@@ -200,9 +197,10 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
       ...progress,
       directoriesVisited: coverage.directories_visited,
       candidatesDiscovered: discovered.value.candidates.length,
-      reviewNeededCount: discovered.value.candidates.length,
+      reviewNeededCount: 0,
       coverage
     }
+    yield* store.recordDiscovery(task.task_id, coverage, discovered.value.candidates.length)
 
     for (const candidate of discovered.value.candidates) {
       const resolved = yield* Effect.tryPromise({
@@ -221,7 +219,11 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
           manifest: null,
           analysisError: sourceError(resolved.code)
         })
-        progress = { ...progress, analysisErrorCount: progress.analysisErrorCount + 1 }
+        progress = {
+          ...progress,
+          analysisErrorCount: progress.analysisErrorCount + 1,
+          reviewNeededCount: progress.reviewNeededCount + 1
+        }
         continue
       }
 
@@ -238,7 +240,11 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
           manifest: manifestView(manifest),
           analysisError: null
         })
-        progress = { ...progress, candidatesAnalyzed: progress.candidatesAnalyzed + 1 }
+        progress = {
+          ...progress,
+          candidatesAnalyzed: progress.candidatesAnalyzed + 1,
+          reviewNeededCount: progress.reviewNeededCount + 1
+        }
       } else {
         yield* store.stage({
           candidateId: randomUUID(),
@@ -250,7 +256,11 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
           manifest: null,
           analysisError: analysisError(result.failure)
         })
-        progress = { ...progress, analysisErrorCount: progress.analysisErrorCount + 1 }
+        progress = {
+          ...progress,
+          analysisErrorCount: progress.analysisErrorCount + 1,
+          reviewNeededCount: progress.reviewNeededCount + 1
+        }
       }
     }
 

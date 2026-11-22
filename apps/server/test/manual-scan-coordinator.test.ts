@@ -60,6 +60,7 @@ it("finishes a scan with an actionable failure while preserving progress", async
       listTasks: unused,
       readTask: unused,
       listStaged: unused,
+      recordDiscovery: () => Effect.succeed(undefined),
       markRunning: () => Effect.succeed(undefined),
       stage: () => Effect.fail(new DatabaseWorkerError({ message: "staging store unavailable" })),
       finish: (input) => Effect.sync(() => {
@@ -79,10 +80,10 @@ it("finishes a scan with an actionable failure while preserving progress", async
       candidatesDiscovered: 1,
       candidatesAnalyzed: 0,
       analysisErrorCount: 0,
-      reviewNeededCount: 1,
+      reviewNeededCount: 0,
       error: {
         code: "scan_failed",
-        message: expect.stringContaining("staging store unavailable")
+        message: "scan failed unexpectedly; staged discoveries and progress were preserved. Check server diagnostics, resolve the underlying issue, and retry the scan."
       },
       readinessError: null
     })

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   ReviewHttpClient,
@@ -12,6 +12,9 @@ import {
   type ScanTask,
   type StagedDiscovery
 } from "@henshin/contracts"
+import { DatabaseWorker } from "../src/persistence/DatabaseWorker"
+import { RootStore } from "../src/persistence/RootStore"
+import { ScanStore } from "../src/persistence/ScanStore"
 import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
 
 const servers: RunningServer[] = []
@@ -150,5 +153,121 @@ describe("durable held manual scan", () => {
     const afterRestart = await waitForTerminal(restarted, submittedTask.task_id)
     expect(afterRestart.status).toBe("completed_with_errors")
     expect((await listCandidates(restarted)).every((candidate) => candidate.hold_state === "held")).toBe(true)
+  })
+
+  it("recovers a persisted running task before readiness and allows a new scan after restart", async () => {
+    const first = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-held-scan-restart-"))
+    fixturePaths.add(fixture)
+    const book = path.join(fixture, "book")
+    await mkdir(book)
+    await writeFile(path.join(book, "001.jpg"), "source page")
+
+    const preview = await withServerClient(first, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const result = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in result.data)) throw new Error("expected setup preview")
+      return result.data as RootPreview
+    }))
+    const saved = await withServerClient(first, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: preview.instance_id,
+          epoch: preview.epoch,
+          label: "Restart books",
+          path: fixture,
+          preview_identity: preview.preview_identity
+        }
+      })
+    }))
+    await first.stop()
+
+    const oldTaskId = randomUUID()
+    const oldCandidateId = randomUUID()
+    const worker = DatabaseWorker.layer(first.dbPath, { workerUrl: new URL("../dist/worker.mjs", import.meta.url) })
+    const storage = Layer.merge(RootStore.layer, ScanStore.layer).pipe(Layer.provideMerge(worker))
+    await Effect.runPromise(Effect.gen(function*() {
+      yield* (yield* DatabaseWorker).call({ op: "init" })
+      const scans = yield* ScanStore
+      const started = yield* scans.start({
+        taskId: oldTaskId,
+        operationId: randomUUID(),
+        epoch: randomUUID(),
+        rootId: saved.data.root_id,
+        expectedMappingRevision: saved.data.mapping_revision,
+        expectedPolicyRevision: saved.data.policy_revision
+      })
+      if (started.kind !== "created") throw new Error("expected a persisted running task")
+      yield* scans.markRunning(oldTaskId)
+      yield* scans.recordDiscovery(oldTaskId, {
+        status: "complete",
+        directories_visited: 2,
+        entries_observed: 2,
+        candidate_count: 1,
+        candidate_sample_truncated: false,
+        excluded_links: [],
+        excluded_link_count: 0,
+        unsupported_names: [],
+        unsupported_name_count: 0,
+        unsupported_directories: [],
+        unsupported_directory_count: 0,
+        issues: [],
+        issue_count: 0
+      }, 1)
+      yield* scans.stage({
+        candidateId: oldCandidateId,
+        taskId: oldTaskId,
+        rootId: saved.data.root_id,
+        relativePath: "book",
+        kind: "image-directory",
+        analysisStatus: "error",
+        manifest: null,
+        analysisError: {
+          code: "source-unavailable",
+          message: "previous process stopped during analysis",
+          diagnostics: { supported_pages: 0, unsupported_pages: 0, ignored_entries: 0, directory_records: 0 }
+        }
+      })
+    }).pipe(Effect.provide(storage)))
+
+    const restarted = await startServer(first.dbPath)
+    servers.push(restarted)
+    const recovered = await withTaskClient(restarted, Effect.gen(function*() {
+      const client = yield* TaskHttpClient
+      return yield* client.get({ params: { id: oldTaskId } })
+    }))
+    expect(recovered.data).toMatchObject({
+      task_id: oldTaskId,
+      status: "interrupted",
+      directories_visited: 2,
+      candidates_discovered: 1,
+      analysis_error_count: 1,
+      review_needed_count: 1,
+      coverage: { status: "complete" },
+      error: { code: "server_restart", message: "scan interrupted by server restart" }
+    })
+    expect((await listCandidates(restarted)).find((candidate) => candidate.candidate_id === oldCandidateId))
+      .toMatchObject({ task_id: oldTaskId, hold_state: "held" })
+
+    const submitted = await withServerClient(restarted, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.command({
+        params: { id: saved.data.root_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: restarted.instanceId,
+          epoch: restarted.epoch,
+          expected_mapping_revision: saved.data.mapping_revision,
+          expected_policy_revision: saved.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: true }
+        }
+      })
+    }))
+    if (!("task" in submitted.data)) throw new Error("expected a new scan task")
+    expect(submitted.data.task.task_id).not.toBe(oldTaskId)
+    const newTask = await waitForTerminal(restarted, submitted.data.task.task_id)
+    expect(newTask.status).toBe("succeeded")
   })
 })
