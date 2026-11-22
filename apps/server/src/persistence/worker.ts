@@ -6,6 +6,7 @@ import { Option, Schema } from "effect"
 import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contracts/canonical"
 import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanAnalysisError, ScanManifest } from "@henshin/contracts/root"
 import { INDEXED_ROOT_SAMPLE_LIMIT } from "@henshin/contracts"
+import { caseFold } from "unicode-case-folding"
 import {
   WorkerMessage,
   WorkerResponse,
@@ -48,11 +49,8 @@ const MAX_REPORTED_DEFERRED_PATHS = 32
 const resolutionParentKey = (relativePath: string): string => {
   const separator = relativePath.lastIndexOf("/")
   const parentPath = separator < 0 ? "" : relativePath.slice(0, separator)
-  return parentPath
-    .normalize("NFC")
-    .toLocaleLowerCase("und")
-    .replaceAll("ς", "σ")
-    .replaceAll("ß", "ss")
+  const foldedParent = caseFold(parentPath.normalize("NFC")).normalize("NFC")
+  return foldedParent.split("/").map((component) => component.replace(/[ .]+$/gu, "")).join("/")
 }
 
 const ResolutionCursor = Schema.Struct({

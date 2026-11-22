@@ -998,6 +998,10 @@ describe("normal library scan", () => {
     }
     const mixedEquivalentId = randomUUID()
     insertAccepted(mixedEquivalentId, "Books/book.zip")
+    const win32SpaceEquivalentId = randomUUID()
+    const win32DotEquivalentId = randomUUID()
+    insertAccepted(win32SpaceEquivalentId, "Books /book.zip")
+    insertAccepted(win32DotEquivalentId, "Books./book.zip")
 
     const normalizedTargetId = randomUUID()
     const normalizedEquivalentId = randomUUID()
@@ -1008,11 +1012,15 @@ describe("normal library scan", () => {
     const greekTargetId = randomUUID()
     const greekEquivalentId = randomUUID()
     insertAccepted(greekTargetId, "ΟΣ/Book.zip")
-    insertAccepted(greekEquivalentId, "οσ/book.zip")
+    insertAccepted(greekEquivalentId, "ος/book.zip")
     const sharpSTargetId = randomUUID()
     const sharpSEquivalentId = randomUUID()
     insertAccepted(sharpSTargetId, "Straße/Book.zip")
     insertAccepted(sharpSEquivalentId, "STRASSE/book.zip")
+    const longSTargetId = randomUUID()
+    const longSEquivalentId = randomUUID()
+    insertAccepted(longSTargetId, "ſigma/Book.zip")
+    insertAccepted(longSEquivalentId, "SIGMA/book.zip")
     db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1").run()
     db.close()
 
@@ -1037,7 +1045,11 @@ describe("normal library scan", () => {
     }))
     expect(second.data.sibling_claims_truncated).toBe(false)
     expect(second.data.sibling_claims_next_cursor).toBeNull()
-    expect(second.data.sibling_claims.map((claim) => claim.relative_path)).toContain("Books/book.zip")
+    const siblingPaths = [...first.data.sibling_claims, ...second.data.sibling_claims]
+      .map((claim) => claim.relative_path)
+    expect(siblingPaths).toContain("Books/book.zip")
+    expect(siblingPaths).toContain("Books /book.zip")
+    expect(siblingPaths).toContain("Books./book.zip")
 
     const crossTargetCursor = await withLibraryClient(restarted, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).resolution({
@@ -1058,12 +1070,17 @@ describe("normal library scan", () => {
     const greek = await withLibraryClient(restarted, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).resolution({ params: { id: greekTargetId }, query: {} })
     }))
-    expect(greek.data.sibling_claims.map((claim) => claim.relative_path)).toContain("οσ/book.zip")
+    expect(greek.data.sibling_claims.map((claim) => claim.relative_path)).toContain("ος/book.zip")
 
     const sharpS = await withLibraryClient(restarted, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).resolution({ params: { id: sharpSTargetId }, query: {} })
     }))
     expect(sharpS.data.sibling_claims.map((claim) => claim.relative_path)).toContain("STRASSE/book.zip")
+
+    const longS = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: longSTargetId }, query: {} })
+    }))
+    expect(longS.data.sibling_claims.map((claim) => claim.relative_path)).toContain("SIGMA/book.zip")
 
     const unknownCursor = await withLibraryClient(restarted, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).resolution({
