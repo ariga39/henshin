@@ -7,6 +7,7 @@ import {
   ReviewHttpClient,
   ServerHttpClient,
   TaskHttpClient,
+  ThumbnailHttpClient,
   type ConnectionStatusView
 } from "@henshin/contracts"
 
@@ -30,7 +31,7 @@ export interface ConnectionLifecycleOptions {
 interface Lease {
   readonly generation: number
   readonly runtime: ManagedRuntime.ManagedRuntime<
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient,
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient | ThumbnailHttpClient,
     never
   >
   readonly instanceId: string
@@ -40,7 +41,7 @@ interface Lease {
 interface Candidate {
   readonly generation: number
   readonly runtime: ManagedRuntime.ManagedRuntime<
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient,
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient | ThumbnailHttpClient,
     never
   >
 }
@@ -49,7 +50,7 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 const disposeBounded = async (
   runtime: ManagedRuntime.ManagedRuntime<
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient,
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient | ThumbnailHttpClient,
     never
   >
 ): Promise<void> => {
@@ -134,7 +135,8 @@ export class ConnectionLifecycle {
       LibraryHttpClient.layer(options),
       TaskHttpClient.layer(options),
       ReviewHttpClient.layer(options),
-      OpenEventHttpClient.layer(options)
+      OpenEventHttpClient.layer(options),
+      ThumbnailHttpClient.layer(options)
     ))
     const candidate = { generation, runtime }
     this.candidates.set(generation, candidate)
@@ -213,7 +215,7 @@ export class ConnectionLifecycle {
     effect: Effect.Effect<
       A,
       E,
-      PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient
+      PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient | ThumbnailHttpClient
     >,
     timeout = NETWORK_DEADLINE
   ): Promise<A> {

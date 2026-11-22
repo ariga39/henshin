@@ -14,6 +14,7 @@ export const IpcChannels = {
   readerProfileTestTargetSelect: "henshin:reader-profile-test-target-select",
   readerProfileTest: "henshin:reader-profile-test",
   librarySearch: "henshin:library-search",
+  thumbnailGet: "henshin:thumbnail-get",
   taskList: "henshin:task-list",
   reviewCandidates: "henshin:review-candidates",
   reviewCommand: "henshin:review-command",

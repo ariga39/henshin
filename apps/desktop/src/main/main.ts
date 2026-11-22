@@ -19,6 +19,8 @@ import {
   ListOpenJournalIpcRequest,
   LocalMappingPreviewIpcRequest,
   LibrarySearchIpcRequest,
+  ThumbnailGetIpcRequest,
+  ThumbnailHttpClient,
   LoadDraftIpcRequest,
   ListCommandAttemptsIpcRequest,
   PrototypeHttpClient,
@@ -88,6 +90,9 @@ import {
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
 const LOCAL_MAPPING_REQUEST_TIMEOUT = Duration.seconds(12)
+// The server gives one thumbnail request a 30-second aggregate producer
+// budget; keep a small allowance for HTTP and IPC teardown.
+const THUMBNAIL_NETWORK_DEADLINE = Duration.seconds(32)
 
 interface Session {
   readonly instanceId: string
@@ -381,7 +386,7 @@ const runNetworkResult = <A>(
   effect: Effect.Effect<
     IpcOk<A> | IpcErr,
     never,
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient | ThumbnailHttpClient
   >,
   timeout?: Duration.Duration,
   errorMapper: (error: unknown) => PublicError = toPublicError
@@ -760,6 +765,21 @@ const registerIpc = (): void => {
           return yield* client.search({ payload: decoded.value })
         })
       )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.thumbnailGet, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ThumbnailGetIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return runNetworkResult(
+      toRawResult(
+        Effect.gen(function*() {
+          const client = yield* ThumbnailHttpClient
+          return yield* client.get({ params: { key: decoded.value.key } })
+        })
+      ),
+      THUMBNAIL_NETWORK_DEADLINE
     )
   })
 

@@ -41,7 +41,8 @@ contextBridge.exposeInMainWorld("henshinReaderProfiles", {
 
 contextBridge.exposeInMainWorld("henshinLibrary", {
   search: (input: { readonly page_size?: number; readonly cursor?: string }) =>
-    ipcRenderer.invoke(IpcChannels.librarySearch, input)
+    ipcRenderer.invoke(IpcChannels.librarySearch, input),
+  getThumbnail: (key: string) => ipcRenderer.invoke(IpcChannels.thumbnailGet, { key })
 })
 
 if (new URLSearchParams(window.location.search).get("mode") === "prototype") {
