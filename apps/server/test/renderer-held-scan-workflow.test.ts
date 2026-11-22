@@ -7,7 +7,7 @@ import type {
   StagedDiscovery
 } from "@henshin/contracts"
 import { afterEach, describe, expect, it } from "vitest"
-import { LibraryClient, RootPreviewClient, ScanReviewClient, type Result } from "../../desktop/src/renderer/client"
+import { LibraryClient, LocalMappingClient, RootPreviewClient, ScanReviewClient, type Result } from "../../desktop/src/renderer/client"
 import {
   loadRootWorkspace,
   loadLibrary,
@@ -131,6 +131,7 @@ const resetView = () => {
     library_has_more: false,
     library_status: "idle",
     library_error: null,
+    library_cover_generation: 0,
     library_scan_status: "idle",
     library_scan_error: null,
     library_scan_task: null
@@ -140,16 +141,18 @@ const resetView = () => {
 afterEach(resetView)
 
 const run = <A>(
-  effect: Effect.Effect<A, unknown, RootPreviewClient | ScanReviewClient | LibraryClient>,
+  effect: Effect.Effect<A, unknown, RootPreviewClient | ScanReviewClient | LibraryClient | LocalMappingClient>,
   rootClient: RootPreviewClient["Service"],
   scanClient: ScanReviewClient["Service"],
-  libraryClient: LibraryClient["Service"] = libraryClientWith()
+  libraryClient: LibraryClient["Service"] = libraryClientWith(),
+  localMappingClient: LocalMappingClient["Service"] = localMappingClientWith()
 ) => Effect.runPromise(Effect.provide(
   effect,
   Layer.mergeAll(
     Layer.succeed(RootPreviewClient, rootClient),
     Layer.succeed(ScanReviewClient, scanClient),
-    Layer.succeed(LibraryClient, libraryClient)
+    Layer.succeed(LibraryClient, libraryClient),
+    Layer.succeed(LocalMappingClient, localMappingClient)
   )
 ))
 
@@ -174,9 +177,18 @@ const scanClientWith = (overrides: Partial<ScanReviewClient["Service"]> = {}): S
 function libraryClientWith(overrides: Partial<LibraryClient["Service"]> = {}): LibraryClient["Service"] {
   return LibraryClient.of({
     search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "0" } }),
+    getThumbnail: () => Effect.succeed({ ok: false as const, error: { code: "thumbnail_missing", message: "not used", retryable: false } }),
     ...overrides
   })
 }
+
+const localMappingClientWith = (overrides: Partial<LocalMappingClient["Service"]> = {}): LocalMappingClient["Service"] =>
+  LocalMappingClient.of({
+    preview: () => Effect.succeed({ ok: true as const, data: null }),
+    list: () => Effect.succeed({ ok: true as const, data: [] }),
+    activate: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+    ...overrides
+  })
 
 describe("held scan renderer workflows", () => {
   it("releases one held discovery using the current candidate and root fences", async () => {
@@ -720,11 +732,13 @@ describe("held scan renderer workflows", () => {
     })
 
     await run(loadLibrary(), rootClientWith(), scanClientWith(), libraryClient)
+    expect(viewStore.getState().library_cover_generation).toBe(1)
     await run(loadLibrary(), rootClientWith(), scanClientWith(), libraryClient)
     expect(viewStore.getState()).toMatchObject({
       library_status: "error",
       library_error: "refresh failed",
-      library_entries: [existing]
+      library_entries: [existing],
+      library_cover_generation: 1
     })
 
     await run(loadLibrary(true), rootClientWith(), scanClientWith(), libraryClient)
@@ -732,7 +746,8 @@ describe("held scan renderer workflows", () => {
       library_status: "ready",
       library_entries: [existing, appended],
       library_has_more: false,
-      library_cursor: null
+      library_cursor: null,
+      library_cover_generation: 1
     })
   })
 })

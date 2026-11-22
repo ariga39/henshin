@@ -1,6 +1,11 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type {
+  LocalMappingActivateIpcRequest,
+  LocalMappingListIpcRequest,
+  LocalMappingPreviewIpcRequest,
   ReaderProfileSaveIpcRequest,
+  ReaderProfileTestIpcRequest,
+  ReaderProfileTestTargetSelectIpcRequest,
   ReleaseHeldDiscoveryIpcRequest,
   RootCommandIpcRequest,
   RootPreviewRequest,
@@ -16,6 +21,15 @@ contextBridge.exposeInMainWorld("henshinRootPreview", {
   command: (input: RootCommandIpcRequest) => ipcRenderer.invoke(IpcChannels.rootCommand, input)
 })
 
+contextBridge.exposeInMainWorld("henshinLocalMapping", {
+  preview: (input: LocalMappingPreviewIpcRequest) =>
+    ipcRenderer.invoke(IpcChannels.localMappingPreview, input),
+  list: (input: LocalMappingListIpcRequest) =>
+    ipcRenderer.invoke(IpcChannels.localMappingList, input),
+  activate: (input: LocalMappingActivateIpcRequest) =>
+    ipcRenderer.invoke(IpcChannels.localMappingActivate, input)
+})
+
 contextBridge.exposeInMainWorld("henshinScanReview", {
   listTasks: () => ipcRenderer.invoke(IpcChannels.taskList, {}),
   candidates: () => ipcRenderer.invoke(IpcChannels.reviewCandidates, {}),
@@ -25,12 +39,16 @@ contextBridge.exposeInMainWorld("henshinScanReview", {
 contextBridge.exposeInMainWorld("henshinReaderProfiles", {
   list: () => ipcRenderer.invoke(IpcChannels.readerProfileList, {}),
   selectExecutable: () => ipcRenderer.invoke(IpcChannels.readerSelectExecutable, {}),
-  save: (input: ReaderProfileSaveIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileSave, input)
+  save: (input: ReaderProfileSaveIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileSave, input),
+  selectTestTarget: (input: ReaderProfileTestTargetSelectIpcRequest) =>
+    ipcRenderer.invoke(IpcChannels.readerProfileTestTargetSelect, input),
+  test: (input: ReaderProfileTestIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileTest, input)
 })
 
 contextBridge.exposeInMainWorld("henshinLibrary", {
   search: (input: { readonly page_size?: number; readonly cursor?: string }) =>
-    ipcRenderer.invoke(IpcChannels.librarySearch, input)
+    ipcRenderer.invoke(IpcChannels.librarySearch, input),
+  getThumbnail: (key: string) => ipcRenderer.invoke(IpcChannels.thumbnailGet, { key })
 })
 
 if (new URLSearchParams(window.location.search).get("mode") === "prototype") {
