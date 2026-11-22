@@ -66,6 +66,7 @@ it("finishes a scan with an actionable failure while preserving progress", async
         message: "scan task no longer matches the current root mapping or policy"
       })),
       publishNormal: () => Effect.die("unused test store operation"),
+      releaseHeld: () => Effect.die("unused test store operation"),
       finish: (input) => Effect.sync(() => {
         terminal = input
       }),
@@ -143,6 +144,7 @@ it("requires matching observations across the quiet interval before normal publi
         publishedPaths = input.observedCandidatePaths
         return { kind: "published" as const }
       }),
+      releaseHeld: () => Effect.die("unused test store operation"),
       finish: (input) => Effect.sync(() => {
         terminal = input
       }),

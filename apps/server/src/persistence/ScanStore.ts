@@ -12,6 +12,7 @@ import { DatabaseWorker, DatabaseWorkerError } from "./DatabaseWorker"
 import {
   ScanStartOutcome,
   NormalPublishOutcome,
+  ReleaseHeldDiscoveryOutcome,
   ScanTaskRow,
   StagedDiscoveryRow,
   type ScanTaskRow as ScanTaskRowType,
@@ -37,6 +38,10 @@ export type ScanStartResult =
   | { readonly kind: "root_not_found" }
   | { readonly kind: "mapping_revision_conflict"; readonly currentMappingRevision: string }
   | { readonly kind: "policy_revision_conflict"; readonly currentPolicyRevision: string }
+
+export type ReleaseHeldResult =
+  | { readonly kind: "committed" | "replayed"; readonly candidate: StagedDiscovery }
+  | Exclude<typeof ReleaseHeldDiscoveryOutcome.Type, { readonly kind: "committed" | "replayed" }>
 
 export interface StageDiscoveryInput {
   readonly candidateId: string
@@ -159,6 +164,15 @@ export class ScanStore extends Context.Service<
       readonly expectedPolicyRevision: string
       readonly observedCandidatePaths: ReadonlyArray<string>
     }) => Effect.Effect<typeof NormalPublishOutcome.Type, DatabaseWorkerError>
+    readonly releaseHeld: (input: {
+      readonly candidateId: string
+      readonly rootId: string
+      readonly operationId: string
+      readonly epoch: string
+      readonly expectedCandidateVersion: number
+      readonly expectedMappingRevision: string
+      readonly expectedPolicyRevision: string
+    }) => Effect.Effect<ReleaseHeldResult, DatabaseWorkerError>
     readonly finish: (input: FinishScanInput) => Effect.Effect<void, DatabaseWorkerError>
     readonly recoverInterrupted: () => Effect.Effect<void, DatabaseWorkerError>
   }
@@ -251,6 +265,30 @@ export class ScanStore extends Context.Service<
         })
       )
 
+      const releaseHeld = (input: {
+        readonly candidateId: string
+        readonly rootId: string
+        readonly operationId: string
+        readonly epoch: string
+        readonly expectedCandidateVersion: number
+        readonly expectedMappingRevision: string
+        readonly expectedPolicyRevision: string
+      }) => worker.call({ op: "releaseHeldDiscovery", ...input }).pipe(
+        Effect.flatMap((value) => {
+          const decoded = Schema.decodeUnknownOption(ReleaseHeldDiscoveryOutcome)(value)
+          if (Option.isNone(decoded)) {
+            return Effect.fail(new DatabaseWorkerError({ message: "invalid review release result" }))
+          }
+          const result = decoded.value
+          return result.kind === "committed" || result.kind === "replayed"
+            ? Effect.try({
+                try: () => ({ kind: result.kind, candidate: stagedView(result.candidate) } as ReleaseHeldResult),
+                catch: () => new DatabaseWorkerError({ message: "invalid persisted released discovery" })
+              })
+            : Effect.succeed(result as ReleaseHeldResult)
+        })
+      )
+
       const finish = (input: FinishScanInput) => worker.call({
         op: "finishScan",
         taskId: input.taskId,
@@ -269,7 +307,7 @@ export class ScanStore extends Context.Service<
 
       const recoverInterrupted = () => worker.call({ op: "recoverScans" }).pipe(Effect.asVoid)
 
-      return ScanStore.of({ start, listTasks, readTask, listStaged, recordDiscovery, markRunning, stage, publishNormal, finish, recoverInterrupted })
+      return ScanStore.of({ start, listTasks, readTask, listStaged, recordDiscovery, markRunning, stage, publishNormal, releaseHeld, finish, recoverInterrupted })
     })
   )
 }
