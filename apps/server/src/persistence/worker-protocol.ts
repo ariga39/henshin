@@ -1,9 +1,9 @@
 import { Schema } from "effect"
 import { INDEXED_ROOT_SAMPLE_LIMIT } from "@henshin/contracts"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
-import { RootExclusions, RootPolicyCommand, RootRelativePath } from "@henshin/contracts/root"
-import { ThumbnailReference } from "@henshin/contracts/thumbnail"
 import { OpenEvent, OpenEventOutcome } from "@henshin/contracts/event"
+import { RootExclusions, RootPolicyCommand, RootRelativePath, ScanManifestObservation, ScanManifestPage } from "@henshin/contracts/root"
+import { ThumbnailReference } from "@henshin/contracts/thumbnail"
 
 /** A persisted prototype note row, always with a canonical decimal revision. */
 export const NoteRow = Schema.Struct({
@@ -144,6 +144,34 @@ export const LibraryEntryRow = Schema.Struct({
   cover: Schema.NullOr(ThumbnailReference)
 })
 export type LibraryEntryRow = typeof LibraryEntryRow.Type
+
+const LibraryEntryResolution = Schema.Struct({
+  entry_id: Uuid,
+  root_id: Uuid,
+  relative_path: Schema.String,
+  kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  decision_version: Revision,
+  location_revision: Revision,
+  content_version: Revision,
+  status: Schema.Union([Schema.Literal("usable"), Schema.Literal("unresolved")]),
+  reason: Schema.NullOr(Schema.Union([
+    Schema.Literal("known-change"),
+    Schema.Literal("insufficient-evidence")
+  ])),
+  accepted_observation: ScanManifestObservation,
+  first_page: Schema.NullOr(ScanManifestPage),
+  sibling_claims: Schema.Array(Schema.Struct({ entry_id: Uuid, relative_path: Schema.String })),
+  sibling_claims_truncated: Schema.Boolean,
+  sibling_claims_next_cursor: Schema.NullOr(Schema.String),
+  sibling_claims_revision: Revision
+})
+export const LibraryEntryResolutionRow = Schema.NullOr(LibraryEntryResolution)
+export type LibraryEntryResolutionRow = typeof LibraryEntryResolutionRow.Type
+export const LibraryEntryResolutionResult = Schema.Union([
+  LibraryEntryResolutionRow,
+  Schema.Struct({ kind: Schema.Literal("invalid_cursor") })
+])
+export type LibraryEntryResolutionResult = typeof LibraryEntryResolutionResult.Type
 
 export const AcceptedThumbnailEntryRow = Schema.Struct({
   entry_id: Uuid,
@@ -327,6 +355,12 @@ export const WorkerRequest = Schema.Union([
     op: Schema.Literal("listIndexedRootSamples"),
     rootId: Uuid,
     sampleLimit: Schema.Literal(INDEXED_ROOT_SAMPLE_LIMIT + 1)
+  }),
+  Schema.Struct({
+    op: Schema.Literal("readEntryResolution"),
+    entryId: Uuid,
+    siblingCursor: Schema.optional(Schema.String),
+    siblingClaimsRevision: Schema.optional(Revision)
   }),
   Schema.Struct({ op: Schema.Literal("readAcceptedThumbnailEntry"), entryId: Uuid }),
   Schema.Struct({ op: Schema.Literal("acceptOpenEvents"), events: Schema.Array(OpenEvent) }),

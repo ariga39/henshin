@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { DatabaseSync } from "node:sqlite"
 import os from "node:os"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
@@ -42,6 +43,17 @@ const waitForTerminal = async (server: RunningServer, taskId: string): Promise<S
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error("normal scan did not reach a terminal state")
+}
+
+const waitForStagedPath = async (server: RunningServer, relativePath: string): Promise<void> => {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const staged = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).candidates()
+    }))
+    if (staged.data.some((candidate) => candidate.relative_path === relativePath)) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error(`scan did not stage ${relativePath}`)
 }
 
 const makeZip = async (archivePath: string): Promise<void> => {
@@ -177,6 +189,33 @@ describe("normal library scan", () => {
       kind: "image-directory",
       page_count: 2
     })
+    for (const entry of firstEntries) {
+      const resolution = await withLibraryClient(server, Effect.gen(function*() {
+        return yield* (yield* LibraryHttpClient).resolution({ params: { id: entry.entry_id }, query: {} })
+      }))
+      expect(resolution.data).toMatchObject({
+        entry_id: entry.entry_id,
+        root_id: entry.root_id,
+        relative_path: entry.relative_path,
+        kind: entry.kind,
+        decision_version: "1",
+        location_revision: "1",
+        content_version: "1",
+        status: "usable",
+        reason: null,
+        first_page: expect.objectContaining({ name: "001.jpg" }),
+        sibling_claims_truncated: false
+      })
+      expect(resolution.data.accepted_observation.observation_token).toEqual(expect.any(String))
+      expect(resolution.data.sibling_claims.map((claim) => claim.relative_path)).toEqual(
+        expect.arrayContaining(firstEntries.filter((other) => other.entry_id !== entry.entry_id).map((other) => other.relative_path))
+      )
+      expect("source_path" in resolution.data).toBe(false)
+    }
+    const unknownResolution = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: randomUUID() }, query: {} }).pipe(Effect.flip)
+    }))
+    expect(unknownResolution._tag).toBe("EntryNotFound")
     const firstIds = new Map(firstEntries.map((entry) => [entry.relative_path, entry.entry_id]))
 
     await server.stop()
@@ -375,6 +414,20 @@ describe("normal library scan", () => {
       location_revision: "1"
     })
 
+    const changedResolution = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+    }))
+    expect(changedResolution.data).toMatchObject({
+      entry_id: accepted.entry_id,
+      relative_path: "book",
+      status: "unresolved",
+      reason: "known-change",
+      decision_version: "1",
+      location_revision: "1",
+      content_version: "1",
+      first_page: { name: "001.jpg" }
+    })
+
     const staged = await withReviewClient(server, Effect.gen(function*() {
       const client = yield* ReviewHttpClient
       return yield* client.candidates()
@@ -382,6 +435,642 @@ describe("normal library scan", () => {
     expect(staged.data).toHaveLength(1)
     expect(staged.data[0]).toMatchObject({ relative_path: "book", analysis_status: "ready" })
     expect(staged.data[0]?.manifest?.pages).toHaveLength(2)
+  })
+
+  it("keeps an accepted archive usable after a transient server source failure", async () => {
+    const previousQuietInterval = process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
+    process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = "1000"
+    const server = await start()
+    try {
+      const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-archive-transient-"))
+      fixturePaths.add(fixture)
+      const archive = path.join(fixture, "archive.cbz")
+      await makeZip(archive)
+
+      const root = await withServerClient(server, Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        const preview = yield* client.preview({ payload: { path: fixture } })
+        if (!("children" in preview.data)) throw new Error("expected setup preview")
+        return yield* client.save({
+          payload: {
+            operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+            label: "Transient archive source", path: fixture, preview_identity: preview.data.preview_identity
+          }
+        })
+      }))
+
+      const scan = () => withServerClient(server, Effect.gen(function*() {
+        return yield* (yield* ServerHttpClient).command({
+          params: { id: root.data.root_id },
+          payload: {
+            operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+            expected_mapping_revision: root.data.mapping_revision,
+            expected_policy_revision: root.data.policy_revision,
+            command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+          }
+        })
+      }))
+
+      const first = await scan()
+      if (!("task" in first.data)) throw new Error("expected initial scan task")
+      expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
+      const accepted = await withLibraryClient(server, Effect.gen(function*() {
+        const entries = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
+        const entry = entries.data.entries[0]
+        if (entry === undefined) throw new Error("expected accepted archive")
+        return entry
+      }))
+      expect(accepted.kind).toBe("archive")
+
+      const second = await scan()
+      if (!("task" in second.data)) throw new Error("expected repeated scan task")
+      await waitForStagedPath(server, "archive.cbz")
+      await rm(archive)
+      const terminal = await waitForTerminal(server, second.data.task.task_id)
+      expect(terminal.status).toBe("completed_with_errors")
+      expect(terminal.readiness_error?.code).toBe("allocation_deferred")
+      await makeZip(archive)
+
+      const resolution = await withLibraryClient(server, Effect.gen(function*() {
+        return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+      }))
+      expect(resolution.data).toMatchObject({
+        entry_id: accepted.entry_id,
+        kind: "archive",
+        status: "usable",
+        reason: null,
+        first_page: { name: "001.jpg" }
+      })
+    } finally {
+      if (previousQuietInterval === undefined) delete process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
+      else process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = previousQuietInterval
+    }
+  })
+
+  it("keeps accepted resolution usable when the server root is unavailable", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-unavailable-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "book")
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+          label: "Unavailable resolution", path: fixture, preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+
+    const scan = await withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in scan.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, scan.data.task.task_id)).status).toBe("succeeded")
+    const entries = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
+    }))
+    const accepted = entries.data.entries[0]
+    if (accepted === undefined) throw new Error("expected accepted entry")
+
+    await rm(fixture, { recursive: true, force: true })
+    const unavailableScan = await withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in unavailableScan.data)) throw new Error("expected unavailable scan task")
+    expect((await waitForTerminal(server, unavailableScan.data.task.task_id)).status).toBe("failed")
+
+    const resolution = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+    }))
+    expect(resolution.data.status).toBe("usable")
+    expect(resolution.data.reason).toBeNull()
+  })
+
+  it("keeps identical accepted evidence usable after a failed ordinary scan", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-staged-failure-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "book")
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+          label: "Staged failure", path: fixture, preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+
+    const scan = async () => withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+
+    const first = await scan()
+    if (!("task" in first.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
+    const accepted = await withLibraryClient(server, Effect.gen(function*() {
+      const entries = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
+      const entry = entries.data.entries[0]
+      if (entry === undefined) throw new Error("expected accepted entry")
+      return entry
+    }))
+
+    const second = await scan()
+    if (!("task" in second.data)) throw new Error("expected repeated scan task")
+    await waitForStagedPath(server, "book")
+    const policy = await withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "exclude", exclusion: { path: "not-present", scope: "exact" } }
+        }
+      })
+    }))
+    if ("task" in policy.data) throw new Error("expected policy response")
+    expect((await waitForTerminal(server, second.data.task.task_id)).status).toBe("failed")
+
+    const resolution = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+    }))
+    expect(resolution.data).toMatchObject({ status: "usable", reason: null })
+  })
+
+  it("keeps identical accepted evidence usable after an interrupted scan", async () => {
+    const previousQuietInterval = process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
+    process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = "1000"
+    const server = await start()
+    try {
+      const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-interrupted-"))
+      fixturePaths.add(fixture)
+      await makeImageBook(fixture, "book")
+
+      const root = await withServerClient(server, Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        const preview = yield* client.preview({ payload: { path: fixture } })
+        if (!("children" in preview.data)) throw new Error("expected setup preview")
+        return yield* client.save({
+          payload: {
+            operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+            label: "Interrupted resolution", path: fixture, preview_identity: preview.data.preview_identity
+          }
+        })
+      }))
+
+      const startScan = () => withServerClient(server, Effect.gen(function*() {
+        return yield* (yield* ServerHttpClient).command({
+          params: { id: root.data.root_id },
+          payload: {
+            operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+            expected_mapping_revision: root.data.mapping_revision,
+            expected_policy_revision: root.data.policy_revision,
+            command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+          }
+        })
+      }))
+
+      const first = await startScan()
+      if (!("task" in first.data)) throw new Error("expected initial scan task")
+      expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
+      const accepted = await withLibraryClient(server, Effect.gen(function*() {
+        const entries = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
+        const entry = entries.data.entries[0]
+        if (entry === undefined) throw new Error("expected accepted entry")
+        return entry
+      }))
+
+      const second = await startScan()
+      if (!("task" in second.data)) throw new Error("expected repeated scan task")
+      await waitForStagedPath(server, "book")
+      await server.stop()
+      const restarted = await startServer(server.dbPath)
+      servers.push(restarted)
+      expect((await waitForTerminal(restarted, second.data.task.task_id)).status).toBe("interrupted")
+
+      const resolution = await withLibraryClient(restarted, Effect.gen(function*() {
+        return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+      }))
+      expect(resolution.data).toMatchObject({ status: "usable", reason: null })
+    } finally {
+      if (previousQuietInterval === undefined) delete process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
+      else process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = previousQuietInterval
+    }
+  })
+
+  it("refreshes legacy accepted observations through an equivalent rescan", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-legacy-observation-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "book")
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+          label: "Legacy observation", path: fixture, preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+
+    const scan = await withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in scan.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, scan.data.task.task_id)).status).toBe("succeeded")
+
+    const accepted = await withLibraryClient(server, Effect.gen(function*() {
+      const entries = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
+      const entry = entries.data.entries.find((candidate) => candidate.relative_path === "book")
+      if (entry === undefined) throw new Error("expected accepted entry")
+      return entry
+    }))
+
+    await server.stop()
+    const db = new DatabaseSync(server.dbPath)
+    const acceptedRow = db.prepare(
+      "SELECT manifest_json FROM library_entries WHERE entry_id = ?"
+    ).get(accepted.entry_id) as { manifest_json: string } | undefined
+    if (acceptedRow === undefined) throw new Error("expected persisted accepted entry")
+    const legacyManifest = JSON.parse(acceptedRow.manifest_json) as {
+      before: { observation_token?: string }
+      after: { observation_token?: string }
+    }
+    delete legacyManifest.before.observation_token
+    delete legacyManifest.after.observation_token
+    db.prepare("UPDATE library_entries SET manifest_json = ? WHERE entry_id = ?").run(
+      JSON.stringify(legacyManifest),
+      accepted.entry_id
+    )
+    db.close()
+
+    const restarted = await startServer(server.dbPath)
+    servers.push(restarted)
+    const beforeRescan = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+    }))
+    expect(beforeRescan.data).toMatchObject({
+      entry_id: accepted.entry_id,
+      status: "unresolved",
+      reason: "insufficient-evidence"
+    })
+    expect(beforeRescan.data.accepted_observation.observation_token).toBeUndefined()
+
+    const rescan = await withServerClient(restarted, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: restarted.instanceId, epoch: restarted.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in rescan.data)) throw new Error("expected legacy rescan task")
+    expect((await waitForTerminal(restarted, rescan.data.task.task_id)).status).toBe("succeeded")
+
+    const afterRescan = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+    }))
+    expect(afterRescan.data).toMatchObject({
+      entry_id: accepted.entry_id,
+      status: "usable",
+      reason: null,
+      decision_version: beforeRescan.data.decision_version,
+      location_revision: beforeRescan.data.location_revision,
+      content_version: beforeRescan.data.content_version,
+      first_page: expect.objectContaining({ name: "001.jpg" })
+    })
+    expect(afterRescan.data.accepted_observation.observation_token).toEqual(expect.any(String))
+  })
+
+  it("paginates complete sibling collision evidence for a large flat collection", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-siblings-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "BOOK-999")
+    for (let index = 0; index < 130; index += 1) {
+      await makeImageBook(fixture, `book-${String(index).padStart(3, "0")}`)
+    }
+    // APFS folds case, so the equivalent logical claim is inserted while the
+    // server is stopped after the real scan has populated the collection.
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+          label: "Large flat collection", path: fixture, preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+
+    const scan = await withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in scan.data)) throw new Error("expected scan task")
+    expect((await waitForTerminal(server, scan.data.task.task_id)).status).toBe("succeeded")
+
+    const entries = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
+    }))
+    const target = entries.data.entries.find((entry) => entry.relative_path === "BOOK-999")
+    if (target === undefined) throw new Error("expected target entry")
+    expect(entries.data.entries).toHaveLength(131)
+
+    const beforeRestart = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: target.entry_id }, query: {} })
+    }))
+    expect(beforeRestart.data.sibling_claims_truncated).toBe(true)
+
+    await server.stop()
+    const db = new DatabaseSync(server.dbPath)
+    const acceptedRow = db.prepare(
+      "SELECT library_id, root_id, kind, manifest_json FROM library_entries WHERE entry_id = ?"
+    ).get(target.entry_id) as {
+      library_id: string
+      root_id: string
+      kind: "image-directory"
+      manifest_json: string
+    } | undefined
+    if (acceptedRow === undefined) throw new Error("expected persisted target entry")
+    const equivalentEntryId = randomUUID()
+    const now = Date.now()
+    db.prepare(
+      "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?)"
+    ).run(
+      equivalentEntryId,
+      acceptedRow.library_id,
+      acceptedRow.root_id,
+      "book-999",
+      path.join(fixture, "book-999"),
+      acceptedRow.kind,
+      "book-999",
+      1,
+      acceptedRow.manifest_json,
+      now,
+      now
+    )
+    db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1").run()
+    db.close()
+    const restarted = await startServer(server.dbPath)
+    servers.push(restarted)
+
+    const staleCursor = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({
+        params: { id: target.entry_id },
+        query: {
+          sibling_cursor: beforeRestart.data.sibling_claims_next_cursor ?? undefined,
+          sibling_claims_revision: beforeRestart.data.sibling_claims_revision
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(staleCursor._tag).toBe("InvalidRequest")
+
+    const first = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: target.entry_id }, query: {} })
+    }))
+    expect(first.data).toMatchObject({
+      status: "usable",
+      reason: null,
+      sibling_claims: expect.any(Array),
+      sibling_claims_truncated: true
+    })
+    expect(first.data.sibling_claims_revision).not.toBe(beforeRestart.data.sibling_claims_revision)
+    expect(first.data.sibling_claims).toHaveLength(128)
+    expect(first.data.sibling_claims.map((claim) => claim.relative_path)).not.toContain("book-999")
+    expect(first.data.sibling_claims_next_cursor).not.toBeNull()
+
+    const second = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({
+        params: { id: target.entry_id },
+        query: {
+          sibling_cursor: first.data.sibling_claims_next_cursor ?? undefined,
+          sibling_claims_revision: first.data.sibling_claims_revision
+        }
+      })
+    }))
+    expect(second.data).toMatchObject({
+      status: "usable",
+      reason: null,
+      sibling_claims_truncated: false,
+      sibling_claims_next_cursor: null,
+      sibling_claims_revision: first.data.sibling_claims_revision
+    })
+    expect(second.data.sibling_claims.map((claim) => claim.relative_path)).toContain("book-999")
+  })
+
+  it("pages nested mixed-case and normalization-equivalent sibling claims through HTTP", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-nested-siblings-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "seed")
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+          label: "Nested sibling claims", path: fixture, preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+
+    const scan = await withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in scan.data)) throw new Error("expected scan task")
+    expect((await waitForTerminal(server, scan.data.task.task_id)).status).toBe("succeeded")
+
+    const seed = await withLibraryClient(server, Effect.gen(function*() {
+      const entries = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
+      const entry = entries.data.entries.find((candidate) => candidate.relative_path === "seed")
+      if (entry === undefined) throw new Error("expected seed entry")
+      return entry
+    }))
+
+    await server.stop()
+    const db = new DatabaseSync(server.dbPath)
+    const acceptedRow = db.prepare(
+      "SELECT library_id, root_id, kind, manifest_json FROM library_entries WHERE entry_id = ?"
+    ).get(seed.entry_id) as {
+      library_id: string
+      root_id: string
+      kind: "image-directory"
+      manifest_json: string
+    } | undefined
+    if (acceptedRow === undefined) throw new Error("expected persisted seed entry")
+    const now = Date.now()
+    const insertAccepted = (entryId: string, relativePath: string): void => {
+      db.prepare(
+        "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?)"
+      ).run(
+        entryId,
+        acceptedRow.library_id,
+        acceptedRow.root_id,
+        relativePath,
+        path.join(fixture, relativePath),
+        acceptedRow.kind,
+        path.basename(relativePath),
+        1,
+        acceptedRow.manifest_json,
+        now,
+        now
+      )
+    }
+
+    const mixedTargetId = randomUUID()
+    insertAccepted(mixedTargetId, "books/Book.zip")
+    for (let index = 0; index < 128; index += 1) {
+      insertAccepted(randomUUID(), `Books/a-${String(index).padStart(3, "0")}`)
+    }
+    const mixedEquivalentId = randomUUID()
+    insertAccepted(mixedEquivalentId, "Books/book.zip")
+
+    const normalizedTargetId = randomUUID()
+    const normalizedEquivalentId = randomUUID()
+    const normalizedTarget = "Café/Book.zip"
+    const normalizedEquivalent = "Cafe\u0301/book.zip"
+    insertAccepted(normalizedTargetId, normalizedTarget)
+    insertAccepted(normalizedEquivalentId, normalizedEquivalent)
+    const greekTargetId = randomUUID()
+    const greekEquivalentId = randomUUID()
+    insertAccepted(greekTargetId, "ΟΣ/Book.zip")
+    insertAccepted(greekEquivalentId, "οσ/book.zip")
+    const sharpSTargetId = randomUUID()
+    const sharpSEquivalentId = randomUUID()
+    insertAccepted(sharpSTargetId, "Straße/Book.zip")
+    insertAccepted(sharpSEquivalentId, "STRASSE/book.zip")
+    db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1").run()
+    db.close()
+
+    const restarted = await startServer(server.dbPath)
+    servers.push(restarted)
+    const first = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: mixedTargetId }, query: {} })
+    }))
+    expect(first.data.sibling_claims).toHaveLength(128)
+    expect(first.data.sibling_claims_truncated).toBe(true)
+    expect(first.data.sibling_claims.map((claim) => claim.relative_path)).not.toContain("Books/book.zip")
+    expect(first.data.sibling_claims_next_cursor).not.toBeNull()
+
+    const second = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({
+        params: { id: mixedTargetId },
+        query: {
+          sibling_cursor: first.data.sibling_claims_next_cursor ?? undefined,
+          sibling_claims_revision: first.data.sibling_claims_revision
+        }
+      })
+    }))
+    expect(second.data.sibling_claims_truncated).toBe(false)
+    expect(second.data.sibling_claims_next_cursor).toBeNull()
+    expect(second.data.sibling_claims.map((claim) => claim.relative_path)).toContain("Books/book.zip")
+
+    const crossTargetCursor = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({
+        params: { id: mixedEquivalentId },
+        query: {
+          sibling_cursor: first.data.sibling_claims_next_cursor ?? undefined,
+          sibling_claims_revision: first.data.sibling_claims_revision
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(crossTargetCursor._tag).toBe("InvalidRequest")
+
+    const normalized = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: normalizedTargetId }, query: {} })
+    }))
+    expect(normalized.data.sibling_claims.map((claim) => claim.relative_path)).toContain(normalizedEquivalent)
+
+    const greek = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: greekTargetId }, query: {} })
+    }))
+    expect(greek.data.sibling_claims.map((claim) => claim.relative_path)).toContain("οσ/book.zip")
+
+    const sharpS = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: sharpSTargetId }, query: {} })
+    }))
+    expect(sharpS.data.sibling_claims.map((claim) => claim.relative_path)).toContain("STRASSE/book.zip")
+
+    const unknownCursor = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({
+        params: { id: mixedTargetId },
+        query: { sibling_cursor: randomUUID(), sibling_claims_revision: first.data.sibling_claims_revision }
+      }).pipe(Effect.flip)
+    }))
+    expect(unknownCursor._tag).toBe("InvalidRequest")
+
+    const wrongParentCursor = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({
+        params: { id: mixedTargetId },
+        query: { sibling_cursor: normalizedEquivalentId, sibling_claims_revision: first.data.sibling_claims_revision }
+      }).pipe(Effect.flip)
+    }))
+    expect(wrongParentCursor._tag).toBe("InvalidRequest")
   })
 
   it("defers new allocation when an accepted path is missing", async () => {

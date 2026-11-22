@@ -1,7 +1,6 @@
 import { Schema } from "effect"
 import { Revision, Uuid } from "./ids"
-import { RootRelativePath } from "./root"
-import { ServerRootList } from "./root"
+import { RootRelativePath, ScanManifestObservation, ScanManifestPage, ServerRootList } from "./root"
 import { ThumbnailReference } from "./thumbnail"
 
 export const LibraryEntry = Schema.Struct({
@@ -61,3 +60,38 @@ export const IndexedRootSamplePage = Schema.Struct({
   library_change_revision: Revision
 })
 export type IndexedRootSamplePage = typeof IndexedRootSamplePage.Type
+export const EntryResolutionSiblingClaim = Schema.Struct({
+  entry_id: Uuid,
+  relative_path: Schema.String
+})
+export type EntryResolutionSiblingClaim = typeof EntryResolutionSiblingClaim.Type
+
+const entryResolutionCursor = Schema.String.check(Schema.isMaxLength(8192))
+
+export const EntryResolutionQuery = Schema.Struct({
+  sibling_cursor: Schema.optional(entryResolutionCursor),
+  sibling_claims_revision: Schema.optional(Revision)
+})
+export type EntryResolutionQuery = typeof EntryResolutionQuery.Type
+
+export const EntryResolution = Schema.Struct({
+  entry_id: Uuid,
+  root_id: Uuid,
+  relative_path: Schema.String,
+  kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  decision_version: Revision,
+  location_revision: Revision,
+  content_version: Revision,
+  status: Schema.Union([Schema.Literal("usable"), Schema.Literal("unresolved")]),
+  reason: Schema.NullOr(Schema.Union([
+    Schema.Literal("known-change"),
+    Schema.Literal("insufficient-evidence")
+  ])),
+  accepted_observation: ScanManifestObservation,
+  first_page: Schema.NullOr(ScanManifestPage),
+  sibling_claims: Schema.Array(EntryResolutionSiblingClaim),
+  sibling_claims_truncated: Schema.Boolean,
+  sibling_claims_next_cursor: Schema.NullOr(entryResolutionCursor),
+  sibling_claims_revision: Revision
+})
+export type EntryResolution = typeof EntryResolution.Type

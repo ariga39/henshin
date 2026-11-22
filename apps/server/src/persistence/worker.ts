@@ -4,8 +4,8 @@ import { basename, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contracts/canonical"
-import { MAX_ROOT_EXCLUSIONS, RootExclusions } from "@henshin/contracts/root"
-import { INDEXED_ROOT_SAMPLE_LIMIT, ScanManifest } from "@henshin/contracts"
+import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanAnalysisError, ScanManifest } from "@henshin/contracts/root"
+import { INDEXED_ROOT_SAMPLE_LIMIT } from "@henshin/contracts"
 import {
   WorkerMessage,
   WorkerResponse,
@@ -45,8 +45,44 @@ const MAX_POLICY_OPERATION_RESULTS = 1024
 const COMPACTION_BATCH = 64
 const MAX_REPORTED_DEFERRED_PATHS = 32
 
+const resolutionParentKey = (relativePath: string): string => {
+  const separator = relativePath.lastIndexOf("/")
+  const parentPath = separator < 0 ? "" : relativePath.slice(0, separator)
+  return parentPath
+    .normalize("NFC")
+    .toLocaleLowerCase("und")
+    .replaceAll("ς", "σ")
+    .replaceAll("ß", "ss")
+}
+
+const ResolutionCursor = Schema.Struct({
+  version: Schema.Literal(1),
+  target_entry_id: Schema.String,
+  root_id: Schema.String,
+  sibling_claims_revision: Schema.String,
+  relative_path: Schema.String,
+  entry_id: Schema.String
+})
+
+const encodeResolutionCursor = (value: typeof ResolutionCursor.Type): string =>
+  Buffer.from(JSON.stringify(value), "utf8").toString("base64url")
+
+const decodeResolutionCursor = (value: string): typeof ResolutionCursor.Type | undefined => {
+  try {
+    const decoded = Schema.decodeUnknownOption(ResolutionCursor)(JSON.parse(Buffer.from(value, "base64url").toString("utf8")))
+    return Option.isNone(decoded) ? undefined : decoded.value
+  } catch {
+    return undefined
+  }
+}
+
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const db = new DatabaseSync(dbPath)
+db.function(
+  "henshin_resolution_parent_key",
+  { deterministic: true },
+  (relativePath) => typeof relativePath === "string" ? resolutionParentKey(relativePath) : null
+)
 
 db.exec("PRAGMA journal_mode = WAL")
 db.exec("PRAGMA synchronous = FULL")
@@ -168,6 +204,7 @@ db.exec(`
     state TEXT NOT NULL CHECK (state = 'accepted'),
     content_version INTEGER NOT NULL,
     location_revision INTEGER NOT NULL,
+    decision_version INTEGER NOT NULL DEFAULT 1,
     manifest_json TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
@@ -207,6 +244,11 @@ if (!rootColumns.has("exclusions")) {
 const serverLibraryColumns = db.prepare("PRAGMA table_info(server_library)").all() as unknown as ReadonlyArray<{ name: string }>
 if (!serverLibraryColumns.some((column) => column.name === "change_revision")) {
   db.exec("ALTER TABLE server_library ADD COLUMN change_revision INTEGER NOT NULL DEFAULT 0")
+}
+
+const libraryEntryColumns = db.prepare("PRAGMA table_info(library_entries)").all() as unknown as ReadonlyArray<{ name: string }>
+if (!libraryEntryColumns.some((column) => column.name === "decision_version")) {
+  db.exec("ALTER TABLE library_entries ADD COLUMN decision_version INTEGER NOT NULL DEFAULT 1")
 }
 
 const scanTaskTable = db.prepare(
@@ -351,6 +393,23 @@ const selectStagedById = db.prepare(
 selectStagedById.setReadBigInts(true)
 const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC")
 const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ? AND state = 'accepted'")
+const selectEntryResolution = db.prepare(
+  "SELECT entry_id, root_id, relative_path, kind, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
+)
+selectEntryResolution.setReadBigInts(true)
+const selectStagedForResolution = db.prepare(
+  "SELECT analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
+)
+const selectResolutionSiblingClaims = db.prepare(
+  "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
+)
+const selectResolutionSiblingClaimsAfter = db.prepare(
+  "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? AND (relative_path > ? OR (relative_path = ? AND entry_id > ?)) ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
+)
+const selectResolutionSiblingCursor = db.prepare(
+  "SELECT entry_id, root_id, relative_path FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
+)
+const MAX_RESOLUTION_SIBLINGS = 128
 const selectEntryById = db.prepare("SELECT entry_id FROM library_entries WHERE entry_id = ? AND state = 'accepted'")
 const selectOpenEvent = db.prepare(
   "SELECT event_id, instance_id, entry_id, device_id, observed_location_revision, observed_content_version, occurred_at_ms, receipt_at_ms FROM open_events WHERE event_id = ?"
@@ -366,7 +425,7 @@ const updateEntryStatistics = db.prepare(
   "UPDATE entry_statistics SET open_count = open_count + 1, last_opened_at_ms = CASE WHEN last_opened_at_ms IS NULL OR last_opened_at_ms < ? THEN ? ELSE last_opened_at_ms END WHERE entry_id = ?"
 )
 const insertEntry = db.prepare(
-  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, ?, ?, ?)"
+  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?)"
 )
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
 const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
@@ -1091,6 +1150,24 @@ const titleForCandidate = (relativePath: string, kind: "archive" | "image-direct
   return name
 }
 
+const comparableManifest = (value: string): string | null => {
+  try {
+    const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
+    if (Option.isNone(decoded)) return null
+    const { observation_token: _beforeToken, ...before } = decoded.value.before
+    const { observation_token: _afterToken, ...after } = decoded.value.after
+    return JSON.stringify({ ...decoded.value, before, after })
+  } catch {
+    return null
+  }
+}
+
+const manifestsEquivalent = (left: string, right: string): boolean => {
+  const comparableLeft = comparableManifest(left)
+  const comparableRight = comparableManifest(right)
+  return comparableLeft !== null && comparableLeft === comparableRight
+}
+
 const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalScan" }>): import("./worker-protocol").NormalPublishOutcome => {
   const observed = new Set(request.observedCandidatePaths)
   db.exec("BEGIN IMMEDIATE")
@@ -1152,7 +1229,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       if (existing !== undefined) {
         existingForCandidate.set(candidate.relative_path, existing)
         if (
-          existing.manifest_json !== candidate.manifest_json ||
+          !manifestsEquivalent(existing.manifest_json, candidate.manifest_json) ||
           existing.kind !== candidate.kind ||
           existing.title !== title ||
           existing.source_path !== sourcePath
@@ -1171,11 +1248,19 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       if (existing !== undefined) {
         const title = titleForCandidate(candidate.relative_path, candidate.kind)
         if (
-          existing.manifest_json === candidate.manifest_json &&
+          manifestsEquivalent(existing.manifest_json, candidate.manifest_json) &&
           existing.kind === candidate.kind &&
           existing.title === title &&
           existing.source_path === sourcePathFor(candidate.relative_path)
         ) {
+          if (existing.manifest_json !== candidate.manifest_json) {
+            db.prepare("UPDATE library_entries SET manifest_json = ?, updated_at_ms = ? WHERE entry_id = ?").run(
+              candidate.manifest_json,
+              Date.now(),
+              existing.entry_id
+            )
+            changed = true
+          }
           deleteStaged.run(candidate.candidate_id)
         }
         continue
@@ -1279,6 +1364,134 @@ const indexedRootSamples = (
     }),
     sample_truncated: rows.length > INDEXED_ROOT_SAMPLE_LIMIT,
     library_change_revision: librarySummary().change_revision
+  }
+}
+
+const entryResolution = (
+  request: Extract<WorkerRequest, { op: "readEntryResolution" }>
+): import("./worker-protocol").LibraryEntryResolutionResult => {
+  const row = selectEntryResolution.get(request.entryId) as {
+    entry_id: string
+    root_id: string
+    relative_path: string
+    kind: "archive" | "image-directory"
+    decision_version: bigint
+    location_revision: bigint
+    content_version: bigint
+    manifest_json: string
+  } | undefined
+  if (row === undefined) return null
+
+  const manifest = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(row.manifest_json))
+  if (manifest._tag === "None") throw new Error("invalid persisted accepted manifest")
+
+  const libraryState = selectLibraryState.get() as { library_id: string; change_revision: bigint } | undefined
+  if (libraryState === undefined) throw new Error("server library is not initialized")
+  const siblingClaimsRevision = libraryState.change_revision.toString()
+
+  const targetParentKey = resolutionParentKey(row.relative_path)
+
+  let cursor: { entry_id: string; root_id: string; relative_path: string } | undefined
+  if (request.siblingCursor !== undefined) {
+    const decodedCursor = decodeResolutionCursor(request.siblingCursor)
+    if (
+      decodedCursor === undefined ||
+      decodedCursor.target_entry_id !== row.entry_id ||
+      decodedCursor.root_id !== row.root_id ||
+      decodedCursor.sibling_claims_revision !== siblingClaimsRevision ||
+      request.siblingClaimsRevision !== siblingClaimsRevision
+    ) return { kind: "invalid_cursor" }
+    const cursorRow = selectResolutionSiblingCursor.get(decodedCursor.entry_id) as typeof cursor | undefined
+    if (
+      cursorRow === undefined ||
+      cursorRow.root_id !== row.root_id ||
+      cursorRow.entry_id === row.entry_id ||
+      cursorRow.relative_path !== decodedCursor.relative_path ||
+      resolutionParentKey(cursorRow.relative_path) !== targetParentKey
+    ) return { kind: "invalid_cursor" }
+    cursor = cursorRow
+  }
+
+  const pageRows = (cursor === undefined
+    ? selectResolutionSiblingClaims.all(row.root_id, row.entry_id, targetParentKey, MAX_RESOLUTION_SIBLINGS + 1)
+    : selectResolutionSiblingClaimsAfter.all(
+      row.root_id,
+      row.entry_id,
+      targetParentKey,
+      cursor.relative_path,
+      cursor.relative_path,
+      cursor.entry_id,
+      MAX_RESOLUTION_SIBLINGS + 1
+    )) as unknown as ReadonlyArray<{
+    entry_id: string
+    relative_path: string
+  }>
+  const siblingClaims = pageRows
+    .slice(0, MAX_RESOLUTION_SIBLINGS)
+    .map((sibling) => ({ entry_id: sibling.entry_id, relative_path: sibling.relative_path }))
+  const siblingClaimsTruncated = pageRows.length > MAX_RESOLUTION_SIBLINGS
+  const siblingClaimsNextCursor = siblingClaimsTruncated
+    ? (() => {
+        const last = siblingClaims[siblingClaims.length - 1]
+        return last === undefined
+          ? null
+          : encodeResolutionCursor({
+              version: 1,
+              target_entry_id: row.entry_id,
+              root_id: row.root_id,
+              sibling_claims_revision: siblingClaimsRevision,
+              relative_path: last.relative_path,
+              entry_id: last.entry_id
+            })
+      })()
+    : null
+
+  const staged = selectStagedForResolution.get(row.root_id, row.relative_path) as {
+    analysis_status: "ready" | "error"
+    manifest_json: string | null
+    analysis_error_json: string | null
+  } | undefined
+  let reason: "known-change" | "insufficient-evidence" | null = null
+  if (staged !== undefined) {
+    if (staged.analysis_status === "ready" && staged.manifest_json !== null) {
+      reason = staged.manifest_json === row.manifest_json ? null : "known-change"
+    } else {
+      const stagedError = staged.analysis_error_json === null
+        ? null
+        : Schema.decodeUnknownOption(ScanAnalysisError)(JSON.parse(staged.analysis_error_json))
+      if (
+        stagedError === null ||
+        Option.isNone(stagedError) ||
+        !["candidate-changed", "location-unavailable", "missing-target", "read-failure", "root-changed", "root-unavailable"].includes(stagedError.value.code)
+      ) {
+        reason = "insufficient-evidence"
+      }
+    }
+  }
+  if (
+    manifest.value.after.observation_token === undefined ||
+    manifest.value.after.observation_token.length === 0 ||
+    manifest.value.pages[0] === undefined
+  ) {
+    reason = reason ?? "insufficient-evidence"
+  }
+
+  return {
+    entry_id: row.entry_id,
+    root_id: row.root_id,
+    relative_path: row.relative_path,
+    kind: row.kind,
+    decision_version: row.decision_version.toString(),
+    location_revision: row.location_revision.toString(),
+    content_version: row.content_version.toString(),
+    status: reason === null ? "usable" : "unresolved",
+    reason,
+    accepted_observation: manifest.value.after,
+    first_page: manifest.value.pages[0] ?? null,
+    sibling_claims: siblingClaims,
+    sibling_claims_truncated: siblingClaimsTruncated,
+    sibling_claims_next_cursor: siblingClaimsNextCursor,
+    sibling_claims_revision: siblingClaimsRevision
   }
 }
 
@@ -1571,6 +1784,8 @@ const handle = (request: WorkerRequest): unknown => {
       return libraryEntries(request)
     case "listIndexedRootSamples":
       return indexedRootSamples(request)
+    case "readEntryResolution":
+      return entryResolution(request)
     case "acceptOpenEvents":
       return acceptOpenEvents(request)
     case "recordDiscovery":
