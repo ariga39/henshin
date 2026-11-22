@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { mkdir, readdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { Effect, Layer, Schema, Context } from "effect"
 
@@ -20,9 +20,6 @@ interface CacheFile {
   readonly size: number
   readonly mtimeMs: number
 }
-
-const isNotFound = (error: unknown): boolean =>
-  typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
 
 const listFiles = async (directory: string): Promise<ReadonlyArray<CacheFile>> => {
   const entries = await readdir(directory, { withFileTypes: true })
@@ -81,16 +78,12 @@ export class ThumbnailCache extends Context.Service<ThumbnailCache, {
           try {
             const info = await stat(path)
             if (!info.isFile() || info.size > THUMBNAIL_MAX_BYTES) {
-              await unlink(path)
+              await unlink(path).catch(() => undefined)
               return null
             }
-            const bytes = new Uint8Array(await readFile(path))
-            const now = new Date()
-            await utimes(path, now, now)
-            return bytes
-          } catch (error) {
-            if (isNotFound(error)) return null
-            throw error
+            return new Uint8Array(await readFile(path))
+          } catch {
+            return null
           }
         }),
         catch: () => new ThumbnailCacheError({ message: "thumbnail cache read failed" })

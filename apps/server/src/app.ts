@@ -12,21 +12,22 @@ import {
 } from "effect/http"
 import type { ServeError } from "effect/http/HttpServerError"
 import { HttpApiBuilder } from "effect/http-api"
-import { LibraryApi, OpenEventApi, PrototypeApi, ReviewApi, ServerApi, TaskApi } from "@henshin/contracts"
+import { LibraryApi, PrototypeApi, ReviewApi, ServerApi, TaskApi, ThumbnailApi } from "@henshin/contracts"
 import { AuthenticationLayer } from "./api/AuthenticationLayer"
 import { PrototypeHandlers } from "./api/handlers"
 import { RootHandlers } from "./api/root-preview"
 import { ReviewHandlers, TaskHandlers } from "./api/scan"
 import { LibraryHandlers } from "./api/library"
-import { OpenEventHandlers } from "./api/open-events"
+import { ThumbnailHandlers } from "./api/thumbnails"
 import { AuthConfig, ServerState } from "./identity"
 import { DatabaseWorker, type DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { NoteStore } from "./persistence/NoteStore"
 import { RootStore } from "./persistence/RootStore"
 import { ScanStore } from "./persistence/ScanStore"
 import { LibraryStore } from "./persistence/LibraryStore"
-import { OpenEventStore } from "./persistence/OpenEventStore"
 import { ServerOwnershipLayer, type ServerOwnershipError } from "./persistence/ServerOwnership"
+import { ThumbnailCache } from "./thumbnails/ThumbnailCache"
+import { ThumbnailProducer } from "./thumbnails/ThumbnailProducer"
 
 const MAX_BODY_BYTES = 1024 * 1024
 const BODIED_METHODS = new Set<string>(["PUT", "POST", "PATCH"])
@@ -198,17 +199,25 @@ export const makeAppLayer = (
     Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer, LibraryStore.layer))
   )
   const LibraryRoutesLayer = HttpApiBuilder.layer(LibraryApi).pipe(Layer.provide(LibraryHandlersLayer))
-  const OpenEventHandlersLayer = OpenEventHandlers.pipe(
-    Layer.provide(Layer.mergeAll(AuthenticationLayer, OpenEventStore.layer))
+  const ThumbnailHandlersLayer = ThumbnailHandlers.pipe(
+    Layer.provide(ThumbnailProducer.layer),
+    Layer.provide(
+      Layer.mergeAll(
+        AuthenticationLayer,
+        LibraryStore.layer,
+        RootStore.layer,
+        ThumbnailCache.layer(path.join(path.dirname(options.dbPath), "thumbnail-cache"))
+      )
+    )
   )
-  const OpenEventRoutesLayer = HttpApiBuilder.layer(OpenEventApi).pipe(Layer.provide(OpenEventHandlersLayer))
+  const ThumbnailRoutesLayer = HttpApiBuilder.layer(ThumbnailApi).pipe(Layer.provide(ThumbnailHandlersLayer))
   const AllRoutes = Layer.mergeAll(
     RoutesLayer,
     RootPreviewRoutesLayer,
     TaskRoutesLayer,
     ReviewRoutesLayer,
     LibraryRoutesLayer,
-    OpenEventRoutesLayer
+    ThumbnailRoutesLayer
   )
 
   const ReadyLayer = Layer.effectDiscard(
@@ -238,7 +247,6 @@ export const makeAppLayer = (
     Layer.provide(ServerState.layer),
     Layer.provide(ScanStore.layer),
     Layer.provide(LibraryStore.layer),
-    Layer.provide(OpenEventStore.layer),
     Layer.provide(AuthConfig.layer(options.bearerToken)),
     Layer.provide(
       DatabaseWorker.layer(options.dbPath).pipe(Layer.provide(ServerOwnershipLayer(options.dbPath)))

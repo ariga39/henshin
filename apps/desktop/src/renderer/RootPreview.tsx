@@ -4,7 +4,6 @@ import { runtime } from "./runtime"
 import { viewStore } from "./store"
 import { canSaveRoot, excludeRootPath, previewRoot, refreshRootPolicy, removeRootExclusion, saveRoot, showLibrary } from "./workflows"
 import { HeldScanControls, HeldScanReview } from "./HeldScanReview"
-import { ReaderProfiles } from "./ReaderProfiles"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -195,7 +194,6 @@ export const RootPreviewScreen = () => {
           ))}
         </ul>
       </section>
-      <ReaderProfiles />
     </main>
   )
 }

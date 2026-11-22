@@ -1,16 +1,11 @@
-import { Deferred, Effect, Fiber } from "effect"
+import { Effect, Fiber } from "effect"
 import type {
   ConnectionStatusView,
   RootPreviewRequest,
   RootPreviewResult,
-  ScanTask,
-  ReaderProfileSaveIpcRequest,
-  ReaderProfile,
-  ReaderProfileTestIpcRequest,
-  ReaderProfileTestTargetSelectIpcRequest
+  ScanTask
 } from "@henshin/contracts"
-import { PrototypeClient, ReaderProfileClient, RootPreviewClient, ScanReviewClient } from "./client"
-import { LibraryClient } from "./client"
+import { LibraryClient, PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
 import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
@@ -67,164 +62,6 @@ export const previewRoot = (selection: RootPreviewRequest | string) =>
     }
   })
 
-export const loadReaderProfiles = Effect.gen(function*() {
-  const client = yield* ReaderProfileClient
-  yield* Effect.sync(() => viewStore.set({ reader_profiles_status: "loading", reader_profiles_error: null }))
-  const result = yield* client.list()
-  if (result.ok) {
-    yield* Effect.sync(() => viewStore.set({
-      reader_profiles: result.data,
-      reader_profiles_status: "ready",
-      reader_profiles_error: null
-    }))
-  } else {
-    yield* Effect.sync(() => viewStore.set({ reader_profiles_status: "error", reader_profiles_error: result.error.message }))
-  }
-})
-
-export const selectReaderExecutable = Effect.gen(function*() {
-  const client = yield* ReaderProfileClient
-  yield* Effect.sync(() => viewStore.set({ reader_profile_selection_error: null }))
-  const result = yield* client.selectExecutable()
-  if (!result.ok) {
-    yield* Effect.sync(() => viewStore.set({ reader_profile_selection_error: result.error.message }))
-    return null
-  }
-  const selection = result.data
-  if (selection === null) return null
-  yield* Effect.sync(() => viewStore.set({
-    reader_profile_selection_handle: selection.selection_handle,
-    reader_profile_selection_name: selection.executable_name,
-    reader_profile_selection_error: null
-  }))
-  return result.data
-})
-
-export const clearReaderExecutableSelection = (): void => {
-  viewStore.set({
-    reader_profile_selection_handle: null,
-    reader_profile_selection_name: null,
-    reader_profile_selection_error: null
-  })
-}
-
-export const selectReaderTestTarget = (input: ReaderProfileTestTargetSelectIpcRequest) =>
-  Effect.gen(function*() {
-    const client = yield* ReaderProfileClient
-    yield* Effect.sync(() => viewStore.set({
-      reader_profile_test_status: "selecting",
-      reader_profile_test_error: null,
-      reader_profile_test_result: null
-    }))
-    const result = yield* client.selectTestTarget(input)
-    if (!result.ok) {
-      if (result.error.code === "reader_profile_conflict") yield* refreshReaderProfilesAfterConflict()
-      yield* Effect.sync(() => viewStore.set({
-        reader_profile_test_status: "error",
-        reader_profile_test_error: result.error.message,
-        reader_profile_test_target: null
-      }))
-      return null
-    }
-    if (result.data === null) {
-      yield* Effect.sync(() => viewStore.set({ reader_profile_test_status: "idle" }))
-      return null
-    }
-    yield* Effect.sync(() => viewStore.set({
-      reader_profile_test_target: result.data,
-      reader_profile_test_status: "ready",
-      reader_profile_test_error: null,
-      reader_profile_test_result: null
-    }))
-    return result.data
-  })
-
-export const clearReaderTestTarget = (): void => {
-  viewStore.set({
-    reader_profile_test_target: null,
-    reader_profile_test_status: "idle",
-    reader_profile_test_result: null,
-    reader_profile_test_error: null
-  })
-}
-
-const refreshReaderProfilesAfterConflict = () =>
-  Effect.gen(function*() {
-    yield* Effect.sync(() => {
-      clearReaderExecutableSelection()
-      clearReaderTestTarget()
-    })
-    yield* loadReaderProfiles
-  })
-
-export const testReaderProfile = (input: ReaderProfileTestIpcRequest) =>
-  Effect.gen(function*() {
-    const client = yield* ReaderProfileClient
-    yield* Effect.sync(() => viewStore.set({
-      reader_profile_test_status: "launching",
-      reader_profile_test_error: null,
-      reader_profile_test_result: null
-    }))
-    const result = yield* client.test(input)
-    if (!result.ok) {
-      if (result.error.code === "reader_profile_conflict") yield* refreshReaderProfilesAfterConflict()
-      if (result.error.code === "reader_test_target_selection_expired") {
-        yield* Effect.sync(clearReaderTestTarget)
-      }
-      yield* Effect.sync(() => viewStore.set({
-        reader_profile_test_status: "error",
-        reader_profile_test_error: result.error.message
-      }))
-      return null
-    }
-    yield* Effect.sync(() => viewStore.set({
-      reader_profile_test_status: "accepted",
-      reader_profile_test_error: null,
-      reader_profile_test_result: result.data
-    }))
-    return result.data
-  })
-
-export const saveReaderProfile = (input: ReaderProfileSaveIpcRequest) =>
-  Effect.gen(function*() {
-    const client = yield* ReaderProfileClient
-    yield* Effect.sync(() => viewStore.set({ reader_profile_save_status: "loading", reader_profile_save_error: null }))
-    const result = yield* client.save(input)
-    if (!result.ok) {
-      if (result.error.code === "reader_profile_conflict") {
-        yield* refreshReaderProfilesAfterConflict()
-      } else if (result.error.code === "reader_profile_not_found") {
-        yield* loadReaderProfiles
-      }
-      if (result.error.code === "reader_executable_invalid") {
-        yield* Effect.sync(clearReaderExecutableSelection)
-      }
-      yield* Effect.sync(() => viewStore.set({
-        reader_profile_save_status: "error",
-        reader_profile_save_error: result.error.message
-      }))
-      return undefined
-    }
-    yield* Effect.sync(() => {
-      const current = viewStore.getState().reader_profiles
-      viewStore.set({
-        reader_profiles: current.some((profile) => profile.profile_id === result.data.profile_id)
-          ? current.map((profile) => profile.profile_id === result.data.profile_id ? result.data : profile)
-          : [...current, result.data],
-        reader_profile_save_status: "ready",
-        reader_profile_save_error: null,
-        reader_profile_selection_handle: null,
-        reader_profile_selection_name: null,
-        reader_profile_selection_error: null,
-        reader_profile_test_target: null,
-        reader_profile_test_status: "idle",
-        reader_profile_test_result: null,
-        reader_profile_test_error: null
-      })
-    })
-    return result.data
-  })
-
 export const loadRoots = Effect.gen(function*() {
   const client = yield* RootPreviewClient
   yield* Effect.sync(() => viewStore.set({ root_roots_status: "loading", root_roots_error: null }))
@@ -240,11 +77,6 @@ export const loadRoots = Effect.gen(function*() {
 
 const scanIsActive = (task: ScanTask): boolean => task.status === "queued" || task.status === "running"
 
-const releaseErrorMessage = (error: { readonly code: string; readonly message: string }): string =>
-  error.code === "epoch_changed" || error.code === "instance_mismatch"
-    ? `${error.message}${error.message.endsWith(".") ? "" : "."} Reconnect before retrying the release.`
-    : error.message
-
 const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
   yield* Effect.sync(() => viewStore.set({ scan_status: "loading", scan_error: null }))
   const tasks = yield* client.listTasks()
@@ -259,29 +91,10 @@ const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(f
     yield* Effect.sync(() => viewStore.set({ scan_status: "error", scan_error: candidates.error.message }))
     return false
   }
-  const current = viewStore.getState()
-  const releaseTarget = current.scan_release_candidate_id === null
-    ? undefined
-    : candidates.data.find((candidate) =>
-        candidate.candidate_id === current.scan_release_candidate_id &&
-        candidate.root_id === current.scan_release_root_id)
-  const releaseResolved = releaseTarget !== undefined && releaseTarget.hold_state !== "held"
   yield* Effect.sync(() => viewStore.set({
     staged_discoveries: candidates.data,
     scan_status: "ready",
-    scan_error: null,
-    ...(releaseResolved
-      ? {
-          scan_release_status: "idle" as const,
-          scan_release_candidate_id: null,
-          scan_release_root_id: null,
-          scan_release_operation_id: null,
-          scan_release_candidate_version: null,
-          scan_release_mapping_revision: null,
-          scan_release_policy_revision: null,
-          scan_release_error: null
-        }
-      : {})
+    scan_error: null
   }))
   return true
 })
@@ -291,186 +104,28 @@ export const loadScanResults = Effect.gen(function*() {
   return yield* loadScanResultsFor(client)
 })
 
-export const releaseHeldDiscovery = (candidateId: string) =>
-  Effect.gen(function*() {
-    const client = yield* ScanReviewClient
-    const state = viewStore.getState()
-    const candidate = state.staged_discoveries.find((item) => item.candidate_id === candidateId)
-    const root = candidate === undefined
-      ? undefined
-      : state.root_saved_roots.find((item) => item.root_id === candidate.root_id)
-    if (candidate === undefined || root === undefined || candidate.hold_state !== "held") return
-
-    const sameCommand = state.scan_release_candidate_id === candidate.candidate_id &&
-      state.scan_release_root_id === candidate.root_id &&
-      state.scan_release_operation_id !== null &&
-      state.scan_release_candidate_version === candidate.candidate_version &&
-      state.scan_release_mapping_revision === root.mapping_revision &&
-      state.scan_release_policy_revision === root.policy_revision
-    const operationId = sameCommand ? state.scan_release_operation_id : newOperationId()
-    yield* Effect.sync(() => viewStore.set({
-      scan_release_status: "loading",
-      scan_release_candidate_id: candidate.candidate_id,
-      scan_release_root_id: candidate.root_id,
-      scan_release_operation_id: operationId,
-      scan_release_candidate_version: candidate.candidate_version,
-      scan_release_mapping_revision: root.mapping_revision,
-      scan_release_policy_revision: root.policy_revision,
-      scan_release_error: null
-    }))
-
-    const result = yield* client.release({
-      candidate_id: candidate.candidate_id,
-      root_id: candidate.root_id,
-      operation_id: operationId,
-      expected_candidate_version: candidate.candidate_version,
-      expected_mapping_revision: root.mapping_revision,
-      expected_policy_revision: root.policy_revision,
-      command: { type: "release-hold" }
-    })
-    if (!result.ok) {
-      if (result.error.code === "revision_conflict" || result.error.code === "not_found") {
-        yield* loadRoots
-        yield* loadScanResults
-      }
-      const definiteFailure = result.error.code === "invalid_request" ||
-        result.error.code === "not_found" ||
-        result.error.code === "revision_conflict" ||
-        result.error.code === "operation_conflict" ||
-        result.error.code === "operation_expired" ||
-        result.error.code === "epoch_changed" ||
-        result.error.code === "instance_mismatch"
-      yield* Effect.sync(() => viewStore.set({
-        scan_release_status: "error",
-        ...(definiteFailure
-          ? {
-              scan_release_root_id: candidate.root_id,
-              scan_release_operation_id: null,
-              scan_release_candidate_version: null,
-              scan_release_mapping_revision: null,
-              scan_release_policy_revision: null
-            }
-          : {}),
-        scan_release_error: releaseErrorMessage(result.error)
-      }))
-      return
-    }
-
-    yield* Effect.sync(() => {
-      const current = viewStore.getState()
-      viewStore.set({
-        staged_discoveries: current.staged_discoveries.map((item) =>
-          item.candidate_id === result.data.candidate.candidate_id ? result.data.candidate : item
-        ),
-        scan_release_status: "idle",
-        scan_release_candidate_id: null,
-        scan_release_root_id: null,
-        scan_release_operation_id: null,
-        scan_release_candidate_version: null,
-        scan_release_mapping_revision: null,
-        scan_release_policy_revision: null,
-        scan_release_error: null
-      })
-    })
-  })
-type ScanWaitResult =
-  | { readonly ok: true; readonly task: ScanTask }
-  | { readonly ok: false; readonly message: string }
-
-type ScanWaiter = {
-  readonly registeredAtPoll: number
-  readonly deferred: Deferred.Deferred<ScanWaitResult>
-}
-
-const scanWaiters = new Map<string, Set<ScanWaiter>>()
-let scanResultsWatcher: Fiber.Fiber<void, never> | null = null
-let scanWatcherStarting: Deferred.Deferred<Fiber.Fiber<void, never>> | null = null
-let scanPollSequence = 0
-
-const completeScanWaiters = (taskId: string, result: ScanWaitResult) => Effect.gen(function*() {
-  const waiters = scanWaiters.get(taskId)
-  if (waiters === undefined) return
-  scanWaiters.delete(taskId)
-  yield* Effect.forEach(waiters, (waiter) => Deferred.succeed(waiter.deferred, result), { discard: true })
-})
-
-const failScanWaiters = (message: string) => Effect.gen(function*() {
-  const waiters = Array.from(scanWaiters.values()).flatMap((entries) => Array.from(entries))
-  scanWaiters.clear()
-  yield* Effect.forEach(waiters, (waiter) => Deferred.succeed(waiter.deferred, { ok: false, message }), { discard: true })
-})
-
 const watchScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
   while (true) {
-    const poll = scanPollSequence + 1
-    scanPollSequence = poll
     const loaded = yield* loadScanResultsFor(client)
-    if (!loaded) {
-      yield* failScanWaiters(viewStore.getState().scan_error ?? "could not load scan results")
-      return
-    }
-
-    const tasks = viewStore.getState().scan_tasks
-    for (const [taskId, waiters] of Array.from(scanWaiters.entries())) {
-      if (!Array.from(waiters).some((waiter) => waiter.registeredAtPoll < poll)) continue
-      const task = tasks.find((candidate) => candidate.task_id === taskId)
-      if (task === undefined) {
-        yield* completeScanWaiters(taskId, { ok: false, message: "submitted scan task was not found in scan results" })
-      } else if (!scanIsActive(task)) {
-        yield* completeScanWaiters(taskId, { ok: true, task })
-      }
-    }
-
-    if (!tasks.some(scanIsActive) && scanWaiters.size === 0) return
+    if (!loaded || !viewStore.getState().scan_tasks.some(scanIsActive)) return
     yield* Effect.sleep("250 millis")
   }
 })
 
-const ensureScanResultsWatcher = Effect.gen(function*() {
-  const existing = scanResultsWatcher
-  if (existing !== null) return existing
-  const starting = scanWatcherStarting
-  if (starting !== null) return yield* Deferred.await(starting)
-
-  const ready = Deferred.makeUnsafe<Fiber.Fiber<void, never>>()
-  scanWatcherStarting = ready
-  const client = yield* ScanReviewClient
-  const watcherRef: { current: Fiber.Fiber<void, never> | null } = { current: null }
-  const watcher = yield* Effect.forkDetach(
-    watchScanResultsFor(client).pipe(
-      Effect.ensuring(Effect.sync(() => {
-        if (scanResultsWatcher === watcherRef.current) scanResultsWatcher = null
-      }))
-    ),
-    { startImmediately: false }
-  )
-  watcherRef.current = watcher
-  scanResultsWatcher = watcher
-  scanWatcherStarting = null
-  yield* Deferred.succeed(ready, watcher)
-  return watcher
-})
-
-const waitForScanTask = (taskId: string) => Effect.gen(function*() {
-  const deferred = Deferred.makeUnsafe<ScanWaitResult>()
-  const waiter = { registeredAtPoll: scanPollSequence, deferred }
-  const waiters = scanWaiters.get(taskId) ?? new Set<ScanWaiter>()
-  waiters.add(waiter)
-  scanWaiters.set(taskId, waiters)
-  yield* ensureScanResultsWatcher
-  return yield* Deferred.await(deferred).pipe(
-    Effect.ensuring(Effect.sync(() => {
-      const current = scanWaiters.get(taskId)
-      if (current === undefined) return
-      current.delete(waiter)
-      if (current.size === 0) scanWaiters.delete(taskId)
-    }))
-  )
-})
+let scanResultsWatcher: Fiber.Fiber<void, never> | null = null
 
 export const watchHeldScans = Effect.gen(function*() {
-  const watcher = yield* ensureScanResultsWatcher
-  yield* Fiber.join(watcher)
+  const existing = scanResultsWatcher
+  if (existing !== null) return yield* Fiber.join(existing)
+
+  const client = yield* ScanReviewClient
+  const watcher = yield* Effect.forkChild(watchScanResultsFor(client))
+  scanResultsWatcher = watcher
+  yield* Fiber.join(watcher).pipe(
+    Effect.ensuring(Effect.sync(() => {
+      if (scanResultsWatcher === watcher) scanResultsWatcher = null
+    }))
+  )
 })
 
 export const retryScanResults = Effect.gen(function*() {
@@ -486,8 +141,12 @@ export const loadRootWorkspace = Effect.gen(function*() {
 
 const watchScanTask = (taskId: string) =>
   Effect.gen(function*() {
-    const result = yield* waitForScanTask(taskId)
-    if (!result.ok) return
+    while (true) {
+      yield* loadScanResults
+      const task = viewStore.getState().scan_tasks.find((candidate) => candidate.task_id === taskId)
+      if (task !== undefined && !scanIsActive(task)) return
+      yield* Effect.sleep("250 millis")
+    }
   })
 
 export const refreshRootPolicy = Effect.gen(function*() {
@@ -589,32 +248,8 @@ export const removeRootExclusion = (input: {
   readonly expectedPolicyRevision: string
 }) => updateRootExclusion(input, "remove-exclusion")
 
-const taskError = (task: ScanTask): string | null => {
-  if (task.readiness_error !== null) return task.readiness_error.message
-  if (task.error !== null) return task.error.message
-  switch (task.status) {
-    case "completed_with_errors":
-      return "one or more discoveries could not be analyzed"
-    case "interrupted":
-      return "scan was interrupted before it completed"
-    case "failed":
-      return "normal scan failed"
-    default:
-      return null
-  }
-}
-
-const finishNormalScanFailure = (message: string) =>
-  Effect.gen(function*() {
-    yield* loadLibrary()
-    yield* Effect.sync(() => viewStore.set({
-      scan_start_status: "error",
-      scan_start_error: message,
-      library_scan_status: "error",
-      library_scan_error: message,
-      library_scan_task: null
-    }))
-  })
+const taskError = (task: ScanTask): string | null =>
+  task.readiness_error?.message ?? task.error?.message ?? null
 
 const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
   Effect.gen(function*() {
@@ -628,7 +263,6 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
       scan_start_status: "loading",
       scan_start_error: null,
       library_scan_status: holdNewDiscoveries ? viewStore.getState().library_scan_status : "starting",
-      library_scan_error: holdNewDiscoveries ? viewStore.getState().library_scan_error : null,
       library_scan_task: null,
       ...(!holdNewDiscoveries ? { screen: "library" as const, library_status: "loading" as const, library_error: null } : {})
     }))
@@ -643,20 +277,19 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
     })
     if (!result.ok) {
       if (result.error.code === "revision_conflict") yield* loadRoots
-      if (holdNewDiscoveries) {
-        yield* Effect.sync(() => viewStore.set({ scan_start_status: "error", scan_start_error: result.error.message }))
-      } else {
-        yield* finishNormalScanFailure(result.error.message)
-      }
+      yield* Effect.sync(() => viewStore.set({
+        scan_start_status: "error",
+        scan_start_error: result.error.message,
+        ...(!holdNewDiscoveries ? { library_scan_status: "error" as const, library_error: result.error.message } : {})
+      }))
       return
     }
     if (!("task" in result.data)) {
-      const message = "server returned a root policy result instead of a scan task"
-      if (holdNewDiscoveries) {
-        yield* Effect.sync(() => viewStore.set({ scan_start_status: "error", scan_start_error: message }))
-      } else {
-        yield* finishNormalScanFailure(message)
-      }
+      yield* Effect.sync(() => viewStore.set({
+        scan_start_status: "error",
+        scan_start_error: "server returned a root policy result instead of a scan task",
+        ...(!holdNewDiscoveries ? { library_scan_status: "error" as const, library_error: "server returned an invalid scan result" } : {})
+      }))
       return
     }
     const submittedTask = result.data.task
@@ -672,34 +305,19 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
     })
     yield* watchScanTask(submittedTask.task_id)
 
-    const watchedState = viewStore.getState()
-    const terminal = watchedState.scan_tasks.find((task) => task.task_id === submittedTask.task_id)
+    const terminal = viewStore.getState().scan_tasks.find((task) => task.task_id === submittedTask.task_id) ?? submittedTask
     if (holdNewDiscoveries) {
       yield* Effect.sync(() => viewStore.set({ scan_start_status: "idle" }))
-      return
-    }
-
-    if (watchedState.scan_status === "error") {
-      yield* finishNormalScanFailure(watchedState.scan_error ?? "could not load normal scan results")
-      return
-    }
-    if (terminal === undefined) {
-      yield* finishNormalScanFailure("submitted scan task was not found in scan results")
-      return
-    }
-    if (scanIsActive(terminal)) {
-      yield* finishNormalScanFailure("normal scan did not reach a terminal state")
       return
     }
 
     yield* loadLibrary()
     const error = taskError(terminal)
     yield* Effect.sync(() => viewStore.set({
-      scan_start_status: terminal.status === "completed_with_errors" ? "idle" : error === null ? "idle" : "error",
-      scan_start_error: terminal.status === "completed_with_errors" ? null : error,
-      library_scan_status: terminal.status === "failed" || terminal.status === "interrupted" ? "error" : "started",
-      library_scan_error: error,
-      library_scan_task: terminal
+      scan_start_status: error === null ? "idle" : "error",
+      scan_start_error: error,
+      library_scan_status: error === null ? "started" : "error",
+      library_error: error
     }))
   })
 
@@ -731,8 +349,10 @@ export const loadLibrary = (append = false) =>
     const current = viewStore.getState()
     const cursor = append ? current.library_cursor : null
     yield* Effect.sync(() => viewStore.set({
+      screen: "library",
       library_status: "loading",
-      library_error: null
+      library_error: null,
+      ...(append ? {} : { library_entries: [], library_cursor: null, library_has_more: false })
     }))
     const result = yield* client.search(cursor === null ? { page_size: 50 } : { page_size: 50, cursor })
     if (!result.ok) {

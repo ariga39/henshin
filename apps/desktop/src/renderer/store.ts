@@ -9,10 +9,7 @@ import type {
   ScanTask,
   StagedDiscovery,
   ServerRoot,
-  SavedDraft,
-  ReaderProfile,
-  ReaderProfileTestResult,
-  ReaderProfileTestTarget
+  SavedDraft
 } from "@henshin/contracts"
 
 export type Outcome =
@@ -64,36 +61,15 @@ export interface ViewState {
   readonly scan_error: string | null
   readonly scan_start_status: "idle" | "loading" | "error"
   readonly scan_start_error: string | null
-  readonly scan_release_status: "idle" | "loading" | "error"
-  readonly scan_release_candidate_id: string | null
-  readonly scan_release_root_id: string | null
-  readonly scan_release_operation_id: string | null
-  readonly scan_release_candidate_version: number | null
-  readonly scan_release_mapping_revision: string | null
-  readonly scan_release_policy_revision: string | null
-  readonly scan_release_error: string | null
   readonly scan_hold_new_discoveries: boolean
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
-  readonly reader_profiles: ReadonlyArray<ReaderProfile>
-  readonly reader_profiles_status: "idle" | "loading" | "ready" | "error"
-  readonly reader_profiles_error: string | null
-  readonly reader_profile_save_status: "idle" | "loading" | "ready" | "error"
-  readonly reader_profile_save_error: string | null
-  readonly reader_profile_selection_handle: string | null
-  readonly reader_profile_selection_name: string | null
-  readonly reader_profile_selection_error: string | null
-  readonly reader_profile_test_target: ReaderProfileTestTarget | null
-  readonly reader_profile_test_status: "idle" | "selecting" | "ready" | "launching" | "accepted" | "error"
-  readonly reader_profile_test_result: ReaderProfileTestResult | null
-  readonly reader_profile_test_error: string | null
   readonly library_entries: ReadonlyArray<LibraryEntry>
   readonly library_cursor: string | null
   readonly library_has_more: boolean
   readonly library_status: "idle" | "loading" | "ready" | "error"
   readonly library_error: string | null
   readonly library_scan_status: "idle" | "starting" | "started" | "error"
-  readonly library_scan_error: string | null
   readonly library_scan_task: ScanTask | null
 }
 
@@ -136,36 +112,15 @@ const initialState: ViewState = {
   scan_error: null,
   scan_start_status: "idle",
   scan_start_error: null,
-  scan_release_status: "idle",
-  scan_release_candidate_id: null,
-  scan_release_root_id: null,
-  scan_release_operation_id: null,
-  scan_release_candidate_version: null,
-  scan_release_mapping_revision: null,
-  scan_release_policy_revision: null,
-  scan_release_error: null,
   scan_hold_new_discoveries: false,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
   connection_generation: 0,
-  reader_profiles: [],
-  reader_profiles_status: "idle",
-  reader_profiles_error: null,
-  reader_profile_save_status: "idle",
-  reader_profile_save_error: null,
-  reader_profile_selection_handle: null,
-  reader_profile_selection_name: null,
-  reader_profile_selection_error: null,
-  reader_profile_test_target: null,
-  reader_profile_test_status: "idle",
-  reader_profile_test_result: null,
-  reader_profile_test_error: null,
   library_entries: [],
   library_cursor: null,
   library_has_more: false,
   library_status: "idle",
   library_error: null,
   library_scan_status: "idle",
-  library_scan_error: null,
   library_scan_task: null
 }
 

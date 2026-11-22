@@ -1,7 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from "electron"
+import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from "electron"
 import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
-import { spawn } from "node:child_process"
-import { randomUUID } from "node:crypto"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import {
@@ -24,7 +22,6 @@ import {
   RootListIpcRequest,
   RootCommandIpcRequest,
   RootSaveIpcRequest,
-  ReleaseHeldDiscoveryIpcRequest,
   ReviewCandidatesIpcRequest,
   ServerHttpClient,
   ReviewHttpClient,
@@ -34,13 +31,7 @@ import {
   ReconcileCommandIpcRequest,
   ConnectionStatusView,
   type PublicError,
-  type RootPreviewResult,
-  ReaderExecutableSelectIpcRequest,
-  ReaderProfileListIpcRequest,
-  ReaderProfileSaveIpcRequest,
-  ReaderProfileTestIpcRequest,
-  ReaderProfileTestTargetSelectIpcRequest,
-  type ReaderProfileTestResult
+  type RootPreviewResult
 } from "@henshin/contracts"
 import { startServerChild, type ServerChild } from "./server-child"
 import { DraftConflictError, DraftStore, DraftStoreFullError } from "./persistence/DraftStore"
@@ -56,24 +47,6 @@ import {
   reconcileNoteCommand
 } from "./CommandCoordinator"
 import { LocalDatabaseWorker } from "./persistence/LocalDatabaseWorker"
-import {
-  ReaderProfileConflictError,
-  ReaderProfileNotFoundError,
-  ReaderProfileStore,
-  ReaderProfileStoreFullError,
-  toReaderProfileView
-} from "./persistence/ReaderProfileStore"
-import {
-  ReaderExecutableSelectionError,
-  ReaderExecutableSelectionRequiredError,
-  ReaderProfileValidationError,
-  ReaderTestLaunchError,
-  ReaderTestTargetError,
-  ReaderTestTargetSelectionError,
-  validateExecutablePath,
-  validateReaderProfile,
-  resolveReaderTestTarget
-} from "./reader-profile-validation"
 import {
   ConnectionInstanceMismatchError,
   ConnectionLifecycle,
@@ -98,53 +71,15 @@ interface IpcErr {
 
 let mainWindow: BrowserWindow | null = null
 let serverChild: ServerChild | null = null
-type MainServices = DraftStore | CommandAttemptStore | ReaderProfileStore
+type MainServices = DraftStore | CommandAttemptStore
 let runtime: ManagedRuntime.ManagedRuntime<MainServices, never> | null = null
 let connection: ConnectionLifecycle | null = null
 let rendererUrl = ""
 let shutdownPromise: Promise<void> | null = null
 let readyToQuit = false
 const prototypeMode = process.env.HENSHIN_PROTOTYPE_MODE === "1"
-const executableSelections = new Map<string, { readonly path: string; readonly createdAt: number }>()
-const EXECUTABLE_SELECTION_TTL_MS = 10 * 60 * 1000
-const MAX_EXECUTABLE_SELECTIONS = 32
-const testTargetSelections = new Map<string, {
-  readonly profileId: string
-  readonly profileRevision: string
-  readonly selectedPath: string
-  readonly resolvedTarget: string
-  readonly createdAt: number
-}>()
-const TEST_TARGET_SELECTION_TTL_MS = 10 * 60 * 1000
-const MAX_TEST_TARGET_SELECTIONS = 32
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
-
-const dispatchExplicitReaderTest = (executablePath: string, argumentsList: ReadonlyArray<string>): Promise<void> =>
-  new Promise((resolve, reject) => {
-    let settled = false
-    const settle = (result: "accepted" | "failed"): void => {
-      if (settled) return
-      settled = true
-      if (result === "accepted") resolve()
-      else reject(new ReaderTestLaunchError("the operating system could not start the reader process"))
-    }
-    try {
-      const child = spawn(executablePath, [...argumentsList], {
-        cwd: app.getPath("userData"),
-        shell: false,
-        stdio: "ignore",
-        windowsHide: true
-      })
-      child.once("spawn", () => {
-        child.unref()
-        settle("accepted")
-      })
-      child.once("error", () => settle("failed"))
-    } catch {
-      settle("failed")
-    }
-  })
 
 const opaqueError: PublicError = { code: "internal_error", message: "request failed", retryable: false }
 const invalidRequestError: PublicError = {
@@ -214,23 +149,6 @@ const toPublicError = (error: unknown): PublicError => {
   }
   if (error instanceof DraftStoreFullError) {
     return { code: "draft_store_full", message: "saved draft storage is full", retryable: false }
-  }
-  if (error instanceof ReaderProfileConflictError) {
-    return {
-      code: "reader_profile_conflict",
-      message: "reader profile changed in another window",
-      retryable: false,
-      current_revision: error.currentRevision
-    }
-  }
-  if (error instanceof ReaderProfileNotFoundError) {
-    return { code: "reader_profile_not_found", message: "reader profile no longer exists", retryable: false }
-  }
-  if (error instanceof ReaderProfileStoreFullError) {
-    return { code: "reader_profile_store_full", message: "reader profile storage is full", retryable: false }
-  }
-  if (error instanceof ReaderProfileValidationError || error instanceof ReaderExecutableSelectionRequiredError || error instanceof ReaderExecutableSelectionError || error instanceof ReaderTestTargetError || error instanceof ReaderTestTargetSelectionError || error instanceof ReaderTestLaunchError) {
-    return { code: error.code, message: error.message, retryable: false }
   }
   const decoded = decodePublicError(error)
   if (Option.isNone(decoded)) return opaqueError
@@ -401,241 +319,18 @@ const registerIpc = (): void => {
     )
   })
 
-  ipcMain.handle(IpcChannels.readerProfileList, (event, raw: unknown) => {
+  ipcMain.handle(IpcChannels.libraryGet, (event, raw: unknown) => {
     assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ReaderProfileListIpcRequest)(raw)
+    const decoded = Schema.decodeUnknownOption(Schema.Struct({}))(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    try {
-      return requireRuntime().runPromise(
-        toResult(
-          Effect.gen(function*() {
-            const store = yield* ReaderProfileStore
-            return { data: yield* store.list() }
-          })
-        )
-      )
-    } catch (error) {
-      return { ok: false as const, error: toPublicError(error) }
-    }
-  })
-
-  ipcMain.handle(IpcChannels.readerSelectExecutable, async (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ReaderExecutableSelectIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    if (mainWindow === null) return { ok: false as const, error: opaqueError }
-    const picker = await dialog.showOpenDialog(mainWindow, {
-      title: "Choose a reader executable",
-      properties: ["openFile"],
-      filters: process.platform === "win32"
-        ? [{ name: "Native executable", extensions: ["exe", "com"] }]
-        : undefined
-    })
-    if (picker.canceled || picker.filePaths.length === 0) return { ok: true as const, data: null }
-    const selectedPath = picker.filePaths[0]
-    if (selectedPath === undefined) return { ok: true as const, data: null }
-    try {
-      await validateExecutablePath(selectedPath)
-    } catch (error) {
-      return { ok: false as const, error: toPublicError(error) }
-    }
-    const now = Date.now()
-    for (const [handle, selection] of executableSelections) {
-      if (selection.createdAt + EXECUTABLE_SELECTION_TTL_MS <= now) executableSelections.delete(handle)
-    }
-    while (executableSelections.size >= MAX_EXECUTABLE_SELECTIONS) {
-      const oldest = executableSelections.keys().next().value
-      if (oldest === undefined) break
-      executableSelections.delete(oldest)
-    }
-    const selectionHandle = randomUUID()
-    executableSelections.set(selectionHandle, { path: selectedPath, createdAt: now })
-    return {
-      ok: true as const,
-      data: { selection_handle: selectionHandle, executable_name: path.basename(selectedPath) }
-    }
-  })
-
-  ipcMain.handle(IpcChannels.readerProfileSave, async (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ReaderProfileSaveIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    const request = decoded.value
-    try {
-      const profileIdToEdit = request.profile_id
-      const existing = profileIdToEdit === null
-        ? undefined
-        : await requireRuntime().runPromise(
-            Effect.gen(function*() {
-              const store = yield* ReaderProfileStore
-              return yield* store.get(profileIdToEdit)
-            })
-          )
-      if (request.profile_id !== null && existing === undefined) {
-        return { ok: false as const, error: toPublicError(new ReaderProfileNotFoundError()) }
-      }
-
-      let executablePath: string | null = null
-      if (request.launch_mode === "explicit-executable") {
-        if (request.selection_handle !== null) {
-          const selection = executableSelections.get(request.selection_handle)
-          if (selection === undefined || selection.createdAt + EXECUTABLE_SELECTION_TTL_MS <= Date.now()) {
-            executableSelections.delete(request.selection_handle)
-            throw new ReaderExecutableSelectionError("the executable selection expired; choose it again")
-          }
-          await validateExecutablePath(selection.path)
-          executablePath = selection.path
-        } else {
-          executablePath = existing?.executablePath ?? null
-        }
-      } else if (request.selection_handle !== null) {
-        throw new ReaderProfileValidationError("system association profiles cannot use an executable selection")
-      }
-
-      validateReaderProfile(request, executablePath)
-      const profileId = request.profile_id ?? randomUUID()
-      const saved = await requireRuntime().runPromise(
-        toResult(
-          Effect.gen(function*() {
-            const store = yield* ReaderProfileStore
-            const profile = yield* store.save({
-              profileId,
-              expectedRevision: request.expected_revision,
-              name: request.name.trim(),
-              launchMode: request.launch_mode,
-              supportedFormats: request.supported_formats,
-              targetMode: request.target_mode,
-              executablePath,
-              argumentTokens: request.argument_tokens
-            })
-            return { data: toReaderProfileView(profile) }
-          })
-        )
-      )
-      if (saved.ok && request.selection_handle !== null) executableSelections.delete(request.selection_handle)
-      return saved
-    } catch (error) {
-      return { ok: false as const, error: toPublicError(error) }
-    }
-  })
-
-  ipcMain.handle(IpcChannels.readerProfileTestTargetSelect, async (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ReaderProfileTestTargetSelectIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    try {
-      const profile = await requireRuntime().runPromise(
+    return runNetworkResult(
+      toResult(
         Effect.gen(function*() {
-          const store = yield* ReaderProfileStore
-          return yield* store.get(decoded.value.profile_id)
+          const client = yield* LibraryHttpClient
+          return yield* client.get()
         })
       )
-      if (profile === undefined) throw new ReaderProfileNotFoundError()
-      if (profile.revision !== decoded.value.expected_revision) {
-        throw new ReaderProfileConflictError({ currentRevision: profile.revision })
-      }
-      if (mainWindow === null) return { ok: false as const, error: opaqueError }
-
-      const picker = await dialog.showOpenDialog(mainWindow, {
-        title: "Choose a disposable reader test target",
-        properties: profile.target_mode === "archive" ? ["openFile"] : ["openDirectory"],
-        ...(profile.target_mode === "archive"
-          ? { filters: [{ name: "ZIP or CBZ archive", extensions: ["zip", "cbz"] }] }
-          : {})
-      })
-      if (picker.canceled || picker.filePaths.length === 0) return { ok: true as const, data: null }
-      const selectedPath = picker.filePaths[0]
-      if (selectedPath === undefined) return { ok: true as const, data: null }
-      const resolvedTarget = await resolveReaderTestTarget(selectedPath, profile.target_mode)
-      const now = Date.now()
-      for (const [handle, selection] of testTargetSelections) {
-        if (selection.createdAt + TEST_TARGET_SELECTION_TTL_MS <= now) testTargetSelections.delete(handle)
-      }
-      while (testTargetSelections.size >= MAX_TEST_TARGET_SELECTIONS) {
-        const oldest = testTargetSelections.keys().next().value
-        if (oldest === undefined) break
-        testTargetSelections.delete(oldest)
-      }
-      const selectionHandle = randomUUID()
-      testTargetSelections.set(selectionHandle, {
-        profileId: profile.profile_id,
-        profileRevision: profile.revision,
-        selectedPath,
-        resolvedTarget,
-        createdAt: now
-      })
-      return {
-        ok: true as const,
-        data: {
-          selection_handle: selectionHandle,
-          profile_id: profile.profile_id,
-          profile_revision: profile.revision,
-          resolved_target: resolvedTarget
-        }
-      }
-    } catch (error) {
-      return { ok: false as const, error: toPublicError(error) }
-    }
-  })
-
-  ipcMain.handle(IpcChannels.readerProfileTest, async (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ReaderProfileTestIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    const request = decoded.value
-    try {
-      const profile = await requireRuntime().runPromise(
-        Effect.gen(function*() {
-          const store = yield* ReaderProfileStore
-          return yield* store.get(request.profile_id)
-        })
-      )
-      if (profile === undefined) throw new ReaderProfileNotFoundError()
-      if (profile.revision !== request.expected_revision) {
-        throw new ReaderProfileConflictError({ currentRevision: profile.revision })
-      }
-      const selection = testTargetSelections.get(request.selection_handle)
-      if (selection === undefined || selection.createdAt + TEST_TARGET_SELECTION_TTL_MS <= Date.now()) {
-        testTargetSelections.delete(request.selection_handle)
-        throw new ReaderTestTargetSelectionError()
-      }
-      if (selection.profileId !== profile.profile_id || selection.profileRevision !== profile.revision) {
-        throw new ReaderTestTargetSelectionError()
-      }
-      const currentResolvedTarget = await resolveReaderTestTarget(selection.selectedPath, profile.target_mode)
-      if (currentResolvedTarget !== selection.resolvedTarget) {
-        testTargetSelections.delete(request.selection_handle)
-        throw new ReaderTestTargetSelectionError("the resolved test target changed; preview it again before launching the reader")
-      }
-      const resolvedTarget = selection.resolvedTarget
-
-      let result: ReaderProfileTestResult
-      if (profile.launch_mode === "explicit-executable") {
-        if (profile.executablePath === null) throw new ReaderTestLaunchError("the saved profile has no executable")
-        await validateExecutablePath(profile.executablePath)
-        const argumentsList = profile.argument_tokens.map((token) => token === "{target}" ? resolvedTarget : token)
-        await dispatchExplicitReaderTest(profile.executablePath, argumentsList)
-        result = {
-          handoff: "accepted",
-          launch_mode: profile.launch_mode,
-          resolved_target: resolvedTarget,
-          message: "The operating system accepted the reader process handoff. This settings test created no Open event."
-        }
-      } else {
-        const error = await shell.openPath(resolvedTarget)
-        if (error !== "") throw new ReaderTestLaunchError("the operating system could not open the resolved target")
-        result = {
-          handoff: "accepted",
-          launch_mode: profile.launch_mode,
-          resolved_target: resolvedTarget,
-          message: "The operating system accepted the associated-application handoff. This settings test created no Open event."
-        }
-      }
-      testTargetSelections.delete(request.selection_handle)
-      return { ok: true as const, data: result }
-    } catch (error) {
-      return { ok: false as const, error: toPublicError(error) }
-    }
+    )
   })
 
   ipcMain.handle(IpcChannels.librarySearch, (event, raw: unknown) => {
@@ -675,39 +370,6 @@ const registerIpc = (): void => {
         Effect.gen(function*() {
           const client = yield* ReviewHttpClient
           return yield* client.candidates()
-        })
-      )
-    )
-  })
-
-  ipcMain.handle(IpcChannels.reviewCommand, (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ReleaseHeldDiscoveryIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    let session: Session
-    try {
-      session = requireSession()
-    } catch (error) {
-      return { ok: false as const, error: toPublicError(error) }
-    }
-    return runNetworkResult(
-      toResult(
-        Effect.gen(function*() {
-          const client = yield* ReviewHttpClient
-          const input = decoded.value
-          return yield* client.command({
-            params: { id: input.candidate_id },
-            payload: {
-              root_id: input.root_id,
-              operation_id: input.operation_id,
-              instance_id: session.instanceId,
-              epoch: session.epoch,
-              expected_candidate_version: input.expected_candidate_version,
-              expected_mapping_revision: input.expected_mapping_revision,
-              expected_policy_revision: input.expected_policy_revision,
-              command: input.command
-            }
-          })
         })
       )
     )
@@ -1043,8 +705,7 @@ const bootstrap = async (): Promise<void> => {
   runtime = ManagedRuntime.make(
     Layer.mergeAll(
       DraftStore.layerFromWorker,
-      CommandAttemptStore.layerFromWorker,
-      ReaderProfileStore.layerFromWorker
+      CommandAttemptStore.layerFromWorker
     ).pipe(Layer.provide(localWorker))
   )
 

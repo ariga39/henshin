@@ -238,7 +238,7 @@ describe("normal library scan", () => {
       })
     }))
 
-    const submitHeld = () => withServerClient(server, Effect.gen(function*() {
+    const held = await withServerClient(server, Effect.gen(function*() {
       const client = yield* ServerHttpClient
       return yield* client.command({
         params: { id: root.data.root_id },
@@ -252,7 +252,6 @@ describe("normal library scan", () => {
         }
       })
     }))
-    const held = await submitHeld()
     if (!("task" in held.data)) throw new Error("expected held scan task submission")
     expect((await waitForTerminal(server, held.data.task.task_id)).status).toBe("succeeded")
 
@@ -274,9 +273,7 @@ describe("normal library scan", () => {
       })
     }))
     if (!("task" in normal.data)) throw new Error("expected normal scan task submission")
-    const terminal = await waitForTerminal(server, normal.data.task.task_id)
-    expect(terminal.status).toBe("succeeded")
-    expect(terminal.review_needed_count).toBe(3)
+    expect((await waitForTerminal(server, normal.data.task.task_id)).status).toBe("succeeded")
 
     const entries = await withLibraryClient(server, Effect.gen(function*() {
       const client = yield* LibraryHttpClient
@@ -295,229 +292,5 @@ describe("normal library scan", () => {
       "held-book-c"
     ])
     expect(staged.data.every((candidate) => candidate.hold_state === "held")).toBe(true)
-
-    await makeImageBook(fixture, "later-discovery")
-    const nextHeld = await submitHeld()
-    if (!("task" in nextHeld.data)) throw new Error("expected a new held scan")
-    expect(await waitForTerminal(server, nextHeld.data.task.task_id)).toMatchObject({
-      status: "succeeded", candidates_analyzed: 6, review_needed_count: 4
-    })
-    const reviewAfterHeld = await withReviewClient(server, Effect.gen(function*() {
-      return yield* (yield* ReviewHttpClient).candidates()
-    }))
-    expect(reviewAfterHeld.data.map((candidate) => candidate.relative_path).sort()).toEqual([
-      "held-book-a", "held-book-b", "held-book-c", "later-discovery"
-    ])
-    expect(reviewAfterHeld.data.every((candidate) => candidate.hold_state === "held")).toBe(true)
-
-  })
-
-  it("keeps a changed occupied path staged without changing the accepted identity", async () => {
-    const server = await start()
-    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-replacement-"))
-    fixturePaths.add(fixture)
-    await makeImageBook(fixture, "book")
-
-    const root = await withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      const preview = yield* client.preview({ payload: { path: fixture } })
-      if (!("children" in preview.data)) throw new Error("expected setup preview")
-      return yield* client.save({
-        payload: {
-          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
-          label: "Replacement", path: fixture, preview_identity: preview.data.preview_identity
-        }
-      })
-    }))
-
-    const scan = async () => withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      return yield* client.command({
-        params: { id: root.data.root_id },
-        payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-          expected_mapping_revision: root.data.mapping_revision,
-          expected_policy_revision: root.data.policy_revision,
-          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
-        }
-      })
-    }))
-
-    const first = await scan()
-    if (!("task" in first.data)) throw new Error("expected initial scan task")
-    expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
-    const before = await withLibraryClient(server, Effect.gen(function*() {
-      const client = yield* LibraryHttpClient
-      return yield* client.search({ payload: { page_size: 200 } })
-    }))
-    const accepted = before.data.entries[0]
-    if (accepted === undefined) throw new Error("expected accepted entry")
-
-    await writeFile(path.join(fixture, "book", "002.jpg"), "changed page")
-    const second = await scan()
-    if (!("task" in second.data)) throw new Error("expected replacement scan task")
-    const terminal = await waitForTerminal(server, second.data.task.task_id)
-    expect(terminal.status).toBe("completed_with_errors")
-    expect(terminal.readiness_error?.code).toBe("allocation_deferred")
-    expect(terminal.readiness_error?.message).toContain("book")
-    expect(terminal.review_needed_count).toBe(1)
-
-    const after = await withLibraryClient(server, Effect.gen(function*() {
-      const client = yield* LibraryHttpClient
-      return yield* client.search({ payload: { page_size: 200 } })
-    }))
-    expect(after.data.entries).toHaveLength(1)
-    expect(after.data.entries[0]).toMatchObject({
-      entry_id: accepted.entry_id,
-      relative_path: "book",
-      page_count: 1,
-      content_version: "1",
-      location_revision: "1"
-    })
-
-    const staged = await withReviewClient(server, Effect.gen(function*() {
-      const client = yield* ReviewHttpClient
-      return yield* client.candidates()
-    }))
-    expect(staged.data).toHaveLength(1)
-    expect(staged.data[0]).toMatchObject({ relative_path: "book", analysis_status: "ready" })
-    expect(staged.data[0]?.manifest?.pages).toHaveLength(2)
-  })
-
-  it("defers new allocation when an accepted path is missing", async () => {
-    const server = await start()
-    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-missing-"))
-    fixturePaths.add(fixture)
-    await makeImageBook(fixture, "missing-book")
-
-    const root = await withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      const preview = yield* client.preview({ payload: { path: fixture } })
-      if (!("children" in preview.data)) throw new Error("expected setup preview")
-      return yield* client.save({
-        payload: {
-          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
-          label: "Missing", path: fixture, preview_identity: preview.data.preview_identity
-        }
-      })
-    }))
-
-    const scan = async () => withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      return yield* client.command({
-        params: { id: root.data.root_id },
-        payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-          expected_mapping_revision: root.data.mapping_revision,
-          expected_policy_revision: root.data.policy_revision,
-          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
-        }
-      })
-    }))
-
-    const first = await scan()
-    if (!("task" in first.data)) throw new Error("expected initial scan task")
-    expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
-    await rm(path.join(fixture, "missing-book"), { recursive: true, force: true })
-
-    const missingOnly = await scan()
-    if (!("task" in missingOnly.data)) throw new Error("expected missing-only scan task")
-    const missingOnlyTerminal = await waitForTerminal(server, missingOnly.data.task.task_id)
-    expect(missingOnlyTerminal.status).toBe("completed_with_errors")
-    expect(missingOnlyTerminal.readiness_error?.code).toBe("allocation_deferred")
-    expect(missingOnlyTerminal.readiness_error?.message).toContain("missing-book")
-    expect(missingOnlyTerminal.review_needed_count).toBe(1)
-
-    await makeImageBook(fixture, "new-book")
-
-    const second = await scan()
-    if (!("task" in second.data)) throw new Error("expected deferred scan task")
-    const terminal = await waitForTerminal(server, second.data.task.task_id)
-    expect(terminal.status).toBe("completed_with_errors")
-    expect(terminal.readiness_error?.code).toBe("allocation_deferred")
-    expect(terminal.readiness_error?.message).toContain("missing-book")
-    expect(terminal.review_needed_count).toBe(2)
-
-    const entries = await withLibraryClient(server, Effect.gen(function*() {
-      const client = yield* LibraryHttpClient
-      return yield* client.search({ payload: { page_size: 200 } })
-    }))
-    expect(entries.data.entries.map((entry) => entry.relative_path)).toEqual(["missing-book"])
-    const staged = await withReviewClient(server, Effect.gen(function*() {
-      const client = yield* ReviewHttpClient
-      return yield* client.candidates()
-    }))
-    expect(staged.data.map((candidate) => candidate.relative_path)).toEqual(["new-book"])
-  })
-
-  it("does not treat an excluded accepted path as a missing claim", async () => {
-    const server = await start()
-    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-excluded-"))
-    fixturePaths.add(fixture)
-    await makeImageBook(fixture, "excluded-book")
-
-    const root = await withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      const preview = yield* client.preview({ payload: { path: fixture } })
-      if (!("children" in preview.data)) throw new Error("expected setup preview")
-      return yield* client.save({
-        payload: {
-          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
-          label: "Excluded", path: fixture, preview_identity: preview.data.preview_identity
-        }
-      })
-    }))
-
-    const first = await withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      return yield* client.command({
-        params: { id: root.data.root_id },
-        payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-          expected_mapping_revision: root.data.mapping_revision,
-          expected_policy_revision: root.data.policy_revision,
-          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
-        }
-      })
-    }))
-    if (!("task" in first.data)) throw new Error("expected initial scan task")
-    expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
-
-    const policy = await withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      return yield* client.command({
-        params: { id: root.data.root_id },
-        payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-          expected_policy_revision: root.data.policy_revision,
-          command: { type: "exclude", exclusion: { path: "excluded-book", scope: "exact" } }
-        }
-      })
-    }))
-    if ("task" in policy.data) throw new Error("expected policy response")
-    const policyRoot = policy.data
-    await rm(path.join(fixture, "excluded-book"), { recursive: true, force: true })
-    await makeImageBook(fixture, "new-book")
-
-    const second = await withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      return yield* client.command({
-        params: { id: root.data.root_id },
-        payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-          expected_mapping_revision: root.data.mapping_revision,
-          expected_policy_revision: policyRoot.policy_revision,
-          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
-        }
-      })
-    }))
-    if (!("task" in second.data)) throw new Error("expected excluded scan task")
-    expect((await waitForTerminal(server, second.data.task.task_id)).status).toBe("succeeded")
-
-    const entries = await withLibraryClient(server, Effect.gen(function*() {
-      const client = yield* LibraryHttpClient
-      return yield* client.search({ payload: { page_size: 200 } })
-    }))
-    expect(entries.data.entries.map((entry) => entry.relative_path).sort()).toEqual(["excluded-book", "new-book"])
   })
 })

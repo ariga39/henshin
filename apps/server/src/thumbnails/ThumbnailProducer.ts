@@ -4,13 +4,7 @@ import { fileURLToPath } from "node:url"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { Context, Effect, Fiber, Layer, Option, Result, Schema, Stream } from "effect"
 import { NodeServices } from "@effect/platform-node"
-import {
-  analyzeSourceManifest,
-  DEFAULT_MANIFEST_LIMITS,
-  readArchivePages,
-  recheckSourceObservation,
-  type SourceObservation
-} from "../analysis/SourceManifestAnalysis"
+import { analyzeSourceManifest, readArchivePage } from "../analysis/SourceManifestAnalysis"
 import {
   revalidateSourceRoot,
   resolveSourceCandidate,
@@ -24,23 +18,17 @@ import { ThumbnailCache, ThumbnailCacheError, THUMBNAIL_MAX_BYTES } from "./Thum
 export const THUMBNAIL_RENDERING_PROFILE = "default-cover-v1" as const
 const MAX_SOURCE_PAGE_BYTES = 16 * 1024 * 1024
 const RENDER_DEADLINE_MS = 3_000
-const RENDER_REQUEST_DEADLINE_MS = DEFAULT_MANIFEST_LIMITS.deadlineMs
-const MAX_DECODE_ATTEMPTS = 8
-const MAX_CONCURRENT_RENDERS = 4
-const FAILED_RENDER_TTL_MS = 30_000
-const MAX_FAILED_RENDER_KEYS = 128
 
-const verificationLimits = DEFAULT_MANIFEST_LIMITS
-
-class ThumbnailSourceError extends Schema.TaggedError<ThumbnailSourceError>()(
-  "ThumbnailSourceError",
-  { message: Schema.String }
-) {}
-
-class ThumbnailBudgetError extends Schema.TaggedError<ThumbnailBudgetError>()(
-  "ThumbnailBudgetError",
-  { message: Schema.String }
-) {}
+const sourceLimits = {
+  maxArchiveBytes: 512 * 1024 * 1024,
+  maxEntryCount: 100_000,
+  maxPageCount: 20_000,
+  maxNameAndMetadataBytes: 32 * 1024 * 1024,
+  maxCentralDirectoryBytes: 64 * 1024 * 1024,
+  maxDeclaredUncompressedBytes: 2 * 1024 ** 3,
+  maxMemberUncompressedBytes: MAX_SOURCE_PAGE_BYTES,
+  deadlineMs: 1_500
+} as const
 
 export class ThumbnailRenderError extends Schema.TaggedError<ThumbnailRenderError>()(
   "ThumbnailRenderError",
@@ -63,73 +51,17 @@ const parseKey = (input: string): { readonly entryId: string; readonly contentVe
   return { entryId: parts[1] as string, contentVersion: parts[2] as string }
 }
 
-const observationIdentity = (observation: {
-  readonly kind: "directory" | "archive"
-  readonly bytes: number
-  readonly mtimeMs: number
-  readonly entryCount: number
-  readonly observationToken?: string
-}) => ({
-  kind: observation.kind,
-  bytes: observation.bytes,
-  mtime_ms: observation.mtimeMs,
-  entry_count: observation.entryCount,
-  observation_token: observation.observationToken
-})
-
-const normalizeObservation = (
-  observation: typeof ScanManifest.Type["before"] | SourceObservation
-): Parameters<typeof observationIdentity>[0] => "mtime_ms" in observation
-  ? {
-      kind: observation.kind,
-      bytes: observation.bytes,
-      mtimeMs: observation.mtime_ms,
-      entryCount: observation.entry_count,
-      observationToken: observation.observation_token
-    }
-  : observation
-
-const sameObservation = (
-  left: typeof ScanManifest.Type["after"] | SourceObservation,
-  right: typeof ScanManifest.Type["after"] | SourceObservation
-): boolean => JSON.stringify(observationIdentity(normalizeObservation(left))) === JSON.stringify(observationIdentity(normalizeObservation(right)))
-
-const sameAcceptedObservation = (
-  current: SourceObservation,
-  accepted: typeof ScanManifest.Type["after"]
-): boolean => {
-  const observed = normalizeObservation(current)
-  const expected = normalizeObservation(accepted)
-  return observed.kind === expected.kind &&
-    observed.bytes === expected.bytes &&
-    observed.mtimeMs === expected.mtimeMs &&
-    observed.entryCount === expected.entryCount &&
-    (expected.observationToken === undefined ||
-      expected.observationToken.length === 0 ||
-      observed.observationToken === expected.observationToken)
-}
-
-const sameAcceptedManifest = (
-  current: {
+const manifestIdentity = (
+  manifest: typeof ScanManifest.Type | {
     readonly sourceKind: "archive" | "directory"
     readonly pages: ReadonlyArray<{ readonly name: string; readonly format: string; readonly declaredBytes: number }>
-    readonly before: SourceObservation
-    readonly after: SourceObservation
-  },
-  accepted: typeof ScanManifest.Type
-): boolean =>
-  current.sourceKind === accepted.source_kind &&
-  JSON.stringify(current.pages.map((page) => ({
-    name: page.name,
-    format: page.format,
-    declared_bytes: page.declaredBytes
-  }))) === JSON.stringify(accepted.pages.map((page) => ({
-    name: page.name,
-    format: page.format,
-    declared_bytes: page.declared_bytes
-  }))) &&
-  sameAcceptedObservation(current.before, accepted.before) &&
-  sameAcceptedObservation(current.after, accepted.after)
+  }
+): string => JSON.stringify({
+  source_kind: "source_kind" in manifest ? manifest.source_kind : manifest.sourceKind,
+  pages: manifest.pages.map((page) => "declared_bytes" in page
+    ? page
+    : { name: page.name, format: page.format, declared_bytes: page.declaredBytes })
+})
 
 const sameStats = (
   left: { readonly dev: bigint; readonly ino: bigint; readonly size: bigint; readonly mtimeNs: bigint },
@@ -137,9 +69,8 @@ const sameStats = (
 ): boolean =>
   left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeNs === right.mtimeNs
 
-const readDirectPage = async (path: string, signal: AbortSignal): Promise<Uint8Array> => {
+const readDirectPage = async (path: string): Promise<Uint8Array> => {
   const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0
-  signal.throwIfAborted()
   const file = await open(path, constants.O_RDONLY | noFollow)
   try {
     const before = await file.stat({ bigint: true })
@@ -147,12 +78,10 @@ const readDirectPage = async (path: string, signal: AbortSignal): Promise<Uint8A
     const output = new Uint8Array(Number(before.size))
     let offset = 0
     while (offset < output.byteLength) {
-      signal.throwIfAborted()
       const result = await file.read(output, offset, output.byteLength - offset, offset)
       if (result.bytesRead === 0) throw new Error("source page ended early")
       offset += result.bytesRead
     }
-    signal.throwIfAborted()
     const after = await file.stat({ bigint: true })
     if (!sameStats(before, after)) throw new Error("source page changed")
     return output
@@ -203,15 +132,8 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
       const decoderPath = fileURLToPath(new URL("./thumbnail-decoder.mjs", import.meta.url))
       const inFlight = new Set<string>()
-      const failedUntil = new Map<string, number>()
-      const phaseLimits = (deadlineAt: number): typeof verificationLimits | null => {
-        const remainingMs = deadlineAt - Date.now()
-        return remainingMs > 0
-          ? { ...verificationLimits, deadlineMs: remainingMs }
-          : null
-      }
 
-      const decode = (input: Uint8Array): Effect.Effect<Uint8Array | null, ThumbnailRenderError> =>
+      const decode = (input: Uint8Array): Effect.Effect<Uint8Array, ThumbnailRenderError> =>
         Effect.scoped(
           Effect.gen(function*() {
             const handle = yield* spawner.spawn(ChildProcess.make(process.execPath, [decoderPath])).pipe(
@@ -230,7 +152,9 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
             const exitCode = yield* handle.exitCode.pipe(
               Effect.mapError(() => new ThumbnailRenderError({ message: "thumbnail decoder exit status unavailable" }))
             )
-            if (exitCode !== ChildProcessSpawner.ExitCode(0) || output.byteLength === 0) return null
+            if (exitCode !== ChildProcessSpawner.ExitCode(0) || output.byteLength === 0) {
+              return yield* new ThumbnailRenderError({ message: "thumbnail decoder failed" })
+            }
             return output
           }).pipe(Effect.timeoutOrElse({
             duration: RENDER_DEADLINE_MS,
@@ -238,7 +162,7 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
           }))
         )
 
-      const render = Effect.fnUntraced(function*(key: string, signal: AbortSignal, deadlineAt: number): Effect.fn.Return<Uint8Array | null, ThumbnailRenderError | ThumbnailCacheError | ThumbnailBudgetError> {
+      const render = Effect.fnUntraced(function*(key: string): Effect.fn.Return<Uint8Array | null, ThumbnailRenderError | ThumbnailCacheError> {
         const parsed = parseKey(key)
         if (parsed === null) return null
         const accepted = yield* library.acceptedThumbnailEntry(parsed.entryId).pipe(
@@ -276,165 +200,60 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
         const candidate = yield* Effect.promise(() => resolveSourceCandidate(currentRoot.value, accepted.relative_path))
         if (!candidate.ok || candidate.value.kind !== accepted.kind) return null
 
-        const hasAcceptedTokens =
-          typeof acceptedManifest.before.observation_token === "string" &&
-          acceptedManifest.before.observation_token.length > 0 &&
-          typeof acceptedManifest.after.observation_token === "string" &&
-          acceptedManifest.after.observation_token.length > 0
-        if (hasAcceptedTokens) {
-          const cheapLimits = phaseLimits(deadlineAt)
-          if (cheapLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
-          const cheapObservation = yield* Effect.result(Effect.tryPromise({
-            try: () => recheckSourceObservation(
-              candidate.value.nativePath,
-              accepted.kind === "archive" ? "archive" : "directory",
-              acceptedManifest.after.entry_count,
-              { limits: cheapLimits, signal }
-            ),
-            catch: () => new ThumbnailSourceError({ message: "accepted source observation is unavailable" })
-          }))
-          if (Result.isFailure(cheapObservation) || !sameObservation(cheapObservation.success, acceptedManifest.after)) return null
-        }
-
+        const freshResult = yield* Effect.result(analyzeSourceManifest({
+          sourcePath: candidate.value.nativePath,
+          limits: sourceLimits
+        }))
+        if (Result.isFailure(freshResult)) return null
+        if (manifestIdentity(freshResult.success) !== manifestIdentity(acceptedManifest)) return null
         const cached = yield* cache.read(key)
         if (cached !== null) return cached
 
-        const analysisLimits = phaseLimits(deadlineAt)
-        if (analysisLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
-        const freshResult = yield* Effect.result(analyzeSourceManifest({
-          sourcePath: candidate.value.nativePath,
-          limits: analysisLimits,
-          signal
-        }))
-        if (Result.isFailure(freshResult)) return null
-        if (!sameAcceptedManifest(freshResult.success, acceptedManifest)) return null
-
-        const readPage = (page: typeof acceptedManifest.pages[number]): Effect.Effect<Uint8Array, ThumbnailSourceError> =>
+        const readPage = (page: typeof acceptedManifest.pages[number]): Effect.Effect<Uint8Array, ThumbnailRenderError> =>
           accepted.kind === "archive"
-            ? Effect.fail(new ThumbnailSourceError({ message: "archive pages are read in one pass" }))
+            ? Effect.tryPromise({
+                try: () => readArchivePage(candidate.value.nativePath, page.name, sourceLimits),
+                catch: () => new ThumbnailRenderError({ message: "accepted archive page is unavailable" })
+              })
             : Effect.promise(() => resolveSourcePage(candidate.value, page.name)).pipe(
                 Effect.flatMap((resolved) => resolved.ok
                   ? Effect.tryPromise({
-                      try: () => readDirectPage(resolved.value.nativePath, signal),
-                      catch: () => new ThumbnailSourceError({ message: "accepted image page is unavailable" })
+                      try: () => readDirectPage(resolved.value.nativePath),
+                      catch: () => new ThumbnailRenderError({ message: "accepted image page is unavailable" })
                     })
-                  : Effect.fail(new ThumbnailSourceError({ message: "accepted image page is unavailable" })))
+                  : Effect.fail(new ThumbnailRenderError({ message: "accepted image page is unavailable" })))
               )
 
-        // Keep the first-decodable policy bounded without changing the accepted page count.
-        const candidatePages = acceptedManifest.pages.slice(0, MAX_DECODE_ATTEMPTS)
-        let archiveAfter = freshResult.success.after
         let rendered: Uint8Array | null = null
-        let lastRenderError: ThumbnailRenderError | undefined
-        if (accepted.kind === "archive") {
-          const archiveLimits = phaseLimits(deadlineAt)
-          if (archiveLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
-          const archiveRead = yield* Effect.result(Effect.tryPromise({
-            try: () => readArchivePages(candidate.value.nativePath, candidatePages.map((page) => page.name), {
-              limits: archiveLimits,
-              maxPageBytes: MAX_SOURCE_PAGE_BYTES,
-              signal,
-              expectedEntryCount: freshResult.success.after.entryCount,
-              onPage: async (_name, bytes) => {
-                if (signal.aborted) return false
-                const outputResult = await Effect.runPromise(Effect.result(decode(bytes)))
-                if (Result.isFailure(outputResult)) {
-                  lastRenderError = outputResult.failure
-                  return false
-                }
-                if (outputResult.success === null) return false
-                rendered = outputResult.success
-                return true
-              }
-            }),
-            catch: () => new ThumbnailSourceError({ message: "accepted archive pages are unavailable" })
-          }))
-          if (Result.isFailure(archiveRead)) return null
-          archiveAfter = archiveRead.success.after
-        }
-        if (accepted.kind === "image-directory") {
-          for (const page of candidatePages) {
-            const input = yield* Effect.result(readPage(page))
-            if (Result.isFailure(input)) continue
-            const outputResult = yield* Effect.result(decode(input.success))
-            if (Result.isFailure(outputResult)) {
-              lastRenderError = outputResult.failure
-              continue
-            }
-            if (outputResult.success !== null) {
-              rendered = outputResult.success
-              break
-            }
+        for (const page of acceptedManifest.pages) {
+          if (page.declared_bytes > MAX_SOURCE_PAGE_BYTES) continue
+          const input = yield* Effect.result(readPage(page))
+          if (Result.isFailure(input)) continue
+          const output = yield* Effect.result(decode(input.success))
+          if (Result.isSuccess(output)) {
+            rendered = output.success
+            break
           }
         }
-        if (rendered === null) {
-          if (lastRenderError !== undefined) return yield* lastRenderError
-          return null
-        }
-
-        if (accepted.kind === "image-directory") {
-          const finalLimits = phaseLimits(deadlineAt)
-          if (finalLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
-          const afterResult = yield* Effect.result(Effect.tryPromise({
-            try: () => recheckSourceObservation(
-              candidate.value.nativePath,
-              "directory",
-              freshResult.success.after.entryCount,
-              { limits: finalLimits, signal }
-            ),
-            catch: () => new ThumbnailSourceError({ message: "accepted image directory changed" })
-          }))
-          if (Result.isFailure(afterResult) || !sameObservation(afterResult.success, freshResult.success.after)) return null
-        } else if (!sameObservation(archiveAfter, freshResult.success.after)) {
-          return null
-        }
+        if (rendered === null) return null
 
         const afterRoot = yield* Effect.promise(() => revalidateSourceRoot(rootObservation))
         if (!afterRoot.ok) return null
         const afterCandidate = yield* Effect.promise(() => resolveSourceCandidate(afterRoot.value, accepted.relative_path))
         if (!afterCandidate.ok || afterCandidate.value.kind !== accepted.kind) return null
 
-        yield* cache.publish(key, rendered).pipe(
-          Effect.catchTag("ThumbnailCacheError", () =>
-            Effect.logWarning("thumbnail cache publication failed; returning generated cover")
-          )
-        )
+        yield* cache.publish(key, rendered)
         return rendered
       })
 
-      const rememberFailed = (key: string): ThumbnailLoad => {
-        failedUntil.set(key, Date.now() + FAILED_RENDER_TTL_MS)
-        while (failedUntil.size > MAX_FAILED_RENDER_KEYS) {
-          const oldest = failedUntil.keys().next().value
-          if (oldest === undefined) break
-          failedUntil.delete(oldest)
-        }
-        return { kind: "missing" }
-      }
-
       const load = (key: string): Effect.Effect<ThumbnailLoad, ThumbnailRenderError | ThumbnailCacheError> =>
         Effect.suspend(() => {
-          if (inFlight.has(key) || inFlight.size >= MAX_CONCURRENT_RENDERS) {
-            return Effect.succeed({ kind: "updating" } as ThumbnailLoad)
-          }
-          const failedExpiry = failedUntil.get(key)
-          if (failedExpiry !== undefined) {
-            if (failedExpiry > Date.now()) return Effect.succeed({ kind: "missing" } as ThumbnailLoad)
-            failedUntil.delete(key)
-          }
+          if (inFlight.has(key)) return Effect.succeed({ kind: "updating" } as const)
           inFlight.add(key)
-          const controller = new AbortController()
-          return render(key, controller.signal, Date.now() + RENDER_REQUEST_DEADLINE_MS).pipe(
-            Effect.timeoutOrElse({
-              duration: RENDER_REQUEST_DEADLINE_MS,
-              orElse: () => Effect.fail(new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" }))
-            }),
-            Effect.map((bytes) => bytes === null ? rememberFailed(key) : { kind: "ready", bytes } as const),
-            Effect.catchTag("ThumbnailBudgetError", () => Effect.succeed(rememberFailed(key))),
-            Effect.ensuring(Effect.sync(() => {
-              controller.abort()
-              inFlight.delete(key)
-            }))
+          return render(key).pipe(
+            Effect.map((bytes) => bytes === null ? { kind: "missing" } as const : { kind: "ready", bytes } as const),
+            Effect.catchTag("ThumbnailRenderError", () => Effect.succeed({ kind: "updating" } as const)),
+            Effect.ensuring(Effect.sync(() => inFlight.delete(key)))
           )
         })
 

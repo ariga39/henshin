@@ -480,16 +480,6 @@ export const DEFAULT_SOURCE_DISCOVERY_LIMITS: SourceDiscoveryLimits = {
   maxCandidates: 64
 }
 
-/**
- * Bounded discovery budget for an explicit manual scan. Root previews keep the
- * smaller default/sample budget so preview latency is independent of scan size.
- */
-export const MANUAL_SCAN_SOURCE_DISCOVERY_LIMITS = {
-  maxDirectories: 10_000,
-  maxCandidates: 10_000,
-  deadlineMs: 60_000
-} satisfies Partial<SourceDiscoveryLimits>
-
 export type SourceDiscoveryIssueCode =
   | "directory-limit"
   | "location-unavailable"
@@ -624,7 +614,7 @@ const discoveryIssue = (
   relativePath?: string
 ): SourceDiscoveryIssue => (relativePath === undefined ? { code } : { code, relativePath })
 
-export const discoveryIssueCode = (code: NativeBoundaryErrorCode): SourceDiscoveryIssueCode => {
+const discoveryIssueCode = (code: NativeBoundaryErrorCode): SourceDiscoveryIssueCode => {
   switch (code) {
     case "directory-limit":
     case "missing-target":
@@ -919,10 +909,8 @@ export const discoverSourceRoot = async (
 
   const finalRoot = await revalidateSourceRoot(root, context)
   if (!finalRoot.ok) {
-    // Keep candidates observed before a source disconnect. The caller can
-    // stage them as unavailable while the partial coverage prevents normal
-    // allocation; an explicit retry can re-observe the restored source.
-    markPartial(discoveryIssueCode(finalRoot.code))
+    if (finalRoot.code !== "directory-limit") return finalRoot
+    markPartial("directory-limit")
   }
 
   candidates.sort((left, right) => utf8Compare(left.relativePath, right.relativePath))

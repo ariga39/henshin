@@ -1,9 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type {
-  ReaderProfileSaveIpcRequest,
-  ReaderProfileTestIpcRequest,
-  ReaderProfileTestTargetSelectIpcRequest,
-  ReleaseHeldDiscoveryIpcRequest,
   RootCommandIpcRequest,
   RootPreviewRequest,
   RootRegistrationRequest
@@ -20,20 +16,11 @@ contextBridge.exposeInMainWorld("henshinRootPreview", {
 
 contextBridge.exposeInMainWorld("henshinScanReview", {
   listTasks: () => ipcRenderer.invoke(IpcChannels.taskList, {}),
-  candidates: () => ipcRenderer.invoke(IpcChannels.reviewCandidates, {}),
-  command: (input: ReleaseHeldDiscoveryIpcRequest) => ipcRenderer.invoke(IpcChannels.reviewCommand, input)
-})
-
-contextBridge.exposeInMainWorld("henshinReaderProfiles", {
-  list: () => ipcRenderer.invoke(IpcChannels.readerProfileList, {}),
-  selectExecutable: () => ipcRenderer.invoke(IpcChannels.readerSelectExecutable, {}),
-  save: (input: ReaderProfileSaveIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileSave, input),
-  selectTestTarget: (input: ReaderProfileTestTargetSelectIpcRequest) =>
-    ipcRenderer.invoke(IpcChannels.readerProfileTestTargetSelect, input),
-  test: (input: ReaderProfileTestIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileTest, input)
+  candidates: () => ipcRenderer.invoke(IpcChannels.reviewCandidates, {})
 })
 
 contextBridge.exposeInMainWorld("henshinLibrary", {
+  get: () => ipcRenderer.invoke(IpcChannels.libraryGet, {}),
   search: (input: { readonly page_size?: number; readonly cursor?: string }) =>
     ipcRenderer.invoke(IpcChannels.librarySearch, input)
 })

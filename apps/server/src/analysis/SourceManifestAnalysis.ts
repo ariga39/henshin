@@ -22,12 +22,11 @@ import {
   ERR_UNSUPPORTED_FORMAT,
   ERR_UNSUPPORTED_UINT64,
   Reader,
+  Uint8ArrayWriter,
   ZipReader,
   type Entry,
-  type FileEntry,
   type ZipReaderConstructorOptions
 } from "@zip.js/zip.js"
-import { compareNaturalPageNames } from "@henshin/contracts"
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
 const textEncoder = new TextEncoder()
@@ -147,8 +146,6 @@ export interface SourceObservation {
   readonly bytes: number
   readonly mtimeMs: number
   readonly entryCount: number
-  /** Includes direct child stats for directories, not only the parent stat. */
-  readonly observationToken: string
 }
 
 export interface SourceManifest {
@@ -235,13 +232,6 @@ class LimitExceeded extends Error {
   constructor() {
     super("source exceeds the finite analysis limit")
     this.name = "LimitExceeded"
-  }
-}
-
-class ArchiveMemberReadFailure extends Error {
-  constructor() {
-    super("archive member could not be read")
-    this.name = "ArchiveMemberReadFailure"
   }
 }
 
@@ -431,8 +421,68 @@ const compareUtf8 = (left: Uint8Array, right: Uint8Array): number => {
   return left.length - right.length
 }
 
+const codePoints = (value: string): ReadonlyArray<number> => Array.from(value, (char) => char.codePointAt(0) as number)
+
+const naturalCompare = (left: string, right: string): number => {
+  const leftPoints = codePoints(left)
+  const rightPoints = codePoints(right)
+  let leftIndex = 0
+  let rightIndex = 0
+
+  while (leftIndex < leftPoints.length && rightIndex < rightPoints.length) {
+    const leftPoint = leftPoints[leftIndex]
+    const rightPoint = rightPoints[rightIndex]
+    const leftDigit = leftPoint >= 0x30 && leftPoint <= 0x39
+    const rightDigit = rightPoint >= 0x30 && rightPoint <= 0x39
+
+    if (leftDigit && rightDigit) {
+      const leftStart = leftIndex
+      const rightStart = rightIndex
+      while (
+        leftIndex < leftPoints.length &&
+        leftPoints[leftIndex] >= 0x30 &&
+        leftPoints[leftIndex] <= 0x39
+      ) leftIndex += 1
+      while (
+        rightIndex < rightPoints.length &&
+        rightPoints[rightIndex] >= 0x30 &&
+        rightPoints[rightIndex] <= 0x39
+      ) rightIndex += 1
+
+      const leftDigits = leftPoints.slice(leftStart, leftIndex).map((point) => point - 0x30)
+      const rightDigits = rightPoints.slice(rightStart, rightIndex).map((point) => point - 0x30)
+      const leftNonZero = leftDigits.findIndex((digit) => digit !== 0)
+      const rightNonZero = rightDigits.findIndex((digit) => digit !== 0)
+      const leftSignificant = leftNonZero < 0 ? [0] : leftDigits.slice(leftNonZero)
+      const rightSignificant = rightNonZero < 0 ? [0] : rightDigits.slice(rightNonZero)
+      if (leftSignificant.length !== rightSignificant.length) {
+        return leftSignificant.length - rightSignificant.length
+      }
+      for (let index = 0; index < leftSignificant.length; index += 1) {
+        if (leftSignificant[index] !== rightSignificant[index]) {
+          return leftSignificant[index] - rightSignificant[index]
+        }
+      }
+      continue
+    }
+
+    if (leftPoint !== rightPoint) return leftPoint - rightPoint
+    leftIndex += 1
+    rightIndex += 1
+  }
+
+  if (leftIndex === leftPoints.length && rightIndex !== rightPoints.length) return -1
+  if (rightIndex === rightPoints.length && leftIndex !== leftPoints.length) return 1
+  return compareUtf8(utf8Bytes(left), utf8Bytes(right))
+}
+
 const sortPages = (pages: Array<ManifestPage>): void => {
-  pages.sort((left, right) => compareNaturalPageNames(left.name, right.name))
+  const names = new Map(pages.map((page) => [page.name, utf8Bytes(page.name)]))
+  pages.sort((left, right) => {
+    const comparison = naturalCompare(left.name, right.name)
+    if (comparison !== 0) return comparison
+    return compareUtf8(names.get(left.name) as Uint8Array, names.get(right.name) as Uint8Array)
+  })
 }
 
 const sameNumber = (left: number, right: number): boolean => Object.is(left, right)
@@ -443,24 +493,6 @@ const sameStats = (left: Stats, right: Stats): boolean =>
   sameNumber(left.ctimeMs, right.ctimeMs) &&
   sameNumber(left.ino, right.ino) &&
   sameNumber(left.dev, right.dev)
-
-const statToken = (stats: Stats) => ({
-  size: stats.size,
-  mtimeMs: stats.mtimeMs,
-  ctimeMs: stats.ctimeMs,
-  ino: stats.ino,
-  dev: stats.dev
-})
-
-const directObservationToken = (
-  root: Stats,
-  entries: ReadonlyMap<string, DirectObservedEntry>
-): string => JSON.stringify({
-  root: statToken(root),
-  entries: Array.from(entries.entries())
-    .sort(([left], [right]) => compareUtf8(utf8Bytes(left), utf8Bytes(right)))
-    .map(([name, entry]) => ({ name, kind: entry.kind, stats: statToken(entry.stats) }))
-})
 
 const safeStatNumber = (value: number | bigint, limit: number): number => {
   const number = typeof value === "bigint" ? Number(value) : value
@@ -669,14 +701,8 @@ const analyzeArchive = async (
       sourceKind: "archive",
       pages,
       diagnostics: diagnosticsOf(diagnostics),
-      before: {
-        kind: "archive", bytes: sourceBytes, mtimeMs: sourceStats.mtimeMs, entryCount,
-        observationToken: JSON.stringify(statToken(sourceStats))
-      },
-      after: {
-        kind: "archive", bytes: sourceBytes, mtimeMs: afterStats.mtimeMs, entryCount,
-        observationToken: JSON.stringify(statToken(afterStats))
-      }
+      before: { kind: "archive", bytes: sourceBytes, mtimeMs: sourceStats.mtimeMs, entryCount },
+      after: { kind: "archive", bytes: sourceBytes, mtimeMs: afterStats.mtimeMs, entryCount }
     }
   } catch (error) {
     if (
@@ -816,14 +842,8 @@ const analyzeDirectory = async (
     sourceKind: "directory",
     pages,
     diagnostics: first.diagnostics,
-    before: {
-      kind: "directory", bytes: 0, mtimeMs: first.root.mtimeMs, entryCount: first.entries.size,
-      observationToken: directObservationToken(first.root, first.entries)
-    },
-    after: {
-      kind: "directory", bytes: 0, mtimeMs: second.root.mtimeMs, entryCount: second.entries.size,
-      observationToken: directObservationToken(second.root, second.entries)
-    }
+    before: { kind: "directory", bytes: 0, mtimeMs: first.root.mtimeMs, entryCount: first.entries.size },
+    after: { kind: "directory", bytes: 0, mtimeMs: second.root.mtimeMs, entryCount: second.entries.size }
   }
 }
 
@@ -844,30 +864,16 @@ const analyze = async (input: AnalyzeSourceManifestInput): Promise<SourceManifes
   return analyzeArchive(input.sourcePath, stats, context)
 }
 
-/** Reads selected already-accepted archive members without extracting the archive. */
-export interface ArchivePageReadResult {
-  readonly pages: ReadonlyMap<string, Uint8Array>
-  readonly after: SourceObservation
-}
-
-export const readArchivePages = async (
+/** Reads one already-accepted archive member without extracting the archive. */
+export const readArchivePage = async (
   sourcePath: string,
-  pageNames: ReadonlyArray<string>,
-  options?: {
-    readonly limits?: Partial<ManifestLimits>
-    readonly maxPageBytes?: number
-    readonly signal?: AbortSignal
-    readonly onPage?: (name: string, bytes: Uint8Array) => Promise<boolean>
-    readonly expectedEntryCount?: number
-  }
-): Promise<ArchivePageReadResult> => {
-  const combined = combineLimits(options?.limits)
-  const maxPageBytes = options?.maxPageBytes ?? combined.maxMemberUncompressedBytes
-  if (!Number.isSafeInteger(maxPageBytes) || maxPageBytes <= 0) throw new LimitExceeded()
+  pageName: string,
+  limits?: Partial<ManifestLimits>
+): Promise<Uint8Array> => {
+  const combined = combineLimits(limits)
   const context: AnalysisContext = {
     limits: combined,
-    deadlineAt: Date.now() + combined.deadlineMs,
-    signal: options?.signal
+    deadlineAt: Date.now() + combined.deadlineMs
   }
   const sourceStats = await observePath(sourcePath, context)
   if (!sourceStats.isFile()) throw new UnsupportedSource()
@@ -880,124 +886,30 @@ export const readArchivePages = async (
     const openedStats = await file.stat({ bigint: false })
     if (!openedStats.isFile() || !sameStats(sourceStats, openedStats)) throw new SourceChanged()
     reader = new ZipReader(new SourceFileReader(file, sourceBytes, context), archiveOptions)
-    const requested = new Set(pageNames)
-    const selected = new Map<string, FileEntry>()
-    const pages = new Map<string, Uint8Array>()
-    const names = new Set<string>()
-    let entryCount = 0
-    let metadataBytes = 0
-    let declaredBytes = 0
+    let result: Uint8Array | undefined
     for await (const entry of reader.getEntriesGenerator()) {
       checkBudget(context)
-      entryCount += 1
-      if (entryCount > combined.maxEntryCount) throw new LimitExceeded()
-      if (
-        reader.directoryLength !== undefined &&
-        reader.directoryLength > combined.maxCentralDirectoryBytes
-      ) throw new LimitExceeded()
-      metadataBytes += entry.rawFilename.length + entry.rawExtraField.length + entry.rawComment.length + 64
-      if (metadataBytes > combined.maxNameAndMetadataBytes) throw new LimitExceeded()
-      const declared = safeStatNumber(entry.uncompressedSize, combined.maxMemberUncompressedBytes)
-      declaredBytes += declared
-      if (declaredBytes > combined.maxDeclaredUncompressedBytes) throw new LimitExceeded()
-      if (names.has(entry.filename)) throw new DuplicateName()
-      names.add(entry.filename)
-      if (entry.encrypted) throw new Encrypted()
-      if (!requested.has(entry.filename) || entry.directory || entry.symlink || declared > maxPageBytes) continue
-      selected.set(entry.filename, entry)
-    }
-
-    // The accepted manifest owns cover order, not the archive's central-directory order.
-    // Keep only Entry handles here; payloads remain lazy and are read one at a time.
-    for (const pageName of pageNames) {
-      const entry = selected.get(pageName)
-      if (entry === undefined) continue
-      const declared = safeStatNumber(entry.uncompressedSize, combined.maxMemberUncompressedBytes)
-      const bytes = new Uint8Array(declared)
-      let offset = 0
-      try {
-        await entry.getData(new WritableStream<Uint8Array>({
-          write(chunk) {
-            checkBudget(context)
-            if (chunk.length > bytes.length - offset) throw new ArchiveMemberReadFailure()
-            bytes.set(chunk, offset)
-            offset += chunk.length
-          }
-        }), {
-          signal: context.signal,
-          checkSignature: true,
-          useWebWorkers: false,
-          checkOverlappingEntryOnly: false,
-          checkOverlappingEntry: true
-        })
-        if (offset !== bytes.length) throw new ArchiveMemberReadFailure()
-        if (options?.onPage !== undefined) {
-          if (await options.onPage(pageName, bytes)) break
-        } else {
-          pages.set(pageName, bytes)
-        }
-      } catch (error) {
-        if (context.signal?.aborted) throw new ProbeInterruption("cancelled")
-        if (error instanceof ProbeInterruption || error instanceof LimitExceeded || error instanceof SourceChanged) {
-          throw error
-        }
-        // A corrupt or unsupported selected member is a per-page fallback,
-        // not a reason to discard later decodable members.
-      }
+      if (entry.filename !== pageName) continue
+      if (entry.directory || entry.symlink || entry.encrypted) throw new SourceChanged()
+      const declaredBytes = safeStatNumber(entry.uncompressedSize, combined.maxMemberUncompressedBytes)
+      if (declaredBytes > combined.maxMemberUncompressedBytes) throw new LimitExceeded()
+      const writer = new Uint8ArrayWriter()
+      await writer.init(declaredBytes)
+      await entry.getData(writer, {
+        useWebWorkers: false,
+        checkOverlappingEntryOnly: false,
+        checkOverlappingEntry: true
+      })
+      result = await writer.getData()
+      break
     }
     const afterStats = await observePath(sourcePath, context)
     if (!afterStats.isFile() || !sameStats(sourceStats, afterStats)) throw new SourceChanged()
-    return {
-      pages,
-      after: {
-        kind: "archive",
-        bytes: sourceBytes,
-        mtimeMs: afterStats.mtimeMs,
-        entryCount: options?.expectedEntryCount ?? entryCount,
-        observationToken: JSON.stringify(statToken(afterStats))
-      }
-    }
+    if (result === undefined) throw new Error("accepted archive member is missing")
+    return result
   } finally {
     if (reader !== undefined) await reader.close().catch(() => undefined)
     if (file !== undefined) await closeQuietly(file)
-  }
-}
-
-/** Rechecks accepted source evidence without decoding page payloads. */
-export const recheckSourceObservation = async (
-  sourcePath: string,
-  sourceKind: "directory" | "archive",
-  expectedEntryCount: number,
-  options?: {
-    readonly limits?: Partial<ManifestLimits>
-    readonly signal?: AbortSignal
-  }
-): Promise<SourceObservation> => {
-  const combined = combineLimits(options?.limits)
-  const context: AnalysisContext = {
-    limits: combined,
-    deadlineAt: Date.now() + combined.deadlineMs,
-    signal: options?.signal
-  }
-  const stats = await observePath(sourcePath, context)
-  if (sourceKind === "archive") {
-    if (!stats.isFile()) throw new SourceChanged()
-    return {
-      kind: "archive",
-      bytes: safeStatNumber(stats.size, combined.maxArchiveBytes),
-      mtimeMs: stats.mtimeMs,
-      entryCount: expectedEntryCount,
-      observationToken: JSON.stringify(statToken(stats))
-    }
-  }
-  if (!stats.isDirectory()) throw new SourceChanged()
-  const observed = await readDirectObservation(sourcePath, context, false)
-  return {
-    kind: "directory",
-    bytes: 0,
-    mtimeMs: observed.root.mtimeMs,
-    entryCount: observed.entries.size,
-    observationToken: directObservationToken(observed.root, observed.entries)
   }
 }
 
