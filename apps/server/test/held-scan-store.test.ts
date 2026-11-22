@@ -52,12 +52,12 @@ it("restores an interrupted task with its staged discovery still held", async ()
       const prior = yield* scans.readTask(taskId)
       if (!prior) throw new Error("expected the original scan")
       const nextEpoch = yield* scans.start({ taskId: randomUUID(), operationId: randomUUID(), epoch: randomUUID(),
-        rootId: prior.root_id, expectedMappingRevision: prior.mapping_revision, expectedPolicyRevision: "1" })
+        rootId: prior.root_id, expectedMappingRevision: prior.mapping_revision, expectedPolicyRevision: "1", holdNewDiscoveries: true })
       expect(nextEpoch.kind).toBe("created")
       yield* scans.recoverInterrupted()
       expect((yield* Effect.result(scans.markRunning(taskId)))._tag).toBe("Failure")
       expect((yield* Effect.result(scans.stage({ taskId, rootId: prior.root_id, candidateId: randomUUID(),
-        relativePath: "late.cbz", kind: "archive", analysisStatus: "error", manifest: null, analysisError: null })))._tag)
+        relativePath: "late.cbz", kind: "archive", holdState: "held", analysisStatus: "error", manifest: null, analysisError: null })))._tag)
         .toBe("Failure")
       const task = yield* scans.readTask(taskId)
       expect(task).toMatchObject({ status: "interrupted", hold_new_discoveries: true, directories_visited: 1,
