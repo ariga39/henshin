@@ -63,6 +63,7 @@ it("finishes a scan with an actionable failure while preserving progress", async
       recordDiscovery: () => Effect.succeed(undefined),
       markRunning: () => Effect.succeed(undefined),
       stage: () => Effect.fail(new DatabaseWorkerError({ message: "staging store unavailable" })),
+      publishNormal: () => Effect.die("unused test store operation"),
       finish: (input) => Effect.sync(() => {
         terminal = input
       }),

@@ -12,16 +12,18 @@ import {
 } from "effect/http"
 import type { ServeError } from "effect/http/HttpServerError"
 import { HttpApiBuilder } from "effect/http-api"
-import { PrototypeApi, ReviewApi, ServerApi, TaskApi } from "@henshin/contracts"
+import { LibraryApi, PrototypeApi, ReviewApi, ServerApi, TaskApi } from "@henshin/contracts"
 import { AuthenticationLayer } from "./api/AuthenticationLayer"
 import { PrototypeHandlers } from "./api/handlers"
 import { RootHandlers } from "./api/root-preview"
 import { ReviewHandlers, TaskHandlers } from "./api/scan"
+import { LibraryHandlers } from "./api/library"
 import { AuthConfig, ServerState } from "./identity"
 import { DatabaseWorker, type DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { NoteStore } from "./persistence/NoteStore"
 import { RootStore } from "./persistence/RootStore"
 import { ScanStore } from "./persistence/ScanStore"
+import { LibraryStore } from "./persistence/LibraryStore"
 import { ServerOwnershipLayer, type ServerOwnershipError } from "./persistence/ServerOwnership"
 
 const MAX_BODY_BYTES = 1024 * 1024
@@ -190,7 +192,11 @@ export const makeAppLayer = (
   const TaskRoutesLayer = HttpApiBuilder.layer(TaskApi).pipe(Layer.provide(TaskHandlersLayer))
   const ReviewHandlersLayer = ReviewHandlers.pipe(Layer.provide(Layer.mergeAll(AuthenticationLayer, ScanStore.layer)))
   const ReviewRoutesLayer = HttpApiBuilder.layer(ReviewApi).pipe(Layer.provide(ReviewHandlersLayer))
-  const AllRoutes = Layer.mergeAll(RoutesLayer, RootPreviewRoutesLayer, TaskRoutesLayer, ReviewRoutesLayer)
+  const LibraryHandlersLayer = LibraryHandlers.pipe(
+    Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer, LibraryStore.layer))
+  )
+  const LibraryRoutesLayer = HttpApiBuilder.layer(LibraryApi).pipe(Layer.provide(LibraryHandlersLayer))
+  const AllRoutes = Layer.mergeAll(RoutesLayer, RootPreviewRoutesLayer, TaskRoutesLayer, ReviewRoutesLayer, LibraryRoutesLayer)
 
   const ReadyLayer = Layer.effectDiscard(
     Effect.gen(function*() {
@@ -218,6 +224,7 @@ export const makeAppLayer = (
     Layer.provide(Layer.succeed(HttpIncomingMessage.MaxBodySize, ByteSize.mebibytes(1))),
     Layer.provide(ServerState.layer),
     Layer.provide(ScanStore.layer),
+    Layer.provide(LibraryStore.layer),
     Layer.provide(AuthConfig.layer(options.bearerToken)),
     Layer.provide(
       DatabaseWorker.layer(options.dbPath).pipe(Layer.provide(ServerOwnershipLayer(options.dbPath)))

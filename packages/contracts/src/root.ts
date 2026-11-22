@@ -183,7 +183,7 @@ export type ServerRootList = typeof ServerRootList.Type
 export const RootScanCommand = Schema.Struct({
   type: Schema.Literal("start-scan"),
   mode: Schema.Literal("manual"),
-  hold_new_discoveries: Schema.Literal(true)
+  hold_new_discoveries: Schema.Boolean
 })
 export type RootScanCommand = typeof RootScanCommand.Type
 
@@ -222,7 +222,7 @@ export const ScanTask = Schema.Struct({
   root_id: Uuid,
   kind: Schema.Literal("manual-scan"),
   mode: Schema.Literal("manual"),
-  hold_new_discoveries: Schema.Literal(true),
+  hold_new_discoveries: Schema.Boolean,
   mapping_revision: Revision,
   status: ScanTaskStatus,
   directories_visited: Schema.Natural,
@@ -293,7 +293,7 @@ export const StagedDiscovery = Schema.Struct({
   relative_path: Schema.String,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
   candidate_version: Schema.Natural,
-  hold_state: Schema.Literal("held"),
+  hold_state: Schema.Union([Schema.Literal("held"), Schema.Literal("eligible")]),
   analysis_status: Schema.Union([Schema.Literal("ready"), Schema.Literal("error")]),
   manifest: Schema.NullOr(ScanManifest),
   analysis_error: Schema.NullOr(ScanAnalysisError),
