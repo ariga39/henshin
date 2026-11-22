@@ -118,13 +118,60 @@ export const StagedDiscoveryRow = Schema.Struct({
   relative_path: Schema.String,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
   candidate_version: Schema.Natural,
-  hold_state: Schema.Literal("held"),
+  hold_state: Schema.Union([Schema.Literal("held"), Schema.Literal("eligible")]),
   analysis_status: Schema.Union([Schema.Literal("ready"), Schema.Literal("error")]),
   manifest_json: Schema.NullOr(Schema.String),
   analysis_error_json: Schema.NullOr(Schema.String),
   updated_at_ms: Schema.Int
 })
 export type StagedDiscoveryRow = typeof StagedDiscoveryRow.Type
+
+export const LibraryEntryRow = Schema.Struct({
+  entry_id: Uuid,
+  library_id: Uuid,
+  root_id: Uuid,
+  relative_path: Schema.String,
+  source_path: Schema.String,
+  kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  title: Schema.String,
+  page_count: Schema.Natural,
+  state: Schema.Literal("accepted"),
+  content_version: Revision,
+  location_revision: Revision
+})
+export type LibraryEntryRow = typeof LibraryEntryRow.Type
+
+export const LibrarySummaryRow = Schema.Struct({
+  library_id: Uuid,
+  change_revision: Revision
+})
+export type LibrarySummaryRow = typeof LibrarySummaryRow.Type
+
+export const LibraryEntryPageRow = Schema.Struct({
+  entries: Schema.Array(LibraryEntryRow),
+  has_more: Schema.Boolean,
+  next_cursor: Schema.NullOr(Uuid),
+  library_change_revision: Revision
+})
+export type LibraryEntryPageRow = typeof LibraryEntryPageRow.Type
+
+export const NormalPublishOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("published") }),
+  Schema.Struct({
+    kind: Schema.Literal("allocation_deferred"),
+    missingPaths: Schema.Array(Schema.String),
+    changedPaths: Schema.Array(Schema.String),
+    excludedPaths: Schema.Array(Schema.String),
+    missingPathCount: Schema.Natural,
+    changedPathCount: Schema.Natural,
+    excludedPathCount: Schema.Natural,
+    reviewNeededCount: Schema.Natural
+  }),
+  Schema.Struct({ kind: Schema.Literal("root_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("mapping_revision_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("policy_revision_conflict") })
+])
+export type NormalPublishOutcome = typeof NormalPublishOutcome.Type
 
 export const ScanStartOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("active_scan_conflict"), taskId: Uuid, policyRevision: Revision }),
@@ -184,7 +231,8 @@ export const WorkerRequest = Schema.Union([
     epoch: Uuid,
     rootId: Uuid,
     expectedMappingRevision: Revision,
-    expectedPolicyRevision: Revision
+    expectedPolicyRevision: Revision,
+    holdNewDiscoveries: Schema.Boolean
   }),
   Schema.Struct({ op: Schema.Literal("listScanTasks") }),
   Schema.Struct({ op: Schema.Literal("readScanTask"), taskId: Uuid }),
@@ -202,9 +250,20 @@ export const WorkerRequest = Schema.Union([
     relativePath: Schema.String,
     kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
     analysisStatus: Schema.Union([Schema.Literal("ready"), Schema.Literal("error")]),
+    holdState: Schema.Union([Schema.Literal("held"), Schema.Literal("eligible")]),
     manifestJson: Schema.NullOr(Schema.String),
     analysisErrorJson: Schema.NullOr(Schema.String)
   }),
+  Schema.Struct({
+    op: Schema.Literal("publishNormalScan"),
+    taskId: Uuid,
+    rootId: Uuid,
+    mappingRevision: Revision,
+    expectedPolicyRevision: Revision,
+    observedCandidatePaths: Schema.Array(Schema.String)
+  }),
+  Schema.Struct({ op: Schema.Literal("readLibrary") }),
+  Schema.Struct({ op: Schema.Literal("listLibraryEntries"), pageSize: Schema.Natural, cursor: Schema.NullOr(Uuid) }),
   Schema.Struct({
     op: Schema.Literal("finishScan"),
     taskId: Uuid,
