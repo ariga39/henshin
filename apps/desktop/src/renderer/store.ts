@@ -87,6 +87,17 @@ export interface ViewState {
   readonly scan_release_mapping_revision: string | null
   readonly scan_release_policy_revision: string | null
   readonly scan_release_error: string | null
+  readonly scan_resolution_status: "idle" | "loading" | "error"
+  readonly scan_resolution_candidate_id: string | null
+  readonly scan_resolution_entry_id: string | null
+  readonly scan_resolution_operation_id: string | null
+  readonly scan_resolution_candidate_version: number | null
+  readonly scan_resolution_decision_revision: string | null
+  readonly scan_resolution_location_revision: string | null
+  readonly scan_resolution_mapping_revision: string | null
+  readonly scan_resolution_policy_revision: string | null
+  readonly scan_resolution_decision: "keep" | "replace" | null
+  readonly scan_resolution_error: string | null
   readonly scan_hold_new_discoveries: boolean
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
@@ -172,6 +183,17 @@ const initialState: ViewState = {
   scan_release_mapping_revision: null,
   scan_release_policy_revision: null,
   scan_release_error: null,
+  scan_resolution_status: "idle",
+  scan_resolution_candidate_id: null,
+  scan_resolution_entry_id: null,
+  scan_resolution_operation_id: null,
+  scan_resolution_candidate_version: null,
+  scan_resolution_decision_revision: null,
+  scan_resolution_location_revision: null,
+  scan_resolution_mapping_revision: null,
+  scan_resolution_policy_revision: null,
+  scan_resolution_decision: null,
+  scan_resolution_error: null,
   scan_hold_new_discoveries: false,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
   connection_generation: 0,

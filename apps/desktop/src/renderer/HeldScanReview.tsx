@@ -1,8 +1,8 @@
-import type { RootPreviewResult, ScanTask, StagedDiscovery } from "@henshin/contracts"
+import type { LibraryEntry, RootPreviewResult, ScanTask, StagedDiscovery } from "@henshin/contracts"
 import { useSyncExternalStore } from "react"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { releaseHeldDiscovery, retryScanResults, startManualScan } from "./workflows"
+import { releaseHeldDiscovery, resolveReplacement, retryScanResults, startManualScan } from "./workflows"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -33,6 +33,18 @@ const scanErrorText = (task: ScanTask): string | null => {
   if (task.error !== null) return `Scan error: ${task.error.message}`
   return null
 }
+
+const replacementCandidateFor = (
+  candidates: ReadonlyArray<StagedDiscovery>,
+  entry: LibraryEntry
+): StagedDiscovery | undefined => candidates.find((candidate) =>
+  candidate.root_id === entry.root_id && candidate.relative_path === entry.relative_path)
+
+const replacementPageCount = (candidate: StagedDiscovery): number | null =>
+  candidate.manifest === null ? null : candidate.manifest.pages.length
+
+const replacementEntryLabel = (entry: LibraryEntry): string =>
+  `${entry.title} (${entry.kind}, ${entry.page_count} page${entry.page_count === 1 ? "" : "s"})`
 
 export const HeldScanControls = ({ preview }: { readonly preview: RootPreviewResult | null }) => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
@@ -88,6 +100,7 @@ const discoveryStatus = (candidate: StagedDiscovery): string =>
 
 export const HeldScanReview = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
+  const pendingEntries = state.library_entries.filter((entry) => entry.state === "replacement-pending")
   return (
     <section aria-labelledby="held-review-heading" data-testid="held-scan-review">
       <h2 id="held-review-heading">Review staged discoveries</h2>
@@ -104,6 +117,83 @@ export const HeldScanReview = () => {
         <p role="alert" data-testid="scan-release-error">
           Could not release hold: {state.scan_release_error}
         </p>
+      )}
+      {pendingEntries.length > 0 && (
+        <section aria-labelledby="replacement-review-heading" data-testid="replacement-review">
+          <h2 id="replacement-review-heading">Changed books need a decision</h2>
+          <p>
+            The server found a different representation at an occupied path. Keep this entry only when it is the same edition; that preserves its identity and history. A different entry detaches the old identity and starts the new entry without inherited history or overrides. Leaving it pending keeps the book blocked from opening.
+          </p>
+          {pendingEntries.map((entry) => {
+            const candidate = replacementCandidateFor(state.staged_discoveries, entry)
+            const resolving = candidate !== undefined &&
+              state.scan_resolution_candidate_id === candidate.candidate_id &&
+              state.scan_resolution_status === "loading"
+            const resolutionError = state.scan_resolution_status === "error" &&
+              state.scan_resolution_entry_id === entry.entry_id
+                ? state.scan_resolution_error
+                : null
+            const pageCount = candidate === undefined ? null : replacementPageCount(candidate)
+            return (
+              <article key={entry.entry_id} data-testid={`replacement-${entry.entry_id}`}>
+                <h3>Previous entry</h3>
+                <dl>
+                  <dt>Previously indexed</dt>
+                  <dd data-testid="replacement-previous-details">{replacementEntryLabel(entry)}</dd>
+                  <dt>Source path</dt>
+                  <dd>{entry.source_path}</dd>
+                  <dt>Entry history</dt>
+                  <dd>{entry.entry_id}</dd>
+                </dl>
+                <h3>Candidate at the same path</h3>
+                {candidate === undefined ? (
+                  <p data-testid="replacement-candidate-unavailable">
+                    Candidate details are unavailable. Keep this replacement pending and refresh Review before deciding.
+                  </p>
+                ) : (
+                  <>
+                    <dl>
+                      <dt>Candidate location</dt>
+                      <dd data-testid="replacement-candidate-path">{candidate.relative_path}</dd>
+                      <dt>Format</dt>
+                      <dd>{candidate.kind}</dd>
+                      <dt>Pages</dt>
+                      <dd data-testid="replacement-candidate-pages">{pageCount === null ? "not available" : pageCount}</dd>
+                      <dt>Analysis</dt>
+                      <dd>{candidate.analysis_status === "ready" ? "complete" : candidate.analysis_error?.message ?? "not ready"}</dd>
+                    </dl>
+                    {candidate.analysis_status === "ready" && candidate.manifest !== null && pageCount !== null && pageCount > 0 ? (
+                      <div>
+                        <button
+                          data-testid={`replacement-keep-${entry.entry_id}`}
+                          disabled={resolving}
+                          onClick={() => void runtime.runPromise(resolveReplacement(candidate.candidate_id, entry.entry_id, "keep"))}
+                        >
+                          {resolving && state.scan_resolution_decision === "keep" ? "Keeping entry…" : "Keep this entry (same edition)"}
+                        </button>
+                        <button
+                          data-testid={`replacement-replace-${entry.entry_id}`}
+                          disabled={resolving}
+                          onClick={() => void runtime.runPromise(resolveReplacement(candidate.candidate_id, entry.entry_id, "replace"))}
+                        >
+                          {resolving && state.scan_resolution_decision === "replace" ? "Creating new entry…" : "Treat as a different entry"}
+                        </button>
+                      </div>
+                    ) : (
+                      <p>Resolution is unavailable until the candidate has complete analysis.</p>
+                    )}
+                  </>
+                )}
+                {resolutionError !== null && (
+                  <p role="alert" data-testid="replacement-resolution-error">Could not resolve replacement: {resolutionError}</p>
+                )}
+                <p data-testid="replacement-pending-note">
+                  Decide later: keep the current entry and its history pending until you are ready.
+                </p>
+              </article>
+            )
+          })}
+        </section>
       )}
       {state.scan_status !== "error" && state.scan_tasks.length === 0 && state.staged_discoveries.length === 0 && (
         <p>No held scan results yet.</p>

@@ -503,6 +503,110 @@ export const releaseHeldDiscovery = (candidateId: string) =>
       })
     })
   })
+
+const replacementResolutionErrorMessage = (error: { readonly code: string; readonly message: string }): string =>
+  error.code === "epoch_changed" || error.code === "instance_mismatch"
+    ? `${error.message}${error.message.endsWith(".") ? "" : "."} Reconnect before retrying the resolution.`
+    : error.message
+
+export const resolveReplacement = (candidateId: string, entryId: string, decision: "keep" | "replace") =>
+  Effect.gen(function*() {
+    const client = yield* ScanReviewClient
+    const state = viewStore.getState()
+    const candidate = state.staged_discoveries.find((item) => item.candidate_id === candidateId)
+    const entry = state.library_entries.find((item) => item.entry_id === entryId)
+    const root = candidate === undefined
+      ? undefined
+      : state.root_saved_roots.find((item) => item.root_id === candidate.root_id)
+    if (
+      candidate === undefined || entry === undefined || root === undefined ||
+      candidate.root_id !== entry.root_id || candidate.relative_path !== entry.relative_path ||
+      entry.state !== "replacement-pending" || candidate.analysis_status !== "ready" || candidate.manifest === null
+    ) return
+
+    const sameCommand = state.scan_resolution_candidate_id === candidate.candidate_id &&
+      state.scan_resolution_entry_id === entry.entry_id &&
+      state.scan_resolution_operation_id !== null &&
+      state.scan_resolution_candidate_version === candidate.candidate_version &&
+      state.scan_resolution_decision_revision === entry.decision_revision &&
+      state.scan_resolution_location_revision === entry.location_revision &&
+      state.scan_resolution_mapping_revision === root.mapping_revision &&
+      state.scan_resolution_policy_revision === root.policy_revision &&
+      state.scan_resolution_decision === decision
+    const operationId = sameCommand ? state.scan_resolution_operation_id : newOperationId()
+    yield* Effect.sync(() => viewStore.set({
+      scan_resolution_status: "loading",
+      scan_resolution_candidate_id: candidate.candidate_id,
+      scan_resolution_entry_id: entry.entry_id,
+      scan_resolution_operation_id: operationId,
+      scan_resolution_candidate_version: candidate.candidate_version,
+      scan_resolution_decision_revision: entry.decision_revision,
+      scan_resolution_location_revision: entry.location_revision,
+      scan_resolution_mapping_revision: root.mapping_revision,
+      scan_resolution_policy_revision: root.policy_revision,
+      scan_resolution_decision: decision,
+      scan_resolution_error: null
+    }))
+
+    const result = yield* client.resolve({
+      candidate_id: candidate.candidate_id,
+      root_id: candidate.root_id,
+      operation_id: operationId,
+      expected_candidate_version: candidate.candidate_version,
+      expected_mapping_revision: root.mapping_revision,
+      expected_policy_revision: root.policy_revision,
+      expected_decision_revision: entry.decision_revision,
+      expected_location_revision: entry.location_revision,
+      command: { type: "resolve-replacement", entry_id: entry.entry_id, decision }
+    })
+    if (!result.ok) {
+      if (result.error.code === "revision_conflict" || result.error.code === "not_found") {
+        yield* loadRoots
+        yield* loadScanResults
+        yield* loadLibrary()
+      }
+      const definiteFailure = result.error.code === "invalid_request" ||
+        result.error.code === "not_found" ||
+        result.error.code === "revision_conflict" ||
+        result.error.code === "operation_conflict" ||
+        result.error.code === "operation_expired" ||
+        result.error.code === "epoch_changed" ||
+        result.error.code === "instance_mismatch"
+      yield* Effect.sync(() => viewStore.set({
+        scan_resolution_status: "error",
+        ...(definiteFailure
+          ? {
+              scan_resolution_entry_id: entry.entry_id,
+              scan_resolution_operation_id: null,
+              scan_resolution_candidate_version: null,
+              scan_resolution_decision_revision: null,
+              scan_resolution_location_revision: null,
+              scan_resolution_mapping_revision: null,
+              scan_resolution_policy_revision: null,
+              scan_resolution_decision: decision
+            }
+          : {}),
+        scan_resolution_error: replacementResolutionErrorMessage(result.error)
+      }))
+      return
+    }
+
+    yield* loadScanResults
+    yield* loadLibrary()
+    yield* Effect.sync(() => viewStore.set({
+      scan_resolution_status: "idle",
+      scan_resolution_candidate_id: null,
+      scan_resolution_entry_id: null,
+      scan_resolution_operation_id: null,
+      scan_resolution_candidate_version: null,
+      scan_resolution_decision_revision: null,
+      scan_resolution_location_revision: null,
+      scan_resolution_mapping_revision: null,
+      scan_resolution_policy_revision: null,
+      scan_resolution_decision: null,
+      scan_resolution_error: null
+    }))
+  })
 type ScanWaitResult =
   | { readonly ok: true; readonly task: ScanTask }
   | { readonly ok: false; readonly message: string }
@@ -612,6 +716,7 @@ export const loadRootWorkspace = Effect.gen(function*() {
   yield* loadRoots
   yield* loadLocalMappings
   const loaded = yield* loadScanResults
+  yield* loadLibrary()
   if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
 })
 

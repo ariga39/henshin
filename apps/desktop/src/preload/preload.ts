@@ -7,6 +7,7 @@ import type {
   ReaderProfileTestIpcRequest,
   ReaderProfileTestTargetSelectIpcRequest,
   ReleaseHeldDiscoveryIpcRequest,
+  ReviewCandidateIpcRequest,
   RootCommandIpcRequest,
   RootPreviewRequest,
   RootRegistrationRequest,
@@ -34,7 +35,7 @@ contextBridge.exposeInMainWorld("henshinLocalMapping", {
 contextBridge.exposeInMainWorld("henshinScanReview", {
   listTasks: () => ipcRenderer.invoke(IpcChannels.taskList, {}),
   candidates: () => ipcRenderer.invoke(IpcChannels.reviewCandidates, {}),
-  command: (input: ReleaseHeldDiscoveryIpcRequest) => ipcRenderer.invoke(IpcChannels.reviewCommand, input)
+  command: (input: ReviewCandidateIpcRequest) => ipcRenderer.invoke(IpcChannels.reviewCommand, input)
 })
 
 contextBridge.exposeInMainWorld("henshinReaderProfiles", {

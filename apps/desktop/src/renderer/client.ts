@@ -17,6 +17,8 @@ import type {
   RootCommandIpcRequest,
   RootRegistrationRequest,
   ReleaseHeldDiscoveryIpcRequest,
+  ResolveReplacementIpcRequest,
+  ReviewCandidateIpcRequest,
   ReviewCommandResult,
   ScanTask,
   ScanTaskSubmission,
@@ -144,7 +146,7 @@ export interface LocalMappingBridge {
 export interface ScanReviewBridge {
   listTasks(): Promise<Result<ReadonlyArray<ScanTask>>>
   candidates(): Promise<Result<ReadonlyArray<StagedDiscovery>>>
-  command(input: ReleaseHeldDiscoveryIpcRequest): Promise<Result<ReviewCommandResult>>
+  command(input: ReviewCandidateIpcRequest): Promise<Result<ReviewCommandResult>>
 }
 
 export interface LibraryBridge {
@@ -270,6 +272,7 @@ export class ScanReviewClient extends Context.Service<
     readonly listTasks: () => Effect.Effect<Result<ReadonlyArray<ScanTask>>>
     readonly candidates: () => Effect.Effect<Result<ReadonlyArray<StagedDiscovery>>>
     readonly release: (input: ReleaseHeldDiscoveryIpcRequest) => Effect.Effect<Result<ReviewCommandResult>>
+    readonly resolve: (input: ResolveReplacementIpcRequest) => Effect.Effect<Result<ReviewCommandResult>>
   }
 >()("henshin/desktop/renderer/ScanReviewClient") {
   static readonly layer = Layer.succeed(
@@ -277,7 +280,8 @@ export class ScanReviewClient extends Context.Service<
     ScanReviewClient.of({
       listTasks: () => callIpc(() => window.henshinScanReview.listTasks()),
       candidates: () => callIpc(() => window.henshinScanReview.candidates()),
-      release: (input) => callIpc(() => window.henshinScanReview.command(input))
+      release: (input) => callIpc(() => window.henshinScanReview.command(input)),
+      resolve: (input) => callIpc(() => window.henshinScanReview.command(input))
     })
   )
 }

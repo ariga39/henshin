@@ -171,6 +171,9 @@ const scanClientWith = (overrides: Partial<ScanReviewClient["Service"]> = {}): S
     operation_id: "77777777-7777-4777-8777-777777777777",
     candidate: { ...candidate, candidate_version: 2, hold_state: "eligible" }
   } }),
+  resolve: () => Effect.succeed({ ok: false as const, error: {
+    code: "not_found", message: "replacement not found", retryable: false
+  } }),
   ...overrides
 })
 
