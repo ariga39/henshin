@@ -12,10 +12,9 @@ import {
   OperationExpired,
   OperationConflict,
   RevisionConflict,
+  RootNotFound,
   RootVerificationFailed,
   RootPreviewUnavailable,
-  RootNotFound,
-  TaskNotFound,
   StorageFull
 } from "./errors"
 import { NoteId, Uuid } from "./ids"
@@ -25,10 +24,6 @@ import {
   RootPreviewRequest,
   RootPreviewResult,
   RootCommandRequest,
-  ScanTask,
-  ScanTaskList,
-  ScanTaskSubmission,
-  StagedDiscoveryList,
   RootRegistrationRequest,
   ServerRoot,
   ServerRootList
@@ -117,46 +112,16 @@ export const ServerApi = HttpApi.make("henshin-server").add(
       HttpApiEndpoint.post("command", "/roots/:id/commands", {
         params: { id: Uuid },
         payload: RootCommandRequest,
-        success: SuccessEnvelope(ScanTaskSubmission),
+        success: SuccessEnvelope(ServerRoot),
         error: [
           AuthenticationRequired,
           RootNotFound,
-          InvalidRequest,
+          RevisionConflict,
           OperationConflict,
           EpochChanged,
           InstanceMismatch,
-          RevisionConflict,
           InternalError
         ]
-      })
-    )
-    .prefix("/api/v1")
-    .middleware(Authentication)
-)
-
-export const TaskApi = HttpApi.make("henshin-task").add(
-  HttpApiGroup.make("tasks", { topLevel: true })
-    .add(
-      HttpApiEndpoint.get("list", "/tasks", {
-        success: SuccessEnvelope(ScanTaskList),
-        error: [AuthenticationRequired, InternalError]
-      }),
-      HttpApiEndpoint.get("get", "/tasks/:id", {
-        params: { id: Uuid },
-        success: SuccessEnvelope(ScanTask),
-        error: [AuthenticationRequired, TaskNotFound, InternalError]
-      })
-    )
-    .prefix("/api/v1")
-    .middleware(Authentication)
-)
-
-export const ReviewApi = HttpApi.make("henshin-review").add(
-  HttpApiGroup.make("review", { topLevel: true })
-    .add(
-      HttpApiEndpoint.get("candidates", "/review/candidates", {
-        success: SuccessEnvelope(StagedDiscoveryList),
-        error: [AuthenticationRequired, InternalError]
       })
     )
     .prefix("/api/v1")

@@ -1,6 +1,56 @@
 import { Schema } from "effect"
 import { Revision, Uuid } from "./ids"
 
+/** A portable path relative to a saved source root. */
+export const RootRelativePath = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(4096),
+  Schema.makeFilter((value) => {
+    if (value.includes("\\") || value.includes("\u0000") || value.startsWith("/")) return false
+    const segments = value.split("/")
+    return segments.every(
+      (segment, index) =>
+        segment.length > 0 &&
+        segment !== "." &&
+        segment !== ".." &&
+        !(index === 0 && /^[A-Za-z]:/.test(segment))
+    )
+  })
+)
+export type RootRelativePath = typeof RootRelativePath.Type
+
+/** A persisted scan-scope exclusion; `subtree` includes the named directory. */
+export const RootExclusion = Schema.Struct({
+  path: RootRelativePath,
+  scope: Schema.Union([Schema.Literal("exact"), Schema.Literal("subtree")])
+})
+export type RootExclusion = typeof RootExclusion.Type
+
+export const RootExclusions = Schema.Array(RootExclusion)
+export type RootExclusions = typeof RootExclusions.Type
+
+/** Root-policy commands for suppressing or restoring one exact path or subtree. */
+export const RootPolicyCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("exclude"),
+    exclusion: RootExclusion
+  }),
+  Schema.Struct({
+    type: Schema.Literal("remove-exclusion"),
+    exclusion: RootExclusion
+  })
+])
+export type RootPolicyCommand = typeof RootPolicyCommand.Type
+
+export const RootCommandRequest = Schema.Struct({
+  operation_id: Uuid,
+  instance_id: Uuid,
+  epoch: Uuid,
+  expected_policy_revision: Revision,
+  command: RootPolicyCommand
+})
+export type RootCommandRequest = typeof RootCommandRequest.Type
+
 /**
  * A bounded read-only sample of a server-local directory. The selected path is
  * returned as display data; it is never turned into a root or an entry.
@@ -85,6 +135,7 @@ export const SavedRootPreview = Schema.Struct({
   selected_server_path: Schema.String,
   instance_id: Uuid,
   epoch: Uuid,
+  policy_revision: Revision,
   candidates: Schema.Array(RootPreviewCandidate),
   sample_limit: Schema.Natural,
   unassigned_loose_images: Schema.Array(Schema.String),
@@ -119,29 +170,14 @@ export const ServerRoot = Schema.Struct({
   selected_server_path: Schema.String,
   canonical_server_path: Schema.String,
   mapping_revision: Revision,
+  policy_revision: Revision,
+  exclusions: RootExclusions,
   state: Schema.Literal("active")
 })
 export type ServerRoot = typeof ServerRoot.Type
 
 export const ServerRootList = Schema.Array(ServerRoot)
 export type ServerRootList = typeof ServerRootList.Type
-
-export const RootScanCommand = Schema.Struct({
-  type: Schema.Literal("start-scan"),
-  mode: Schema.Literal("manual"),
-  hold_new_discoveries: Schema.Literal(true)
-})
-export type RootScanCommand = typeof RootScanCommand.Type
-
-/** The explicit, non-accepting manual scan command for a saved root. */
-export const RootCommandRequest = Schema.Struct({
-  operation_id: Uuid,
-  instance_id: Uuid,
-  epoch: Uuid,
-  expected_mapping_revision: Revision,
-  command: RootScanCommand
-})
-export type RootCommandRequest = typeof RootCommandRequest.Type
 
 export const ScanTaskError = Schema.Struct({
   code: Schema.String,
@@ -182,11 +218,6 @@ export type ScanTask = typeof ScanTask.Type
 
 export const ScanTaskList = Schema.Array(ScanTask)
 export type ScanTaskList = typeof ScanTaskList.Type
-
-export const ScanTaskSubmission = Schema.Struct({
-  task: ScanTask
-})
-export type ScanTaskSubmission = typeof ScanTaskSubmission.Type
 
 export const ScanManifestPage = Schema.Struct({
   name: Schema.String,

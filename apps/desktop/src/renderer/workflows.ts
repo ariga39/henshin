@@ -1,7 +1,7 @@
 import { Effect } from "effect"
-import type { ConnectionStatusView, RootPreviewRequest } from "@henshin/contracts"
+import type { ConnectionStatusView, RootPreviewRequest, RootPreviewResult } from "@henshin/contracts"
 import { PrototypeClient, RootPreviewClient } from "./client"
-import { viewStore } from "./store"
+import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
 export const FORM_ID = "synthetic-note"
@@ -13,21 +13,28 @@ export const previewRoot = (selection: RootPreviewRequest | string) =>
     const client = yield* RootPreviewClient
     const input: RootPreviewRequest = typeof selection === "string" ? { path: selection } : selection
     const requestedPath = "path" in input ? input.path : null
+    const generation = viewStore.getState().root_preview_generation + 1
     yield* Effect.sync(() =>
       viewStore.set({
-        ...(requestedPath === null ? {} : {
+        ...(requestedPath === null ? { root_preview_selected_path: null } : {
           root_preview_path: requestedPath,
           root_preview_selected_path: requestedPath
         }),
         root_preview_status: "loading",
         root_preview: null,
+        root_preview_request: input,
+        root_preview_generation: generation,
         root_preview_error: null,
+        root_save_operation_id: null,
         root_save_status: "idle",
-        root_save_error: null
+        root_save_error: null,
+        root_policy_status: "idle",
+        root_policy_error: null
       })
     )
 
     const result = yield* client.preview(input)
+    if (viewStore.getState().root_preview_generation !== generation) return
     if (result.ok) {
       yield* Effect.sync(() =>
         viewStore.set({
@@ -62,28 +69,86 @@ export const loadRoots = Effect.gen(function*() {
   }
 })
 
+const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
+  preview !== null && "kind" in preview
+
+const updateRootExclusion = (input: {
+  readonly rootId: string
+  readonly path: string
+  readonly scope: "exact" | "subtree"
+}, type: "exclude" | "remove-exclusion") =>
+  Effect.gen(function*() {
+    const client = yield* RootPreviewClient
+    const preview = viewStore.getState().root_preview
+    if (!isSavedDiscovery(preview) || preview.root_id !== input.rootId) return
+
+    yield* Effect.sync(() => viewStore.set({ root_policy_status: "loading", root_policy_error: null }))
+    const result = yield* client.command({
+      root_id: preview.root_id,
+      operation_id: newOperationId(),
+      instance_id: preview.instance_id,
+      epoch: preview.epoch,
+      expected_policy_revision: preview.policy_revision,
+      command: { type, exclusion: { path: input.path, scope: input.scope } }
+    })
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({ root_policy_status: "error", root_policy_error: result.error.message }))
+      return
+    }
+
+    yield* Effect.sync(() => {
+      const roots = viewStore.getState().root_saved_roots
+      viewStore.set({
+        root_saved_roots: roots.map((root) => root.root_id === result.data.root_id ? result.data : root),
+        root_policy_status: "idle",
+        root_policy_error: null
+      })
+    })
+    yield* previewRoot({ kind: "saved-root", root_id: result.data.root_id })
+  })
+
+export const excludeRootPath = (input: {
+  readonly rootId: string
+  readonly path: string
+  readonly scope: "exact" | "subtree"
+}) => updateRootExclusion(input, "exclude")
+
+export const removeRootExclusion = (input: {
+  readonly rootId: string
+  readonly path: string
+  readonly scope: "exact" | "subtree"
+}) => updateRootExclusion(input, "remove-exclusion")
+
+export const canSaveRoot = (state: ViewState): boolean => {
+  const preview = state.root_preview
+  return preview !== null && "children" in preview &&
+    state.root_preview_status === "ready" &&
+    state.root_save_status !== "loading" &&
+    state.root_preview_path === preview.selected_server_path &&
+    state.root_label.length > 0 &&
+    !state.root_saved_roots.some((root) => root.canonical_server_path === preview.preview_identity.canonical_server_path)
+}
+
 export const saveRoot = Effect.gen(function*() {
   const client = yield* RootPreviewClient
   const state = viewStore.getState()
   const preview = state.root_preview
-  if (
-    preview === null ||
-    !("children" in preview) ||
-    state.root_preview_status !== "ready" ||
-    state.root_preview_path !== preview.selected_server_path ||
-    state.root_label.length === 0
-  ) return
+  if (!preview || !("children" in preview) || !canSaveRoot(state)) return
 
   const confirmedPath = preview.selected_server_path
   const confirmedLabel = state.root_label
+  const operationId = state.root_save_target_label === confirmedLabel && state.root_save_target_path === confirmedPath
+    ? state.root_save_operation_id ?? newOperationId()
+    : newOperationId()
   yield* Effect.sync(() => viewStore.set({
+    root_save_operation_id: operationId,
     root_save_status: "loading",
     root_save_error: null,
     root_save_target_label: confirmedLabel,
     root_save_target_path: confirmedPath
   }))
   const result = yield* client.save({
-    operation_id: newOperationId(),
+    operation_id: operationId,
     instance_id: preview.instance_id,
     epoch: preview.epoch,
     label: state.root_label,
