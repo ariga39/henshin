@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import { DraftFormId, NoteId, Revision, Text, Uuid } from "./ids"
+import { RootPreviewRequest } from "./root"
 import type {
   CommandAttempt,
   CommandReconciliation,
@@ -114,3 +115,5 @@ export const HandshakeView = Schema.Struct({
   epoch: Uuid
 })
 export type HandshakeView = typeof HandshakeView.Type
+
+export const RootPreviewIpcRequest = RootPreviewRequest

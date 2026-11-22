@@ -1,6 +1,6 @@
-import { Data, Duration, Effect, Fiber, ManagedRuntime } from "effect"
+import { Data, Duration, Effect, Fiber, Layer, ManagedRuntime } from "effect"
 import { NodeHttpClient } from "@effect/platform-node"
-import { PrototypeHttpClient, type ConnectionStatusView } from "@henshin/contracts"
+import { PrototypeHttpClient, ServerHttpClient, type ConnectionStatusView } from "@henshin/contracts"
 
 const NETWORK_DEADLINE = Duration.seconds(5)
 const CLEANUP_DEADLINE_MS = 5_000
@@ -21,19 +21,19 @@ export interface ConnectionLifecycleOptions {
 
 interface Lease {
   readonly generation: number
-  readonly runtime: ManagedRuntime.ManagedRuntime<PrototypeHttpClient, never>
+  readonly runtime: ManagedRuntime.ManagedRuntime<PrototypeHttpClient | ServerHttpClient, never>
   readonly instanceId: string
   readonly epoch: string
 }
 
 interface Candidate {
   readonly generation: number
-  readonly runtime: ManagedRuntime.ManagedRuntime<PrototypeHttpClient, never>
+  readonly runtime: ManagedRuntime.ManagedRuntime<PrototypeHttpClient | ServerHttpClient, never>
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
-const disposeBounded = async (runtime: ManagedRuntime.ManagedRuntime<PrototypeHttpClient, never>): Promise<void> => {
+const disposeBounded = async (runtime: ManagedRuntime.ManagedRuntime<PrototypeHttpClient | ServerHttpClient, never>): Promise<void> => {
   await Promise.race([runtime.dispose().catch(() => undefined), delay(CLEANUP_DEADLINE_MS)])
 }
 
@@ -108,13 +108,11 @@ export class ConnectionLifecycle {
     ])
     if (generation !== this.generation) return this.status
 
-    const runtime = ManagedRuntime.make(
-      PrototypeHttpClient.layer({
-        baseUrl: this.options.baseUrl,
-        bearerToken: this.options.bearerToken,
-        transportLayer: NodeHttpClient.layerUndici
-      })
-    )
+    const options = { ...this.options, transportLayer: NodeHttpClient.layerUndici }
+    const runtime = ManagedRuntime.make(Layer.merge(
+      PrototypeHttpClient.layer(options),
+      ServerHttpClient.layer(options)
+    ))
     const candidate = { generation, runtime }
     this.candidates.set(generation, candidate)
 
@@ -188,7 +186,7 @@ export class ConnectionLifecycle {
     await this.disconnect()
   }
 
-  run<A, E>(effect: Effect.Effect<A, E, PrototypeHttpClient>): Promise<A> {
+  run<A, E>(effect: Effect.Effect<A, E, PrototypeHttpClient | ServerHttpClient>): Promise<A> {
     const lease = this.lease
     if (lease === null) return Promise.reject(new ConnectionPausedError({ state: this.status.state }))
     const fiber = lease.runtime.runFork(effect.pipe(Effect.timeout(NETWORK_DEADLINE))) as Fiber.Fiber<A, E | never>

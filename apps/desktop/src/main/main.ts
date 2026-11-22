@@ -16,6 +16,8 @@ import {
   ListCommandAttemptsIpcRequest,
   PrototypeHttpClient,
   PublicApiError,
+  RootPreviewIpcRequest,
+  ServerHttpClient,
   SaveDraftIpcRequest,
   ReconcileCommandIpcRequest,
   ConnectionStatusView,
@@ -65,6 +67,7 @@ let connection: ConnectionLifecycle | null = null
 let rendererUrl = ""
 let shutdownPromise: Promise<void> | null = null
 let readyToQuit = false
+const prototypeMode = process.env.HENSHIN_PROTOTYPE_MODE === "1"
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -205,7 +208,7 @@ const requireConnection = (): ConnectionLifecycle => {
 }
 
 const runNetworkResult = <A>(
-  effect: Effect.Effect<IpcOk<A> | IpcErr, never, PrototypeHttpClient>
+  effect: Effect.Effect<IpcOk<A> | IpcErr, never, PrototypeHttpClient | ServerHttpClient>
 ): Promise<IpcOk<A> | IpcErr> =>
   requireConnection()
     .run(effect)
@@ -217,6 +220,22 @@ const connectionStatusResult = (status: ConnectionStatusView): IpcOk<ConnectionS
 })
 
 const registerIpc = (): void => {
+  ipcMain.handle(IpcChannels.rootPreview, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(RootPreviewIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* ServerHttpClient
+          return yield* client.preview({ payload: { path: decoded.value.path } })
+        })
+      )
+    )
+  })
+
+  if (!prototypeMode) return
+
   ipcMain.handle(IpcChannels.handshake, (event, raw: unknown) => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(HandshakeIpcRequest)(raw)
@@ -506,7 +525,9 @@ const createWindow = (): void => {
     mainWindow = null
   })
   mainWindow = window
-  void window.loadFile(path.join(app.getAppPath(), "dist", "index.html"))
+  void window.loadFile(path.join(app.getAppPath(), "dist", "index.html"), {
+    query: prototypeMode ? { mode: "prototype" } : undefined
+  })
 }
 
 /**
@@ -562,7 +583,9 @@ const bootstrap = async (): Promise<void> => {
 app.disableHardwareAcceleration()
 
 app.whenReady().then(async () => {
-  rendererUrl = pathToFileURL(path.join(app.getAppPath(), "dist", "index.html")).toString()
+  rendererUrl = `${pathToFileURL(path.join(app.getAppPath(), "dist", "index.html")).toString()}${
+    prototypeMode ? "?mode=prototype" : ""
+  }`
   try {
     await bootstrap()
   } catch (error) {

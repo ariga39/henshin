@@ -11,9 +11,10 @@ import {
 } from "effect/http"
 import type { ServeError } from "effect/http/HttpServerError"
 import { HttpApiBuilder } from "effect/http-api"
-import { PrototypeApi } from "@henshin/contracts"
+import { PrototypeApi, ServerApi } from "@henshin/contracts"
 import { AuthenticationLayer } from "./api/AuthenticationLayer"
 import { PrototypeHandlers } from "./api/handlers"
+import { RootPreviewHandlers } from "./api/root-preview"
 import { AuthConfig, ServerState } from "./identity"
 import { DatabaseWorker, type DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { NoteStore } from "./persistence/NoteStore"
@@ -173,6 +174,13 @@ export const makeAppLayer = (
     Layer.provide(Layer.mergeAll(NoteStore.layer, AuthenticationLayer))
   )
   const RoutesLayer = HttpApiBuilder.layer(PrototypeApi).pipe(Layer.provide(HandlersLayer))
+  const RootPreviewHandlersLayer = RootPreviewHandlers.pipe(Layer.provide(AuthenticationLayer))
+  const RootPreviewRoutesLayer = HttpApiBuilder.layer(ServerApi).pipe(
+    // The product API has its own route namespace but shares the authenticated
+    // server state and HTTP server with the synthetic prototype.
+    Layer.provide(RootPreviewHandlersLayer)
+  )
+  const AllRoutes = Layer.mergeAll(RoutesLayer, RootPreviewRoutesLayer)
 
   const ReadyLayer = Layer.effectDiscard(
     Effect.gen(function*() {
@@ -192,7 +200,7 @@ export const makeAppLayer = (
     })
   )
 
-  return Layer.mergeAll(HttpRouter.serve(RoutesLayer, { middleware: bodyLimit }), ReadyLayer).pipe(
+  return Layer.mergeAll(HttpRouter.serve(AllRoutes, { middleware: bodyLimit }), ReadyLayer).pipe(
     Layer.provide(NodeHttpServer.layer(createServer, { host: "127.0.0.1", port: 0 })),
     // Second line of defense for any body read that bypasses the middleware.
     Layer.provide(Layer.succeed(HttpIncomingMessage.MaxBodySize, ByteSize.mebibytes(1))),

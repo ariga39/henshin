@@ -13,14 +13,10 @@ English is the working language for repository documentation.
 
 ## Current status
 
-The full product is in the design phase; the first-release client and server do
-not exist yet. The design distinguishes confirmed choices from proposed
-defaults, and package versions, framework integration, packaging, native
-dependencies, and NAS access still require validation.
+Henshin is in early development. On startup, the desktop connects to its
+managed local server. Enter a collection directory to see a read-only sample
+of its contents. Root registration and indexing are upcoming features.
 
-This repository also contains one focused, isolated runtime/persistence
-prototype. It is not a runnable product client or server, does not implement the
-first-release schema or API, and does not claim any gate complete.
 The separately isolated source-manifest precursor has current executed evidence
 in [docs/validation/source-manifests-prototype.md](docs/validation/source-manifests-prototype.md).
 The bounded native source-boundary precursor is recorded in
@@ -56,12 +52,29 @@ pnpm test:e2e    # real Electron integration test (Playwright)
 pnpm test        # build + all tests
 ```
 
-### Run the prototype locally
+### Run the managed product preview locally
 
 ```sh
 pnpm build
 pnpm --filter @henshin/desktop start   # launches Electron and its owned server child
 ```
+
+The normal launch opens the server collection preview. Enter an absolute
+directory path on the managed server to see an empty, complete, or bounded
+partial sample. An unavailable path is reported with a retry action. The
+submitted path remains attached to displayed results while a new path is being
+edited.
+
+### Run the synthetic prototype explicitly
+
+```sh
+HENSHIN_PROTOTYPE_MODE=1 pnpm --filter @henshin/desktop start
+```
+
+This explicit mode opens the synthetic note editor and its local draft and
+command-recovery flow. Its tests remain in
+`apps/desktop/e2e/prototype.spec.ts`; the normal product preview flow is tested
+separately.
 
 The desktop spawns the independent server with the bundled Electron Node runtime
 and passes the bearer token over a private stdin channel. Starting the server
