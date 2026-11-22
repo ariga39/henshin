@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
-import { RootExclusions, RootPolicyCommand } from "@henshin/contracts/root"
+import { OpenEvent, OpenEventOutcome } from "@henshin/contracts/event"
+import { RootExclusions, RootPolicyCommand, RootRelativePath, ScanManifestObservation, ScanManifestPage } from "@henshin/contracts/root"
 import { ThumbnailReference } from "@henshin/contracts/thumbnail"
 
 /** A persisted prototype note row, always with a canonical decimal revision. */
@@ -152,12 +153,39 @@ export const AcceptedThumbnailEntryRow = Schema.Struct({
   manifest_json: Schema.String
 })
 export type AcceptedThumbnailEntryRow = typeof AcceptedThumbnailEntryRow.Type
+const LibraryEntryResolution = Schema.Struct({
+  entry_id: Uuid,
+  root_id: Uuid,
+  relative_path: Schema.String,
+  kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  decision_version: Revision,
+  location_revision: Revision,
+  content_version: Revision,
+  status: Schema.Union([Schema.Literal("usable"), Schema.Literal("unresolved")]),
+  reason: Schema.NullOr(Schema.Union([
+    Schema.Literal("known-change"),
+    Schema.Literal("insufficient-evidence")
+  ])),
+  accepted_observation: ScanManifestObservation,
+  first_page: Schema.NullOr(ScanManifestPage),
+  sibling_claims: Schema.Array(Schema.Struct({ entry_id: Uuid, relative_path: Schema.String })),
+  sibling_claims_truncated: Schema.Boolean,
+  sibling_claims_next_cursor: Schema.NullOr(Uuid),
+  sibling_claims_revision: Revision
+})
+export const LibraryEntryResolutionRow = Schema.NullOr(LibraryEntryResolution)
+export type LibraryEntryResolutionRow = typeof LibraryEntryResolutionRow.Type
 
 export const LibrarySummaryRow = Schema.Struct({
   library_id: Uuid,
   change_revision: Revision
 })
 export type LibrarySummaryRow = typeof LibrarySummaryRow.Type
+
+export const OpenEventBatchOutcome = Schema.Struct({
+  results: Schema.Array(OpenEventOutcome)
+})
+export type OpenEventBatchOutcome = typeof OpenEventBatchOutcome.Type
 
 export const LibraryEntryPageRow = Schema.Struct({
   entries: Schema.Array(LibraryEntryRow),
@@ -166,6 +194,21 @@ export const LibraryEntryPageRow = Schema.Struct({
   library_change_revision: Revision
 })
 export type LibraryEntryPageRow = typeof LibraryEntryPageRow.Type
+
+export const IndexedRootSampleRow = Schema.Struct({
+  relative_path: RootRelativePath,
+  kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  format_evidence: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
+  size_bytes: Schema.NullOr(Schema.Natural)
+})
+export type IndexedRootSampleRow = typeof IndexedRootSampleRow.Type
+
+export const IndexedRootSamplePageRow = Schema.Struct({
+  samples: Schema.Array(IndexedRootSampleRow),
+  sample_truncated: Schema.Boolean,
+  library_change_revision: Revision
+})
+export type IndexedRootSamplePageRow = typeof IndexedRootSamplePageRow.Type
 
 export const NormalPublishOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("published") }),
@@ -301,7 +344,15 @@ export const WorkerRequest = Schema.Union([
   }),
   Schema.Struct({ op: Schema.Literal("readLibrary") }),
   Schema.Struct({ op: Schema.Literal("listLibraryEntries"), pageSize: Schema.Natural, cursor: Schema.NullOr(Uuid) }),
+  Schema.Struct({ op: Schema.Literal("listIndexedRootSamples"), rootId: Uuid, sampleLimit: Schema.Literal(33) }),
+  Schema.Struct({
+    op: Schema.Literal("readEntryResolution"),
+    entryId: Uuid,
+    siblingCursor: Schema.optional(Uuid),
+    siblingClaimsRevision: Schema.optional(Revision)
+  }),
   Schema.Struct({ op: Schema.Literal("readAcceptedThumbnailEntry"), entryId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("acceptOpenEvents"), events: Schema.Array(OpenEvent) }),
   Schema.Struct({
     op: Schema.Literal("finishScan"),
     taskId: Uuid,

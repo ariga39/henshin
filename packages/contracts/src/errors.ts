@@ -220,6 +220,38 @@ export class CandidateNotFound extends Schema.TaggedError<CandidateNotFound>()(
   { httpApiStatus: 404 }
 ) {}
 
+export class ThumbnailMissing extends Schema.TaggedError<ThumbnailMissing>()(
+  "ThumbnailMissing",
+  {
+    code: Schema.Literal("thumbnail_missing"),
+    message: Schema.String,
+    retryable: Schema.Literal(false),
+    ...envelope
+  },
+  { httpApiStatus: 404 }
+) {}
+
+export class ThumbnailUpdating extends Schema.TaggedError<ThumbnailUpdating>()(
+  "ThumbnailUpdating",
+  {
+    code: Schema.Literal("thumbnail_updating"),
+    message: Schema.String,
+    retryable: Schema.Literal(true),
+    ...envelope
+  },
+  { httpApiStatus: 503 }
+) {}
+
+export class EntryNotFound extends Schema.TaggedError<EntryNotFound>()(
+  "EntryNotFound",
+  {
+    code: Schema.Literal("not_found"),
+    message: Schema.String,
+    retryable: Schema.Literal(false),
+    ...envelope
+  },
+  { httpApiStatus: 404 }
+) {}
 /**
  * Every public error, as a single schema. Clients map an unknown failure to the
  * public shape only when it decodes here; anything else becomes an opaque
@@ -240,10 +272,13 @@ export const PublicApiError = Schema.Union([
   InstanceMismatch,
   RootPreviewUnavailable,
   RootVerificationFailed,
+  ThumbnailMissing,
+  ThumbnailUpdating,
   RootNotFound,
   ActiveScanConflict,
   TaskNotFound,
   CandidateNotFound,
+  EntryNotFound,
   InternalError
 ])
 export type PublicApiError = typeof PublicApiError.Type

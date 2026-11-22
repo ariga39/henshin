@@ -1,4 +1,6 @@
 import { Schema } from "effect"
+import { isAbsolute } from "node:path"
+import { OpenEvent } from "@henshin/contracts/event"
 import { DraftFormId, NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import {
   ReaderEntryFormat,
@@ -101,12 +103,90 @@ export type CommandAttemptMutation = typeof CommandAttemptMutation.Type
 export const CommandAttemptRows = Schema.Array(CommandAttemptRow)
 export type CommandAttemptRows = typeof CommandAttemptRows.Type
 
+export const LocalMappingRow = Schema.Struct({
+  instanceId: Uuid,
+  rootId: Uuid,
+  selectedPath: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  canonicalPath: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  mappingRevision: Revision
+})
+export type LocalMappingRow = typeof LocalMappingRow.Type
+
+export const LocalMappingReadResult = Schema.NullOr(LocalMappingRow)
+export type LocalMappingReadResult = typeof LocalMappingReadResult.Type
+
+export const LocalMappingRows = Schema.Array(LocalMappingRow)
+export type LocalMappingRows = typeof LocalMappingRows.Type
+
+export const LocalMappingActivationOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("activated"), mapping: LocalMappingRow }),
+  Schema.Struct({
+    kind: Schema.Literal("revision_conflict"),
+    currentMapping: Schema.NullOr(LocalMappingRow)
+  }),
+  Schema.Struct({ kind: Schema.Literal("root_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("writable_overlap") })
+])
+export type LocalMappingActivationOutcome = typeof LocalMappingActivationOutcome.Type
+
+const AbsoluteLocalPath = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(4096),
+  Schema.makeFilter(isAbsolute)
+)
+
 export const CommandAttemptNote = Schema.Struct({
   note_id: NoteId,
   text: Text,
   revision: Revision
 })
 export type CommandAttemptNote = typeof CommandAttemptNote.Type
+
+export const OpenJournalStatus = Schema.Union([
+  Schema.Literal("prepared"),
+  Schema.Literal("accepted"),
+  Schema.Literal("failed"),
+  Schema.Literal("unknown")
+])
+export type OpenJournalStatus = typeof OpenJournalStatus.Type
+
+export const OpenJournalRow = Schema.Struct({
+  instanceId: Uuid,
+  actionId: Uuid,
+  entryId: Uuid,
+  deviceId: Uuid,
+  observedLocationRevision: Revision,
+  observedContentVersion: Revision,
+  status: OpenJournalStatus,
+  event: Schema.NullOr(OpenEvent),
+  failureCode: Schema.NullOr(Schema.String),
+  failureMessage: Schema.NullOr(Schema.String),
+  createdAtMs: Schema.Int,
+  updatedAtMs: Schema.Int
+})
+export type OpenJournalRow = typeof OpenJournalRow.Type
+
+export const OpenJournalRows = Schema.Array(OpenJournalRow)
+export type OpenJournalRows = typeof OpenJournalRows.Type
+
+export const OpenJournalReadResult = Schema.NullOr(OpenJournalRow)
+export type OpenJournalReadResult = typeof OpenJournalReadResult.Type
+
+export const OpenJournalAdmission = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("admitted"), entry: OpenJournalRow }),
+  Schema.Struct({ kind: Schema.Literal("existing"), entry: OpenJournalRow }),
+  Schema.Struct({ kind: Schema.Literal("conflict") }),
+  Schema.Struct({ kind: Schema.Literal("full") })
+])
+export type OpenJournalAdmission = typeof OpenJournalAdmission.Type
+
+export const OpenJournalMutation = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("updated"), entry: OpenJournalRow }),
+  Schema.Struct({ kind: Schema.Literal("existing"), entry: OpenJournalRow }),
+  Schema.Struct({ kind: Schema.Literal("not_found") }),
+  Schema.Struct({ kind: Schema.Literal("conflict") })
+])
+export type OpenJournalMutation = typeof OpenJournalMutation.Type
 
 export const DraftWorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("listReaderProfiles") }),
@@ -169,6 +249,37 @@ export const DraftWorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("listCommandAttempts"), instanceId: Uuid }),
   Schema.Struct({ op: Schema.Literal("getCommandAttempt"), instanceId: Uuid, operationId: Uuid }),
   Schema.Struct({ op: Schema.Literal("dismissCommand"), instanceId: Uuid, operationId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("loadLocalMapping"), instanceId: Uuid, rootId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("listLocalMappings"), instanceId: Uuid }),
+  Schema.Struct({
+    op: Schema.Literal("activateLocalMapping"),
+    instanceId: Uuid,
+    rootId: Uuid,
+    selectedPath: AbsoluteLocalPath,
+    canonicalPath: AbsoluteLocalPath,
+    expectedMappingRevision: Revision,
+    protectedWritablePaths: Schema.Array(AbsoluteLocalPath),
+    activationDeadlineMs: Schema.optional(Schema.Int)
+  }),
+  Schema.Struct({
+    op: Schema.Literal("prepareOpen"),
+    instanceId: Uuid,
+    actionId: Uuid,
+    entryId: Uuid,
+    deviceId: Uuid,
+    observedLocationRevision: Revision,
+    observedContentVersion: Revision
+  }),
+  Schema.Struct({ op: Schema.Literal("recordOpenAccepted"), instanceId: Uuid, actionId: Uuid, event: OpenEvent }),
+  Schema.Struct({
+    op: Schema.Literal("recordOpenFailed"),
+    instanceId: Uuid,
+    actionId: Uuid,
+    failureCode: Schema.String,
+    failureMessage: Schema.String
+  }),
+  Schema.Struct({ op: Schema.Literal("listOpenJournal"), instanceId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("getOpenJournal"), instanceId: Uuid, actionId: Uuid }),
   Schema.Struct({ op: Schema.Literal("close") })
 ])
 export type DraftWorkerRequest = typeof DraftWorkerRequest.Type

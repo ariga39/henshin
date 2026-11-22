@@ -1,6 +1,10 @@
 import { DatabaseSync } from "node:sqlite"
+import { realpathSync, statSync } from "node:fs"
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
+import { canonicalOpenEventPayload } from "@henshin/contracts/canonical"
+import { OpenEvent } from "@henshin/contracts/event"
 import {
   CommandAttemptAdmission,
   CommandAttemptMutation,
@@ -9,15 +13,20 @@ import {
   DraftWorkerResponse,
   type ReaderProfileRow,
   type CommandAttemptRow,
+  type LocalMappingRow,
   type DraftRow,
+  type OpenJournalRow,
   type DraftWorkerRequest
 } from "./draft-worker-protocol"
 
 const MAX_DRAFT_ROWS = 64
 const MAX_COMMAND_ATTEMPTS = 64
 const MAX_READER_PROFILES = 64
+const MAX_OPEN_JOURNAL_ROWS = 64
 const COMMAND_ATTEMPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const COMMAND_ATTEMPT_COMPACTION_BATCH = 64
+const OPEN_JOURNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const OPEN_JOURNAL_COMPACTION_BATCH = 64
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const db = new DatabaseSync(dbPath)
 
@@ -64,6 +73,19 @@ db.exec(`
     dismissed INTEGER NOT NULL CHECK (dismissed IN (0, 1)),
     PRIMARY KEY (instance_id, operation_id)
   );
+  CREATE TABLE IF NOT EXISTS client_mappings (
+    instance_id TEXT NOT NULL,
+    root_id TEXT NOT NULL,
+    selected_path TEXT NOT NULL,
+    canonical_path TEXT NOT NULL,
+    mapping_revision INTEGER NOT NULL,
+    selected_identity TEXT,
+    canonical_identity TEXT,
+    selected_resolution TEXT,
+    canonical_resolution TEXT,
+    state TEXT NOT NULL CHECK (state = 'active'),
+    PRIMARY KEY (instance_id, root_id)
+  );
   CREATE TABLE IF NOT EXISTS reader_profiles (
     profile_id TEXT PRIMARY KEY,
     revision INTEGER NOT NULL,
@@ -75,7 +97,47 @@ db.exec(`
     argument_tokens TEXT NOT NULL,
     updated_at_ms INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS launch_journal (
+    instance_id TEXT NOT NULL,
+    action_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    observed_location_revision INTEGER NOT NULL,
+    observed_content_version INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('prepared', 'accepted', 'failed', 'unknown')),
+    event_json TEXT,
+    failure_code TEXT,
+    failure_message TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (instance_id, action_id),
+    CHECK ((status = 'accepted' AND event_json IS NOT NULL) OR (status <> 'accepted' AND event_json IS NULL)),
+    CHECK ((status = 'failed' AND failure_code IS NOT NULL AND failure_message IS NOT NULL) OR
+      (status <> 'failed' AND failure_code IS NULL AND failure_message IS NULL))
+  );
 `)
+
+const clientMappingColumns = new Set(
+  (db.prepare("PRAGMA table_info(client_mappings)").all() as unknown as ReadonlyArray<{ name: string }>).map(
+    (column) => column.name
+  )
+)
+if (!clientMappingColumns.has("selected_identity")) {
+  db.exec("ALTER TABLE client_mappings ADD COLUMN selected_identity TEXT")
+}
+if (!clientMappingColumns.has("canonical_identity")) {
+  db.exec("ALTER TABLE client_mappings ADD COLUMN canonical_identity TEXT")
+}
+if (!clientMappingColumns.has("selected_resolution")) {
+  db.exec("ALTER TABLE client_mappings ADD COLUMN selected_resolution TEXT")
+}
+if (!clientMappingColumns.has("canonical_resolution")) {
+  db.exec("ALTER TABLE client_mappings ADD COLUMN canonical_resolution TEXT")
+}
+// A prepared intent has no reliable dispatch outcome after this worker has
+// been closed and reopened. Preserve it as diagnostic unknown rather than
+// allowing any caller to turn it back into a launch.
+db.prepare("UPDATE launch_journal SET status = 'unknown', updated_at_ms = ? WHERE status = 'prepared'").run(Date.now())
 
 const selectDraft = db.prepare(`
   SELECT instance_id, note_id, form_id, text, local_revision,
@@ -120,6 +182,53 @@ const listReaderProfiles = db.prepare(`
   ORDER BY name COLLATE NOCASE ASC, profile_id ASC
 `)
 listReaderProfiles.setReadBigInts(true)
+
+const selectOpenJournal = db.prepare(`
+  SELECT instance_id, action_id, entry_id, device_id,
+         observed_location_revision, observed_content_version, status,
+         event_json, failure_code, failure_message, created_at_ms, updated_at_ms
+  FROM launch_journal
+  WHERE instance_id = ? AND action_id = ?
+`)
+selectOpenJournal.setReadBigInts(true)
+const listOpenJournal = db.prepare(`
+  SELECT instance_id, action_id, entry_id, device_id,
+         observed_location_revision, observed_content_version, status,
+         event_json, failure_code, failure_message, created_at_ms, updated_at_ms
+  FROM launch_journal
+  WHERE instance_id = ?
+  ORDER BY updated_at_ms DESC, action_id ASC
+`)
+listOpenJournal.setReadBigInts(true)
+const selectOpenJournalCount = db.prepare("SELECT COUNT(*) AS count FROM launch_journal")
+selectOpenJournalCount.setReadBigInts(true)
+const compactOpenJournal = db.prepare(`
+  DELETE FROM launch_journal
+  WHERE rowid IN (
+    SELECT rowid
+    FROM launch_journal
+    WHERE status = 'failed' AND updated_at_ms + ? <= ?
+    ORDER BY updated_at_ms ASC, rowid ASC
+    LIMIT ?
+  )
+`)
+const insertOpenJournal = db.prepare(`
+  INSERT INTO launch_journal(
+    instance_id, action_id, entry_id, device_id,
+    observed_location_revision, observed_content_version, status,
+    event_json, failure_code, failure_message, created_at_ms, updated_at_ms
+  ) VALUES(?, ?, ?, ?, ?, ?, 'prepared', NULL, NULL, NULL, ?, ?)
+`)
+const updateOpenAccepted = db.prepare(`
+  UPDATE launch_journal
+  SET status = 'accepted', event_json = ?, updated_at_ms = ?
+  WHERE instance_id = ? AND action_id = ? AND status = 'prepared'
+`)
+const updateOpenFailed = db.prepare(`
+  UPDATE launch_journal
+  SET status = 'failed', failure_code = ?, failure_message = ?, updated_at_ms = ?
+  WHERE instance_id = ? AND action_id = ? AND status = 'prepared'
+`)
 const selectReaderProfileCount = db.prepare("SELECT COUNT(*) AS count FROM reader_profiles")
 selectReaderProfileCount.setReadBigInts(true)
 const insertReaderProfile = db.prepare(`
@@ -196,6 +305,37 @@ const listCommandAttempts = db.prepare(`
 `)
 listCommandAttempts.setReadBigInts(true)
 
+const selectLocalMapping = db.prepare(`
+  SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision,
+         selected_identity, canonical_identity, selected_resolution, canonical_resolution
+  FROM client_mappings
+  WHERE instance_id = ? AND root_id = ? AND state = 'active'
+`)
+selectLocalMapping.setReadBigInts(true)
+const listLocalMappings = db.prepare(`
+  SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision,
+         selected_identity, canonical_identity, selected_resolution, canonical_resolution
+  FROM client_mappings
+  WHERE instance_id = ? AND state = 'active'
+  ORDER BY rowid ASC
+`)
+listLocalMappings.setReadBigInts(true)
+const upsertLocalMapping = db.prepare(`
+  INSERT INTO client_mappings(
+    instance_id, root_id, selected_path, canonical_path, mapping_revision,
+    selected_identity, canonical_identity, selected_resolution, canonical_resolution, state
+  ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+  ON CONFLICT(instance_id, root_id) DO UPDATE SET
+    selected_path = excluded.selected_path,
+    canonical_path = excluded.canonical_path,
+    mapping_revision = excluded.mapping_revision,
+    selected_identity = excluded.selected_identity,
+    canonical_identity = excluded.canonical_identity,
+    selected_resolution = excluded.selected_resolution,
+    canonical_resolution = excluded.canonical_resolution,
+    state = 'active'
+`)
+
 const readDraft = (instanceId: string, noteId: string, formId: string): DraftRow | undefined => {
   const row = selectDraft.get(instanceId, noteId, formId) as
     | {
@@ -268,6 +408,84 @@ const readReaderProfiles = (): ReadonlyArray<ReaderProfileRow> =>
     argument_tokens: string
   }>).map(toReaderProfileRow)
 
+type OpenJournalDbRow = {
+  instance_id: string
+  action_id: string
+  entry_id: string
+  device_id: string
+  observed_location_revision: bigint
+  observed_content_version: bigint
+  status: OpenJournalRow["status"]
+  event_json: string | null
+  failure_code: string | null
+  failure_message: string | null
+  created_at_ms: bigint
+  updated_at_ms: bigint
+}
+
+const toOpenJournalRow = (row: OpenJournalDbRow): OpenJournalRow => ({
+  instanceId: row.instance_id,
+  actionId: row.action_id,
+  entryId: row.entry_id,
+  deviceId: row.device_id,
+  observedLocationRevision: row.observed_location_revision.toString(),
+  observedContentVersion: row.observed_content_version.toString(),
+  status: row.status,
+  event: row.event_json === null
+    ? null
+    : Schema.decodeUnknownSync(OpenEvent)(JSON.parse(row.event_json)),
+  failureCode: row.failure_code,
+  failureMessage: row.failure_message,
+  createdAtMs: Number(row.created_at_ms),
+  updatedAtMs: Number(row.updated_at_ms)
+})
+
+const readOpenJournal = (instanceId: string, actionId: string): OpenJournalRow | undefined => {
+  const row = selectOpenJournal.get(instanceId, actionId) as OpenJournalDbRow | undefined
+  return row === undefined ? undefined : toOpenJournalRow(row)
+}
+
+const readOpenJournalRows = (instanceId: string): ReadonlyArray<OpenJournalRow> =>
+  (listOpenJournal.all(instanceId) as unknown as ReadonlyArray<OpenJournalDbRow>).map(toOpenJournalRow)
+
+const sameOpenIntent = (
+  row: OpenJournalRow,
+  request: Extract<DraftWorkerRequest, { op: "prepareOpen" }>
+): boolean =>
+  row.instanceId === request.instanceId &&
+  row.actionId === request.actionId &&
+  row.entryId === request.entryId &&
+  row.deviceId === request.deviceId &&
+  row.observedLocationRevision === request.observedLocationRevision &&
+  row.observedContentVersion === request.observedContentVersion
+
+const sameOpenEvent = (left: OpenEvent, right: OpenEvent): boolean =>
+  canonicalOpenEventPayload({
+    eventId: left.event_id,
+    instanceId: left.instance_id,
+    entryId: left.entry_id,
+    deviceId: left.device_id,
+    observedLocationRevision: left.observed_location_revision,
+    observedContentVersion: left.observed_content_version,
+    occurredAtMs: left.occurred_at_ms
+  }) === canonicalOpenEventPayload({
+    eventId: right.event_id,
+    instanceId: right.instance_id,
+    entryId: right.entry_id,
+    deviceId: right.device_id,
+    observedLocationRevision: right.observed_location_revision,
+    observedContentVersion: right.observed_content_version,
+    occurredAtMs: right.occurred_at_ms
+  })
+
+const openEventMatchesIntent = (row: OpenJournalRow, event: OpenEvent): boolean =>
+  event.event_id === row.actionId &&
+  event.instance_id === row.instanceId &&
+  event.entry_id === row.entryId &&
+  event.device_id === row.deviceId &&
+  event.observed_location_revision === row.observedLocationRevision &&
+  event.observed_content_version === row.observedContentVersion
+
 const readCommandAttempt = (instanceId: string, operationId: string): CommandAttemptRow | undefined => {
   const row = selectCommandAttempt.get(instanceId, operationId) as
     | {
@@ -332,6 +550,198 @@ const readCommandAttempts = (instanceId: string): ReadonlyArray<CommandAttemptRo
     return attempt
   })
 }
+
+type PersistedLocalMapping = {
+  readonly instance_id: string
+  readonly root_id: string
+  readonly selected_path: string
+  readonly canonical_path: string
+  readonly mapping_revision: bigint
+  readonly selected_identity: string | null
+  readonly canonical_identity: string | null
+  readonly selected_resolution: string | null
+  readonly canonical_resolution: string | null
+}
+
+const readLocalMappingRow = (row: PersistedLocalMapping): LocalMappingRow => ({
+  instanceId: row.instance_id,
+  rootId: row.root_id,
+  selectedPath: row.selected_path,
+  canonicalPath: row.canonical_path,
+  mappingRevision: row.mapping_revision.toString()
+})
+
+const readLocalMapping = (instanceId: string, rootId: string): LocalMappingRow | undefined => {
+  const row = selectLocalMapping.get(instanceId, rootId) as PersistedLocalMapping | undefined
+  return row === undefined ? undefined : readLocalMappingRow(row)
+}
+
+const readPersistedLocalMappings = (instanceId: string): ReadonlyArray<PersistedLocalMapping> =>
+  listLocalMappings.all(instanceId) as unknown as ReadonlyArray<PersistedLocalMapping>
+
+const readLocalMappings = (instanceId: string): ReadonlyArray<LocalMappingRow> =>
+  readPersistedLocalMappings(instanceId).map(readLocalMappingRow)
+
+type ResolvedLocalPath = {
+  readonly comparisonPath: string
+  readonly endpointIdentity: string | null
+  readonly ancestorIdentities: ReadonlyArray<string>
+  readonly exact: boolean
+  readonly directory: boolean
+}
+
+const LocalPathResolution = Schema.Struct({
+  comparisonPath: Schema.String,
+  endpointIdentity: Schema.NullOr(Schema.String),
+  ancestorIdentities: Schema.Array(Schema.String),
+  exact: Schema.Boolean,
+  directory: Schema.Boolean
+})
+
+const identityOf = (path: string): string => {
+  const stats = statSync(path, { bigint: true })
+  return `${stats.dev.toString()}:${stats.ino.toString()}`
+}
+
+const ancestorIdentitiesOf = (path: string): ReadonlyArray<string> => {
+  const identities: Array<string> = []
+  let current = path
+  while (true) {
+    identities.push(identityOf(current))
+    const parent = dirname(current)
+    if (parent === current) return identities
+    current = parent
+  }
+}
+
+const pathErrorCode = (error: unknown): string | undefined =>
+  typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+    ? error.code
+    : undefined
+
+const resolveLocalPath = (input: string): ResolvedLocalPath => {
+  let current = input
+  const missingSuffix: Array<string> = []
+
+  while (true) {
+    try {
+      const realCurrent = realpathSync.native(current)
+      const stats = statSync(current, { bigint: true })
+      const ancestorIdentities = ancestorIdentitiesOf(current)
+      return {
+        comparisonPath: missingSuffix.length === 0 ? realCurrent : join(realCurrent, ...missingSuffix),
+        endpointIdentity: missingSuffix.length === 0 ? identityOf(current) : null,
+        ancestorIdentities,
+        exact: missingSuffix.length === 0,
+        directory: missingSuffix.length === 0 && stats.isDirectory()
+      }
+    } catch (error) {
+      const code = pathErrorCode(error)
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        return {
+          comparisonPath: input,
+          endpointIdentity: null,
+          ancestorIdentities: [],
+          exact: false,
+          directory: false
+        }
+      }
+      const parent = dirname(current)
+      if (parent === current) {
+        return {
+          comparisonPath: input,
+          endpointIdentity: null,
+          ancestorIdentities: [],
+          exact: false,
+          directory: false
+        }
+      }
+      missingSuffix.unshift(basename(current))
+      current = parent
+    }
+  }
+}
+
+const persistedPath = (path: string, identity: string | null): ResolvedLocalPath => ({
+  comparisonPath: path,
+  endpointIdentity: identity,
+  ancestorIdentities: identity === null ? [] : [identity],
+  exact: identity !== null,
+  directory: identity !== null
+})
+
+const persistedResolution = (
+  path: string,
+  identity: string | null,
+  resolution: string | null
+): ResolvedLocalPath => {
+  if (resolution !== null) {
+    try {
+      const decoded = Schema.decodeUnknownOption(LocalPathResolution)(JSON.parse(resolution))
+      if (Option.isSome(decoded)) return decoded.value
+    } catch {
+      // Fall through to the legacy path and identity evidence.
+    }
+  }
+  return persistedPath(path, identity)
+}
+
+const encodeResolution = (resolution: ResolvedLocalPath): string => JSON.stringify(resolution)
+
+const identityOverlaps = (left: ResolvedLocalPath, right: ResolvedLocalPath): boolean => {
+  if (left.endpointIdentity !== null && right.ancestorIdentities.includes(left.endpointIdentity)) return true
+  if (right.endpointIdentity !== null && left.ancestorIdentities.includes(right.endpointIdentity)) return true
+  return false
+}
+
+const isPathWithin = (parent: string, candidate: string): boolean => {
+  if (process.platform === "win32") {
+    return isPathWithinWindows(parent, candidate)
+  }
+  const remainder = relative(parent, candidate)
+  return remainder === "" || (remainder !== ".." && !remainder.startsWith(`..${sep}`) && !isAbsolute(remainder))
+}
+
+const isPathWithinWindows = (parent: string, candidate: string): boolean => {
+  const normalize = (value: string): string => value.replace(/[\\/]+/g, "\\").replace(/\\$/, "").toLowerCase()
+  const normalizedParent = normalize(parent)
+  const normalizedCandidate = normalize(candidate)
+  return normalizedCandidate === normalizedParent || normalizedCandidate.startsWith(`${normalizedParent}\\`)
+}
+
+const pathsOverlap = (left: string, right: string): boolean =>
+  isPathWithin(left, right) || isPathWithin(right, left)
+
+type MappingPathEvidence = {
+  readonly selectedPath: ResolvedLocalPath
+  readonly canonicalPath: ResolvedLocalPath
+}
+
+const pathsOverlapWithEvidence = (left: ResolvedLocalPath, right: ResolvedLocalPath): boolean =>
+  pathsOverlap(left.comparisonPath, right.comparisonPath) || identityOverlaps(left, right)
+
+const mappingPathsOverlap = (
+  selectedPath: ResolvedLocalPath,
+  canonicalPath: ResolvedLocalPath,
+  mapping: MappingPathEvidence
+): boolean =>
+  pathsOverlapWithEvidence(selectedPath, mapping.selectedPath) ||
+  pathsOverlapWithEvidence(selectedPath, mapping.canonicalPath) ||
+  pathsOverlapWithEvidence(canonicalPath, mapping.selectedPath) ||
+  pathsOverlapWithEvidence(canonicalPath, mapping.canonicalPath)
+
+const storedMappingPathEvidence = (mapping: PersistedLocalMapping): MappingPathEvidence => ({
+  selectedPath: persistedResolution(
+    mapping.selected_path,
+    mapping.selected_identity,
+    mapping.selected_resolution
+  ),
+  canonicalPath: persistedResolution(
+    mapping.canonical_path,
+    mapping.canonical_identity,
+    mapping.canonical_resolution
+  )
+})
 
 const handle = (request: DraftWorkerRequest): unknown => {
   switch (request.op) {
@@ -665,6 +1075,227 @@ const handle = (request: DraftWorkerRequest): unknown => {
         throw error
       }
     }
+    case "loadLocalMapping":
+      return readLocalMapping(request.instanceId, request.rootId) ?? null
+    case "listLocalMappings":
+      return readLocalMappings(request.instanceId)
+    case "activateLocalMapping": {
+      const activationDeadlineMs = request.activationDeadlineMs ?? Date.now() + 4_000
+      const ensureBeforeDeadline = (): void => {
+        if (Date.now() >= activationDeadlineMs) {
+          throw new Error("local mapping activation deadline exceeded")
+        }
+      }
+
+      ensureBeforeDeadline()
+      const selectedPath = resolveLocalPath(request.selectedPath)
+      const canonicalPath = resolveLocalPath(request.canonicalPath)
+      const protectedWritablePaths = request.protectedWritablePaths.map(resolveLocalPath)
+      if (!selectedPath.exact || !selectedPath.directory || !canonicalPath.exact || !canonicalPath.directory) {
+        throw new Error("local mapping roots must be existing directories")
+      }
+
+      const preparedMappings = new Map<string, {
+        readonly mappingRevision: string
+        readonly selectedPath: string
+        readonly canonicalPath: string
+        readonly evidence: MappingPathEvidence
+      }>()
+      for (const mapping of readPersistedLocalMappings(request.instanceId)) {
+        preparedMappings.set(mapping.root_id, {
+          mappingRevision: mapping.mapping_revision.toString(),
+          selectedPath: mapping.selected_path,
+          canonicalPath: mapping.canonical_path,
+          evidence: mapping.selected_resolution === null || mapping.canonical_resolution === null
+            ? {
+                selectedPath: resolveLocalPath(mapping.selected_path),
+                canonicalPath: resolveLocalPath(mapping.canonical_path)
+              }
+            : storedMappingPathEvidence(mapping)
+        })
+      }
+      ensureBeforeDeadline()
+
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        ensureBeforeDeadline()
+        const current = readLocalMapping(request.instanceId, request.rootId)
+        const currentRevision = current?.mappingRevision ?? "0"
+        if (currentRevision !== request.expectedMappingRevision) {
+          db.exec("ROLLBACK")
+          return { kind: "revision_conflict", currentMapping: current ?? null }
+        }
+
+        const overlapsRoot = readPersistedLocalMappings(request.instanceId).some(
+          (mapping) => {
+            if (mapping.root_id === request.rootId) return false
+            const prepared = preparedMappings.get(mapping.root_id)
+            const evidence = prepared !== undefined &&
+              prepared.mappingRevision === mapping.mapping_revision.toString() &&
+              prepared.selectedPath === mapping.selected_path &&
+              prepared.canonicalPath === mapping.canonical_path
+              ? prepared.evidence
+              : storedMappingPathEvidence(mapping)
+            return mappingPathsOverlap(selectedPath, canonicalPath, evidence)
+          }
+        )
+        if (overlapsRoot) {
+          db.exec("ROLLBACK")
+          return { kind: "root_conflict" }
+        }
+
+        const overlapsWritable = protectedWritablePaths.some(
+          (writablePath) =>
+            pathsOverlapWithEvidence(selectedPath, writablePath) ||
+            pathsOverlapWithEvidence(canonicalPath, writablePath)
+        )
+        if (overlapsWritable) {
+          db.exec("ROLLBACK")
+          return { kind: "writable_overlap" }
+        }
+
+        const mapping: LocalMappingRow = {
+          instanceId: request.instanceId,
+          rootId: request.rootId,
+          selectedPath: request.selectedPath,
+          canonicalPath: request.canonicalPath,
+          mappingRevision: (BigInt(request.expectedMappingRevision) + 1n).toString()
+        }
+        ensureBeforeDeadline()
+        upsertLocalMapping.run(
+          mapping.instanceId,
+          mapping.rootId,
+          mapping.selectedPath,
+          mapping.canonicalPath,
+          BigInt(mapping.mappingRevision),
+          selectedPath.endpointIdentity,
+          canonicalPath.endpointIdentity,
+          encodeResolution(selectedPath),
+          encodeResolution(canonicalPath)
+        )
+        ensureBeforeDeadline()
+        db.exec("COMMIT")
+        return { kind: "activated", mapping }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "prepareOpen": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const existing = readOpenJournal(request.instanceId, request.actionId)
+        if (existing !== undefined) {
+          db.exec("COMMIT")
+          return sameOpenIntent(existing, request)
+            ? { kind: "existing", entry: existing }
+            : { kind: "conflict" }
+        }
+
+        const now = Date.now()
+        compactOpenJournal.run(OPEN_JOURNAL_RETENTION_MS, now, OPEN_JOURNAL_COMPACTION_BATCH)
+        const count = (selectOpenJournalCount.get() as { count: bigint }).count
+        if (count >= BigInt(MAX_OPEN_JOURNAL_ROWS)) {
+          db.exec("COMMIT")
+          return { kind: "full" }
+        }
+
+        insertOpenJournal.run(
+          request.instanceId,
+          request.actionId,
+          request.entryId,
+          request.deviceId,
+          BigInt(request.observedLocationRevision),
+          BigInt(request.observedContentVersion),
+          now,
+          now
+        )
+        db.exec("COMMIT")
+        const entry = readOpenJournal(request.instanceId, request.actionId)
+        if (entry === undefined) throw new Error("prepared open intent was not readable")
+        return { kind: "admitted", entry }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "recordOpenAccepted": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const current = readOpenJournal(request.instanceId, request.actionId)
+        if (current === undefined) {
+          db.exec("ROLLBACK")
+          return { kind: "not_found" }
+        }
+        if (!openEventMatchesIntent(current, request.event)) {
+          db.exec("COMMIT")
+          return { kind: "conflict" }
+        }
+        if (current.status === "accepted") {
+          db.exec("COMMIT")
+          return current.event !== null && sameOpenEvent(current.event, request.event)
+            ? { kind: "existing", entry: current }
+            : { kind: "conflict" }
+        }
+        if (current.status !== "prepared") {
+          db.exec("COMMIT")
+          return { kind: "conflict" }
+        }
+
+        updateOpenAccepted.run(
+          JSON.stringify(request.event),
+          Date.now(),
+          request.instanceId,
+          request.actionId
+        )
+        db.exec("COMMIT")
+        const entry = readOpenJournal(request.instanceId, request.actionId)
+        if (entry === undefined) throw new Error("accepted open event was not readable")
+        return { kind: "updated", entry }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "recordOpenFailed": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const current = readOpenJournal(request.instanceId, request.actionId)
+        if (current === undefined) {
+          db.exec("ROLLBACK")
+          return { kind: "not_found" }
+        }
+        if (current.status === "failed") {
+          db.exec("COMMIT")
+          return current.failureCode === request.failureCode && current.failureMessage === request.failureMessage
+            ? { kind: "existing", entry: current }
+            : { kind: "conflict" }
+        }
+        if (current.status !== "prepared") {
+          db.exec("COMMIT")
+          return { kind: "conflict" }
+        }
+
+        updateOpenFailed.run(
+          request.failureCode,
+          request.failureMessage,
+          Date.now(),
+          request.instanceId,
+          request.actionId
+        )
+        db.exec("COMMIT")
+        const entry = readOpenJournal(request.instanceId, request.actionId)
+        if (entry === undefined) throw new Error("failed open intent was not readable")
+        return { kind: "updated", entry }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "listOpenJournal":
+      return readOpenJournalRows(request.instanceId)
+    case "getOpenJournal":
+      return readOpenJournal(request.instanceId, request.actionId) ?? null
     case "close":
       db.close()
       return null

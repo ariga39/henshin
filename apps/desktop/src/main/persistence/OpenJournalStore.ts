@@ -1,0 +1,161 @@
+import { Context, Data, Effect, Layer, Option, Schema } from "effect"
+import type { OpenEvent } from "@henshin/contracts/event"
+import { LocalDatabaseWorker, LocalDatabaseWorkerError } from "./LocalDatabaseWorker"
+import {
+  OpenJournalAdmission,
+  OpenJournalMutation,
+  OpenJournalReadResult,
+  OpenJournalRows,
+  type DraftWorkerRequest,
+  type OpenJournalRow
+} from "./draft-worker-protocol"
+
+export interface OpenJournalInput {
+  readonly instanceId: string
+  readonly actionId: string
+  readonly entryId: string
+  readonly deviceId: string
+  readonly observedLocationRevision: string
+  readonly observedContentVersion: string
+}
+
+export interface OpenJournalFailure {
+  readonly failureCode: string
+  readonly failureMessage: string
+}
+
+export class OpenJournalConflictError extends Data.TaggedError("OpenJournalConflictError")<{}> {}
+export class OpenJournalNotFoundError extends Data.TaggedError("OpenJournalNotFoundError")<{}> {}
+export class OpenJournalStoreFullError extends Data.TaggedError("OpenJournalStoreFullError")<{}> {}
+
+const decodeAdmission = Schema.decodeUnknownOption(OpenJournalAdmission)
+const decodeMutation = Schema.decodeUnknownOption(OpenJournalMutation)
+const decodeRows = Schema.decodeUnknownOption(OpenJournalRows)
+const decodeRow = Schema.decodeUnknownOption(OpenJournalReadResult)
+
+export class OpenJournalStore extends Context.Service<
+  OpenJournalStore,
+  {
+    readonly prepare: (
+      input: OpenJournalInput
+    ) => Effect.Effect<
+      { readonly admitted: boolean; readonly entry: OpenJournalRow },
+      LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalStoreFullError
+    >
+    readonly recordAccepted: (
+      key: Pick<OpenJournalInput, "instanceId" | "actionId">,
+      event: OpenEvent
+    ) => Effect.Effect<
+      OpenJournalRow,
+      LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError
+    >
+    readonly recordFailed: (
+      key: Pick<OpenJournalInput, "instanceId" | "actionId"> & OpenJournalFailure
+    ) => Effect.Effect<
+      OpenJournalRow,
+      LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError
+    >
+    readonly list: (instanceId: string) => Effect.Effect<ReadonlyArray<OpenJournalRow>, LocalDatabaseWorkerError>
+    readonly get: (
+      key: Pick<OpenJournalInput, "instanceId" | "actionId">
+    ) => Effect.Effect<OpenJournalRow | undefined, LocalDatabaseWorkerError>
+  }
+>()("henshin/desktop/OpenJournalStore") {
+  static readonly layerFromWorker: Layer.Layer<OpenJournalStore, never, LocalDatabaseWorker> = Layer.effect(
+    OpenJournalStore,
+    Effect.gen(function*() {
+      const worker = yield* LocalDatabaseWorker
+      const call = (request: DraftWorkerRequest): Effect.Effect<unknown, LocalDatabaseWorkerError> =>
+        worker.call(request)
+
+      const prepare = (
+        input: OpenJournalInput
+      ): Effect.Effect<
+        { readonly admitted: boolean; readonly entry: OpenJournalRow },
+        LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalStoreFullError
+      > =>
+        call({ op: "prepareOpen", ...input }).pipe(
+          Effect.flatMap((value): Effect.Effect<
+            { readonly admitted: boolean; readonly entry: OpenJournalRow },
+            LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalStoreFullError
+          > => {
+            const decoded = decodeAdmission(value)
+            if (Option.isNone(decoded)) {
+              return Effect.fail(new LocalDatabaseWorkerError({ message: "invalid open journal admission result" }))
+            }
+            switch (decoded.value.kind) {
+              case "admitted":
+                return Effect.succeed({ admitted: true, entry: decoded.value.entry })
+              case "existing":
+                return Effect.succeed({ admitted: false, entry: decoded.value.entry })
+              case "conflict":
+                return Effect.fail(new OpenJournalConflictError())
+              case "full":
+                return Effect.fail(new OpenJournalStoreFullError())
+            }
+          })
+        )
+
+      const mutation = (
+        request: DraftWorkerRequest,
+        operation: string
+      ): Effect.Effect<
+        OpenJournalRow,
+        LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError
+      > =>
+        call(request).pipe(
+          Effect.flatMap((value): Effect.Effect<
+            OpenJournalRow,
+            LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError
+          > => {
+            const decoded = decodeMutation(value)
+            if (Option.isNone(decoded)) {
+              return Effect.fail(new LocalDatabaseWorkerError({ message: `invalid ${operation} result` }))
+            }
+            switch (decoded.value.kind) {
+              case "updated":
+              case "existing":
+                return Effect.succeed(decoded.value.entry)
+              case "not_found":
+                return Effect.fail(new OpenJournalNotFoundError())
+              case "conflict":
+                return Effect.fail(new OpenJournalConflictError())
+            }
+          })
+        )
+
+      const recordAccepted = (
+        key: Pick<OpenJournalInput, "instanceId" | "actionId">,
+        event: OpenEvent
+      ) => mutation({ op: "recordOpenAccepted", ...key, event }, "record accepted open")
+
+      const recordFailed = (
+        key: Pick<OpenJournalInput, "instanceId" | "actionId"> & OpenJournalFailure
+      ) => mutation({ op: "recordOpenFailed", ...key }, "record failed open")
+
+      const list = (instanceId: string): Effect.Effect<ReadonlyArray<OpenJournalRow>, LocalDatabaseWorkerError> =>
+        call({ op: "listOpenJournal", instanceId }).pipe(
+          Effect.flatMap((value) => {
+            const decoded = decodeRows(value)
+            return Option.isNone(decoded)
+              ? Effect.fail(new LocalDatabaseWorkerError({ message: "invalid open journal list" }))
+              : Effect.succeed(decoded.value)
+          })
+        )
+
+      const get = (
+        key: Pick<OpenJournalInput, "instanceId" | "actionId">
+      ): Effect.Effect<OpenJournalRow | undefined, LocalDatabaseWorkerError> =>
+        call({ op: "getOpenJournal", ...key }).pipe(
+          Effect.flatMap((value) => {
+            const decoded = decodeRow(value)
+            return Option.isNone(decoded)
+              ? Effect.fail(new LocalDatabaseWorkerError({ message: "invalid open journal read" }))
+              : Effect.succeed(decoded.value ?? undefined)
+          })
+        )
+
+      return OpenJournalStore.of({ prepare, recordAccepted, recordFailed, list, get })
+    })
+  )
+}
