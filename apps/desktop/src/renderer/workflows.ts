@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import type { ConnectionStatusView } from "@henshin/contracts"
+import type { ConnectionStatusView, RootPreviewRequest } from "@henshin/contracts"
 import { PrototypeClient, RootPreviewClient } from "./client"
 import { viewStore } from "./store"
 
@@ -8,13 +8,17 @@ export const FORM_ID = "synthetic-note"
 
 const newOperationId = (): string => crypto.randomUUID()
 
-export const previewRoot = (path: string) =>
+export const previewRoot = (selection: RootPreviewRequest | string) =>
   Effect.gen(function*() {
     const client = yield* RootPreviewClient
+    const input: RootPreviewRequest = typeof selection === "string" ? { path: selection } : selection
+    const requestedPath = "path" in input ? input.path : null
     yield* Effect.sync(() =>
       viewStore.set({
-        root_preview_path: path,
-        root_preview_selected_path: path,
+        ...(requestedPath === null ? {} : {
+          root_preview_path: requestedPath,
+          root_preview_selected_path: requestedPath
+        }),
         root_preview_status: "loading",
         root_preview: null,
         root_preview_error: null,
@@ -23,7 +27,7 @@ export const previewRoot = (path: string) =>
       })
     )
 
-    const result = yield* client.preview(path)
+    const result = yield* client.preview(input)
     if (result.ok) {
       yield* Effect.sync(() =>
         viewStore.set({
@@ -37,7 +41,7 @@ export const previewRoot = (path: string) =>
       yield* Effect.sync(() =>
         viewStore.set({
           root_preview_status: "error",
-          root_preview_selected_path: path,
+          ...(requestedPath === null ? {} : { root_preview_selected_path: requestedPath }),
           root_preview: null,
           root_preview_error: result.error.message
         })
@@ -64,6 +68,7 @@ export const saveRoot = Effect.gen(function*() {
   const preview = state.root_preview
   if (
     preview === null ||
+    !("children" in preview) ||
     state.root_preview_status !== "ready" ||
     state.root_preview_path !== preview.selected_server_path ||
     state.root_label.length === 0

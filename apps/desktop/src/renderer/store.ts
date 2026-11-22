@@ -3,7 +3,7 @@ import type {
   CommandReconciliation,
   ConnectionStatusView,
   NoteView,
-  RootPreview,
+  RootPreviewResult,
   ServerRoot,
   SavedDraft
 } from "@henshin/contracts"
@@ -35,7 +35,7 @@ export interface ViewState {
   readonly root_preview_path: string
   readonly root_preview_selected_path: string | null
   readonly root_preview_status: "idle" | "loading" | "ready" | "error"
-  readonly root_preview: RootPreview | null
+  readonly root_preview: RootPreviewResult | null
   readonly root_preview_error: string | null
   readonly root_label: string
   readonly root_saved_roots: ReadonlyArray<ServerRoot>
