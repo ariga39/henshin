@@ -178,7 +178,7 @@ test("previews book candidates for an existing saved root after restart", async 
   }
 })
 
-test("runs a held manual scan and restores staged failures after restart", async () => {
+test("runs a held manual scan, reports a disappeared release, and releases another discovery", async () => {
   const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-held-scan-db-"))
   const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-held-scan-fixture-"))
   const dbPath = path.join(dbDirectory, "prototype.db")
@@ -235,6 +235,34 @@ test("runs a held manual scan and restores staged failures after restart", async
     await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("broken.cbz")
     await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("hold: held")
     await expect(reopened.window.getByTestId("staged-discovery-root").first()).toContainText(fixtureDirectory)
+
+    const database = new DatabaseSync(dbPath)
+    try {
+      database.prepare("DELETE FROM staged_discoveries WHERE relative_path = ?").run("healthy-book")
+    } finally {
+      database.close()
+    }
+    await reopened.window
+      .getByTestId("staged-discoveries")
+      .locator("li")
+      .filter({ hasText: "healthy-book" })
+      .getByRole("button", { name: "Release hold" })
+      .click()
+    await expect(reopened.window.getByTestId("staged-discoveries")).not.toContainText("healthy-book")
+    await expect(reopened.window.getByTestId("scan-release-error")).toContainText(
+      "staged discovery not found; refresh Review"
+    )
+    await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("broken.cbz")
+    await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("hold: held")
+
+    await reopened.window
+      .getByTestId("staged-discoveries")
+      .locator("li")
+      .filter({ hasText: "broken.cbz" })
+      .getByRole("button", { name: "Release hold" })
+      .click()
+    await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("hold: eligible")
+    await expect(reopened.window.getByTestId("scan-release-error")).toHaveCount(0)
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })

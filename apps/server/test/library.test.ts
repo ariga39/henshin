@@ -238,7 +238,7 @@ describe("normal library scan", () => {
       })
     }))
 
-    const held = await withServerClient(server, Effect.gen(function*() {
+    const submitHeld = () => withServerClient(server, Effect.gen(function*() {
       const client = yield* ServerHttpClient
       return yield* client.command({
         params: { id: root.data.root_id },
@@ -252,6 +252,7 @@ describe("normal library scan", () => {
         }
       })
     }))
+    const held = await submitHeld()
     if (!("task" in held.data)) throw new Error("expected held scan task submission")
     expect((await waitForTerminal(server, held.data.task.task_id)).status).toBe("succeeded")
 
@@ -294,6 +295,21 @@ describe("normal library scan", () => {
       "held-book-c"
     ])
     expect(staged.data.every((candidate) => candidate.hold_state === "held")).toBe(true)
+
+    await makeImageBook(fixture, "later-discovery")
+    const nextHeld = await submitHeld()
+    if (!("task" in nextHeld.data)) throw new Error("expected a new held scan")
+    expect(await waitForTerminal(server, nextHeld.data.task.task_id)).toMatchObject({
+      status: "succeeded", candidates_analyzed: 6, review_needed_count: 4
+    })
+    const reviewAfterHeld = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).candidates()
+    }))
+    expect(reviewAfterHeld.data.map((candidate) => candidate.relative_path).sort()).toEqual([
+      "held-book-a", "held-book-b", "held-book-c", "later-discovery"
+    ])
+    expect(reviewAfterHeld.data.every((candidate) => candidate.hold_state === "held")).toBe(true)
+
   })
 
   it("keeps a changed occupied path staged without changing the accepted identity", async () => {
@@ -343,6 +359,7 @@ describe("normal library scan", () => {
     const terminal = await waitForTerminal(server, second.data.task.task_id)
     expect(terminal.status).toBe("completed_with_errors")
     expect(terminal.readiness_error?.code).toBe("allocation_deferred")
+    expect(terminal.readiness_error?.message).toContain("book")
     expect(terminal.review_needed_count).toBe(1)
 
     const after = await withLibraryClient(server, Effect.gen(function*() {
@@ -402,6 +419,15 @@ describe("normal library scan", () => {
     if (!("task" in first.data)) throw new Error("expected initial scan task")
     expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
     await rm(path.join(fixture, "missing-book"), { recursive: true, force: true })
+
+    const missingOnly = await scan()
+    if (!("task" in missingOnly.data)) throw new Error("expected missing-only scan task")
+    const missingOnlyTerminal = await waitForTerminal(server, missingOnly.data.task.task_id)
+    expect(missingOnlyTerminal.status).toBe("completed_with_errors")
+    expect(missingOnlyTerminal.readiness_error?.code).toBe("allocation_deferred")
+    expect(missingOnlyTerminal.readiness_error?.message).toContain("missing-book")
+    expect(missingOnlyTerminal.review_needed_count).toBe(1)
+
     await makeImageBook(fixture, "new-book")
 
     const second = await scan()
@@ -409,7 +435,8 @@ describe("normal library scan", () => {
     const terminal = await waitForTerminal(server, second.data.task.task_id)
     expect(terminal.status).toBe("completed_with_errors")
     expect(terminal.readiness_error?.code).toBe("allocation_deferred")
-    expect(terminal.review_needed_count).toBe(1)
+    expect(terminal.readiness_error?.message).toContain("missing-book")
+    expect(terminal.review_needed_count).toBe(2)
 
     const entries = await withLibraryClient(server, Effect.gen(function*() {
       const client = yield* LibraryHttpClient
