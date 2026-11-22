@@ -778,7 +778,8 @@ export const loadLibrary = (append = false) =>
       return
     }
     yield* Effect.sync(() => {
-      const existing = append ? viewStore.getState().library_entries : []
+      const state = viewStore.getState()
+      const existing = append ? state.library_entries : []
       const ids = new Set(existing.map((entry) => entry.entry_id))
       const entries = [...existing]
       for (const entry of result.data.entries) {
@@ -789,7 +790,10 @@ export const loadLibrary = (append = false) =>
         library_cursor: result.data.next_cursor,
         library_has_more: result.data.has_more,
         library_status: "ready",
-        library_error: null
+        library_error: null,
+        library_cover_generation: append
+          ? state.library_cover_generation
+          : state.library_cover_generation + 1
       })
     })
   })

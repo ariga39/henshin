@@ -7,6 +7,7 @@ import {
   RootScanCommand
 } from "./root"
 import { LibrarySearchRequest } from "./library"
+import { ThumbnailKey } from "./thumbnail"
 import { ReleaseHoldCommand } from "./review"
 import type {
   CommandAttempt,
@@ -163,6 +164,9 @@ export type LocalMappingPreviewIpcResult = import("./root").LocalMappingPreview 
 
 export const LibrarySearchIpcRequest = LibrarySearchRequest
 export type LibrarySearchIpcRequest = typeof LibrarySearchIpcRequest.Type
+
+export const ThumbnailGetIpcRequest = Schema.Struct({ key: ThumbnailKey })
+export type ThumbnailGetIpcRequest = typeof ThumbnailGetIpcRequest.Type
 
 export const TaskListIpcRequest = Schema.Struct({})
 export type TaskListIpcRequest = typeof TaskListIpcRequest.Type
