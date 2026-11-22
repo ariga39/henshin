@@ -249,6 +249,82 @@ describe("held scan renderer workflows", () => {
     expect(releaseInputs[2]?.expected_candidate_version).toBe(changedCandidate.candidate_version)
   })
 
+  it("retains a definite release failure after refresh removes the candidate", async () => {
+    const scanClient = scanClientWith({
+      candidates: () => Effect.succeed({ ok: true, data: [] }),
+      release: () => Effect.succeed({
+        ok: false,
+        error: {
+          code: "revision_conflict",
+          message: "discovery changed; refresh Review before releasing it",
+          retryable: false,
+          current_revision: "2"
+        }
+      })
+    })
+    viewStore.set({ root_saved_roots: [root], staged_discoveries: [candidate], scan_status: "ready" })
+
+    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
+
+    expect(viewStore.getState()).toMatchObject({
+      scan_release_status: "error",
+      scan_release_candidate_id: candidate.candidate_id,
+      scan_release_error: "discovery changed; refresh Review before releasing it",
+      staged_discoveries: []
+    })
+  })
+
+  it("stores reconnect guidance and permits a successful second release", async () => {
+    const releaseInputs: Array<Parameters<ScanReviewClient["Service"]["release"]>[0]> = []
+    let calls = 0
+    const released = { ...candidate, candidate_version: 2, hold_state: "eligible" as const }
+    const scanClient = scanClientWith({
+      release: (input) => {
+        releaseInputs.push(input)
+        calls += 1
+        return calls === 1
+          ? Effect.succeed({
+              ok: false,
+              error: { code: "epoch_changed", message: "authority epoch changed", retryable: true }
+            })
+          : Effect.succeed({ ok: true, data: { operation_id: input.operation_id, candidate: released } })
+      }
+    })
+    viewStore.set({ root_saved_roots: [root], staged_discoveries: [candidate], scan_status: "ready" })
+
+    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
+    expect(viewStore.getState().scan_release_error).toBe("authority epoch changed. Reconnect before retrying the release.")
+
+    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
+
+    expect(releaseInputs[1]?.operation_id).not.toBe(releaseInputs[0]?.operation_id)
+    expect(viewStore.getState()).toMatchObject({
+      scan_release_status: "idle",
+      scan_release_error: null,
+      staged_discoveries: [released]
+    })
+  })
+
+  it("clears unknown release feedback when fresh results show the target released", async () => {
+    const scanClient = scanClientWith({ release: () => Effect.succeed(scanError) })
+    viewStore.set({ root_saved_roots: [root], staged_discoveries: [candidate], scan_status: "ready" })
+
+    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
+    const released = { ...candidate, candidate_version: 2, hold_state: "eligible" as const }
+    const refreshedScanClient = scanClientWith({
+      candidates: () => Effect.succeed({ ok: true, data: [released] })
+    })
+    await run(retryScanResults, rootClientWith(), refreshedScanClient)
+
+    expect(viewStore.getState()).toMatchObject({
+      scan_release_status: "idle",
+      scan_release_candidate_id: null,
+      scan_release_operation_id: null,
+      scan_release_error: null,
+      staged_discoveries: [released]
+    })
+  })
+
   it("starts from the policy revision observed by the saved-root preview", async () => {
     let commandInput: RootCommandIpcRequest | undefined
     const submitted = task("succeeded")
