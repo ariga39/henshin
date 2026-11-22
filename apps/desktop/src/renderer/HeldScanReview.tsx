@@ -95,6 +95,11 @@ export const HeldScanReview = () => {
           </button>
         </>
       )}
+      {state.scan_release_status === "error" && state.scan_release_error !== null && (
+        <p role="alert" data-testid="scan-release-error">
+          Could not release hold: {state.scan_release_error}
+        </p>
+      )}
       {state.scan_status !== "error" && state.scan_tasks.length === 0 && state.staged_discoveries.length === 0 && (
         <p>No held scan results yet.</p>
       )}
@@ -126,11 +131,6 @@ export const HeldScanReview = () => {
                     ? "Releasing hold…"
                     : "Release hold"}
                 </button>
-              )}
-              {state.scan_release_candidate_id === candidate.candidate_id && state.scan_release_status === "error" && (
-                <p role="alert" data-testid={`release-hold-error-${candidate.candidate_id}`}>
-                  Could not release hold: {state.scan_release_error}
-                </p>
               )}
             </li>
           ))}
