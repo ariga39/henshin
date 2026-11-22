@@ -9,10 +9,7 @@ import type {
   ScanTask,
   StagedDiscovery,
   ServerRoot,
-  SavedDraft,
-  ReaderProfile,
-  ReaderProfileTestResult,
-  ReaderProfileTestTarget
+  SavedDraft
 } from "@henshin/contracts"
 
 export type Outcome =
@@ -67,18 +64,6 @@ export interface ViewState {
   readonly scan_hold_new_discoveries: boolean
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
-  readonly reader_profiles: ReadonlyArray<ReaderProfile>
-  readonly reader_profiles_status: "idle" | "loading" | "ready" | "error"
-  readonly reader_profiles_error: string | null
-  readonly reader_profile_save_status: "idle" | "loading" | "ready" | "error"
-  readonly reader_profile_save_error: string | null
-  readonly reader_profile_selection_handle: string | null
-  readonly reader_profile_selection_name: string | null
-  readonly reader_profile_selection_error: string | null
-  readonly reader_profile_test_target: ReaderProfileTestTarget | null
-  readonly reader_profile_test_status: "idle" | "selecting" | "ready" | "launching" | "accepted" | "error"
-  readonly reader_profile_test_result: ReaderProfileTestResult | null
-  readonly reader_profile_test_error: string | null
   readonly library_entries: ReadonlyArray<LibraryEntry>
   readonly library_cursor: string | null
   readonly library_has_more: boolean
@@ -131,18 +116,6 @@ const initialState: ViewState = {
   scan_hold_new_discoveries: false,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
   connection_generation: 0,
-  reader_profiles: [],
-  reader_profiles_status: "idle",
-  reader_profiles_error: null,
-  reader_profile_save_status: "idle",
-  reader_profile_save_error: null,
-  reader_profile_selection_handle: null,
-  reader_profile_selection_name: null,
-  reader_profile_selection_error: null,
-  reader_profile_test_target: null,
-  reader_profile_test_status: "idle",
-  reader_profile_test_result: null,
-  reader_profile_test_error: null,
   library_entries: [],
   library_cursor: null,
   library_has_more: false,

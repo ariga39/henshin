@@ -13,7 +13,6 @@ import {
   saveLocalDraft,
   saveNote
 } from "./workflows"
-import { ReaderProfiles } from "./ReaderProfiles"
 
 const outcomeText = (state: ReturnType<typeof viewStore.getState>): string => {
   const outcome = state.outcome
@@ -209,7 +208,6 @@ export const App = () => {
           </div>
         )}
       </section>
-      <ReaderProfiles />
     </main>
   )
 }

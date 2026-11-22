@@ -73,6 +73,9 @@ export const HeldScanControls = ({ preview }: { readonly preview: RootPreviewRes
           <p data-testid="scan-task-progress">
             {task.candidates_analyzed} of {task.candidates_discovered} discoveries analyzed; {task.directories_visited} directories visited.
           </p>
+          <p data-testid="scan-task-coverage">
+            Coverage: {task.coverage?.status ?? "not recorded"}
+          </p>
           {scanErrorText(task) !== null && <p role="alert" data-testid="scan-task-error">{scanErrorText(task)}</p>}
         </div>
       )}
@@ -106,6 +109,7 @@ export const HeldScanReview = () => {
             <li key={task.task_id} data-testid="scan-task-summary">
               <strong>{taskStatusText(task.status)}</strong>
               <span> — {taskRootLabel(state, task.root_id)} — {task.candidates_analyzed}/{task.candidates_discovered} analyzed</span>
+              <small data-testid="scan-task-coverage"> — coverage: {task.coverage?.status ?? "not recorded"}</small>
               {scanErrorText(task) !== null && <small> {scanErrorText(task)}</small>}
             </li>
           ))}

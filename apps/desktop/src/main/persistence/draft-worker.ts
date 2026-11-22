@@ -7,7 +7,6 @@ import {
   CommandAttemptRows,
   DraftWorkerMessage,
   DraftWorkerResponse,
-  type ReaderProfileRow,
   type CommandAttemptRow,
   type DraftRow,
   type DraftWorkerRequest
@@ -15,7 +14,6 @@ import {
 
 const MAX_DRAFT_ROWS = 64
 const MAX_COMMAND_ATTEMPTS = 64
-const MAX_READER_PROFILES = 64
 const COMMAND_ATTEMPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const COMMAND_ATTEMPT_COMPACTION_BATCH = 64
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
@@ -64,17 +62,6 @@ db.exec(`
     dismissed INTEGER NOT NULL CHECK (dismissed IN (0, 1)),
     PRIMARY KEY (instance_id, operation_id)
   );
-  CREATE TABLE IF NOT EXISTS reader_profiles (
-    profile_id TEXT PRIMARY KEY,
-    revision INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    launch_mode TEXT NOT NULL CHECK (launch_mode IN ('explicit-executable', 'system-association')),
-    supported_formats TEXT NOT NULL,
-    target_mode TEXT NOT NULL CHECK (target_mode IN ('archive', 'directory', 'first-image')),
-    executable_path TEXT,
-    argument_tokens TEXT NOT NULL,
-    updated_at_ms INTEGER NOT NULL
-  );
 `)
 
 const selectDraft = db.prepare(`
@@ -104,35 +91,6 @@ const tombstoneDraft = db.prepare(`
   UPDATE unsent_drafts
   SET text = '', local_revision = ?, present = 0, updated_at_ms = ?
   WHERE instance_id = ? AND note_id = ? AND form_id = ?
-`)
-
-const selectReaderProfile = db.prepare(`
-  SELECT profile_id, revision, name, launch_mode, supported_formats, target_mode,
-         executable_path, argument_tokens
-  FROM reader_profiles
-  WHERE profile_id = ?
-`)
-selectReaderProfile.setReadBigInts(true)
-const listReaderProfiles = db.prepare(`
-  SELECT profile_id, revision, name, launch_mode, supported_formats, target_mode,
-         executable_path, argument_tokens
-  FROM reader_profiles
-  ORDER BY name COLLATE NOCASE ASC, profile_id ASC
-`)
-listReaderProfiles.setReadBigInts(true)
-const selectReaderProfileCount = db.prepare("SELECT COUNT(*) AS count FROM reader_profiles")
-selectReaderProfileCount.setReadBigInts(true)
-const insertReaderProfile = db.prepare(`
-  INSERT INTO reader_profiles(
-    profile_id, revision, name, launch_mode, supported_formats, target_mode,
-    executable_path, argument_tokens, updated_at_ms
-  ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-`)
-const updateReaderProfile = db.prepare(`
-  UPDATE reader_profiles
-  SET revision = ?, name = ?, launch_mode = ?, supported_formats = ?, target_mode = ?,
-      executable_path = ?, argument_tokens = ?, updated_at_ms = ?
-  WHERE profile_id = ? AND revision = ?
 `)
 
 const selectCommandAttempt = db.prepare(`
@@ -222,52 +180,6 @@ const readDraft = (instanceId: string, noteId: string, formId: string): DraftRow
   }
 }
 
-const toReaderProfileRow = (row: {
-  profile_id: string
-  revision: bigint
-  name: string
-  launch_mode: ReaderProfileRow["launchMode"]
-  supported_formats: string
-  target_mode: ReaderProfileRow["targetMode"]
-  executable_path: string | null
-  argument_tokens: string
-}): ReaderProfileRow => ({
-  profileId: row.profile_id,
-  revision: row.revision.toString(),
-  name: row.name,
-  launchMode: row.launch_mode,
-  supportedFormats: JSON.parse(row.supported_formats),
-  targetMode: row.target_mode,
-  executablePath: row.executable_path,
-  argumentTokens: JSON.parse(row.argument_tokens)
-})
-
-const readReaderProfile = (profileId: string): ReaderProfileRow | undefined => {
-  const row = selectReaderProfile.get(profileId) as {
-    profile_id: string
-    revision: bigint
-    name: string
-    launch_mode: ReaderProfileRow["launchMode"]
-    supported_formats: string
-    target_mode: ReaderProfileRow["targetMode"]
-    executable_path: string | null
-    argument_tokens: string
-  } | undefined
-  return row === undefined ? undefined : toReaderProfileRow(row)
-}
-
-const readReaderProfiles = (): ReadonlyArray<ReaderProfileRow> =>
-  (listReaderProfiles.all() as unknown as ReadonlyArray<{
-    profile_id: string
-    revision: bigint
-    name: string
-    launch_mode: ReaderProfileRow["launchMode"]
-    supported_formats: string
-    target_mode: ReaderProfileRow["targetMode"]
-    executable_path: string | null
-    argument_tokens: string
-  }>).map(toReaderProfileRow)
-
 const readCommandAttempt = (instanceId: string, operationId: string): CommandAttemptRow | undefined => {
   const row = selectCommandAttempt.get(instanceId, operationId) as
     | {
@@ -335,81 +247,6 @@ const readCommandAttempts = (instanceId: string): ReadonlyArray<CommandAttemptRo
 
 const handle = (request: DraftWorkerRequest): unknown => {
   switch (request.op) {
-    case "listReaderProfiles":
-      return readReaderProfiles()
-    case "getReaderProfile":
-      return readReaderProfile(request.profileId) ?? null
-    case "saveReaderProfile": {
-      db.exec("BEGIN IMMEDIATE")
-      try {
-        const current = readReaderProfile(request.profileId)
-        if (current === undefined) {
-          if (request.expectedRevision !== "0") {
-            db.exec("ROLLBACK")
-            return { kind: "conflict", currentRevision: "0" }
-          }
-          const count = (selectReaderProfileCount.get() as { count: bigint }).count
-          if (count >= BigInt(MAX_READER_PROFILES)) {
-            db.exec("ROLLBACK")
-            return { kind: "full" }
-          }
-          const profile: ReaderProfileRow = {
-            profileId: request.profileId,
-            revision: "1",
-            name: request.name,
-            launchMode: request.launchMode,
-            supportedFormats: request.supportedFormats,
-            targetMode: request.targetMode,
-            executablePath: request.executablePath,
-            argumentTokens: request.argumentTokens
-          }
-          insertReaderProfile.run(
-            profile.profileId,
-            BigInt(profile.revision),
-            profile.name,
-            profile.launchMode,
-            JSON.stringify(profile.supportedFormats),
-            profile.targetMode,
-            profile.executablePath,
-            JSON.stringify(profile.argumentTokens),
-            Date.now()
-          )
-          db.exec("COMMIT")
-          return { kind: "saved", profile }
-        }
-        if (current.revision !== request.expectedRevision) {
-          db.exec("ROLLBACK")
-          return { kind: "conflict", currentRevision: current.revision }
-        }
-        const profile: ReaderProfileRow = {
-          profileId: request.profileId,
-          revision: (BigInt(current.revision) + 1n).toString(),
-          name: request.name,
-          launchMode: request.launchMode,
-          supportedFormats: request.supportedFormats,
-          targetMode: request.targetMode,
-          executablePath: request.executablePath,
-          argumentTokens: request.argumentTokens
-        }
-        updateReaderProfile.run(
-          BigInt(profile.revision),
-          profile.name,
-          profile.launchMode,
-          JSON.stringify(profile.supportedFormats),
-          profile.targetMode,
-          profile.executablePath,
-          JSON.stringify(profile.argumentTokens),
-          Date.now(),
-          profile.profileId,
-          BigInt(request.expectedRevision)
-        )
-        db.exec("COMMIT")
-        return { kind: "saved", profile }
-      } catch (error) {
-        rollbackIfActive()
-        throw error
-      }
-    }
     case "load": {
       const row = readDraft(request.instanceId, request.noteId, request.formId)
       return row === undefined

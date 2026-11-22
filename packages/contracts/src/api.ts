@@ -16,7 +16,6 @@ import {
   RootVerificationFailed,
   RootPreviewUnavailable,
   ActiveScanConflict,
-  CandidateNotFound,
   TaskNotFound,
   StorageFull
 } from "./errors"
@@ -35,7 +34,6 @@ import {
   ServerRoot,
   ServerRootList
 } from "./root"
-import { ReviewCandidateCommandRequest, ReviewCommandResult } from "./review"
 import { LibraryEntryPage, LibrarySearchRequest, LibraryView } from "./library"
 
 /**
@@ -164,23 +162,6 @@ export const ReviewApi = HttpApi.make("henshin-review").add(
       HttpApiEndpoint.get("candidates", "/review/candidates", {
         success: SuccessEnvelope(StagedDiscoveryList),
         error: [AuthenticationRequired, InternalError]
-      }),
-      HttpApiEndpoint.post("command", "/review/candidates/:id/commands", {
-        params: { id: Uuid },
-        payload: ReviewCandidateCommandRequest,
-        success: SuccessEnvelope(ReviewCommandResult),
-        error: [
-          AuthenticationRequired,
-          CandidateNotFound,
-          InvalidRequest,
-          OperationConflict,
-          OperationExpired,
-          EpochChanged,
-          InstanceMismatch,
-          RevisionConflict,
-          StorageFull,
-          InternalError
-        ]
       })
     )
     .prefix("/api/v1")
