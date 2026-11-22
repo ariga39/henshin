@@ -1,6 +1,6 @@
 import { discoveryCoverageView } from "../analysis/discovery-coverage"
 import { randomUUID } from "node:crypto"
-import { Cause, Effect, Result } from "effect"
+import { Cause, Duration, Effect, Result } from "effect"
 import {
   analyzeSourceManifest,
   ManifestCandidateError,
@@ -40,13 +40,15 @@ const manifestView = (manifest: SourceManifest) => ({
     kind: manifest.before.kind,
     bytes: manifest.before.bytes,
     mtime_ms: manifest.before.mtimeMs,
-    entry_count: manifest.before.entryCount
+    entry_count: manifest.before.entryCount,
+    observation_token: manifest.before.observationToken
   },
   after: {
     kind: manifest.after.kind,
     bytes: manifest.after.bytes,
     mtime_ms: manifest.after.mtimeMs,
-    entry_count: manifest.after.entryCount
+    entry_count: manifest.after.entryCount,
+    observation_token: manifest.after.observationToken
   }
 })
 
@@ -73,6 +75,14 @@ const sourceError = (code: string) => ({
   diagnostics: emptyDiagnostics()
 })
 
+/** Positive default; HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS may override it per deployment. */
+export const NORMAL_SCAN_QUIET_INTERVAL_MS = 50
+
+const normalScanQuietIntervalMs = (): number => {
+  const configured = Number(process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS)
+  return Number.isSafeInteger(configured) && configured > 0 ? configured : NORMAL_SCAN_QUIET_INTERVAL_MS
+}
+
 const rootObservation = (root: ServerRootRow): SourceRootObservation => ({
   selectedPath: root.selectedPath,
   canonicalPath: root.canonicalPath,
@@ -82,6 +92,11 @@ const rootObservation = (root: ServerRootRow): SourceRootObservation => ({
 type ScanStoreService = ScanStore["Service"]
 
 const finish = (store: ScanStoreService, input: FinishScanInput) => store.finish(input)
+
+const stagedCountForRoot = (store: ScanStoreService, rootId: string) =>
+  store.listStaged().pipe(
+    Effect.map((candidates) => candidates.filter((candidate) => candidate.root_id === rootId).length)
+  )
 
 interface ScanProgress {
   readonly directoriesVisited: number
@@ -202,6 +217,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
     }
     yield* store.recordDiscovery(task.task_id, coverage, discovered.value.candidates.length)
 
+    const firstObservations = new Map<string, string>()
     for (const candidate of discovered.value.candidates) {
       const resolved = yield* Effect.tryPromise({
         try: () => resolveSourceCandidate(current.value, candidate.relativePath),
@@ -231,6 +247,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
       const result = yield* Effect.result(analyzeSourceManifest({ sourcePath: resolved.value.nativePath }))
       if (Result.isSuccess(result)) {
         const manifest = result.success
+        firstObservations.set(candidate.relativePath, JSON.stringify(manifestView(manifest)))
         yield* store.stage({
           candidateId: randomUUID(),
           taskId: task.task_id,
@@ -268,10 +285,13 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
     }
 
     let readinessError: { readonly code: string; readonly message: string } | null = null
+    let unstableCandidateCount = 0
+    let allocationDeferred = false
     if (!task.hold_new_discoveries && coverage.status === "complete") {
       let verifiedAnalyzed = 0
       let verifiedErrors = 0
       const verifiedCandidatePaths: Array<string> = []
+      yield* Effect.sleep(Duration.millis(normalScanQuietIntervalMs()))
       for (const candidate of discovered.value.candidates) {
         const resolved = yield* Effect.tryPromise({
           try: () => resolveSourceCandidate(current.value, candidate.relativePath),
@@ -295,7 +315,12 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
         const result = yield* Effect.result(analyzeSourceManifest({ sourcePath: resolved.value.nativePath }))
         if (Result.isSuccess(result)) {
           verifiedAnalyzed += 1
-          verifiedCandidatePaths.push(candidate.relativePath)
+          const observedManifest = JSON.stringify(manifestView(result.success))
+          if (firstObservations.get(candidate.relativePath) === observedManifest) {
+            verifiedCandidatePaths.push(candidate.relativePath)
+          } else {
+            unstableCandidateCount += 1
+          }
           yield* store.stage({
             candidateId: randomUUID(),
             taskId: task.task_id,
@@ -345,6 +370,13 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
         switch (published.kind) {
           case "published":
             break
+          case "allocation_deferred":
+            allocationDeferred = true
+            readinessError = {
+              code: "allocation_deferred",
+              message: `automatic allocation was deferred for ${published.missingPaths.length + published.changedPaths.length} occupied path(s); ${published.excludedPaths.length} occupied path(s) were excluded by policy`
+            }
+            break
           case "root_not_found":
           case "mapping_revision_conflict":
             readinessError = { code: "root_changed", message: "saved root changed during scan" }
@@ -356,8 +388,12 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
       }
     }
 
-    const hasErrors = progress.analysisErrorCount > 0 || coverage.status === "partial"
-    const failed = readinessError !== null
+    progress = {
+      ...progress,
+      reviewNeededCount: yield* stagedCountForRoot(store, task.root_id)
+    }
+    const hasErrors = progress.analysisErrorCount > 0 || coverage.status === "partial" || unstableCandidateCount > 0 || allocationDeferred
+    const failed = readinessError !== null && readinessError.code !== "allocation_deferred"
     yield* finish(store, {
       taskId: task.task_id,
       status: failed ? "failed" : hasErrors ? "completed_with_errors" : "succeeded",
@@ -368,7 +404,16 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
       reviewNeededCount: progress.reviewNeededCount,
       coverage: progress.coverage,
       error: !failed && hasErrors
-        ? { code: progress.analysisErrorCount > 0 ? "analysis_error" : "partial_coverage", message: progress.analysisErrorCount > 0 ? "one or more discoveries could not be analyzed" : "scan coverage is partial" }
+        ? {
+            code: allocationDeferred ? "allocation_deferred" : unstableCandidateCount > 0 ? "unstable_observation" : progress.analysisErrorCount > 0 ? "analysis_error" : "partial_coverage",
+            message: allocationDeferred
+              ? "automatic allocation was deferred; unresolved occupied paths require review"
+              : unstableCandidateCount > 0
+                ? "one or more discoveries changed during the quiet interval"
+                : progress.analysisErrorCount > 0
+                  ? "one or more discoveries could not be analyzed"
+                  : "scan coverage is partial"
+          }
         : null,
       readinessError
     })

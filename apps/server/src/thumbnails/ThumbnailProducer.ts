@@ -4,7 +4,13 @@ import { fileURLToPath } from "node:url"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { Context, Effect, Fiber, Layer, Option, Result, Schema, Stream } from "effect"
 import { NodeServices } from "@effect/platform-node"
-import { analyzeSourceManifest, readArchivePage } from "../analysis/SourceManifestAnalysis"
+import {
+  analyzeSourceManifest,
+  DEFAULT_MANIFEST_LIMITS,
+  readArchivePages,
+  recheckSourceObservation,
+  type SourceObservation
+} from "../analysis/SourceManifestAnalysis"
 import {
   revalidateSourceRoot,
   resolveSourceCandidate,
@@ -18,17 +24,18 @@ import { ThumbnailCache, ThumbnailCacheError, THUMBNAIL_MAX_BYTES } from "./Thum
 export const THUMBNAIL_RENDERING_PROFILE = "default-cover-v1" as const
 const MAX_SOURCE_PAGE_BYTES = 16 * 1024 * 1024
 const RENDER_DEADLINE_MS = 3_000
+const RENDER_REQUEST_DEADLINE_MS = 10_000
+const MAX_DECODE_ATTEMPTS = 8
+const MAX_CONCURRENT_RENDERS = 4
+const FAILED_RENDER_TTL_MS = 30_000
+const MAX_FAILED_RENDER_KEYS = 128
 
-const sourceLimits = {
-  maxArchiveBytes: 512 * 1024 * 1024,
-  maxEntryCount: 100_000,
-  maxPageCount: 20_000,
-  maxNameAndMetadataBytes: 32 * 1024 * 1024,
-  maxCentralDirectoryBytes: 64 * 1024 * 1024,
-  maxDeclaredUncompressedBytes: 2 * 1024 ** 3,
-  maxMemberUncompressedBytes: MAX_SOURCE_PAGE_BYTES,
-  deadlineMs: 1_500
-} as const
+const verificationLimits = DEFAULT_MANIFEST_LIMITS
+
+class ThumbnailSourceError extends Schema.TaggedError<ThumbnailSourceError>()(
+  "ThumbnailSourceError",
+  { message: Schema.String }
+) {}
 
 export class ThumbnailRenderError extends Schema.TaggedError<ThumbnailRenderError>()(
   "ThumbnailRenderError",
@@ -51,17 +58,58 @@ const parseKey = (input: string): { readonly entryId: string; readonly contentVe
   return { entryId: parts[1] as string, contentVersion: parts[2] as string }
 }
 
+const observationIdentity = (observation: {
+  readonly kind: "directory" | "archive"
+  readonly bytes: number
+  readonly mtimeMs: number
+  readonly entryCount: number
+  readonly observationToken?: string
+}) => ({
+  kind: observation.kind,
+  bytes: observation.bytes,
+  mtime_ms: observation.mtimeMs,
+  entry_count: observation.entryCount,
+  observation_token: observation.observationToken
+})
+
+const normalizeObservation = (
+  observation: typeof ScanManifest.Type["before"] | SourceObservation
+): Parameters<typeof observationIdentity>[0] => "mtime_ms" in observation
+  ? {
+      kind: observation.kind,
+      bytes: observation.bytes,
+      mtimeMs: observation.mtime_ms,
+      entryCount: observation.entry_count,
+      observationToken: observation.observation_token
+    }
+  : observation
+
 const manifestIdentity = (
   manifest: typeof ScanManifest.Type | {
     readonly sourceKind: "archive" | "directory"
     readonly pages: ReadonlyArray<{ readonly name: string; readonly format: string; readonly declaredBytes: number }>
+    readonly before: SourceObservation
+    readonly after: SourceObservation
   }
 ): string => JSON.stringify({
   source_kind: "source_kind" in manifest ? manifest.source_kind : manifest.sourceKind,
   pages: manifest.pages.map((page) => "declared_bytes" in page
     ? page
-    : { name: page.name, format: page.format, declared_bytes: page.declaredBytes })
+    : { name: page.name, format: page.format, declared_bytes: page.declaredBytes }),
+  before: normalizeObservation(manifest.before),
+  after: normalizeObservation(manifest.after)
 })
+
+const hasObservationEvidence = (manifest: typeof ScanManifest.Type): boolean =>
+  typeof manifest.before.observation_token === "string" &&
+  manifest.before.observation_token.length > 0 &&
+  typeof manifest.after.observation_token === "string" &&
+  manifest.after.observation_token.length > 0
+
+const sameObservation = (
+  left: Parameters<typeof observationIdentity>[0],
+  right: Parameters<typeof observationIdentity>[0]
+): boolean => JSON.stringify(observationIdentity(left)) === JSON.stringify(observationIdentity(right))
 
 const sameStats = (
   left: { readonly dev: bigint; readonly ino: bigint; readonly size: bigint; readonly mtimeNs: bigint },
@@ -132,8 +180,9 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
       const decoderPath = fileURLToPath(new URL("./thumbnail-decoder.mjs", import.meta.url))
       const inFlight = new Set<string>()
+      const failedUntil = new Map<string, number>()
 
-      const decode = (input: Uint8Array): Effect.Effect<Uint8Array, ThumbnailRenderError> =>
+      const decode = (input: Uint8Array): Effect.Effect<Uint8Array | null, ThumbnailRenderError> =>
         Effect.scoped(
           Effect.gen(function*() {
             const handle = yield* spawner.spawn(ChildProcess.make(process.execPath, [decoderPath])).pipe(
@@ -152,9 +201,7 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
             const exitCode = yield* handle.exitCode.pipe(
               Effect.mapError(() => new ThumbnailRenderError({ message: "thumbnail decoder exit status unavailable" }))
             )
-            if (exitCode !== ChildProcessSpawner.ExitCode(0) || output.byteLength === 0) {
-              return yield* new ThumbnailRenderError({ message: "thumbnail decoder failed" })
-            }
+            if (exitCode !== ChildProcessSpawner.ExitCode(0) || output.byteLength === 0) return null
             return output
           }).pipe(Effect.timeoutOrElse({
             duration: RENDER_DEADLINE_MS,
@@ -181,6 +228,7 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
         const decoded = decodeManifest(persistedManifest)
         if (Option.isNone(decoded) || decoded.value.pages.length === 0) return null
         const acceptedManifest = decoded.value
+        if (!hasObservationEvidence(acceptedManifest)) return null
         if (
           (accepted.kind === "archive" && acceptedManifest.source_kind !== "archive") ||
           (accepted.kind === "image-directory" && acceptedManifest.source_kind !== "directory")
@@ -202,40 +250,72 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
 
         const freshResult = yield* Effect.result(analyzeSourceManifest({
           sourcePath: candidate.value.nativePath,
-          limits: sourceLimits
+          limits: verificationLimits
         }))
         if (Result.isFailure(freshResult)) return null
         if (manifestIdentity(freshResult.success) !== manifestIdentity(acceptedManifest)) return null
         const cached = yield* cache.read(key)
         if (cached !== null) return cached
 
-        const readPage = (page: typeof acceptedManifest.pages[number]): Effect.Effect<Uint8Array, ThumbnailRenderError> =>
+        const readPage = (page: typeof acceptedManifest.pages[number]): Effect.Effect<Uint8Array, ThumbnailSourceError> =>
           accepted.kind === "archive"
-            ? Effect.tryPromise({
-                try: () => readArchivePage(candidate.value.nativePath, page.name, sourceLimits),
-                catch: () => new ThumbnailRenderError({ message: "accepted archive page is unavailable" })
-              })
+            ? Effect.fail(new ThumbnailSourceError({ message: "archive pages are read in one pass" }))
             : Effect.promise(() => resolveSourcePage(candidate.value, page.name)).pipe(
                 Effect.flatMap((resolved) => resolved.ok
                   ? Effect.tryPromise({
                       try: () => readDirectPage(resolved.value.nativePath),
-                      catch: () => new ThumbnailRenderError({ message: "accepted image page is unavailable" })
+                      catch: () => new ThumbnailSourceError({ message: "accepted image page is unavailable" })
                     })
-                  : Effect.fail(new ThumbnailRenderError({ message: "accepted image page is unavailable" })))
+                  : Effect.fail(new ThumbnailSourceError({ message: "accepted image page is unavailable" })))
               )
 
+        const candidatePages = acceptedManifest.pages.slice(0, MAX_DECODE_ATTEMPTS)
+        let archivePages: ReadonlyMap<string, Uint8Array> = new Map()
+        let archiveAfter = freshResult.success.after
+        if (accepted.kind === "archive") {
+          const archiveRead = yield* Effect.result(Effect.tryPromise({
+            try: () => readArchivePages(candidate.value.nativePath, candidatePages.map((page) => page.name), {
+              limits: verificationLimits,
+              maxPageBytes: MAX_SOURCE_PAGE_BYTES
+            }),
+            catch: () => new ThumbnailSourceError({ message: "accepted archive pages are unavailable" })
+          }))
+          if (Result.isFailure(archiveRead)) return null
+          archivePages = archiveRead.success.pages
+          archiveAfter = archiveRead.success.after
+        }
         let rendered: Uint8Array | null = null
-        for (const page of acceptedManifest.pages) {
-          if (page.declared_bytes > MAX_SOURCE_PAGE_BYTES) continue
-          const input = yield* Effect.result(readPage(page))
-          if (Result.isFailure(input)) continue
-          const output = yield* Effect.result(decode(input.success))
-          if (Result.isSuccess(output)) {
-            rendered = output.success
+        for (const page of candidatePages) {
+          let input: Uint8Array | undefined
+          if (accepted.kind === "archive") {
+            input = archivePages.get(page.name)
+          } else {
+            const pageResult = yield* Effect.result(readPage(page))
+            if (Result.isSuccess(pageResult)) input = pageResult.success
+          }
+          if (input === undefined) continue
+          const output = yield* decode(input)
+          if (output !== null) {
+            rendered = output
             break
           }
         }
         if (rendered === null) return null
+
+        if (accepted.kind === "image-directory") {
+          const afterResult = yield* Effect.result(Effect.tryPromise({
+            try: () => recheckSourceObservation(
+              candidate.value.nativePath,
+              "directory",
+              freshResult.success.after.entryCount,
+              verificationLimits
+            ),
+            catch: () => new ThumbnailSourceError({ message: "accepted image directory changed" })
+          }))
+          if (Result.isFailure(afterResult) || !sameObservation(afterResult.success, freshResult.success.after)) return null
+        } else if (!sameObservation(archiveAfter, freshResult.success.after)) {
+          return null
+        }
 
         const afterRoot = yield* Effect.promise(() => revalidateSourceRoot(rootObservation))
         if (!afterRoot.ok) return null
@@ -248,11 +328,30 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
 
       const load = (key: string): Effect.Effect<ThumbnailLoad, ThumbnailRenderError | ThumbnailCacheError> =>
         Effect.suspend(() => {
-          if (inFlight.has(key)) return Effect.succeed({ kind: "updating" } as const)
+          if (inFlight.has(key) || inFlight.size >= MAX_CONCURRENT_RENDERS) {
+            return Effect.succeed({ kind: "updating" } as ThumbnailLoad)
+          }
+          const failedExpiry = failedUntil.get(key)
+          if (failedExpiry !== undefined) {
+            if (failedExpiry > Date.now()) return Effect.succeed({ kind: "missing" } as ThumbnailLoad)
+            failedUntil.delete(key)
+          }
           inFlight.add(key)
           return render(key).pipe(
-            Effect.map((bytes) => bytes === null ? { kind: "missing" } as const : { kind: "ready", bytes } as const),
-            Effect.catchTag("ThumbnailRenderError", () => Effect.succeed({ kind: "updating" } as const)),
+            Effect.timeoutOrElse({
+              duration: RENDER_REQUEST_DEADLINE_MS,
+              orElse: () => Effect.fail(new ThumbnailRenderError({ message: "thumbnail render timed out" }))
+            }),
+            Effect.map((bytes) => {
+              if (bytes !== null) return { kind: "ready", bytes } as const
+              failedUntil.set(key, Date.now() + FAILED_RENDER_TTL_MS)
+              while (failedUntil.size > MAX_FAILED_RENDER_KEYS) {
+                const oldest = failedUntil.keys().next().value
+                if (oldest === undefined) break
+                failedUntil.delete(oldest)
+              }
+              return { kind: "missing" } as const
+            }),
             Effect.ensuring(Effect.sync(() => inFlight.delete(key)))
           )
         })
