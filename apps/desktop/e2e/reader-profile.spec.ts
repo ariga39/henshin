@@ -99,18 +99,17 @@ test("saves a picked local reader profile across restart and preserves the saved
   }
 })
 
-test("previews and test-launches a saved profile with a disposable target, revision recheck, and argv recording", async () => {
+test("previews and test-launches a saved profile with a disposable target and exact native argv", async () => {
+  test.skip(process.platform !== "darwin", "the native cp fixture is scoped to the macOS development platform")
   const directory = await mkdtemp(path.join(os.tmpdir(), "henshin reader test target "))
   const targetPath = path.join(directory, "disposable target.cbz")
   const missingTargetPath = path.join(directory, "missing target.cbz")
-  const recordPath = path.join(directory, "argv record.json")
+  const copiedPath = path.join(directory, "copied target.cbz")
   await writeFile(targetPath, "disposable fixture", "utf8")
   try {
     const first = await launch(path.join(directory, "prototype.db"))
     await expect(first.window.getByTestId("reader-settings")).toBeVisible()
-    const fixtureExecutable = process.execPath
-    const recorderScript = "require('node:fs').writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))"
-    const selections = [fixtureExecutable, missingTargetPath, targetPath]
+    const selections = ["/bin/cp", missingTargetPath, targetPath]
     await first.app.evaluate(({ dialog }, input) => {
       dialog.showOpenDialog = async () => ({
         canceled: false,
@@ -121,7 +120,7 @@ test("previews and test-launches a saved profile with a disposable target, revis
     await first.window.getByTestId("reader-profile-name").fill("Disposable target reader")
     await first.window.getByTestId("reader-select-executable").click()
     await first.window.getByTestId("reader-profile-arguments").fill(
-      `-e\n${recorderScript}\n${recordPath}\n--fixture\n{target}`
+      `-f\n{target}\n${copiedPath}`
     )
     await first.window.getByTestId("reader-profile-save").click()
     const saved = first.window.getByTestId("reader-profile-list")
@@ -163,11 +162,11 @@ test("previews and test-launches a saved profile with a disposable target, revis
     await expect(first.window.getByTestId("reader-profile-test-result")).toContainText("accepted")
     await expect.poll(async () => {
       try {
-        return await readFile(recordPath, "utf8")
+        return await readFile(copiedPath, "utf8")
       } catch {
         return ""
       }
-    }).toBe(JSON.stringify(["--fixture", targetPath]))
+    }).toBe("disposable fixture")
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
