@@ -48,6 +48,7 @@ describe("saved root scan policy", () => {
       Effect.gen(function*() {
         const client = yield* ServerHttpClient
         const preview = yield* client.preview({ payload: { path: fixture } })
+        if (!("children" in preview.data)) throw new Error("expected setup preview")
         return yield* client.save({
           payload: {
             operation_id: randomUUID(),
