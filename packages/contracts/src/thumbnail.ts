@@ -6,7 +6,7 @@ export type ThumbnailProfile = typeof ThumbnailProfile.Type
 
 /** Opaque server-issued key for one accepted entry/content version. */
 export const ThumbnailKey = Schema.String.check(
-  Schema.isPattern(/^default-v1\.[0-9a-fA-F-]{36}\.(0|[1-9][0-9]*)$/)
+  Schema.isPattern(/^default-v1\.[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.(0|[1-9][0-9]*)$/)
 )
 export type ThumbnailKey = typeof ThumbnailKey.Type
 

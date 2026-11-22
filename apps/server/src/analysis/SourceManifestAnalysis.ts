@@ -331,6 +331,8 @@ const errorCode = (error: unknown): ManifestCandidateErrorCode => {
   if (error instanceof Encrypted) return "encrypted"
   if (error instanceof LimitExceeded) return "limit-exceeded"
   if (error instanceof StructuralCorruption) return "structural-corruption"
+  const archiveCode = archiveErrorCode(error)
+  if (archiveCode !== undefined) return archiveCode
   if (error instanceof ManifestCandidateError) return error.code
   return "read-failure"
 }
@@ -957,6 +959,8 @@ export const readArchivePages = async (
         observationToken: JSON.stringify(statToken(afterStats))
       }
     }
+  } catch (error) {
+    throw candidateErrorOf(error, options?.signal)
   } finally {
     if (reader !== undefined) await reader.close().catch(() => undefined)
     if (file !== undefined) await closeQuietly(file)
@@ -973,31 +977,35 @@ export const recheckSourceObservation = async (
     readonly signal?: AbortSignal
   }
 ): Promise<SourceObservation> => {
-  const combined = combineLimits(options?.limits)
-  const context: AnalysisContext = {
-    limits: combined,
-    deadlineAt: Date.now() + combined.deadlineMs,
-    signal: options?.signal
-  }
-  const stats = await observePath(sourcePath, context)
-  if (sourceKind === "archive") {
-    if (!stats.isFile()) throw new SourceChanged()
-    return {
-      kind: "archive",
-      bytes: safeStatNumber(stats.size, combined.maxArchiveBytes),
-      mtimeMs: stats.mtimeMs,
-      entryCount: expectedEntryCount,
-      observationToken: JSON.stringify(statToken(stats))
+  try {
+    const combined = combineLimits(options?.limits)
+    const context: AnalysisContext = {
+      limits: combined,
+      deadlineAt: Date.now() + combined.deadlineMs,
+      signal: options?.signal
     }
-  }
-  if (!stats.isDirectory()) throw new SourceChanged()
-  const observed = await readDirectObservation(sourcePath, context, false)
-  return {
-    kind: "directory",
-    bytes: 0,
-    mtimeMs: observed.root.mtimeMs,
-    entryCount: observed.entries.size,
-    observationToken: directObservationToken(observed.root, observed.entries)
+    const stats = await observePath(sourcePath, context)
+    if (sourceKind === "archive") {
+      if (!stats.isFile()) throw new SourceChanged()
+      return {
+        kind: "archive",
+        bytes: safeStatNumber(stats.size, combined.maxArchiveBytes),
+        mtimeMs: stats.mtimeMs,
+        entryCount: expectedEntryCount,
+        observationToken: JSON.stringify(statToken(stats))
+      }
+    }
+    if (!stats.isDirectory()) throw new SourceChanged()
+    const observed = await readDirectObservation(sourcePath, context, false)
+    return {
+      kind: "directory",
+      bytes: 0,
+      mtimeMs: observed.root.mtimeMs,
+      entryCount: observed.entries.size,
+      observationToken: directObservationToken(observed.root, observed.entries)
+    }
+  } catch (error) {
+    throw candidateErrorOf(error, options?.signal)
   }
 }
 

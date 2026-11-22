@@ -3,10 +3,10 @@ import { open } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { Context, Effect, Fiber, Layer, Option, Result, Schema, Stream } from "effect"
-import { NodeServices } from "@effect/platform-node"
 import {
   analyzeSourceManifest,
   DEFAULT_MANIFEST_LIMITS,
+  ManifestCandidateError,
   readArchivePages,
   recheckSourceObservation,
   type SourceObservation
@@ -16,6 +16,8 @@ import {
   resolveSourceCandidate,
   resolveSourcePage
 } from "../analysis/NativeSourceBoundary"
+import type { ManifestCandidateErrorCode } from "../analysis/SourceManifestAnalysis"
+import type { NativeBoundaryErrorCode } from "../analysis/NativeSourceBoundary"
 import { ScanManifest, ThumbnailKey } from "@henshin/contracts"
 import { LibraryStore } from "../persistence/LibraryStore"
 import { RootStore } from "../persistence/RootStore"
@@ -29,6 +31,8 @@ const MAX_DECODE_ATTEMPTS = 8
 const MAX_CONCURRENT_RENDERS = 4
 const FAILED_RENDER_TTL_MS = 30_000
 const MAX_FAILED_RENDER_KEYS = 128
+const RETRYABLE_RENDER_BACKOFF_MS = 1_000
+const MAX_RETRYABLE_RENDER_KEYS = 128
 
 const verificationLimits = DEFAULT_MANIFEST_LIMITS
 
@@ -41,6 +45,13 @@ class ThumbnailBudgetError extends Schema.TaggedError<ThumbnailBudgetError>()(
   "ThumbnailBudgetError",
   { message: Schema.String }
 ) {}
+
+class ThumbnailRetryableError extends Schema.TaggedError<ThumbnailRetryableError>()(
+  "ThumbnailRetryableError",
+  { message: Schema.String }
+) {}
+
+class DirectPageTerminalError extends Error {}
 
 export class ThumbnailRenderError extends Schema.TaggedError<ThumbnailRenderError>()(
   "ThumbnailRenderError",
@@ -62,6 +73,32 @@ const parseKey = (input: string): { readonly entryId: string; readonly contentVe
   if (parts.length !== 3 || parts[0] !== "default-v1") return null
   return { entryId: parts[1] as string, contentVersion: parts[2] as string }
 }
+
+const retryableNativeCodes = new Set<NativeBoundaryErrorCode>([
+  "root-unavailable",
+  "location-unavailable"
+])
+
+const retryableManifestCodes = new Set<ManifestCandidateErrorCode>([
+  "cancelled",
+  "deadline-exceeded",
+  "read-failure"
+])
+
+const retryableNativeFailure = (code: NativeBoundaryErrorCode): ThumbnailRetryableError | undefined =>
+  retryableNativeCodes.has(code)
+    ? new ThumbnailRetryableError({ message: "thumbnail source is temporarily unavailable" })
+    : undefined
+
+const retryableManifestFailure = (error: ManifestCandidateError): ThumbnailRetryableError | undefined =>
+  retryableManifestCodes.has(error.code)
+    ? new ThumbnailRetryableError({ message: "thumbnail source analysis is temporarily unavailable" })
+    : undefined
+
+const manifestFailure = (error: unknown): ThumbnailSourceError | ThumbnailRetryableError =>
+  error instanceof ManifestCandidateError
+    ? retryableManifestFailure(error) ?? new ThumbnailSourceError({ message: "accepted source is unavailable" })
+    : new ThumbnailRetryableError({ message: "accepted source analysis is temporarily unavailable" })
 
 const observationIdentity = (observation: {
   readonly kind: "directory" | "archive"
@@ -143,18 +180,18 @@ const readDirectPage = async (path: string, signal: AbortSignal): Promise<Uint8A
   const file = await open(path, constants.O_RDONLY | noFollow)
   try {
     const before = await file.stat({ bigint: true })
-    if (!before.isFile() || before.size > BigInt(MAX_SOURCE_PAGE_BYTES)) throw new Error("source page exceeds limit")
+    if (!before.isFile() || before.size > BigInt(MAX_SOURCE_PAGE_BYTES)) throw new DirectPageTerminalError()
     const output = new Uint8Array(Number(before.size))
     let offset = 0
     while (offset < output.byteLength) {
       signal.throwIfAborted()
       const result = await file.read(output, offset, output.byteLength - offset, offset)
-      if (result.bytesRead === 0) throw new Error("source page ended early")
+      if (result.bytesRead === 0) throw new DirectPageTerminalError()
       offset += result.bytesRead
     }
     signal.throwIfAborted()
     const after = await file.stat({ bigint: true })
-    if (!sameStats(before, after)) throw new Error("source page changed")
+    if (!sameStats(before, after)) throw new DirectPageTerminalError()
     return output
   } finally {
     await file.close().catch(() => undefined)
@@ -204,6 +241,7 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
       const decoderPath = fileURLToPath(new URL("./thumbnail-decoder.mjs", import.meta.url))
       const inFlight = new Set<string>()
       const failedUntil = new Map<string, number>()
+      const retryUntil = new Map<string, number>()
       const phaseLimits = (deadlineAt: number): typeof verificationLimits | null => {
         const remainingMs = deadlineAt - Date.now()
         return remainingMs > 0
@@ -211,34 +249,34 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
           : null
       }
 
-      const decode = (input: Uint8Array): Effect.Effect<Uint8Array | null, ThumbnailRenderError> =>
+      const decode = (input: Uint8Array): Effect.Effect<Uint8Array | null, ThumbnailRetryableError> =>
         Effect.scoped(
           Effect.gen(function*() {
             const handle = yield* spawner.spawn(ChildProcess.make(process.execPath, [decoderPath])).pipe(
-              Effect.mapError(() => new ThumbnailRenderError({ message: "thumbnail decoder could not start" }))
+              Effect.mapError(() => new ThumbnailRetryableError({ message: "thumbnail decoder is temporarily unavailable" }))
             )
             const outputFiber = yield* Effect.forkChild(
               collectBounded(handle.stdout).pipe(
-                Effect.mapError(() => new ThumbnailRenderError({ message: "thumbnail decoder output failed" }))
+                Effect.mapError(() => new ThumbnailRetryableError({ message: "thumbnail decoder output is temporarily unavailable" }))
               )
             )
             yield* Stream.fromIterable([input]).pipe(
               Stream.run(handle.stdin),
-              Effect.mapError(() => new ThumbnailRenderError({ message: "thumbnail decoder input failed" }))
+              Effect.mapError(() => new ThumbnailRetryableError({ message: "thumbnail decoder input is temporarily unavailable" }))
             )
             const output = yield* Fiber.join(outputFiber)
             const exitCode = yield* handle.exitCode.pipe(
-              Effect.mapError(() => new ThumbnailRenderError({ message: "thumbnail decoder exit status unavailable" }))
+              Effect.mapError(() => new ThumbnailRetryableError({ message: "thumbnail decoder exit status is temporarily unavailable" }))
             )
             if (exitCode !== ChildProcessSpawner.ExitCode(0) || output.byteLength === 0) return null
             return output
           }).pipe(Effect.timeoutOrElse({
             duration: RENDER_DEADLINE_MS,
-            orElse: () => Effect.fail(new ThumbnailRenderError({ message: "thumbnail decoder timed out" }))
+            orElse: () => Effect.fail(new ThumbnailRetryableError({ message: "thumbnail decoder timed out" }))
           }))
         )
 
-      const render = Effect.fnUntraced(function*(key: string, signal: AbortSignal, deadlineAt: number): Effect.fn.Return<Uint8Array | null, ThumbnailRenderError | ThumbnailCacheError | ThumbnailBudgetError> {
+      const render = Effect.fnUntraced(function*(key: string, signal: AbortSignal, deadlineAt: number): Effect.fn.Return<Uint8Array | null, ThumbnailRenderError | ThumbnailCacheError | ThumbnailBudgetError | ThumbnailRetryableError | ThumbnailSourceError> {
         const parsed = parseKey(key)
         if (parsed === null) return null
         const accepted = yield* library.acceptedThumbnailEntry(parsed.entryId).pipe(
@@ -272,9 +310,18 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
           identity: { device: root.device, inode: root.inode }
         }
         const currentRoot = yield* Effect.promise(() => revalidateSourceRoot(rootObservation))
-        if (!currentRoot.ok) return null
+        if (!currentRoot.ok) {
+          const retryable = retryableNativeFailure(currentRoot.code)
+          if (retryable !== undefined) return yield* retryable
+          return null
+        }
         const candidate = yield* Effect.promise(() => resolveSourceCandidate(currentRoot.value, accepted.relative_path))
-        if (!candidate.ok || candidate.value.kind !== accepted.kind) return null
+        if (!candidate.ok) {
+          const retryable = retryableNativeFailure(candidate.code)
+          if (retryable !== undefined) return yield* retryable
+          return null
+        }
+        if (candidate.value.kind !== accepted.kind) return null
 
         const hasAcceptedTokens =
           typeof acceptedManifest.before.observation_token === "string" &&
@@ -291,13 +338,20 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
               acceptedManifest.after.entry_count,
               { limits: cheapLimits, signal }
             ),
-            catch: () => new ThumbnailSourceError({ message: "accepted source observation is unavailable" })
+            catch: (error) => manifestFailure(error)
           }))
-          if (Result.isFailure(cheapObservation) || !sameObservation(cheapObservation.success, acceptedManifest.after)) return null
+          if (Result.isFailure(cheapObservation)) return yield* cheapObservation.failure
+          if (!sameObservation(cheapObservation.success, acceptedManifest.after)) return null
         }
 
-        const cached = yield* cache.read(key)
-        if (cached !== null) return cached
+        const readCache = () => cache.read(key).pipe(
+          Effect.catchTag("ThumbnailCacheError", () => Effect.succeed(null))
+        )
+        let cached: Uint8Array | null = null
+        if (hasAcceptedTokens) {
+          cached = yield* readCache()
+          if (cached !== null) return cached
+        }
 
         const analysisLimits = phaseLimits(deadlineAt)
         if (analysisLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
@@ -306,26 +360,40 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
           limits: analysisLimits,
           signal
         }))
-        if (Result.isFailure(freshResult)) return null
+        if (Result.isFailure(freshResult)) {
+          const retryable = retryableManifestFailure(freshResult.failure)
+          if (retryable !== undefined) return yield* retryable
+          return null
+        }
         if (!sameAcceptedManifest(freshResult.success, acceptedManifest)) return null
+        if (!hasAcceptedTokens) {
+          cached = yield* readCache()
+          if (cached !== null) return cached
+        }
 
-        const readPage = (page: typeof acceptedManifest.pages[number]): Effect.Effect<Uint8Array, ThumbnailSourceError> =>
+        const readPage = (page: typeof acceptedManifest.pages[number]): Effect.Effect<Uint8Array, ThumbnailSourceError | ThumbnailRetryableError> =>
           accepted.kind === "archive"
             ? Effect.fail(new ThumbnailSourceError({ message: "archive pages are read in one pass" }))
             : Effect.promise(() => resolveSourcePage(candidate.value, page.name)).pipe(
                 Effect.flatMap((resolved) => resolved.ok
                   ? Effect.tryPromise({
                       try: () => readDirectPage(resolved.value.nativePath, signal),
-                      catch: () => new ThumbnailSourceError({ message: "accepted image page is unavailable" })
+                      catch: (error) => error instanceof DirectPageTerminalError ||
+                        (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")
+                        ? new ThumbnailSourceError({ message: "accepted image page is unavailable" })
+                        : new ThumbnailRetryableError({ message: "accepted image page is temporarily unavailable" })
                     })
-                  : Effect.fail(new ThumbnailSourceError({ message: "accepted image page is unavailable" })))
+                  : Effect.fail(
+                      retryableNativeFailure(resolved.code) ??
+                      new ThumbnailSourceError({ message: "accepted image page is unavailable" })
+                    ))
               )
 
         // Keep the first-decodable policy bounded without changing the accepted page count.
         const candidatePages = acceptedManifest.pages.slice(0, MAX_DECODE_ATTEMPTS)
         let archiveAfter = freshResult.success.after
         let rendered: Uint8Array | null = null
-        let lastRenderError: ThumbnailRenderError | undefined
+        let lastRenderError: ThumbnailRetryableError | undefined
         if (accepted.kind === "archive") {
           const archiveLimits = phaseLimits(deadlineAt)
           if (archiveLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
@@ -347,15 +415,18 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
                 return true
               }
             }),
-            catch: () => new ThumbnailSourceError({ message: "accepted archive pages are unavailable" })
+            catch: (error) => manifestFailure(error)
           }))
-          if (Result.isFailure(archiveRead)) return null
+          if (Result.isFailure(archiveRead)) return yield* archiveRead.failure
           archiveAfter = archiveRead.success.after
         }
         if (accepted.kind === "image-directory") {
           for (const page of candidatePages) {
             const input = yield* Effect.result(readPage(page))
-            if (Result.isFailure(input)) continue
+            if (Result.isFailure(input)) {
+              if (input.failure._tag === "ThumbnailRetryableError") lastRenderError = input.failure
+              continue
+            }
             const outputResult = yield* Effect.result(decode(input.success))
             if (Result.isFailure(outputResult)) {
               lastRenderError = outputResult.failure
@@ -382,17 +453,27 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
               freshResult.success.after.entryCount,
               { limits: finalLimits, signal }
             ),
-            catch: () => new ThumbnailSourceError({ message: "accepted image directory changed" })
+            catch: (error) => manifestFailure(error)
           }))
-          if (Result.isFailure(afterResult) || !sameObservation(afterResult.success, freshResult.success.after)) return null
+          if (Result.isFailure(afterResult)) return yield* afterResult.failure
+          if (!sameObservation(afterResult.success, freshResult.success.after)) return null
         } else if (!sameObservation(archiveAfter, freshResult.success.after)) {
           return null
         }
 
         const afterRoot = yield* Effect.promise(() => revalidateSourceRoot(rootObservation))
-        if (!afterRoot.ok) return null
+        if (!afterRoot.ok) {
+          const retryable = retryableNativeFailure(afterRoot.code)
+          if (retryable !== undefined) return yield* retryable
+          return null
+        }
         const afterCandidate = yield* Effect.promise(() => resolveSourceCandidate(afterRoot.value, accepted.relative_path))
-        if (!afterCandidate.ok || afterCandidate.value.kind !== accepted.kind) return null
+        if (!afterCandidate.ok) {
+          const retryable = retryableNativeFailure(afterCandidate.code)
+          if (retryable !== undefined) return yield* retryable
+          return null
+        }
+        if (afterCandidate.value.kind !== accepted.kind) return null
 
         yield* cache.publish(key, rendered).pipe(
           Effect.catchTag("ThumbnailCacheError", () =>
@@ -412,10 +493,25 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
         return { kind: "missing" }
       }
 
+      const rememberUpdating = (key: string): ThumbnailLoad => {
+        retryUntil.set(key, Date.now() + RETRYABLE_RENDER_BACKOFF_MS)
+        while (retryUntil.size > MAX_RETRYABLE_RENDER_KEYS) {
+          const oldest = retryUntil.keys().next().value
+          if (oldest === undefined) break
+          retryUntil.delete(oldest)
+        }
+        return { kind: "updating" }
+      }
+
       const load = (key: string): Effect.Effect<ThumbnailLoad, ThumbnailRenderError | ThumbnailCacheError> =>
         Effect.suspend(() => {
           if (inFlight.has(key) || inFlight.size >= MAX_CONCURRENT_RENDERS) {
             return Effect.succeed({ kind: "updating" } as ThumbnailLoad)
+          }
+          const retryExpiry = retryUntil.get(key)
+          if (retryExpiry !== undefined) {
+            if (retryExpiry > Date.now()) return Effect.succeed({ kind: "updating" } as ThumbnailLoad)
+            retryUntil.delete(key)
           }
           const failedExpiry = failedUntil.get(key)
           if (failedExpiry !== undefined) {
@@ -424,13 +520,18 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
           }
           inFlight.add(key)
           const controller = new AbortController()
-          return render(key, controller.signal, Date.now() + RENDER_REQUEST_DEADLINE_MS).pipe(
+          const deadlineAt = Date.now() + RENDER_REQUEST_DEADLINE_MS
+          return render(key, controller.signal, deadlineAt).pipe(
             Effect.timeoutOrElse({
               duration: RENDER_REQUEST_DEADLINE_MS,
               orElse: () => Effect.fail(new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" }))
             }),
             Effect.map((bytes) => bytes === null ? rememberFailed(key) : { kind: "ready", bytes } as const),
-            Effect.catchTag("ThumbnailBudgetError", () => Effect.succeed(rememberFailed(key))),
+            Effect.catchTags({
+              ThumbnailBudgetError: () => Effect.succeed(rememberUpdating(key)),
+              ThumbnailRetryableError: () => Effect.succeed(rememberUpdating(key)),
+              ThumbnailSourceError: () => Effect.succeed(rememberFailed(key))
+            }),
             Effect.ensuring(Effect.sync(() => {
               controller.abort()
               inFlight.delete(key)
@@ -440,5 +541,5 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
 
       return ThumbnailProducer.of({ load })
     })
-  ).pipe(Layer.provide(NodeServices.layer))
+  )
 }
