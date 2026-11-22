@@ -393,6 +393,12 @@ const requireConnection = (): ConnectionLifecycle => {
   return connection
 }
 
+const notifyOpenJournalChanged = (): void => {
+  if (mainWindow !== null && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IpcChannels.openJournalChanged)
+  }
+}
+
 const deliverPendingOpenEvents = async (): Promise<void> => {
   const activeConnection = connection
   if (activeConnection === null) return
@@ -404,15 +410,30 @@ const deliverPendingOpenEvents = async (): Promise<void> => {
     const store = await requireRuntime().runPromise(Effect.gen(function*() {
       return yield* OpenJournalStore
     }))
-    await activeConnection.run(Effect.gen(function*() {
-      const client = yield* OpenEventHttpClient
-      return yield* drainOpenEvents(store, client, session, {
-        isActive: () => activeConnection.currentGeneration() === generation
+    const client: OpenEventHttpClient["Service"] = {
+      batch: (request) => Effect.tryPromise({
+        try: () => activeConnection.run(
+          Effect.gen(function*() {
+            const authenticatedClient = yield* OpenEventHttpClient
+            return yield* authenticatedClient.batch(request)
+          })
+        ),
+        catch: (error) => error as never
       })
+    }
+    const result = await Effect.runPromise(drainOpenEvents(store, client, session, {
+      isActive: () => activeConnection.currentGeneration() === generation
     }))
-  } catch {
+    if (result.missingResults) {
+      console.warn("open event delivery stopped after an incomplete server response")
+    }
+  } catch (error) {
     // A lost response, paused connection, or local write failure leaves the
-    // immutable event pending. The next deliberate reconnect retries it.
+    // immutable event pending. The active generation retries transient errors;
+    // a changed generation leaves the residual journal for the next reconnect.
+    console.warn("open event delivery stopped with pending journal entries", error)
+  } finally {
+    notifyOpenJournalChanged()
   }
 }
 

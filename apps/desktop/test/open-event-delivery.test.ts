@@ -186,4 +186,24 @@ describe("accepted open event delivery", () => {
     expect(calls).toBe(1)
     expect(sleeps).toBe(0)
   })
+
+  it("preserves pending events when the authenticated generation stops during retry", async () => {
+    const row = makeRow()
+    const { store, acknowledged } = makeStore([row])
+    let active = true
+    let calls = 0
+    const client = clientFor(() => {
+      calls += 1
+      return Effect.fail(new Error("temporary server failure"))
+    })
+
+    await expect(Effect.runPromise(drainOpenEvents(store, client, session, {
+      isActive: () => active,
+      sleep: () => Effect.sync(() => { active = false })
+    }))).rejects.toMatchObject({
+      _tag: "OpenEventDeliveryStoppedError"
+    })
+    expect(calls).toBe(1)
+    expect(acknowledged).toEqual([])
+  })
 })

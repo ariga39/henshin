@@ -71,6 +71,7 @@ export interface PrototypeBridge {
   connect(): Promise<Result<ConnectionStatusView>>
   disconnect(): Promise<Result<ConnectionStatusView>>
   connectionStatus(): Promise<Result<ConnectionStatusView>>
+  onOpenJournalChanged?(listener: () => void): () => void
   listOpenJournal?(): Promise<Result<ReadonlyArray<OpenJournalView>>>
   getNote(noteId: string): Promise<Result<NoteView>>
   editNote(input: EditNoteInput): Promise<Result<NoteView>>

@@ -180,10 +180,18 @@ describe("desktop open event delivery boundary", () => {
     await lifecycle.connect()
     const firstSession = lifecycle.getSession()
     if (firstSession === null) throw new Error("connection did not establish a session")
-    const drain = await lifecycle.run(Effect.gen(function*() {
-      const client = yield* OpenEventHttpClient
-      return yield* drainOpenEvents(store, client, firstSession, { random: () => 0 })
-    }))
+    const client: OpenEventHttpClient["Service"] = {
+      batch: (request) => Effect.tryPromise({
+        try: () => lifecycle.run(
+          Effect.gen(function*() {
+            const authenticatedClient = yield* OpenEventHttpClient
+            return yield* authenticatedClient.batch(request)
+          })
+        ),
+        catch: (error) => error as never
+      })
+    }
+    const drain = await Effect.runPromise(drainOpenEvents(store, client, firstSession, { random: () => 0 }))
     expect(drain).toMatchObject({ attempted: 33, acknowledged: 33, alreadyAccepted: 32, held: 0 })
     expect(proxy.requestCount()).toBe(3)
     for (const actionId of eventIds) {
