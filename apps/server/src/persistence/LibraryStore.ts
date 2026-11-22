@@ -52,7 +52,7 @@ export class LibraryStore extends Context.Service<
       const indexedRootSamples = (rootId: string) => worker.call({
         op: "listIndexedRootSamples",
         rootId,
-        sampleLimit: 33
+        sampleLimit: INDEXED_ROOT_SAMPLE_LIMIT + 1
       }).pipe(
         Effect.flatMap((value) => decodeOrFail(decodeIndexedRootSamples, value, "invalid indexed root samples result")),
         Effect.map((page) => ({ root_id: rootId, sample_limit: INDEXED_ROOT_SAMPLE_LIMIT, ...page }))

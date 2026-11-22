@@ -5,7 +5,7 @@ import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contracts/canonical"
 import { MAX_ROOT_EXCLUSIONS, RootExclusions } from "@henshin/contracts/root"
-import { ScanManifest } from "@henshin/contracts"
+import { INDEXED_ROOT_SAMPLE_LIMIT, ScanManifest } from "@henshin/contracts"
 import {
   WorkerMessage,
   WorkerResponse,
@@ -1261,7 +1261,7 @@ const indexedRootSamples = (
     kind: "archive" | "image-directory"
     manifest_json: string
   }>
-  const page = rows.slice(0, 32)
+  const page = rows.slice(0, INDEXED_ROOT_SAMPLE_LIMIT)
   return {
     samples: page.map((row) => {
       const parsed = JSON.parse(row.manifest_json) as unknown
@@ -1277,7 +1277,7 @@ const indexedRootSamples = (
           : manifest.value.pages.reduce((total, page) => total + page.declared_bytes, 0)
       }
     }),
-    sample_truncated: rows.length > 32,
+    sample_truncated: rows.length > INDEXED_ROOT_SAMPLE_LIMIT,
     library_change_revision: librarySummary().change_revision
   }
 }

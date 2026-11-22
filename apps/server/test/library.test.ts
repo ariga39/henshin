@@ -572,4 +572,84 @@ describe("normal library scan", () => {
     })
     expect(samples.data.samples.every((sample) => sample.size_bytes !== null && sample.size_bytes > 0)).toBe(true)
   })
+
+  it("truncates persisted indexed samples at the public limit and leaves small roots complete", async () => {
+    const server = await start()
+    const largeFixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-sample-limit-large-"))
+    const smallFixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-sample-limit-small-"))
+    fixturePaths.add(largeFixture)
+    fixturePaths.add(smallFixture)
+    for (let index = 0; index < 33; index += 1) {
+      await makeImageBook(largeFixture, `book-${index.toString().padStart(2, "0")}`)
+    }
+    await makeImageBook(smallFixture, "small-book")
+
+    const register = (fixture: string, label: string) => withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: preview.data.instance_id,
+          epoch: preview.data.epoch,
+          label,
+          path: fixture,
+          preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+    const scan = (rootId: string, mappingRevision: string, policyRevision: string) => withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.command({
+        params: { id: rootId },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: server.instanceId,
+          epoch: server.epoch,
+          expected_mapping_revision: mappingRevision,
+          expected_policy_revision: policyRevision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+
+    const largeRoot = await register(largeFixture, "Large sample root")
+    const largeScan = await scan(
+      largeRoot.data.root_id,
+      largeRoot.data.mapping_revision,
+      largeRoot.data.policy_revision
+    )
+    if (!("task" in largeScan.data)) throw new Error("expected large scan task")
+    expect((await waitForTerminal(server, largeScan.data.task.task_id)).status).toBe("succeeded")
+
+    const largeSamples = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).indexedSamples({ params: { id: largeRoot.data.root_id } })
+    }))
+    expect(largeSamples.data).toMatchObject({
+      sample_limit: 32,
+      sample_truncated: true
+    })
+    expect(largeSamples.data.samples).toHaveLength(32)
+    expect(largeSamples.data.samples[0]?.relative_path).toBe("book-00")
+    expect(largeSamples.data.samples[31]?.relative_path).toBe("book-31")
+
+    const smallRoot = await register(smallFixture, "Small sample root")
+    const smallScan = await scan(
+      smallRoot.data.root_id,
+      smallRoot.data.mapping_revision,
+      smallRoot.data.policy_revision
+    )
+    if (!("task" in smallScan.data)) throw new Error("expected small scan task")
+    expect((await waitForTerminal(server, smallScan.data.task.task_id)).status).toBe("succeeded")
+
+    const smallSamples = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).indexedSamples({ params: { id: smallRoot.data.root_id } })
+    }))
+    expect(smallSamples.data).toMatchObject({
+      sample_limit: 32,
+      sample_truncated: false
+    })
+    expect(smallSamples.data.samples).toHaveLength(1)
+  })
 })

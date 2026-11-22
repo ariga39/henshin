@@ -5,7 +5,7 @@ import type {
   RootPreviewResult,
   ScanTask
 } from "@henshin/contracts"
-import { LibraryClient, LocalMappingClient, PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
+import { LibraryClient, PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
 import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
@@ -60,38 +60,6 @@ export const previewRoot = (selection: RootPreviewRequest | string) =>
         })
       )
     }
-  })
-
-export const previewLocalMapping = (rootId: string) =>
-  Effect.gen(function*() {
-    const client = yield* LocalMappingClient
-    yield* Effect.sync(() => viewStore.set({
-      local_mapping_root_id: rootId,
-      local_mapping_status: "loading",
-      local_mapping_error: null
-    }))
-    const result = yield* client.preview(rootId)
-    if (!result.ok) {
-      yield* Effect.sync(() => viewStore.set({
-        local_mapping_status: "error",
-        local_mapping_error: result.error.message
-      }))
-      return
-    }
-    if (result.data === null) {
-      const retainedPreview = viewStore.getState().local_mapping_preview
-      yield* Effect.sync(() => viewStore.set({
-        local_mapping_status: retainedPreview === null ? "idle" : "ready",
-        local_mapping_error: null
-      }))
-      return
-    }
-    yield* Effect.sync(() => viewStore.set({
-      local_mapping_root_id: rootId,
-      local_mapping_status: "ready",
-      local_mapping_preview: result.data,
-      local_mapping_error: null
-    }))
   })
 
 export const loadRoots = Effect.gen(function*() {
