@@ -6,6 +6,7 @@ import { Effect, Layer } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   ReviewHttpClient,
+  LibraryHttpClient,
   ServerHttpClient,
   TaskHttpClient,
   type RootPreview,
@@ -38,6 +39,9 @@ const withTaskClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E
 const withReviewClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, ReviewHttpClient>): Promise<A> =>
   Effect.runPromise(Effect.provide(program, ReviewHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
 
+const withLibraryClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, LibraryHttpClient>): Promise<A> =>
+  Effect.runPromise(Effect.provide(program, LibraryHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
+
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 const waitForTerminal = async (server: RunningServer, taskId: string): Promise<ScanTask> => {
@@ -68,6 +72,114 @@ afterEach(async () => {
 })
 
 describe("durable held manual scan", () => {
+  it("conditionally releases one held discovery, survives restart, and accepts it only on a later normal scan", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-release-held-"))
+    fixturePaths.add(fixture)
+    for (const name of ["book-a", "book-b"]) {
+      const book = path.join(fixture, name)
+      await mkdir(book)
+      await writeFile(path.join(book, "001.jpg"), `${name} page`)
+    }
+
+    const preview = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const result = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in result.data)) throw new Error("expected setup preview")
+      return result.data
+    }))
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: preview.instance_id,
+          epoch: preview.epoch,
+          label: "Release books",
+          path: fixture,
+          preview_identity: preview.preview_identity
+        }
+      })
+    }))
+
+    const held = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: server.instanceId,
+          epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: true }
+        }
+      })
+    }))
+    if (!("task" in held.data)) throw new Error("expected held scan task submission")
+    expect((await waitForTerminal(server, held.data.task.task_id)).status).toBe("succeeded")
+
+    const initialCandidates = await listCandidates(server)
+    expect(initialCandidates).toHaveLength(2)
+    const released = initialCandidates.find((candidate) => candidate.relative_path === "book-a")
+    const retained = initialCandidates.find((candidate) => candidate.relative_path === "book-b")
+    if (released === undefined || retained === undefined) throw new Error("expected two held discoveries")
+    const releasePayload = {
+      root_id: root.data.root_id,
+      operation_id: randomUUID(),
+      instance_id: server.instanceId,
+      epoch: server.epoch,
+      expected_candidate_version: released.candidate_version,
+      expected_mapping_revision: root.data.mapping_revision,
+      expected_policy_revision: root.data.policy_revision,
+      command: { type: "release-hold" as const }
+    }
+    const release = await withReviewClient(server, Effect.gen(function*() {
+      const client = yield* ReviewHttpClient
+      return yield* client.command({ params: { id: released.candidate_id }, payload: releasePayload })
+    }))
+    expect(release.data.candidate).toMatchObject({ relative_path: "book-a", hold_state: "eligible", candidate_version: 2 })
+    const replay = await withReviewClient(server, Effect.gen(function*() {
+      const client = yield* ReviewHttpClient
+      return yield* client.command({ params: { id: released.candidate_id }, payload: releasePayload })
+    }))
+    expect(replay.data).toEqual(release.data)
+    expect((await listCandidates(server)).find((candidate) => candidate.relative_path === "book-b")?.hold_state).toBe("held")
+
+    await server.stop()
+    const restarted = await startServer(server.dbPath)
+    servers.push(restarted)
+    const afterRestart = await listCandidates(restarted)
+    expect(afterRestart.find((candidate) => candidate.relative_path === "book-a")?.hold_state).toBe("eligible")
+    expect(afterRestart.find((candidate) => candidate.relative_path === "book-b")?.hold_state).toBe("held")
+
+    const normal = await withServerClient(restarted, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: restarted.instanceId,
+          epoch: restarted.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in normal.data)) throw new Error("expected normal scan task submission")
+    expect((await waitForTerminal(restarted, normal.data.task.task_id)).status).toBe("succeeded")
+
+    const library = await withLibraryClient(restarted, Effect.gen(function*() {
+      const client = yield* LibraryHttpClient
+      return yield* client.search({ payload: { page_size: 200 } })
+    }))
+    expect(library.data.entries.map((entry) => entry.relative_path)).toEqual(["book-a"])
+    const remaining = await listCandidates(restarted)
+    expect(remaining).toHaveLength(1)
+    expect(remaining[0]).toMatchObject({ relative_path: "book-b", hold_state: "held" })
+  })
+
   it("stages a healthy book and an invalid CBZ, preserves hold state across restart, and accepts nothing", async () => {
     const server = await start()
     const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-held-scan-"))
