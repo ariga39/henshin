@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron"
 import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
@@ -13,6 +13,7 @@ import {
   HandshakeIpcRequest,
   IpcChannels,
   LibraryHttpClient,
+  LocalMappingPreviewIpcRequest,
   LibrarySearchIpcRequest,
   ThumbnailGetIpcRequest,
   ThumbnailHttpClient,
@@ -35,6 +36,7 @@ import {
   type PublicError,
   type RootPreviewResult
 } from "@henshin/contracts"
+import { inspectLocalMapping, LocalMappingUnavailableError } from "./LocalMappingPreview"
 import { startServerChild, type ServerChild } from "./server-child"
 import { DraftConflictError, DraftStore, DraftStoreFullError } from "./persistence/DraftStore"
 import {
@@ -98,6 +100,13 @@ const decodePublicError = Schema.decodeUnknownOption(PublicApiError)
  * message, stack, or internal cause never crosses the IPC boundary.
  */
 const toPublicError = (error: unknown): PublicError => {
+  if (error instanceof LocalMappingUnavailableError) {
+    return {
+      code: "local_mapping_unavailable",
+      message: error.message,
+      retryable: true
+    }
+  }
   if (error instanceof CommandAttemptConflictError) {
     return {
       code: "operation_conflict",
@@ -324,6 +333,34 @@ const registerIpc = (): void => {
           }
           const { root_id, ...payload } = decoded.value
           return yield* client.command({ params: { id: root_id }, payload })
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.localMappingPreview, async (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(LocalMappingPreviewIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    const selected = await dialog.showOpenDialog(mainWindow!, {
+      title: "Select the local collection directory",
+      properties: ["openDirectory"]
+    })
+    if (selected.canceled || selected.filePaths.length === 0) return { ok: true as const, data: null }
+    const selectedPath = selected.filePaths[0]
+    return runNetworkResult(
+      toRawResult(
+        Effect.gen(function*() {
+          const client = yield* LibraryHttpClient
+          const indexed = yield* client.indexedSamples({ params: { id: decoded.value.root_id } })
+          return yield* Effect.promise(() =>
+            inspectLocalMapping(
+              decoded.value.root_id,
+              selectedPath,
+              indexed.data.samples,
+              indexed.data.sample_truncated
+            )
+          )
         })
       )
     )

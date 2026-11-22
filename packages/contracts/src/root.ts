@@ -147,6 +147,32 @@ export const SavedRootPreview = Schema.Struct({
 })
 export type SavedRootPreview = typeof SavedRootPreview.Type
 
+export const LocalMappingSample = Schema.Struct({
+  relative_path: RootRelativePath,
+  indexed_kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  indexed_format_evidence: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
+  indexed_size_bytes: Schema.NullOr(Schema.Natural),
+  status: Schema.Union([
+    Schema.Literal("found"),
+    Schema.Literal("missing"),
+    Schema.Literal("unsafe"),
+    Schema.Literal("unsupported")
+  ]),
+  local_kind: Schema.NullOr(Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")])),
+  local_format_evidence: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
+  local_size_bytes: Schema.NullOr(Schema.Natural)
+})
+export type LocalMappingSample = typeof LocalMappingSample.Type
+
+export const LocalMappingPreview = Schema.Struct({
+  root_id: Uuid,
+  selected_local_path: Schema.String,
+  samples: Schema.Array(LocalMappingSample),
+  sample_limit: Schema.Literal(32),
+  sample_truncated: Schema.Boolean
+})
+export type LocalMappingPreview = typeof LocalMappingPreview.Type
+
 export const RootPreviewResult = Schema.Union([RootPreview, SavedRootPreview])
 export type RootPreviewResult = typeof RootPreviewResult.Type
 

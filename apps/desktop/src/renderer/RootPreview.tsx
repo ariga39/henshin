@@ -2,7 +2,16 @@ import { useSyncExternalStore } from "react"
 import type { RootPreviewResult } from "@henshin/contracts"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { canSaveRoot, excludeRootPath, previewRoot, refreshRootPolicy, removeRootExclusion, saveRoot, showLibrary } from "./workflows"
+import {
+  canSaveRoot,
+  excludeRootPath,
+  previewLocalMapping,
+  previewRoot,
+  refreshRootPolicy,
+  removeRootExclusion,
+  saveRoot,
+  showLibrary
+} from "./workflows"
 import { HeldScanControls, HeldScanReview } from "./HeldScanReview"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
@@ -59,6 +68,27 @@ const rootPreviewStatusText = (state: ReturnType<typeof viewStore.getState>): st
       ? `Showing the first ${state.root_preview.sample_limit} items. More are available.`
       : "All items are shown."
 }
+
+const formatBytes = (bytes: number | null): string => {
+  if (bytes === null) return "not recorded"
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+}
+
+const formats = (values: ReadonlyArray<string>): string => values.length === 0 ? "not recorded" : values.join(", ")
+
+const indexedFormatLabel = (kind: "archive" | "image-directory"): string =>
+  kind === "archive" ? "Indexed page formats" : "Indexed image formats"
+
+const indexedSizeLabel = (kind: "archive" | "image-directory"): string =>
+  kind === "archive" ? "Indexed container bytes" : "Indexed direct-image bytes"
+
+const localFormatLabel = (kind: "archive" | "image-directory"): string =>
+  kind === "archive" ? "Local container format" : "Local image formats"
+
+const localSizeLabel = (kind: "archive" | "image-directory"): string =>
+  kind === "archive" ? "Local container bytes" : "Local direct-image bytes"
 
 export const RootPreviewScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
@@ -190,6 +220,36 @@ export const RootPreviewScreen = () => {
               <button data-testid="root-saved-preview" disabled={loading || saving || changingPolicy} onClick={() => void runtime.runPromise(previewRoot({ kind: "saved-root", root_id: root.root_id }))}>
                 Preview books
               </button>
+              <button
+                data-testid="root-local-mapping"
+                disabled={state.local_mapping_status === "loading"}
+                onClick={() => void runtime.runPromise(previewLocalMapping(root.root_id))}
+              >
+                Check local directory
+              </button>
+              {state.local_mapping_root_id === root.root_id && state.local_mapping_status === "error" && (
+                <p role="alert" data-testid="local-mapping-error">Local directory check failed: {state.local_mapping_error}</p>
+              )}
+              {state.local_mapping_root_id === root.root_id && state.local_mapping_status === "ready" && state.local_mapping_preview !== null && (
+                <section data-testid="local-mapping-preview" aria-labelledby="local-mapping-heading">
+                  <h3 id="local-mapping-heading">Local directory check</h3>
+                  <p data-testid="local-mapping-selected-path">Selected local directory: {state.local_mapping_preview.selected_local_path}</p>
+                  {state.local_mapping_preview.sample_truncated && (
+                    <p>Showing the first {state.local_mapping_preview.sample_limit} indexed samples.</p>
+                  )}
+                  <ul data-testid="local-mapping-samples">
+                    {state.local_mapping_preview.samples.map((sample) => (
+                      <li key={sample.relative_path} data-testid="local-mapping-sample">
+                        <strong>{sample.relative_path}</strong>{" "}
+                        <span>{sample.status === "found" ? "Found on this device." : sample.status === "missing" ? "Missing on this device." : sample.status === "unsafe" ? "Rejected as unsafe." : "Unsupported on this device."}</span>{" "}
+                        <small>
+                          {indexedFormatLabel(sample.indexed_kind)}: {formats(sample.indexed_format_evidence)}; {indexedSizeLabel(sample.indexed_kind)}: {formatBytes(sample.indexed_size_bytes)}. {localFormatLabel(sample.indexed_kind)}: {formats(sample.local_format_evidence)}; {localSizeLabel(sample.indexed_kind)}: {formatBytes(sample.local_size_bytes)}.
+                        </small>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
             </li>
           ))}
         </ul>
