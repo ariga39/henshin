@@ -51,7 +51,7 @@ import {
 } from "./CommandCoordinator"
 import { LocalDatabaseWorker } from "./persistence/LocalDatabaseWorker"
 import { OpenJournalStore } from "./persistence/OpenJournalStore"
-import { deliverOpenEvents } from "./OpenEventDelivery"
+import { drainOpenEvents } from "./OpenEventDelivery"
 import {
   ConnectionInstanceMismatchError,
   ConnectionLifecycle,
@@ -227,13 +227,17 @@ const deliverPendingOpenEvents = async (): Promise<void> => {
   if (activeConnection === null) return
   const session = activeConnection.getSession()
   if (session === null) return
+  const generation = activeConnection.currentGeneration()
+  if (generation === null) return
   try {
     const store = await requireRuntime().runPromise(Effect.gen(function*() {
       return yield* OpenJournalStore
     }))
     await activeConnection.run(Effect.gen(function*() {
       const client = yield* OpenEventHttpClient
-      return yield* deliverOpenEvents(store, client, session)
+      return yield* drainOpenEvents(store, client, session, {
+        isActive: () => activeConnection.currentGeneration() === generation
+      })
     }))
   } catch {
     // A lost response, paused connection, or local write failure leaves the
@@ -444,7 +448,10 @@ const registerIpc = (): void => {
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return requireConnection()
       .connect()
-      .then((status) => deliverPendingOpenEvents().then(() => connectionStatusResult(status)))
+      .then((status) => {
+        void deliverPendingOpenEvents()
+        return connectionStatusResult(status)
+      })
       .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
   })
 
@@ -779,7 +786,7 @@ const bootstrap = async (): Promise<void> => {
     bearerToken: serverChild.bearerToken
   })
   await connection.connect()
-  await deliverPendingOpenEvents()
+  void deliverPendingOpenEvents()
 
   registerIpc()
   createWindow()
