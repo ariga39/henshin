@@ -39,8 +39,11 @@ describe("saved root scan policy", () => {
     fixturePaths.add(fixture)
     await mkdir(path.join(fixture, "series"))
     await mkdir(path.join(fixture, "series-extra"))
+    await mkdir(path.join(fixture, "series-extra-sibling"))
     const source = path.join(fixture, "series", "book.cbz")
     await writeFile(source, "source-bytes")
+    await writeFile(path.join(fixture, "series-extra", "001.jpg"), "page")
+    await writeFile(path.join(fixture, "series-extra-sibling", "001.jpg"), "page")
     const sourceBefore = await readFile(source)
 
     const saved = await withClient(
@@ -103,6 +106,58 @@ describe("saved root scan policy", () => {
       { path: "series/book.cbz", scope: "exact" },
       { path: "series-extra", scope: "subtree" }
     ])
+
+    const discovery = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        return yield* client.preview({ payload: { kind: "saved-root", root_id: saved.data.root_id } })
+      })
+    )
+    expect(discovery.data).toMatchObject({
+      kind: "saved-root-discovery",
+      policy_revision: "2",
+      candidates: [{ relative_path: "series-extra-sibling", kind: "image-directory" }]
+    })
+    expect(discovery.data).not.toMatchObject({
+      candidates: expect.arrayContaining([
+        { relative_path: "series/book.cbz" },
+        { relative_path: "series-extra" }
+      ])
+    })
+
+    const restored = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        return yield* client.command({
+          params: { id: saved.data.root_id },
+          payload: {
+            operation_id: randomUUID(),
+            instance_id: server.instanceId,
+            epoch: server.epoch,
+            expected_policy_revision: subtree.data.policy_revision,
+            command: { type: "remove-exclusion", exclusion: { path: "series/book.cbz", scope: "exact" } }
+          }
+        })
+      })
+    )
+    expect(restored.data.policy_revision).toBe("3")
+    expect(restored.data.exclusions).toEqual([{ path: "series-extra", scope: "subtree" }])
+
+    const restoredDiscovery = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        return yield* client.preview({ payload: { kind: "saved-root", root_id: saved.data.root_id } })
+      })
+    )
+    if (!("kind" in restoredDiscovery.data)) throw new Error("expected saved-root discovery")
+    expect(restoredDiscovery.data.candidates.map((candidate) => candidate.relative_path).sort()).toEqual([
+      "series-extra-sibling",
+      "series/book.cbz"
+    ])
+    expect(restoredDiscovery.data.candidates).toHaveLength(2)
 
     const replay = await withClient(
       server,
@@ -210,7 +265,7 @@ describe("saved root scan policy", () => {
         return yield* client.list()
       })
     )
-    expect(listedBeforeRestart.data[0]?.exclusions).toEqual(subtree.data.exclusions)
+    expect(listedBeforeRestart.data[0]?.exclusions).toEqual(restored.data.exclusions)
 
     await server.stop()
     const restarted = await startServer(server.dbPath)
@@ -222,7 +277,7 @@ describe("saved root scan policy", () => {
         return yield* client.list()
       })
     )
-    expect(listedAfterRestart.data[0]?.policy_revision).toBe("2")
-    expect(listedAfterRestart.data[0]?.exclusions).toEqual(subtree.data.exclusions)
+    expect(listedAfterRestart.data[0]?.policy_revision).toBe("3")
+    expect(listedAfterRestart.data[0]?.exclusions).toEqual(restored.data.exclusions)
   })
 })

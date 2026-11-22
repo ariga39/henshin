@@ -488,6 +488,12 @@ export interface SourceRootDiscovery {
 
 export interface DiscoverSourceRootOptions {
   readonly limits?: Partial<SourceDiscoveryLimits>
+  readonly exclusions?: ReadonlyArray<SourceDiscoveryExclusion>
+}
+
+export interface SourceDiscoveryExclusion {
+  readonly path: string
+  readonly scope: "exact" | "subtree"
 }
 
 const supportedImageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp"])
@@ -596,6 +602,15 @@ export const discoverSourceRoot = async (
 ): Promise<NativeBoundaryResult<SourceRootDiscovery>> => {
   const limits = sourceDiscoveryLimits(options?.limits)
   if (limits === undefined) return failure("directory-limit")
+  const exclusions = options?.exclusions ?? []
+  const isSubtreeExcluded = (relativePath: string): boolean =>
+    exclusions.some(
+      (exclusion) =>
+        exclusion.scope === "subtree" &&
+        (relativePath === exclusion.path || relativePath.startsWith(`${exclusion.path}/`))
+    )
+  const isExactlyExcluded = (relativePath: string): boolean =>
+    exclusions.some((exclusion) => exclusion.scope === "exact" && relativePath === exclusion.path)
 
   const context: OperationContext = {
     limits: discoveryNativeLimits(limits),
@@ -635,9 +650,6 @@ export const discoverSourceRoot = async (
     appendSample(issues, discoveryIssue(code, relativePath))
   }
 
-  const remainingNativeLimits = (): NativeBoundaryLimits =>
-    discoveryNativeLimits(limits, Math.max(1, context.deadlineAt - Date.now()))
-
   while (directories.length > 0 && !stopped) {
     const next = directories.shift() as {
       readonly relativePath: string
@@ -656,6 +668,7 @@ export const discoverSourceRoot = async (
     directoriesVisited += 1
 
     if (next.relativePath !== "") {
+      if (isSubtreeExcluded(next.relativePath)) continue
       let queuedStats: Awaited<ReturnType<typeof lstat>>
       try {
         queuedStats = await lstat(next.nativePath, { bigint: true })
@@ -754,6 +767,7 @@ export const discoverSourceRoot = async (
           directoryComplete = false
           continue
         }
+        if (isSubtreeExcluded(relativePath)) continue
 
         let stats: Awaited<ReturnType<typeof lstat>>
         try {
@@ -770,35 +784,24 @@ export const discoverSourceRoot = async (
         }
 
         if (stats.isDirectory()) {
-          const resolved = await resolveSourceCandidate(
-            initialRoot.value,
-            relativePath,
-            { limits: remainingNativeLimits() }
-          )
-          if (!resolved.ok) {
-            if (resolved.code === "source-link") {
-              excludedLinkCount += 1
-              appendSample(excludedLinks, relativePath)
-            }
-            else markPartial(discoveryIssueCode(resolved.code), relativePath)
-            continue
-          }
-          directories.push({ relativePath, nativePath: resolved.value.nativePath, identity: identityOf(stats) })
+          directories.push({ relativePath, nativePath: join(next.nativePath, name), identity: identityOf(stats) })
           continue
         }
 
+        if (stats.isFile() && isExactlyExcluded(relativePath)) continue
+
         if (stats.isFile() && isArchiveName(name)) {
-          const resolved = await resolveSourceCandidate(
-            initialRoot.value,
-            relativePath,
-            { limits: remainingNativeLimits() }
-          )
-          if (!resolved.ok) {
-            if (resolved.code === "source-link") {
+          const verified = await verifyFinalCandidate(initialRoot.value, {
+            name,
+            path: join(next.nativePath, name),
+            stats
+          }, context)
+          if (!verified.ok) {
+            if (verified.code === "source-link") {
               excludedLinkCount += 1
               appendSample(excludedLinks, relativePath)
             }
-            else markPartial(discoveryIssueCode(resolved.code), relativePath)
+            else markPartial(discoveryIssueCode(verified.code), relativePath)
             continue
           }
           candidateCount += 1
@@ -842,7 +845,7 @@ export const discoverSourceRoot = async (
       }
     }
 
-    if (directoryComplete && next.relativePath !== "" && directImageCount > 0) {
+    if (directoryComplete && next.relativePath !== "" && directImageCount > 0 && !isExactlyExcluded(next.relativePath)) {
       candidateCount += 1
       if (candidates.length >= limits.maxCandidates) {
         markPartial("directory-limit", next.relativePath)
@@ -854,7 +857,7 @@ export const discoverSourceRoot = async (
         directImageCount,
         unsupportedDirectImageCount
       })
-    } else if (directoryComplete && next.relativePath !== "" && unsupportedDirectImageCount > 0) {
+    } else if (directoryComplete && next.relativePath !== "" && unsupportedDirectImageCount > 0 && !isExactlyExcluded(next.relativePath)) {
       unsupportedDirectoryCount += 1
       appendSample(unsupportedDirectories, next.relativePath)
     }
@@ -867,6 +870,10 @@ export const discoverSourceRoot = async (
   }
 
   candidates.sort((left, right) => utf8Compare(left.relativePath, right.relativePath))
+  const hasUnsupportedContent = unsupportedLooseImageCount > 0 ||
+    unsupportedNameCount > 0 ||
+    unsupportedDirectoryCount > 0 ||
+    candidates.some((candidate) => candidate.unsupportedDirectImageCount > 0)
   const discovery: SourceRootDiscovery = {
     root: initialRoot.value,
     candidates,
@@ -875,7 +882,7 @@ export const discoverSourceRoot = async (
     unsupportedLooseImages: sorted(unsupportedLooseImages),
     unsupportedLooseImageCount,
     coverage: {
-      status: partial || directories.length > 0 ? "partial" : "complete",
+      status: partial || directories.length > 0 || hasUnsupportedContent ? "partial" : "complete",
       directoriesVisited,
       entriesObserved,
       candidateCount,

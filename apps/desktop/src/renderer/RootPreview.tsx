@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react"
 import type { RootPreviewResult } from "@henshin/contracts"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { canSaveRoot, previewRoot, saveRoot } from "./workflows"
+import { canSaveRoot, excludeRootPath, previewRoot, removeRootExclusion, saveRoot } from "./workflows"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -18,17 +18,36 @@ const rootPreviewStatusText = (state: ReturnType<typeof viewStore.getState>): st
   if (state.root_save_status === "ready") {
     return `Server root saved: ${state.root_save_target_label} (${state.root_save_target_path}).`
   }
+  if (state.root_policy_status === "loading") return "Updating exclusion policy…"
+  if (state.root_policy_status === "error") {
+    return `Exclusion policy update failed: ${state.root_policy_error}. Refresh the preview and try again.`
+  }
   if (state.root_preview_status === "loading") return "Previewing directory…"
   if (state.root_preview_status === "error") {
     return `Preview failed: ${state.root_preview_error}. Check the server path and try again.`
   }
   if (state.root_preview === null) return ""
   if (isSavedDiscovery(state.root_preview)) {
-    return state.root_preview.coverage.status === "partial"
+    const { coverage } = state.root_preview
+    const skipped = [
+      coverage.unsupported_name_count > 0 ? `${coverage.unsupported_name_count} unsupported names` : null,
+      coverage.unsupported_directory_count > 0 ? `${coverage.unsupported_directory_count} unsupported directories` : null,
+      state.root_preview.unsupported_loose_image_count > 0
+        ? `${state.root_preview.unsupported_loose_image_count} unsupported loose images`
+        : null,
+      state.root_preview.unassigned_loose_image_count > 0
+        ? `${state.root_preview.unassigned_loose_image_count} unassigned loose images`
+        : null
+    ].filter((value): value is string => value !== null)
+    const coverageText = coverage.status === "partial"
       ? "Preview is partial; some source locations could not be covered."
-      : state.root_preview.coverage.candidate_sample_truncated
-        ? `Showing the first ${state.root_preview.sample_limit} candidates. More are available.`
-        : "Candidate preview is complete."
+      : "Candidate preview is complete."
+    const candidateText = coverage.candidate_sample_truncated
+      ? `Showing the first ${state.root_preview.sample_limit} candidates; more candidates are available.`
+      : null
+    return [candidateText, coverageText, skipped.length > 0 ? `Skipped: ${skipped.join(", ")}.` : null]
+      .filter((value): value is string => value !== null)
+      .join(" ")
   }
   return state.root_preview.outcome === "empty"
     ? "The directory is empty."
@@ -41,13 +60,15 @@ export const RootPreviewScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   const loading = state.root_preview_status === "loading"
   const saving = state.root_save_status === "loading"
+  const changingPolicy = state.root_policy_status === "loading"
+  const retryRequest = state.root_preview_request
   return (
     <main className="collection">
       <h1>Collection setup</h1>
       <p>Enter the full path to your collection as it appears on the server.</p>
       <form onSubmit={(event) => {
         event.preventDefault()
-        if (!loading && !saving && state.root_preview_path) void runtime.runPromise(previewRoot({ path: state.root_preview_path }))
+        if (!loading && !saving && !changingPolicy && state.root_preview_path) void runtime.runPromise(previewRoot({ path: state.root_preview_path }))
       }}>
         <label htmlFor="server-path">Server directory</label>
         <input id="server-path" data-testid="root-preview-path" value={state.root_preview_path}
@@ -58,7 +79,7 @@ export const RootPreviewScreen = () => {
               ? {}
               : { root_save_status: "idle" as const, root_save_error: null })
           })} />
-        <button data-testid="root-preview-submit" disabled={loading || saving || !state.root_preview_path}>
+        <button data-testid="root-preview-submit" disabled={loading || saving || changingPolicy || !state.root_preview_path}>
           {loading ? "Previewing…" : "Preview directory"}
         </button>
       </form>
@@ -71,12 +92,12 @@ export const RootPreviewScreen = () => {
       )}
       <p role="status" data-testid="root-preview-outcome">{rootPreviewStatusText(state)}</p>
       {!isSavedDiscovery(state.root_preview) && (
-        <button data-testid="root-save" disabled={!canSaveRoot(state)} onClick={() => void runtime.runPromise(saveRoot)}>
+        <button data-testid="root-save" disabled={!canSaveRoot(state) || changingPolicy} onClick={() => void runtime.runPromise(saveRoot)}>
           {saving ? "Saving…" : "Save server root"}
         </button>
       )}
-      {state.root_preview_status === "error" && state.root_preview_selected_path === state.root_preview_path && (
-        <button data-testid="root-preview-retry" disabled={saving} onClick={() => void runtime.runPromise(previewRoot({ path: state.root_preview_path }))}>
+      {state.root_preview_status === "error" && retryRequest !== null && (
+        <button data-testid="root-preview-retry" disabled={saving || loading} onClick={() => void runtime.runPromise(previewRoot(retryRequest))}>
           Retry preview
         </button>
       )}
@@ -96,14 +117,39 @@ export const RootPreviewScreen = () => {
               {candidate.kind === "image-directory" && (
                 <small> {candidate.direct_image_count} direct images</small>
               )}
+              <button
+                data-testid="root-exclude"
+                disabled={changingPolicy}
+                onClick={() => void runtime.runPromise(excludeRootPath({
+                  rootId: state.root_preview && "kind" in state.root_preview ? state.root_preview.root_id : "",
+                  path: candidate.relative_path,
+                  scope: candidate.kind === "archive" ? "exact" : "subtree"
+                }))}
+              >
+                Exclude {candidate.kind === "archive" ? "file" : "subtree"}
+              </button>
+              {candidate.unsupported_direct_image_count > 0 && (
+                <small> {candidate.unsupported_direct_image_count} unsupported direct images</small>
+              )}
             </li>
           ))}
         </ul>
       )}
       {isSavedDiscovery(state.root_preview) && (
         <p data-testid="root-preview-coverage">
-          {state.root_preview.unassigned_loose_image_count} unassigned loose images; {state.root_preview.coverage.excluded_link_count} linked locations excluded; {state.root_preview.coverage.entries_observed} entries observed.
+          {state.root_preview.unassigned_loose_image_count} unassigned loose images; {state.root_preview.unsupported_loose_image_count} unsupported loose images; {state.root_preview.coverage.unsupported_name_count} unsupported names; {state.root_preview.coverage.unsupported_directory_count} unsupported directories; {state.root_preview.coverage.excluded_link_count} linked locations excluded; {state.root_preview.coverage.entries_observed} entries observed.
         </p>
+      )}
+      {state.root_policy_status === "error" && isSavedDiscovery(state.root_preview) && (
+        <button
+          data-testid="root-policy-refresh"
+          disabled={changingPolicy}
+          onClick={() => {
+            if (retryRequest !== null) void runtime.runPromise(previewRoot(retryRequest))
+          }}
+        >
+          Refresh preview
+        </button>
       )}
       <section aria-labelledby="saved-roots-heading">
         <h2 id="saved-roots-heading">Saved server roots</h2>
@@ -113,7 +159,26 @@ export const RootPreviewScreen = () => {
           {state.root_saved_roots.map((root) => (
             <li key={root.root_id} data-testid="root-saved">
               <strong>{root.label}</strong><span> {root.selected_server_path}</span>
-              <button data-testid="root-saved-preview" onClick={() => void runtime.runPromise(previewRoot({ kind: "saved-root", root_id: root.root_id }))}>
+              <small data-testid="root-saved-policy">
+                {root.exclusions.length === 0 ? " No exclusions" : " Excluded: "}
+                {root.exclusions.map((exclusion) => (
+                  <span key={`${exclusion.path}:${exclusion.scope}`}>
+                    {exclusion.path} ({exclusion.scope})
+                    <button
+                      data-testid="root-remove-exclusion"
+                      disabled={changingPolicy}
+                      onClick={() => void runtime.runPromise(removeRootExclusion({
+                        rootId: root.root_id,
+                        path: exclusion.path,
+                        scope: exclusion.scope
+                      }))}
+                    >
+                      Remove exclusion
+                    </button>
+                  </span>
+                ))}
+              </small>
+              <button data-testid="root-saved-preview" disabled={loading || saving || changingPolicy} onClick={() => void runtime.runPromise(previewRoot({ kind: "saved-root", root_id: root.root_id }))}>
                 Preview books
               </button>
             </li>
