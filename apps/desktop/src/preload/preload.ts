@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type {
   ReaderProfileSaveIpcRequest,
+  ReleaseHeldDiscoveryIpcRequest,
   RootCommandIpcRequest,
   RootPreviewRequest,
   RootRegistrationRequest
@@ -17,7 +18,8 @@ contextBridge.exposeInMainWorld("henshinRootPreview", {
 
 contextBridge.exposeInMainWorld("henshinScanReview", {
   listTasks: () => ipcRenderer.invoke(IpcChannels.taskList, {}),
-  candidates: () => ipcRenderer.invoke(IpcChannels.reviewCandidates, {})
+  candidates: () => ipcRenderer.invoke(IpcChannels.reviewCandidates, {}),
+  command: (input: ReleaseHeldDiscoveryIpcRequest) => ipcRenderer.invoke(IpcChannels.reviewCommand, input)
 })
 
 contextBridge.exposeInMainWorld("henshinReaderProfiles", {

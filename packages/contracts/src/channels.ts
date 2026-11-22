@@ -13,6 +13,7 @@ export const IpcChannels = {
   librarySearch: "henshin:library-search",
   taskList: "henshin:task-list",
   reviewCandidates: "henshin:review-candidates",
+  reviewCommand: "henshin:review-command",
   handshake: "henshin-prototype:handshake",
   connect: "henshin-prototype:connect",
   disconnect: "henshin-prototype:disconnect",
