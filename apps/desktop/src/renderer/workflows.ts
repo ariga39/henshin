@@ -110,6 +110,7 @@ export const loadRootWorkspace = Effect.gen(function*() {
   yield* loadRoots
   yield* loadScanResults
   if (viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
+})
 
 export const refreshRootPolicy = Effect.gen(function*() {
   const initialState = viewStore.getState()
@@ -181,11 +182,11 @@ const updateRootExclusion = (input: {
       return
     }
 
+    const updatedRoot = result.data
     yield* Effect.sync(() => {
-      const roots = viewStore.getState().root_saved_roots
       const current = viewStore.getState()
       viewStore.set({
-        root_saved_roots: roots.map((root) => root.root_id === result.data.root_id ? result.data : root),
+        root_saved_roots: current.root_saved_roots.map((root) => root.root_id === updatedRoot.root_id ? updatedRoot : root),
         ...(current.root_preview_generation === previewGeneration
           ? { root_policy_status: "idle" as const, root_policy_error: null }
           : {})
