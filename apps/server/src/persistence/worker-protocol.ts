@@ -161,7 +161,11 @@ export const NormalPublishOutcome = Schema.Union([
     kind: Schema.Literal("allocation_deferred"),
     missingPaths: Schema.Array(Schema.String),
     changedPaths: Schema.Array(Schema.String),
-    excludedPaths: Schema.Array(Schema.String)
+    excludedPaths: Schema.Array(Schema.String),
+    missingPathCount: Schema.Natural,
+    changedPathCount: Schema.Natural,
+    excludedPathCount: Schema.Natural,
+    reviewNeededCount: Schema.Natural
   }),
   Schema.Struct({ kind: Schema.Literal("root_not_found") }),
   Schema.Struct({ kind: Schema.Literal("mapping_revision_conflict") }),
