@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react"
 import type { RootPreviewResult } from "@henshin/contracts"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { canSaveRoot, excludeRootPath, previewRoot, removeRootExclusion, saveRoot } from "./workflows"
+import { canSaveRoot, excludeRootPath, previewRoot, refreshRootPolicy, removeRootExclusion, saveRoot } from "./workflows"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -145,7 +145,7 @@ export const RootPreviewScreen = () => {
           data-testid="root-policy-refresh"
           disabled={changingPolicy}
           onClick={() => {
-            if (retryRequest !== null) void runtime.runPromise(previewRoot(retryRequest))
+            if (retryRequest !== null) void runtime.runPromise(refreshRootPolicy)
           }}
         >
           Refresh preview
