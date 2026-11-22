@@ -53,9 +53,10 @@ afterEach(async () => {
 })
 
 describe("accepted default thumbnails", () => {
-  it("renders CBZ and direct-image covers, then keeps a changed source on the placeholder", async () => {
+  it("starts without its optional cache, regenerates covers, then keeps a changed source on the placeholder", async () => {
     const dbPath = await makeTempDbPath()
     dbPaths.add(dbPath)
+    await writeFile(path.join(path.dirname(dbPath), "thumbnail-cache"), Buffer.from("cache unavailable"))
     const server = await startServer(dbPath)
     servers.push(server)
     const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-thumbnail-"))

@@ -63,10 +63,15 @@ export class ThumbnailCache extends Context.Service<ThumbnailCache, {
   static readonly layer = (directory: string): Layer.Layer<ThumbnailCache> => Layer.effect(
     ThumbnailCache,
     Effect.gen(function*() {
-      yield* Effect.tryPromise({
+      const available = yield* Effect.tryPromise({
         try: () => mkdir(directory, { recursive: true }),
         catch: () => new ThumbnailCacheError({ message: "thumbnail cache is unavailable" })
-      }).pipe(Effect.orDie)
+      }).pipe(
+        Effect.as(true),
+        Effect.catchTag("ThumbnailCacheError", () =>
+          Effect.logWarning("thumbnail cache is unavailable; continuing without cache").pipe(Effect.as(false))
+        )
+      )
 
       let tail = Promise.resolve()
       const enqueue = <A>(work: () => Promise<A>): Promise<A> => {
@@ -75,44 +80,48 @@ export class ThumbnailCache extends Context.Service<ThumbnailCache, {
         return result
       }
 
-      const read = (key: string) => Effect.tryPromise({
-        try: () => enqueue(async () => {
-          const path = join(directory, cacheFilename(key))
-          try {
-            const info = await stat(path)
-            if (!info.isFile() || info.size > THUMBNAIL_MAX_BYTES) {
-              await unlink(path)
-              return null
-            }
-            const bytes = new Uint8Array(await readFile(path))
-            const now = new Date()
-            await utimes(path, now, now)
-            return bytes
-          } catch (error) {
-            if (isNotFound(error)) return null
-            throw error
-          }
-        }),
-        catch: () => new ThumbnailCacheError({ message: "thumbnail cache read failed" })
-      })
+      const read = (key: string) => available
+        ? Effect.tryPromise({
+            try: () => enqueue(async () => {
+              const path = join(directory, cacheFilename(key))
+              try {
+                const info = await stat(path)
+                if (!info.isFile() || info.size > THUMBNAIL_MAX_BYTES) {
+                  await unlink(path)
+                  return null
+                }
+                const bytes = new Uint8Array(await readFile(path))
+                const now = new Date()
+                await utimes(path, now, now)
+                return bytes
+              } catch (error) {
+                if (isNotFound(error)) return null
+                throw error
+              }
+            }),
+            catch: () => new ThumbnailCacheError({ message: "thumbnail cache read failed" })
+          })
+        : Effect.succeed(null)
 
-      const publish = (key: string, bytes: Uint8Array) => Effect.tryPromise({
-        try: () => enqueue(async () => {
-          if (bytes.byteLength === 0 || bytes.byteLength > THUMBNAIL_MAX_BYTES) {
-            throw new Error("thumbnail output exceeds the cache limit")
-          }
-          const temporary = join(directory, `.${randomUUID()}.tmp`)
-          const target = join(directory, cacheFilename(key))
-          try {
-            await writeFile(temporary, bytes, { flag: "wx", mode: 0o600 })
-            await rename(temporary, target)
-            await reclaim(directory)
-          } finally {
-            await unlink(temporary).catch(() => undefined)
-          }
-        }),
-        catch: () => new ThumbnailCacheError({ message: "thumbnail cache publication failed" })
-      })
+      const publish = (key: string, bytes: Uint8Array) => available
+        ? Effect.tryPromise({
+            try: () => enqueue(async () => {
+              if (bytes.byteLength === 0 || bytes.byteLength > THUMBNAIL_MAX_BYTES) {
+                throw new Error("thumbnail output exceeds the cache limit")
+              }
+              const temporary = join(directory, `.${randomUUID()}.tmp`)
+              const target = join(directory, cacheFilename(key))
+              try {
+                await writeFile(temporary, bytes, { flag: "wx", mode: 0o600 })
+                await rename(temporary, target)
+                await reclaim(directory)
+              } finally {
+                await unlink(temporary).catch(() => undefined)
+              }
+            }),
+            catch: () => new ThumbnailCacheError({ message: "thumbnail cache publication failed" })
+          })
+        : Effect.void
 
       return ThumbnailCache.of({ read, publish })
     })

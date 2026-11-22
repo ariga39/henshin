@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
@@ -28,5 +28,20 @@ describe("thumbnail cache", () => {
       yield* cache.publish("overflow", new Uint8Array([99]))
       expect(yield* cache.read("recent")).toEqual(new Uint8Array([1]))
     }).pipe(Effect.provide(ThumbnailCache.layer(directory))))
+  })
+
+  it("continues without cache when the configured path is unavailable", async () => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), "henshin-thumbnail-cache-unavailable-"))
+    directories.push(parent)
+    const unavailable = path.join(parent, "thumbnail-cache")
+    await writeFile(unavailable, new Uint8Array([1]))
+
+    await Effect.runPromise(Effect.gen(function*() {
+      const cache = yield* ThumbnailCache
+      expect(yield* cache.read("missing")).toBeNull()
+      yield* cache.publish("generated", new Uint8Array([2]))
+    }).pipe(Effect.provide(ThumbnailCache.layer(unavailable))))
+
+    await expect(readFile(unavailable)).resolves.toEqual(Buffer.from([1]))
   })
 })

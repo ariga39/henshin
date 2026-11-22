@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import { InternalError, LibraryApi, RequestContext, RootNotFound } from "@henshin/contracts"
+import { InternalError, LibraryApi, RequestContext } from "@henshin/contracts"
 import { HttpApiBuilder } from "effect/http-api"
 import { ServerState } from "../identity"
 import { LibraryStore } from "../persistence/LibraryStore"
@@ -81,40 +81,6 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
                 ...errorBase(server, context.request_id)
               })
             })
-          )
-          return {
-            ...errorBase(server, context.request_id),
-            server_time: Date.now(),
-            data: page
-          }
-        })
-      )
-      .handle("indexedSamples", ({ params }) =>
-        Effect.gen(function*() {
-          const context = yield* RequestContext
-          const root = (yield* roots.list().pipe(
-            Effect.mapError(() => new InternalError({
-              code: "internal_error",
-              message: "internal error",
-              retryable: false,
-              ...errorBase(server, context.request_id)
-            }))
-          )).find((candidate) => candidate.rootId === params.id)
-          if (root === undefined) {
-            return yield* new RootNotFound({
-              code: "not_found",
-              message: "root not found",
-              retryable: false,
-              ...errorBase(server, context.request_id)
-            })
-          }
-          const page = yield* library.indexedRootSamples(params.id).pipe(
-            Effect.mapError(() => new InternalError({
-              code: "internal_error",
-              message: "internal error",
-              retryable: false,
-              ...errorBase(server, context.request_id)
-            }))
           )
           return {
             ...errorBase(server, context.request_id),

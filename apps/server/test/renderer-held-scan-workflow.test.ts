@@ -131,7 +131,6 @@ const resetView = () => {
     library_has_more: false,
     library_status: "idle",
     library_error: null,
-    library_cover_generation: 0,
     library_scan_status: "idle",
     library_scan_error: null,
     library_scan_task: null
@@ -175,7 +174,6 @@ const scanClientWith = (overrides: Partial<ScanReviewClient["Service"]> = {}): S
 function libraryClientWith(overrides: Partial<LibraryClient["Service"]> = {}): LibraryClient["Service"] {
   return LibraryClient.of({
     search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "0" } }),
-    getThumbnail: () => Effect.succeed({ ok: false as const, error: { code: "thumbnail_missing", message: "not used", retryable: false } }),
     ...overrides
   })
 }
@@ -722,13 +720,11 @@ describe("held scan renderer workflows", () => {
     })
 
     await run(loadLibrary(), rootClientWith(), scanClientWith(), libraryClient)
-    expect(viewStore.getState().library_cover_generation).toBe(1)
     await run(loadLibrary(), rootClientWith(), scanClientWith(), libraryClient)
     expect(viewStore.getState()).toMatchObject({
       library_status: "error",
       library_error: "refresh failed",
-      library_entries: [existing],
-      library_cover_generation: 1
+      library_entries: [existing]
     })
 
     await run(loadLibrary(true), rootClientWith(), scanClientWith(), libraryClient)
@@ -736,8 +732,7 @@ describe("held scan renderer workflows", () => {
       library_status: "ready",
       library_entries: [existing, appended],
       library_has_more: false,
-      library_cursor: null,
-      library_cover_generation: 1
+      library_cursor: null
     })
   })
 })

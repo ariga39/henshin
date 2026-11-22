@@ -29,6 +29,8 @@ const MAX_DECODE_ATTEMPTS = 8
 const MAX_CONCURRENT_RENDERS = 4
 const FAILED_RENDER_TTL_MS = 30_000
 const MAX_FAILED_RENDER_KEYS = 128
+const RETRYABLE_RENDER_BACKOFF_MS = 1_000
+const MAX_RETRYABLE_RENDER_KEYS = 128
 
 const verificationLimits = DEFAULT_MANIFEST_LIMITS
 
@@ -204,6 +206,7 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
       const decoderPath = fileURLToPath(new URL("./thumbnail-decoder.mjs", import.meta.url))
       const inFlight = new Set<string>()
       const failedUntil = new Map<string, number>()
+      const retryUntil = new Map<string, number>()
       const phaseLimits = (deadlineAt: number): typeof verificationLimits | null => {
         const remainingMs = deadlineAt - Date.now()
         return remainingMs > 0
@@ -296,8 +299,14 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
           if (Result.isFailure(cheapObservation) || !sameObservation(cheapObservation.success, acceptedManifest.after)) return null
         }
 
-        const cached = yield* cache.read(key)
-        if (cached !== null) return cached
+        const readCache = () => cache.read(key).pipe(
+          Effect.catchTag("ThumbnailCacheError", () => Effect.succeed(null))
+        )
+        let cached: Uint8Array | null = null
+        if (hasAcceptedTokens) {
+          cached = yield* readCache()
+          if (cached !== null) return cached
+        }
 
         const analysisLimits = phaseLimits(deadlineAt)
         if (analysisLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
@@ -308,6 +317,10 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
         }))
         if (Result.isFailure(freshResult)) return null
         if (!sameAcceptedManifest(freshResult.success, acceptedManifest)) return null
+        if (!hasAcceptedTokens) {
+          cached = yield* readCache()
+          if (cached !== null) return cached
+        }
 
         const readPage = (page: typeof acceptedManifest.pages[number]): Effect.Effect<Uint8Array, ThumbnailSourceError> =>
           accepted.kind === "archive"
@@ -412,10 +425,25 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
         return { kind: "missing" }
       }
 
+      const rememberUpdating = (key: string): ThumbnailLoad => {
+        retryUntil.set(key, Date.now() + RETRYABLE_RENDER_BACKOFF_MS)
+        while (retryUntil.size > MAX_RETRYABLE_RENDER_KEYS) {
+          const oldest = retryUntil.keys().next().value
+          if (oldest === undefined) break
+          retryUntil.delete(oldest)
+        }
+        return { kind: "updating" }
+      }
+
       const load = (key: string): Effect.Effect<ThumbnailLoad, ThumbnailRenderError | ThumbnailCacheError> =>
         Effect.suspend(() => {
           if (inFlight.has(key) || inFlight.size >= MAX_CONCURRENT_RENDERS) {
             return Effect.succeed({ kind: "updating" } as ThumbnailLoad)
+          }
+          const retryExpiry = retryUntil.get(key)
+          if (retryExpiry !== undefined) {
+            if (retryExpiry > Date.now()) return Effect.succeed({ kind: "updating" } as ThumbnailLoad)
+            retryUntil.delete(key)
           }
           const failedExpiry = failedUntil.get(key)
           if (failedExpiry !== undefined) {
@@ -424,13 +452,14 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
           }
           inFlight.add(key)
           const controller = new AbortController()
-          return render(key, controller.signal, Date.now() + RENDER_REQUEST_DEADLINE_MS).pipe(
+          const deadlineAt = Date.now() + RENDER_REQUEST_DEADLINE_MS
+          return render(key, controller.signal, deadlineAt).pipe(
             Effect.timeoutOrElse({
               duration: RENDER_REQUEST_DEADLINE_MS,
               orElse: () => Effect.fail(new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" }))
             }),
             Effect.map((bytes) => bytes === null ? rememberFailed(key) : { kind: "ready", bytes } as const),
-            Effect.catchTag("ThumbnailBudgetError", () => Effect.succeed(rememberFailed(key))),
+            Effect.catchTag("ThumbnailBudgetError", () => Effect.succeed(rememberUpdating(key))),
             Effect.ensuring(Effect.sync(() => {
               controller.abort()
               inFlight.delete(key)
