@@ -1,11 +1,46 @@
 import { Effect } from "effect"
-import { PrototypeClient } from "./client"
+import { PrototypeClient, RootPreviewClient } from "./client"
 import { viewStore } from "./store"
 
 export const NOTE_ID = "note-1"
 export const FORM_ID = "synthetic-note"
 
 const newOperationId = (): string => crypto.randomUUID()
+
+export const previewRoot = (path: string) =>
+  Effect.gen(function*() {
+    const client = yield* RootPreviewClient
+    yield* Effect.sync(() =>
+      viewStore.set({
+        root_preview_path: path,
+        root_preview_selected_path: path,
+        root_preview_status: "loading",
+        root_preview: null,
+        root_preview_error: null
+      })
+    )
+
+    const result = yield* client.preview(path)
+    if (result.ok) {
+      yield* Effect.sync(() =>
+        viewStore.set({
+          root_preview_status: "ready",
+          root_preview_selected_path: result.data.selected_server_path,
+          root_preview: result.data,
+          root_preview_error: null
+        })
+      )
+    } else {
+      yield* Effect.sync(() =>
+        viewStore.set({
+          root_preview_status: "error",
+          root_preview_selected_path: path,
+          root_preview: null,
+          root_preview_error: result.error.message
+        })
+      )
+    }
+  })
 
 /**
  * Loads the note and captures the revision the form edits from. `base_revision`

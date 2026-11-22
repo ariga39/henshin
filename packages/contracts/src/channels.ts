@@ -3,6 +3,7 @@
  * can import them without pulling the HTTP client graph.
  */
 export const IpcChannels = {
+  rootPreview: "henshin:root-preview",
   handshake: "henshin-prototype:handshake",
   getNote: "henshin-prototype:get-note",
   editNote: "henshin-prototype:edit-note",
