@@ -66,20 +66,36 @@ const manifestView = (manifest: SourceManifest) => ({
   }
 })
 
-const makeServices = async (cachePublish: "succeed" | "fail", sourceKind: "directory" | "archive" = "directory") => {
+const makeServices = async (
+  cachePublish: "succeed" | "fail",
+  sourceKind: "directory" | "archive" = "directory",
+  options: { readonly legacyObservations?: boolean; readonly nonNaturalArchiveOrder?: boolean } = {}
+) => {
   const rootPath = await mkdtemp(join(os.tmpdir(), "henshin-thumbnail-producer-"))
   temporaryRoots.push(rootPath)
   const bookPath = sourceKind === "directory" ? join(rootPath, "book") : join(rootPath, "book.cbz")
   const goodPage = await sharp({ create: { width: 640, height: 800, channels: 3, background: { r: 30, g: 90, b: 220 } } }).png().toBuffer()
+  const alternatePage = await sharp({ create: { width: 640, height: 800, channels: 3, background: { r: 220, g: 30, b: 40 } } }).png().toBuffer()
   if (sourceKind === "directory") {
     await mkdir(bookPath)
     await writeFile(join(bookPath, "001.png"), Buffer.from("corrupt page"))
     await writeFile(join(bookPath, "002.png"), goodPage)
   } else {
     const writer = new ZipWriter(new BlobWriter("application/zip"))
-    await writer.add("001.png", new Uint8ArrayReader(Buffer.from("corrupt page")), { compressionMethod: 0 })
-    await writer.add("002.png", new Uint8ArrayReader(goodPage), { compressionMethod: 0 })
-    await writer.add("003.png", new Uint8ArrayReader(Buffer.from("later corrupt page")), { compressionMethod: 0 })
+    const entries: ReadonlyArray<readonly [string, Uint8Array]> = options.nonNaturalArchiveOrder
+      ? [
+          ["10.png", alternatePage],
+          ["2.png", goodPage],
+          ["3.png", new Uint8Array(Buffer.from("later corrupt page"))]
+        ]
+      : [
+          ["001.png", new Uint8Array(Buffer.from("corrupt page"))],
+          ["002.png", goodPage],
+          ["003.png", new Uint8Array(Buffer.from("later corrupt page"))]
+        ]
+    for (const [name, bytes] of entries) {
+      await writer.add(name, new Uint8ArrayReader(bytes), { compressionMethod: 0 })
+    }
     const blob = await writer.close()
     const bytes = Buffer.from(await blob.arrayBuffer())
     const localHeaders: Array<number> = []
@@ -121,6 +137,15 @@ const makeServices = async (cachePublish: "succeed" | "fail", sourceKind: "direc
     kind: sourceKind === "directory" ? "image-directory" as const : "archive" as const,
     content_version: "1",
     manifest_json: JSON.stringify(manifestView(manifest))
+  }
+  if (options.legacyObservations) {
+    const legacyManifest = JSON.parse(accepted.manifest_json) as {
+      before: { observation_token?: string }
+      after: { observation_token?: string }
+    }
+    delete legacyManifest.before.observation_token
+    delete legacyManifest.after.observation_token
+    accepted.manifest_json = JSON.stringify(legacyManifest)
   }
   let published: Uint8Array | undefined
   const library = {
@@ -185,5 +210,30 @@ describe("real default-cover producer", () => {
     expect(result.kind).toBe("ready")
     if (result.kind !== "ready") throw new Error("expected rendered CBZ cover")
     await expect(sharp(result.bytes).metadata()).resolves.toMatchObject({ format: "webp", width: 320, height: 480 })
+  })
+
+  it("renders the accepted manifest's first page when ZIP order is non-natural", async () => {
+    const fixture = await makeServices("succeed", "archive", { nonNaturalArchiveOrder: true })
+    const result = await Effect.runPromise(
+      Effect.gen(function*() {
+        const producer = yield* ThumbnailProducer
+        return yield* producer.load(`default-v1.${fixture.entryId}.1`)
+      }).pipe(Effect.provide(fixture.layer))
+    )
+    expect(result.kind).toBe("ready")
+    if (result.kind !== "ready") throw new Error("expected rendered CBZ cover")
+    const stats = await sharp(result.bytes).stats()
+    expect(stats.channels[2]?.mean).toBeGreaterThan(stats.channels[0]?.mean ?? 0)
+  })
+
+  it("renders an accepted entry whose observations predate observation tokens", async () => {
+    const fixture = await makeServices("succeed", "directory", { legacyObservations: true })
+    const result = await Effect.runPromise(
+      Effect.gen(function*() {
+        const producer = yield* ThumbnailProducer
+        return yield* producer.load(`default-v1.${fixture.entryId}.1`)
+      }).pipe(Effect.provide(fixture.layer))
+    )
+    expect(result.kind).toBe("ready")
   })
 })

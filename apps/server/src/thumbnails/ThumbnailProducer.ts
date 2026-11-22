@@ -89,32 +89,47 @@ const normalizeObservation = (
     }
   : observation
 
-const manifestIdentity = (
-  manifest: typeof ScanManifest.Type | {
-    readonly sourceKind: "archive" | "directory"
-    readonly pages: ReadonlyArray<{ readonly name: string; readonly format: string; readonly declaredBytes: number }>
-    readonly before: SourceObservation
-    readonly after: SourceObservation
-  }
-): string => JSON.stringify({
-  source_kind: "source_kind" in manifest ? manifest.source_kind : manifest.sourceKind,
-  pages: manifest.pages.map((page) => "declared_bytes" in page
-    ? page
-    : { name: page.name, format: page.format, declared_bytes: page.declaredBytes }),
-  before: normalizeObservation(manifest.before),
-  after: normalizeObservation(manifest.after)
-})
-
-const hasObservationEvidence = (manifest: typeof ScanManifest.Type): boolean =>
-  typeof manifest.before.observation_token === "string" &&
-  manifest.before.observation_token.length > 0 &&
-  typeof manifest.after.observation_token === "string" &&
-  manifest.after.observation_token.length > 0
-
 const sameObservation = (
   left: typeof ScanManifest.Type["after"] | SourceObservation,
   right: typeof ScanManifest.Type["after"] | SourceObservation
 ): boolean => JSON.stringify(observationIdentity(normalizeObservation(left))) === JSON.stringify(observationIdentity(normalizeObservation(right)))
+
+const sameAcceptedObservation = (
+  current: SourceObservation,
+  accepted: typeof ScanManifest.Type["after"]
+): boolean => {
+  const observed = normalizeObservation(current)
+  const expected = normalizeObservation(accepted)
+  return observed.kind === expected.kind &&
+    observed.bytes === expected.bytes &&
+    observed.mtimeMs === expected.mtimeMs &&
+    observed.entryCount === expected.entryCount &&
+    (expected.observationToken === undefined ||
+      expected.observationToken.length === 0 ||
+      observed.observationToken === expected.observationToken)
+}
+
+const sameAcceptedManifest = (
+  current: {
+    readonly sourceKind: "archive" | "directory"
+    readonly pages: ReadonlyArray<{ readonly name: string; readonly format: string; readonly declaredBytes: number }>
+    readonly before: SourceObservation
+    readonly after: SourceObservation
+  },
+  accepted: typeof ScanManifest.Type
+): boolean =>
+  current.sourceKind === accepted.source_kind &&
+  JSON.stringify(current.pages.map((page) => ({
+    name: page.name,
+    format: page.format,
+    declared_bytes: page.declaredBytes
+  }))) === JSON.stringify(accepted.pages.map((page) => ({
+    name: page.name,
+    format: page.format,
+    declared_bytes: page.declared_bytes
+  }))) &&
+  sameAcceptedObservation(current.before, accepted.before) &&
+  sameAcceptedObservation(current.after, accepted.after)
 
 const sameStats = (
   left: { readonly dev: bigint; readonly ino: bigint; readonly size: bigint; readonly mtimeNs: bigint },
@@ -242,7 +257,6 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
         const decoded = decodeManifest(persistedManifest)
         if (Option.isNone(decoded) || decoded.value.pages.length === 0) return null
         const acceptedManifest = decoded.value
-        if (!hasObservationEvidence(acceptedManifest)) return null
         if (
           (accepted.kind === "archive" && acceptedManifest.source_kind !== "archive") ||
           (accepted.kind === "image-directory" && acceptedManifest.source_kind !== "directory")
@@ -262,18 +276,25 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
         const candidate = yield* Effect.promise(() => resolveSourceCandidate(currentRoot.value, accepted.relative_path))
         if (!candidate.ok || candidate.value.kind !== accepted.kind) return null
 
-        const cheapLimits = phaseLimits(deadlineAt)
-        if (cheapLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
-        const cheapObservation = yield* Effect.result(Effect.tryPromise({
-          try: () => recheckSourceObservation(
-            candidate.value.nativePath,
-            accepted.kind === "archive" ? "archive" : "directory",
-            acceptedManifest.after.entry_count,
-            { limits: cheapLimits, signal }
-          ),
-          catch: () => new ThumbnailSourceError({ message: "accepted source observation is unavailable" })
-        }))
-        if (Result.isFailure(cheapObservation) || !sameObservation(cheapObservation.success, acceptedManifest.after)) return null
+        const hasAcceptedTokens =
+          typeof acceptedManifest.before.observation_token === "string" &&
+          acceptedManifest.before.observation_token.length > 0 &&
+          typeof acceptedManifest.after.observation_token === "string" &&
+          acceptedManifest.after.observation_token.length > 0
+        if (hasAcceptedTokens) {
+          const cheapLimits = phaseLimits(deadlineAt)
+          if (cheapLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
+          const cheapObservation = yield* Effect.result(Effect.tryPromise({
+            try: () => recheckSourceObservation(
+              candidate.value.nativePath,
+              accepted.kind === "archive" ? "archive" : "directory",
+              acceptedManifest.after.entry_count,
+              { limits: cheapLimits, signal }
+            ),
+            catch: () => new ThumbnailSourceError({ message: "accepted source observation is unavailable" })
+          }))
+          if (Result.isFailure(cheapObservation) || !sameObservation(cheapObservation.success, acceptedManifest.after)) return null
+        }
 
         const cached = yield* cache.read(key)
         if (cached !== null) return cached
@@ -286,7 +307,7 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
           signal
         }))
         if (Result.isFailure(freshResult)) return null
-        if (manifestIdentity(freshResult.success) !== manifestIdentity(acceptedManifest)) return null
+        if (!sameAcceptedManifest(freshResult.success, acceptedManifest)) return null
 
         const readPage = (page: typeof acceptedManifest.pages[number]): Effect.Effect<Uint8Array, ThumbnailSourceError> =>
           accepted.kind === "archive"
