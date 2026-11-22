@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type {
+  ReaderProfileSaveIpcRequest,
   ReleaseHeldDiscoveryIpcRequest,
   RootCommandIpcRequest,
   RootPreviewRequest,
@@ -21,6 +22,12 @@ contextBridge.exposeInMainWorld("henshinScanReview", {
   command: (input: ReleaseHeldDiscoveryIpcRequest) => ipcRenderer.invoke(IpcChannels.reviewCommand, input)
 })
 
+contextBridge.exposeInMainWorld("henshinReaderProfiles", {
+  list: () => ipcRenderer.invoke(IpcChannels.readerProfileList, {}),
+  selectExecutable: () => ipcRenderer.invoke(IpcChannels.readerSelectExecutable, {}),
+  save: (input: ReaderProfileSaveIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileSave, input)
+})
+
 contextBridge.exposeInMainWorld("henshinLibrary", {
   search: (input: { readonly page_size?: number; readonly cursor?: string }) =>
     ipcRenderer.invoke(IpcChannels.librarySearch, input)
@@ -32,6 +39,11 @@ if (new URLSearchParams(window.location.search).get("mode") === "prototype") {
     connect: () => ipcRenderer.invoke(IpcChannels.connect, {}),
     disconnect: () => ipcRenderer.invoke(IpcChannels.disconnect, {}),
     connectionStatus: () => ipcRenderer.invoke(IpcChannels.connectionStatus, {}),
+    onOpenJournalChanged: (listener: () => void) => {
+      const handler = () => listener()
+      ipcRenderer.on(IpcChannels.openJournalChanged, handler)
+      return () => ipcRenderer.removeListener(IpcChannels.openJournalChanged, handler)
+    },
     listOpenJournal: () => ipcRenderer.invoke(IpcChannels.listOpenJournal, {}),
     getNote: (noteId: string) => ipcRenderer.invoke(IpcChannels.getNote, { note_id: noteId }),
     editNote: (input: {
