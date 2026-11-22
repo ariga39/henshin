@@ -304,10 +304,6 @@ const registerIpc = (): void => {
       toResult(
         Effect.gen(function*() {
           const client = yield* ServerHttpClient
-          if ("expected_mapping_revision" in decoded.value) {
-            const { root_id, ...payload } = decoded.value
-            return yield* client.command({ params: { id: root_id }, payload })
-          }
           const { root_id, ...payload } = decoded.value
           return yield* client.command({ params: { id: root_id }, payload })
         })

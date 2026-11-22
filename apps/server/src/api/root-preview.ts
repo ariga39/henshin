@@ -220,7 +220,9 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
               try: () => revalidateSourceRoot(observed),
               catch: () => undefined
             }).pipe(Effect.mapError(() => unavailable("saved server root changed or is unavailable")))
-            if (!current.ok) return yield* unavailable("saved server root changed or is unavailable")
+            if (!current.ok) return yield* unavailable(current.code === "root-changed"
+              ? "saved server path now identifies a different directory"
+              : "saved server path is unavailable")
 
             const preview = yield* enumerateSavedRootCandidates(
               current.value,

@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
 import type {
   ConnectionStatusView,
   RootPreviewRequest,
@@ -77,39 +77,66 @@ export const loadRoots = Effect.gen(function*() {
 
 const scanIsActive = (task: ScanTask): boolean => task.status === "queued" || task.status === "running"
 
-export const loadScanResults = Effect.gen(function*() {
-  const client = yield* ScanReviewClient
+const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
   yield* Effect.sync(() => viewStore.set({ scan_status: "loading", scan_error: null }))
   const tasks = yield* client.listTasks()
   if (!tasks.ok) {
     yield* Effect.sync(() => viewStore.set({ scan_status: "error", scan_error: tasks.error.message }))
-    return
+    return false
   }
+  yield* Effect.sync(() => viewStore.set({ scan_tasks: tasks.data }))
+
   const candidates = yield* client.candidates()
   if (!candidates.ok) {
     yield* Effect.sync(() => viewStore.set({ scan_status: "error", scan_error: candidates.error.message }))
-    return
+    return false
   }
   yield* Effect.sync(() => viewStore.set({
-    scan_tasks: tasks.data,
     staged_discoveries: candidates.data,
     scan_status: "ready",
     scan_error: null
   }))
+  return true
 })
 
-export const watchHeldScans = Effect.gen(function*() {
+export const loadScanResults = Effect.gen(function*() {
+  const client = yield* ScanReviewClient
+  return yield* loadScanResultsFor(client)
+})
+
+const watchScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
   while (true) {
-    yield* loadScanResults
-    if (!viewStore.getState().scan_tasks.some(scanIsActive)) return
+    const loaded = yield* loadScanResultsFor(client)
+    if (!loaded || !viewStore.getState().scan_tasks.some(scanIsActive)) return
     yield* Effect.sleep("250 millis")
   }
 })
 
+let scanResultsWatcher: Fiber.Fiber<void, never> | null = null
+
+export const watchHeldScans = Effect.gen(function*() {
+  const existing = scanResultsWatcher
+  if (existing !== null) return yield* Fiber.join(existing)
+
+  const client = yield* ScanReviewClient
+  const watcher = yield* Effect.forkChild(watchScanResultsFor(client))
+  scanResultsWatcher = watcher
+  yield* Fiber.join(watcher).pipe(
+    Effect.ensuring(Effect.sync(() => {
+      if (scanResultsWatcher === watcher) scanResultsWatcher = null
+    }))
+  )
+})
+
+export const retryScanResults = Effect.gen(function*() {
+  const loaded = yield* loadScanResults
+  if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
+})
+
 export const loadRootWorkspace = Effect.gen(function*() {
   yield* loadRoots
-  yield* loadScanResults
-  if (viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
+  const loaded = yield* loadScanResults
+  if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
 })
 
 export const refreshRootPolicy = Effect.gen(function*() {
@@ -227,10 +254,11 @@ export const startHeldScan = (rootId: string) =>
       instance_id: preview.instance_id,
       epoch: preview.epoch,
       expected_mapping_revision: root.mapping_revision,
-      expected_policy_revision: root.policy_revision,
+      expected_policy_revision: preview.policy_revision,
       command: { type: "start-scan", mode: "manual", hold_new_discoveries: true }
     })
     if (!result.ok) {
+      if (result.error.code === "revision_conflict") yield* loadRoots
       yield* Effect.sync(() => viewStore.set({ scan_start_status: "error", scan_start_error: result.error.message }))
       return
     }

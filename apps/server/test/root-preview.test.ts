@@ -149,5 +149,16 @@ describe("server root preview", () => {
       unassigned_loose_image_count: 1
     })
     expect("children" in discovery.data).toBe(false)
+
+    await Promise.all(Array.from({ length: 35 }, (_, i) => writeFile(path.join(fixturePath, `sample-${i}.zip`), "")))
+    const capped = await withClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.preview({ payload: { kind: "saved-root", root_id: saved.data.root_id } })
+    }))
+    expect(capped.data).toMatchObject({ coverage: {
+      candidate_sample_truncated: true,
+      issues: expect.arrayContaining([{ code: "directory-limit", relative_path: expect.any(String) }])
+    } })
+
   })
 })
