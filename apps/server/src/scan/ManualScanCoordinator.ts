@@ -8,6 +8,7 @@ import {
 } from "../analysis/SourceManifestAnalysis"
 import {
   discoverSourceRoot,
+  MANUAL_SCAN_SOURCE_DISCOVERY_LIMITS,
   revalidateSourceRoot,
   resolveSourceCandidate,
   type SourceRootObservation,
@@ -83,6 +84,9 @@ const normalScanQuietIntervalMs = (): number => {
   return Number.isSafeInteger(configured) && configured > 0 ? configured : NORMAL_SCAN_QUIET_INTERVAL_MS
 }
 
+const deferredPathsMessage = (label: string, paths: ReadonlyArray<string>, total: number): string =>
+  `${label}: ${paths.join(", ")}${total > paths.length ? ` (+${total - paths.length} more)` : ""}`
+
 const rootObservation = (root: ServerRootRow): SourceRootObservation => ({
   selectedPath: root.selectedPath,
   canonicalPath: root.canonicalPath,
@@ -123,10 +127,18 @@ const finishUnexpected = (
   cause: Cause.Cause<unknown>
 ) => {
   const interrupted = Cause.hasInterruptsOnly(cause)
+  const rootFenceChanged = Cause.pretty(cause).includes(
+    "scan task no longer matches the current root mapping or policy"
+  )
   const error = interrupted
     ? {
         code: "scan_interrupted",
         message: "scan interrupted; staged discoveries and progress were preserved. Retry the scan after confirming the source is available."
+      }
+    : rootFenceChanged
+    ? {
+        code: "root_policy_changed",
+        message: "scan stopped because the saved root mapping or policy changed while it was running. Retry the scan to continue with the current root settings."
       }
     : {
         code: "scan_failed",
@@ -188,7 +200,10 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
     }
 
     const discovered = yield* Effect.tryPromise({
-      try: () => discoverSourceRoot(current.value, { exclusions: root.exclusions }),
+      try: () => discoverSourceRoot(current.value, {
+        limits: MANUAL_SCAN_SOURCE_DISCOVERY_LIMITS,
+        exclusions: root.exclusions
+      }),
       catch: () => undefined
     })
     if (!discovered.ok) {
@@ -211,11 +226,11 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
     progress = {
       ...progress,
       directoriesVisited: coverage.directories_visited,
-      candidatesDiscovered: discovered.value.candidates.length,
+      candidatesDiscovered: coverage.candidate_count,
       reviewNeededCount: 0,
       coverage
     }
-    yield* store.recordDiscovery(task.task_id, coverage, discovered.value.candidates.length)
+    yield* store.recordDiscovery(task.task_id, coverage, coverage.candidate_count)
 
     const firstObservations = new Map<string, string>()
     for (const candidate of discovered.value.candidates) {
@@ -287,6 +302,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
     let readinessError: { readonly code: string; readonly message: string } | null = null
     let unstableCandidateCount = 0
     let allocationDeferred = false
+    let deferredReviewNeededCount: number | undefined
     if (!task.hold_new_discoveries && coverage.status === "complete") {
       let verifiedAnalyzed = 0
       let verifiedErrors = 0
@@ -372,9 +388,15 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
             break
           case "allocation_deferred":
             allocationDeferred = true
+            deferredReviewNeededCount = published.reviewNeededCount
             readinessError = {
               code: "allocation_deferred",
-              message: `automatic allocation was deferred for ${published.missingPaths.length + published.changedPaths.length} occupied path(s); ${published.excludedPaths.length} occupied path(s) were excluded by policy`
+              message: [
+                "automatic allocation was deferred",
+                deferredPathsMessage("missing occupied paths", published.missingPaths, published.missingPathCount),
+                deferredPathsMessage("changed occupied paths", published.changedPaths, published.changedPathCount),
+                `${published.excludedPathCount} occupied path(s) excluded by policy`
+              ].join("; ")
             }
             break
           case "root_not_found":
@@ -388,9 +410,10 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
       }
     }
 
+    const reviewNeededCount = deferredReviewNeededCount ?? (yield* stagedCountForRoot(store, task.root_id))
     progress = {
       ...progress,
-      reviewNeededCount: yield* stagedCountForRoot(store, task.root_id)
+      reviewNeededCount
     }
     const hasErrors = progress.analysisErrorCount > 0 || coverage.status === "partial" || unstableCandidateCount > 0 || allocationDeferred
     const failed = readinessError !== null && readinessError.code !== "allocation_deferred"

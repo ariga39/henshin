@@ -62,8 +62,8 @@ const preview: Extract<RootPreviewResult, { kind: "saved-root-discovery" }> = {
   }
 }
 
-const task = (status: ScanTask["status"]): ScanTask => ({
-  task_id: "55555555-5555-4555-8555-555555555555",
+const task = (status: ScanTask["status"], taskId = "55555555-5555-4555-8555-555555555555"): ScanTask => ({
+  task_id: taskId,
   root_id: root.root_id,
   kind: "manual-scan",
   mode: "manual",
@@ -288,6 +288,56 @@ describe("held scan renderer workflows", () => {
     expect(viewStore.getState().scan_tasks).toEqual([completed])
   })
 
+  it("lets a normal scan finish while the shared watcher tracks another task", async () => {
+    const heldActive = task("running", "77777777-7777-4777-8777-777777777777")
+    const heldCompleted = { ...heldActive, status: "succeeded" as const }
+    const normalSubmitted = {
+      ...task("queued", "88888888-8888-4888-8888-888888888888"),
+      hold_new_discoveries: false
+    }
+    const normalCompleted = { ...normalSubmitted, status: "succeeded" as const }
+    let taskCalls = 0
+    let releaseHeld!: () => void
+    const heldRelease = new Promise<void>((resolve) => { releaseHeld = resolve })
+    let firstPoll!: () => void
+    const firstPollStarted = new Promise<void>((resolve) => { firstPoll = resolve })
+    const scanClient = scanClientWith({
+      listTasks: () => Effect.promise(async () => {
+        taskCalls += 1
+        if (taskCalls === 1) {
+          firstPoll()
+          return { ok: true as const, data: [heldActive] }
+        }
+        if (taskCalls === 2) return { ok: true as const, data: [heldActive, normalCompleted] }
+        await heldRelease
+        return { ok: true as const, data: [heldCompleted, normalCompleted] }
+      })
+    })
+    viewStore.set({
+      root_preview_status: "ready",
+      root_preview: preview,
+      root_saved_roots: [root],
+      scan_hold_new_discoveries: false
+    })
+
+    const heldRun = run(watchHeldScans, rootClientWith(), scanClient)
+    await firstPollStarted
+    const normalRun = run(
+      startManualScan(root.root_id),
+      rootClientWith({ command: () => Effect.succeed({ ok: true, data: { task: normalSubmitted } }) }),
+      scanClient
+    )
+
+    await normalRun
+    expect(viewStore.getState()).toMatchObject({
+      library_scan_status: "started",
+      library_scan_task: normalCompleted
+    })
+    releaseHeld()
+    await heldRun
+    expect(taskCalls).toBe(3)
+  })
+
   it("surfaces normal scan result-load failure instead of waiting forever", async () => {
     const submitted = { ...task("running"), hold_new_discoveries: false }
     const rootClient = rootClientWith({
@@ -384,9 +434,41 @@ describe("held scan renderer workflows", () => {
       scan_start_status: "idle",
       scan_start_error: null,
       library_scan_status: "started",
-      library_scan_error: null,
+      library_scan_error: "one discovery could not be analyzed",
+      library_scan_task: partial,
       library_status: "error",
       library_error: "library read failed"
+    })
+  })
+
+  it("surfaces interrupted normal completion after refreshing accepted results", async () => {
+    const interrupted = {
+      ...task("interrupted"),
+      hold_new_discoveries: false,
+      error: { code: "scan_interrupted", message: "scan interrupted by server restart" }
+    }
+    const rootClient = rootClientWith({
+      command: () => Effect.succeed({ ok: true, data: { task: interrupted } })
+    })
+    viewStore.set({
+      root_preview_status: "ready",
+      root_preview: preview,
+      root_saved_roots: [root],
+      scan_hold_new_discoveries: false
+    })
+
+    await run(
+      startManualScan(root.root_id),
+      rootClient,
+      scanClientWith({ listTasks: () => Effect.succeed({ ok: true, data: [interrupted] }) })
+    )
+
+    expect(viewStore.getState()).toMatchObject({
+      scan_start_status: "error",
+      scan_start_error: "scan interrupted by server restart",
+      library_scan_status: "error",
+      library_scan_error: "scan interrupted by server restart",
+      library_scan_task: interrupted
     })
   })
 
@@ -425,5 +507,53 @@ describe("held scan renderer workflows", () => {
     viewStore.set({ screen: "setup" })
     await run(loadLibrary(), rootClientWith(), scanClientWith())
     expect(viewStore.getState().screen).toBe("setup")
+  })
+
+  it("keeps visible Library entries when a refresh fails and appends pages without duplicates", async () => {
+    const existing = {
+      entry_id: "99999999-9999-4999-8999-999999999999",
+      library_id: root.library_id,
+      root_id: root.root_id,
+      relative_path: "existing",
+      title: "Existing",
+      cover: null,
+      source_path: "/collections/existing",
+      kind: "image-directory" as const,
+      page_count: 1,
+      state: "accepted" as const,
+      content_version: "1",
+      location_revision: "1"
+    }
+    const appended = {
+      ...existing,
+      entry_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      title: "Appended",
+      source_path: "/collections/appended"
+    }
+    let calls = 0
+    const libraryClient = libraryClientWith({
+      search: () => {
+        calls += 1
+        if (calls === 1) return Effect.succeed({ ok: true as const, data: { entries: [existing], has_more: true, next_cursor: "next", library_change_revision: "1" } })
+        if (calls === 2) return Effect.succeed({ ok: false as const, error: { code: "library_unavailable", message: "refresh failed", retryable: true } })
+        return Effect.succeed({ ok: true as const, data: { entries: [existing, appended], has_more: false, next_cursor: null, library_change_revision: "2" } })
+      }
+    })
+
+    await run(loadLibrary(), rootClientWith(), scanClientWith(), libraryClient)
+    await run(loadLibrary(), rootClientWith(), scanClientWith(), libraryClient)
+    expect(viewStore.getState()).toMatchObject({
+      library_status: "error",
+      library_error: "refresh failed",
+      library_entries: [existing]
+    })
+
+    await run(loadLibrary(true), rootClientWith(), scanClientWith(), libraryClient)
+    expect(viewStore.getState()).toMatchObject({
+      library_status: "ready",
+      library_entries: [existing, appended],
+      library_has_more: false,
+      library_cursor: null
+    })
   })
 })
