@@ -367,6 +367,10 @@ db.exec(`
   );
 `)
 
+const existingServerState = db.prepare(
+  "SELECT schema_version FROM server_state WHERE id = 1"
+).get() as { schema_version: number } | undefined
+
 const rootColumns = new Set(
   (db.prepare("PRAGMA table_info(server_roots)").all() as unknown as ReadonlyArray<{ name: string }>).map(
     (column) => column.name
@@ -388,12 +392,14 @@ const libraryEntryColumns = db.prepare("PRAGMA table_info(library_entries)").all
 if (!libraryEntryColumns.some((column) => column.name === "decision_version")) {
   db.exec("ALTER TABLE library_entries ADD COLUMN decision_version INTEGER NOT NULL DEFAULT 1")
 }
-if (!libraryEntryColumns.some((column) => column.name === "accepted_observation_json")) {
+const addedAcceptedObservationSummary = !libraryEntryColumns.some((column) => column.name === "accepted_observation_json")
+if (addedAcceptedObservationSummary) {
   db.exec("ALTER TABLE library_entries ADD COLUMN accepted_observation_json TEXT")
 }
 
 const stagedDiscoveryColumns = db.prepare("PRAGMA table_info(staged_discoveries)").all() as unknown as ReadonlyArray<{ name: string }>
-if (!stagedDiscoveryColumns.some((column) => column.name === "candidate_observation_json")) {
+const addedCandidateObservationSummary = !stagedDiscoveryColumns.some((column) => column.name === "candidate_observation_json")
+if (addedCandidateObservationSummary) {
   db.exec("ALTER TABLE staged_discoveries ADD COLUMN candidate_observation_json TEXT")
 }
 
@@ -537,47 +543,52 @@ if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("repl
   }
 }
 
-db.exec("BEGIN IMMEDIATE")
-try {
-  const acceptedWithoutSummary = db.prepare(
-    "SELECT entry_id, kind, manifest_json FROM library_entries WHERE accepted_observation_json IS NULL"
-  ).iterate() as unknown as Iterable<{
-    entry_id: string
-    kind: "archive" | "image-directory"
-    manifest_json: string
-  }>
-  const updateAcceptedSummary = db.prepare(
-    "UPDATE library_entries SET accepted_observation_json = ? WHERE entry_id = ?"
-  )
-  for (const row of acceptedWithoutSummary) {
-    updateAcceptedSummary.run(
-      JSON.stringify(replacementObservation(persistedManifest(row.manifest_json, "accepted manifest"), row.kind)),
-      row.entry_id
-    )
-  }
+const needsSummaryBackfill = addedAcceptedObservationSummary || addedCandidateObservationSummary ||
+  (existingServerState !== undefined && existingServerState.schema_version < CURRENT_SCHEMA_VERSION)
 
-  const candidatesWithoutSummary = db.prepare(
-    "SELECT candidate_id, kind, analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE candidate_observation_json IS NULL"
-  ).iterate() as unknown as Iterable<{
-    candidate_id: string
-    kind: "archive" | "image-directory"
-    analysis_status: "ready" | "error"
-    manifest_json: string | null
-    analysis_error_json: string | null
-  }>
-  const updateCandidateSummary = db.prepare(
-    "UPDATE staged_discoveries SET candidate_observation_json = ? WHERE candidate_id = ?"
-  )
-  for (const row of candidatesWithoutSummary) {
-    updateCandidateSummary.run(
-      JSON.stringify(replacementCandidateObservation(row.kind, row.analysis_status, row.manifest_json, row.analysis_error_json)),
-      row.candidate_id
+if (needsSummaryBackfill) {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const acceptedWithoutSummary = db.prepare(
+      "SELECT entry_id, kind, manifest_json FROM library_entries WHERE accepted_observation_json IS NULL"
+    ).iterate() as unknown as Iterable<{
+      entry_id: string
+      kind: "archive" | "image-directory"
+      manifest_json: string
+    }>
+    const updateAcceptedSummary = db.prepare(
+      "UPDATE library_entries SET accepted_observation_json = ? WHERE entry_id = ?"
     )
+    for (const row of acceptedWithoutSummary) {
+      updateAcceptedSummary.run(
+        JSON.stringify(replacementObservation(persistedManifest(row.manifest_json, "accepted manifest"), row.kind)),
+        row.entry_id
+      )
+    }
+
+    const candidatesWithoutSummary = db.prepare(
+      "SELECT candidate_id, kind, analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE candidate_observation_json IS NULL"
+    ).iterate() as unknown as Iterable<{
+      candidate_id: string
+      kind: "archive" | "image-directory"
+      analysis_status: "ready" | "error"
+      manifest_json: string | null
+      analysis_error_json: string | null
+    }>
+    const updateCandidateSummary = db.prepare(
+      "UPDATE staged_discoveries SET candidate_observation_json = ? WHERE candidate_id = ?"
+    )
+    for (const row of candidatesWithoutSummary) {
+      updateCandidateSummary.run(
+        JSON.stringify(replacementCandidateObservation(row.kind, row.analysis_status, row.manifest_json, row.analysis_error_json)),
+        row.candidate_id
+      )
+    }
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
   }
-  db.exec("COMMIT")
-} catch (error) {
-  db.exec("ROLLBACK")
-  throw error
 }
 
 const selectNote = db.prepare("SELECT note_id, text, revision FROM prototype_note WHERE note_id = ?")
