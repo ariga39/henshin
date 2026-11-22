@@ -8,6 +8,7 @@ import {
 } from "../analysis/SourceManifestAnalysis"
 import {
   discoverSourceRoot,
+  discoveryIssueCode,
   MANUAL_SCAN_SOURCE_DISCOVERY_LIMITS,
   revalidateSourceRoot,
   resolveSourceCandidate,
@@ -380,7 +381,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
             coverage: {
               ...progress.coverage,
               status: "partial",
-              issues: [...progress.coverage.issues, { code: rootStillCurrent.code }],
+              issues: [...progress.coverage.issues, { code: discoveryIssueCode(rootStillCurrent.code) }],
               issue_count: progress.coverage.issue_count + 1
             }
           }

@@ -580,7 +580,7 @@ const discoveryIssue = (
   relativePath?: string
 ): SourceDiscoveryIssue => (relativePath === undefined ? { code } : { code, relativePath })
 
-const discoveryIssueCode = (code: NativeBoundaryErrorCode): SourceDiscoveryIssueCode => {
+export const discoveryIssueCode = (code: NativeBoundaryErrorCode): SourceDiscoveryIssueCode => {
   switch (code) {
     case "directory-limit":
     case "missing-target":
