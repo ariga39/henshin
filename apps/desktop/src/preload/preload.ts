@@ -1,22 +1,33 @@
 import { contextBridge, ipcRenderer } from "electron"
-import type {
-  RootCommandIpcRequest,
-  RootPreviewRequest,
-  RootRegistrationRequest
-} from "@henshin/contracts"
 import { IpcChannels } from "@henshin/contracts/channels"
 
 contextBridge.exposeInMainWorld("henshinRootPreview", {
-  preview: (input: RootPreviewRequest) =>
+  preview: (input: { readonly path: string } | { readonly kind: "saved-root"; readonly root_id: string }) =>
     ipcRenderer.invoke(IpcChannels.rootPreview, input),
   list: () => ipcRenderer.invoke(IpcChannels.rootList, {}),
-  save: (input: RootRegistrationRequest) => ipcRenderer.invoke(IpcChannels.rootSave, input),
-  command: (input: RootCommandIpcRequest) => ipcRenderer.invoke(IpcChannels.rootCommand, input)
-})
-
-contextBridge.exposeInMainWorld("henshinScanReview", {
-  listTasks: () => ipcRenderer.invoke(IpcChannels.taskList, {}),
-  candidates: () => ipcRenderer.invoke(IpcChannels.reviewCandidates, {})
+  save: (input: {
+    readonly operation_id: string
+    readonly instance_id: string
+    readonly epoch: string
+    readonly label: string
+    readonly path: string
+    readonly preview_identity: {
+      readonly canonical_server_path: string
+      readonly device: string
+      readonly inode: string
+    }
+  }) => ipcRenderer.invoke(IpcChannels.rootSave, input),
+  command: (input: {
+    readonly root_id: string
+    readonly operation_id: string
+    readonly instance_id: string
+    readonly epoch: string
+    readonly expected_policy_revision: string
+    readonly command: {
+      readonly type: "exclude"
+      readonly exclusion: { readonly path: string; readonly scope: "exact" | "subtree" }
+    }
+  }) => ipcRenderer.invoke(IpcChannels.rootCommand, input)
 })
 
 if (new URLSearchParams(window.location.search).get("mode") === "prototype") {
