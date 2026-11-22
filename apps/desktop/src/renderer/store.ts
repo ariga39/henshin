@@ -2,6 +2,7 @@ import type {
   CommandAttempt,
   CommandReconciliation,
   ConnectionStatusView,
+  LibraryEntry,
   NoteView,
   RootPreviewRequest,
   RootPreviewResult,
@@ -22,6 +23,7 @@ export type Outcome =
   | { readonly kind: "error"; readonly message: string }
 
 export interface ViewState {
+  readonly screen: "setup" | "library"
   readonly status: "idle" | "loading" | "ready" | "error"
   readonly instance_id: string | null
   readonly epoch: string | null
@@ -59,20 +61,20 @@ export interface ViewState {
   readonly scan_error: string | null
   readonly scan_start_status: "idle" | "loading" | "error"
   readonly scan_start_error: string | null
-  readonly scan_release_status: "idle" | "loading" | "error"
-  readonly scan_release_candidate_id: string | null
-  readonly scan_release_root_id: string | null
-  readonly scan_release_operation_id: string | null
-  readonly scan_release_candidate_version: number | null
-  readonly scan_release_mapping_revision: string | null
-  readonly scan_release_policy_revision: string | null
-  readonly scan_release_error: string | null
   readonly scan_hold_new_discoveries: boolean
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
+  readonly library_entries: ReadonlyArray<LibraryEntry>
+  readonly library_cursor: string | null
+  readonly library_has_more: boolean
+  readonly library_status: "idle" | "loading" | "ready" | "error"
+  readonly library_error: string | null
+  readonly library_scan_status: "idle" | "starting" | "started" | "error"
+  readonly library_scan_task: ScanTask | null
 }
 
 const initialState: ViewState = {
+  screen: "setup",
   status: "idle",
   instance_id: null,
   epoch: null,
@@ -110,17 +112,16 @@ const initialState: ViewState = {
   scan_error: null,
   scan_start_status: "idle",
   scan_start_error: null,
-  scan_release_status: "idle",
-  scan_release_candidate_id: null,
-  scan_release_root_id: null,
-  scan_release_operation_id: null,
-  scan_release_candidate_version: null,
-  scan_release_mapping_revision: null,
-  scan_release_policy_revision: null,
-  scan_release_error: null,
   scan_hold_new_discoveries: false,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
-  connection_generation: 0
+  connection_generation: 0,
+  library_entries: [],
+  library_cursor: null,
+  library_has_more: false,
+  library_status: "idle",
+  library_error: null,
+  library_scan_status: "idle",
+  library_scan_task: null
 }
 
 const sameConnection = (left: ConnectionStatusView, right: ConnectionStatusView): boolean =>

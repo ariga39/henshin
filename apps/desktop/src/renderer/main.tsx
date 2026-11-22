@@ -1,9 +1,11 @@
 import "./collection.css"
-import { useEffect } from "react"
+import { useEffect, useSyncExternalStore } from "react"
 import { createRoot } from "react-dom/client"
 import { RootPreviewScreen } from "./RootPreview"
 import { App } from "./App"
+import { LibraryScreen } from "./Library"
 import { runtime } from "./runtime"
+import { viewStore } from "./store"
 import { loadConnectionStatus, loadRootWorkspace } from "./workflows"
 
 const container = document.getElementById("root")
@@ -12,10 +14,11 @@ if (container === null) throw new Error("missing #root container")
 const prototype = new URLSearchParams(location.search).get("mode") === "prototype"
 
 const Root = () => {
+  const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   useEffect(() => {
     void runtime.runPromise(prototype ? loadConnectionStatus : loadRootWorkspace)
   }, [])
-  return prototype ? <App /> : <RootPreviewScreen />
+  return prototype ? <App /> : state.screen === "library" ? <LibraryScreen /> : <RootPreviewScreen />
 }
 
 createRoot(container).render(<Root />)

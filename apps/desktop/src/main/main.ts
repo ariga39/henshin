@@ -12,6 +12,8 @@ import {
   GetNoteIpcRequest,
   HandshakeIpcRequest,
   IpcChannels,
+  LibraryHttpClient,
+  LibrarySearchIpcRequest,
   LoadDraftIpcRequest,
   ListCommandAttemptsIpcRequest,
   PrototypeHttpClient,
@@ -20,7 +22,6 @@ import {
   RootListIpcRequest,
   RootCommandIpcRequest,
   RootSaveIpcRequest,
-  ReleaseHeldDiscoveryIpcRequest,
   ReviewCandidatesIpcRequest,
   ServerHttpClient,
   ReviewHttpClient,
@@ -220,7 +221,7 @@ const runNetworkResult = <A>(
   effect: Effect.Effect<
     IpcOk<A> | IpcErr,
     never,
-    PrototypeHttpClient | ServerHttpClient | TaskHttpClient | ReviewHttpClient
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient
   >
 ): Promise<IpcOk<A> | IpcErr> =>
   requireConnection()
@@ -318,6 +319,34 @@ const registerIpc = (): void => {
     )
   })
 
+  ipcMain.handle(IpcChannels.libraryGet, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(Schema.Struct({}))(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* LibraryHttpClient
+          return yield* client.get()
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.librarySearch, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(LibrarySearchIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* LibraryHttpClient
+          return yield* client.search({ payload: decoded.value })
+        })
+      )
+    )
+  })
+
   ipcMain.handle(IpcChannels.taskList, (event, raw: unknown) => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(TaskListIpcRequest)(raw)
@@ -341,39 +370,6 @@ const registerIpc = (): void => {
         Effect.gen(function*() {
           const client = yield* ReviewHttpClient
           return yield* client.candidates()
-        })
-      )
-    )
-  })
-
-  ipcMain.handle(IpcChannels.reviewCommand, (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ReleaseHeldDiscoveryIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    let session: Session
-    try {
-      session = requireSession()
-    } catch (error) {
-      return { ok: false as const, error: toPublicError(error) }
-    }
-    return runNetworkResult(
-      toResult(
-        Effect.gen(function*() {
-          const client = yield* ReviewHttpClient
-          const input = decoded.value
-          return yield* client.command({
-            params: { id: input.candidate_id },
-            payload: {
-              root_id: input.root_id,
-              operation_id: input.operation_id,
-              instance_id: session.instanceId,
-              epoch: session.epoch,
-              expected_candidate_version: input.expected_candidate_version,
-              expected_mapping_revision: input.expected_mapping_revision,
-              expected_policy_revision: input.expected_policy_revision,
-              command: input.command
-            }
-          })
         })
       )
     )

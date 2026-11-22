@@ -5,7 +5,7 @@ import type {
   RootPreviewResult,
   ScanTask
 } from "@henshin/contracts"
-import { PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
+import { LibraryClient, PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
 import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
@@ -77,11 +77,6 @@ export const loadRoots = Effect.gen(function*() {
 
 const scanIsActive = (task: ScanTask): boolean => task.status === "queued" || task.status === "running"
 
-const releaseErrorMessage = (error: { readonly code: string; readonly message: string }): string =>
-  error.code === "epoch_changed" || error.code === "instance_mismatch"
-    ? `${error.message}${error.message.endsWith(".") ? "" : "."} Reconnect before retrying the release.`
-    : error.message
-
 const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
   yield* Effect.sync(() => viewStore.set({ scan_status: "loading", scan_error: null }))
   const tasks = yield* client.listTasks()
@@ -96,29 +91,10 @@ const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(f
     yield* Effect.sync(() => viewStore.set({ scan_status: "error", scan_error: candidates.error.message }))
     return false
   }
-  const current = viewStore.getState()
-  const releaseTarget = current.scan_release_candidate_id === null
-    ? undefined
-    : candidates.data.find((candidate) =>
-        candidate.candidate_id === current.scan_release_candidate_id &&
-        candidate.root_id === current.scan_release_root_id)
-  const releaseResolved = releaseTarget !== undefined && releaseTarget.hold_state !== "held"
   yield* Effect.sync(() => viewStore.set({
     staged_discoveries: candidates.data,
     scan_status: "ready",
-    scan_error: null,
-    ...(releaseResolved
-      ? {
-          scan_release_status: "idle" as const,
-          scan_release_candidate_id: null,
-          scan_release_root_id: null,
-          scan_release_operation_id: null,
-          scan_release_candidate_version: null,
-          scan_release_mapping_revision: null,
-          scan_release_policy_revision: null,
-          scan_release_error: null
-        }
-      : {})
+    scan_error: null
   }))
   return true
 })
@@ -127,89 +103,6 @@ export const loadScanResults = Effect.gen(function*() {
   const client = yield* ScanReviewClient
   return yield* loadScanResultsFor(client)
 })
-
-export const releaseHeldDiscovery = (candidateId: string) =>
-  Effect.gen(function*() {
-    const client = yield* ScanReviewClient
-    const state = viewStore.getState()
-    const candidate = state.staged_discoveries.find((item) => item.candidate_id === candidateId)
-    const root = candidate === undefined
-      ? undefined
-      : state.root_saved_roots.find((item) => item.root_id === candidate.root_id)
-    if (candidate === undefined || root === undefined || candidate.hold_state !== "held") return
-
-    const sameCommand = state.scan_release_candidate_id === candidate.candidate_id &&
-      state.scan_release_root_id === candidate.root_id &&
-      state.scan_release_operation_id !== null &&
-      state.scan_release_candidate_version === candidate.candidate_version &&
-      state.scan_release_mapping_revision === root.mapping_revision &&
-      state.scan_release_policy_revision === root.policy_revision
-    const operationId = sameCommand ? state.scan_release_operation_id : newOperationId()
-    yield* Effect.sync(() => viewStore.set({
-      scan_release_status: "loading",
-      scan_release_candidate_id: candidate.candidate_id,
-      scan_release_root_id: candidate.root_id,
-      scan_release_operation_id: operationId,
-      scan_release_candidate_version: candidate.candidate_version,
-      scan_release_mapping_revision: root.mapping_revision,
-      scan_release_policy_revision: root.policy_revision,
-      scan_release_error: null
-    }))
-
-    const result = yield* client.release({
-      candidate_id: candidate.candidate_id,
-      root_id: candidate.root_id,
-      operation_id: operationId,
-      expected_candidate_version: candidate.candidate_version,
-      expected_mapping_revision: root.mapping_revision,
-      expected_policy_revision: root.policy_revision,
-      command: { type: "release-hold" }
-    })
-    if (!result.ok) {
-      if (result.error.code === "revision_conflict" || result.error.code === "not_found") {
-        yield* loadRoots
-        yield* loadScanResults
-      }
-      const definiteFailure = result.error.code === "invalid_request" ||
-        result.error.code === "not_found" ||
-        result.error.code === "revision_conflict" ||
-        result.error.code === "operation_conflict" ||
-        result.error.code === "operation_expired" ||
-        result.error.code === "epoch_changed" ||
-        result.error.code === "instance_mismatch"
-      yield* Effect.sync(() => viewStore.set({
-        scan_release_status: "error",
-        ...(definiteFailure
-          ? {
-              scan_release_root_id: candidate.root_id,
-              scan_release_operation_id: null,
-              scan_release_candidate_version: null,
-              scan_release_mapping_revision: null,
-              scan_release_policy_revision: null
-            }
-          : {}),
-        scan_release_error: releaseErrorMessage(result.error)
-      }))
-      return
-    }
-
-    yield* Effect.sync(() => {
-      const current = viewStore.getState()
-      viewStore.set({
-        staged_discoveries: current.staged_discoveries.map((item) =>
-          item.candidate_id === result.data.candidate.candidate_id ? result.data.candidate : item
-        ),
-        scan_release_status: "idle",
-        scan_release_candidate_id: null,
-        scan_release_root_id: null,
-        scan_release_operation_id: null,
-        scan_release_candidate_version: null,
-        scan_release_mapping_revision: null,
-        scan_release_policy_revision: null,
-        scan_release_error: null
-      })
-    })
-  })
 
 const watchScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
   while (true) {
@@ -245,6 +138,16 @@ export const loadRootWorkspace = Effect.gen(function*() {
   const loaded = yield* loadScanResults
   if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
 })
+
+const watchScanTask = (taskId: string) =>
+  Effect.gen(function*() {
+    while (true) {
+      yield* loadScanResults
+      const task = viewStore.getState().scan_tasks.find((candidate) => candidate.task_id === taskId)
+      if (task !== undefined && !scanIsActive(task)) return
+      yield* Effect.sleep("250 millis")
+    }
+  })
 
 export const refreshRootPolicy = Effect.gen(function*() {
   const initialState = viewStore.getState()
@@ -345,16 +248,24 @@ export const removeRootExclusion = (input: {
   readonly expectedPolicyRevision: string
 }) => updateRootExclusion(input, "remove-exclusion")
 
-export const startHeldScan = (rootId: string) =>
+const taskError = (task: ScanTask): string | null =>
+  task.readiness_error?.message ?? task.error?.message ?? null
+
+const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
   Effect.gen(function*() {
     const client = yield* RootPreviewClient
     const state = viewStore.getState()
     const root = state.root_saved_roots.find((candidate) => candidate.root_id === rootId)
     const preview = state.root_preview
     if (root === undefined || !isSavedDiscovery(preview) || preview.root_id !== rootId) return
-    if (!state.scan_hold_new_discoveries) return
 
-    yield* Effect.sync(() => viewStore.set({ scan_start_status: "loading", scan_start_error: null }))
+    yield* Effect.sync(() => viewStore.set({
+      scan_start_status: "loading",
+      scan_start_error: null,
+      library_scan_status: holdNewDiscoveries ? viewStore.getState().library_scan_status : "starting",
+      library_scan_task: null,
+      ...(!holdNewDiscoveries ? { screen: "library" as const, library_status: "loading" as const, library_error: null } : {})
+    }))
     const result = yield* client.command({
       root_id: rootId,
       operation_id: newOperationId(),
@@ -362,17 +273,22 @@ export const startHeldScan = (rootId: string) =>
       epoch: preview.epoch,
       expected_mapping_revision: root.mapping_revision,
       expected_policy_revision: preview.policy_revision,
-      command: { type: "start-scan", mode: "manual", hold_new_discoveries: true }
+      command: { type: "start-scan", mode: "manual", hold_new_discoveries: holdNewDiscoveries }
     })
     if (!result.ok) {
       if (result.error.code === "revision_conflict") yield* loadRoots
-      yield* Effect.sync(() => viewStore.set({ scan_start_status: "error", scan_start_error: result.error.message }))
+      yield* Effect.sync(() => viewStore.set({
+        scan_start_status: "error",
+        scan_start_error: result.error.message,
+        ...(!holdNewDiscoveries ? { library_scan_status: "error" as const, library_error: result.error.message } : {})
+      }))
       return
     }
     if (!("task" in result.data)) {
       yield* Effect.sync(() => viewStore.set({
         scan_start_status: "error",
-        scan_start_error: "server returned a root policy result instead of a scan task"
+        scan_start_error: "server returned a root policy result instead of a scan task",
+        ...(!holdNewDiscoveries ? { library_scan_status: "error" as const, library_error: "server returned an invalid scan result" } : {})
       }))
       return
     }
@@ -383,12 +299,36 @@ export const startHeldScan = (rootId: string) =>
         scan_tasks: tasks.some((task) => task.task_id === submittedTask.task_id)
           ? tasks.map((task) => task.task_id === submittedTask.task_id ? submittedTask : task)
           : [...tasks, submittedTask],
-        scan_start_status: "idle",
-        scan_start_error: null
+        scan_start_error: null,
+        ...(holdNewDiscoveries ? {} : { library_scan_task: submittedTask })
       })
     })
-    yield* watchHeldScans
+    yield* watchScanTask(submittedTask.task_id)
+
+    const terminal = viewStore.getState().scan_tasks.find((task) => task.task_id === submittedTask.task_id) ?? submittedTask
+    if (holdNewDiscoveries) {
+      yield* Effect.sync(() => viewStore.set({ scan_start_status: "idle" }))
+      return
+    }
+
+    yield* loadLibrary()
+    const error = taskError(terminal)
+    yield* Effect.sync(() => viewStore.set({
+      scan_start_status: error === null ? "idle" : "error",
+      scan_start_error: error,
+      library_scan_status: error === null ? "started" : "error",
+      library_error: error
+    }))
   })
+
+export const startHeldScan = (rootId: string) =>
+  Effect.gen(function*() {
+    if (!viewStore.getState().scan_hold_new_discoveries) return
+    yield* startManualScanFor(rootId, true)
+  })
+
+export const startManualScan = (rootId: string) =>
+  startManualScanFor(rootId, viewStore.getState().scan_hold_new_discoveries)
 
 export const canSaveRoot = (state: ViewState): boolean => {
   const preview = state.root_preview
@@ -399,6 +339,42 @@ export const canSaveRoot = (state: ViewState): boolean => {
     state.root_label.length > 0 &&
     !state.root_saved_roots.some((root) => root.canonical_server_path === preview.preview_identity.canonical_server_path)
 }
+
+export const showLibrary = Effect.sync(() => viewStore.set({ screen: "library" }))
+export const showSetup = Effect.sync(() => viewStore.set({ screen: "setup" }))
+
+export const loadLibrary = (append = false) =>
+  Effect.gen(function*() {
+    const client = yield* LibraryClient
+    const current = viewStore.getState()
+    const cursor = append ? current.library_cursor : null
+    yield* Effect.sync(() => viewStore.set({
+      screen: "library",
+      library_status: "loading",
+      library_error: null,
+      ...(append ? {} : { library_entries: [], library_cursor: null, library_has_more: false })
+    }))
+    const result = yield* client.search(cursor === null ? { page_size: 50 } : { page_size: 50, cursor })
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({ library_status: "error", library_error: result.error.message }))
+      return
+    }
+    yield* Effect.sync(() => {
+      const existing = append ? viewStore.getState().library_entries : []
+      const ids = new Set(existing.map((entry) => entry.entry_id))
+      const entries = [...existing]
+      for (const entry of result.data.entries) {
+        if (!ids.has(entry.entry_id)) entries.push(entry)
+      }
+      viewStore.set({
+        library_entries: entries,
+        library_cursor: result.data.next_cursor,
+        library_has_more: result.data.has_more,
+        library_status: "ready",
+        library_error: null
+      })
+    })
+  })
 
 export const saveRoot = Effect.gen(function*() {
   const client = yield* RootPreviewClient
