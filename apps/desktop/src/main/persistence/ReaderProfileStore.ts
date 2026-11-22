@@ -1,4 +1,4 @@
-import { basename, win32 } from "node:path"
+import { posix, win32 } from "node:path"
 import { Context, Data, Effect, Layer, Option, Schema } from "effect"
 import type {
   ReaderEntryFormat,
@@ -44,7 +44,7 @@ const decodeWrite = Schema.decodeUnknownOption(ReaderProfileWriteOutcome)
 
 const executableName = (executablePath: string | null): string | null => {
   if (executablePath === null) return null
-  return basename(executablePath) || win32.basename(executablePath)
+  return posix.isAbsolute(executablePath) ? posix.basename(executablePath) : win32.basename(executablePath)
 }
 
 const toStored = (row: ReaderProfileRow): StoredReaderProfile => ({
