@@ -2,7 +2,16 @@ import { useSyncExternalStore } from "react"
 import type { RootPreviewResult } from "@henshin/contracts"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { canSaveRoot, excludeRootPath, previewRoot, refreshRootPolicy, removeRootExclusion, saveRoot, showLibrary } from "./workflows"
+import {
+  canSaveRoot,
+  excludeRootPath,
+  previewLocalMapping,
+  previewRoot,
+  refreshRootPolicy,
+  removeRootExclusion,
+  saveRoot,
+  showLibrary
+} from "./workflows"
 import { HeldScanControls, HeldScanReview } from "./HeldScanReview"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
@@ -58,6 +67,54 @@ const rootPreviewStatusText = (state: ReturnType<typeof viewStore.getState>): st
     : state.root_preview.outcome === "truncated"
       ? `Showing the first ${state.root_preview.sample_limit} items. More are available.`
       : "All items are shown."
+}
+
+const formatBytes = (bytes: number | null): string => {
+  if (bytes === null) return "not recorded"
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+}
+
+const formats = (values: ReadonlyArray<string>): string => values.length === 0 ? "not recorded" : values.join(", ")
+
+const indexedFormatLabel = (kind: "archive" | "image-directory"): string =>
+  kind === "archive" ? "Indexed page formats" : "Indexed image formats"
+
+const indexedSizeLabel = (kind: "archive" | "image-directory"): string =>
+  kind === "archive" ? "Indexed container bytes" : "Indexed direct-image bytes"
+
+const localFormatLabel = (kind: "archive" | "image-directory"): string =>
+  kind === "archive" ? "Local container format" : "Local image formats"
+
+const localSizeLabel = (kind: "archive" | "image-directory"): string =>
+  kind === "archive" ? "Local container bytes" : "Local direct-image bytes"
+
+const localErrorText = (error: NonNullable<ReturnType<typeof viewStore.getState>["local_mapping_preview"]>["samples"][number]["local_error"]): string => {
+  switch (error) {
+    case "missing": return "missing"
+    case "unsafe": return "unsafe target"
+    case "unsupported": return "unsupported"
+    case "permission-denied": return "permission denied"
+    case "directory-limit": return "directory limit"
+    case "budget-exceeded": return "time budget"
+    case "unavailable": return "unavailable"
+    case null: return "unavailable"
+  }
+}
+
+const localSampleStatus = (sample: NonNullable<ReturnType<typeof viewStore.getState>["local_mapping_preview"]>["samples"][number]): string => {
+  switch (sample.status) {
+    case "found": return "Found on this device."
+    case "missing": return "Missing on this device."
+    case "unsafe": return "Rejected as unsafe."
+    case "unsupported": return "Unsupported on this device."
+    case "collision":
+      return sample.collision_kind === "physical-identity"
+        ? "Collision: multiple indexed paths resolve to one physical object."
+        : "Collision: only a case/normalization-equivalent name was found."
+    case "error": return `Could not inspect this sample (${localErrorText(sample.local_error)}).`
+  }
 }
 
 export const RootPreviewScreen = () => {
@@ -190,6 +247,39 @@ export const RootPreviewScreen = () => {
               <button data-testid="root-saved-preview" disabled={loading || saving || changingPolicy} onClick={() => void runtime.runPromise(previewRoot({ kind: "saved-root", root_id: root.root_id }))}>
                 Preview books
               </button>
+              <button
+                data-testid="root-local-mapping"
+                disabled={state.local_mapping_status === "loading"}
+                onClick={() => void runtime.runPromise(previewLocalMapping(root.root_id))}
+              >
+                Check local directory
+              </button>
+              {state.local_mapping_root_id === root.root_id && state.local_mapping_status === "error" && (
+                <p role="alert" data-testid="local-mapping-error">Local directory check failed: {state.local_mapping_error}</p>
+              )}
+              {state.local_mapping_preview?.root_id === root.root_id && (
+                <section data-testid="local-mapping-preview" aria-labelledby="local-mapping-heading">
+                  <h3 id="local-mapping-heading">Local directory check</h3>
+                  <p data-testid="local-mapping-selected-path">Selected local directory: {state.local_mapping_preview.selected_local_path}</p>
+                  {state.local_mapping_preview.sample_truncated && (
+                    <p>Showing the first {state.local_mapping_preview.sample_limit} indexed samples.</p>
+                  )}
+                  {state.local_mapping_preview.local_budget_exhausted && (
+                    <p>Local checking reached its finite time budget; remaining evidence is unavailable.</p>
+                  )}
+                  <ul data-testid="local-mapping-samples">
+                    {state.local_mapping_preview.samples.map((sample) => (
+                      <li key={sample.relative_path} data-testid="local-mapping-sample">
+                        <strong>{sample.relative_path}</strong>{" "}
+                        <span>{localSampleStatus(sample)}</span>{" "}
+                        <small>
+                          {indexedFormatLabel(sample.indexed_kind)}: {formats(sample.indexed_format_evidence)}; {indexedSizeLabel(sample.indexed_kind)}: {formatBytes(sample.indexed_size_bytes)}. {localFormatLabel(sample.indexed_kind)}: {formats(sample.local_format_evidence)}; {localSizeLabel(sample.indexed_kind)}: {formatBytes(sample.local_size_bytes)}. {sample.local_evidence_status === "partial" ? `Local evidence partial (${localErrorText(sample.local_error)}).` : sample.local_evidence_status === "unavailable" && sample.status === "found" ? `Local evidence unavailable (${localErrorText(sample.local_error)}).` : ""}
+                        </small>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
             </li>
           ))}
         </ul>

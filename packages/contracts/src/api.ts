@@ -36,7 +36,12 @@ import {
   ServerRoot,
   ServerRootList
 } from "./root"
-import { LibraryEntryPage, LibrarySearchRequest, LibraryView } from "./library"
+import {
+  IndexedRootSamplePage,
+  LibraryEntryPage,
+  LibrarySearchRequest,
+  LibraryView
+} from "./library"
 import { ThumbnailKey } from "./thumbnail"
 
 /**
@@ -182,6 +187,11 @@ export const LibraryApi = HttpApi.make("henshin-library").add(
         payload: LibrarySearchRequest,
         success: SuccessEnvelope(LibraryEntryPage),
         error: [AuthenticationRequired, InvalidRequest, InternalError]
+      }),
+      HttpApiEndpoint.get("indexedSamples", "/roots/:id/indexed-samples", {
+        params: { id: Uuid },
+        success: SuccessEnvelope(IndexedRootSamplePage),
+        error: [AuthenticationRequired, RootNotFound, InternalError]
       })
     )
     .prefix("/api/v1")

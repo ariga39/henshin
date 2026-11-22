@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type {
+  LocalMappingPreviewIpcRequest,
   RootCommandIpcRequest,
   RootPreviewRequest,
   RootRegistrationRequest
@@ -12,6 +13,11 @@ contextBridge.exposeInMainWorld("henshinRootPreview", {
   list: () => ipcRenderer.invoke(IpcChannels.rootList, {}),
   save: (input: RootRegistrationRequest) => ipcRenderer.invoke(IpcChannels.rootSave, input),
   command: (input: RootCommandIpcRequest) => ipcRenderer.invoke(IpcChannels.rootCommand, input)
+})
+
+contextBridge.exposeInMainWorld("henshinLocalMapping", {
+  preview: (input: LocalMappingPreviewIpcRequest) =>
+    ipcRenderer.invoke(IpcChannels.localMappingPreview, input)
 })
 
 contextBridge.exposeInMainWorld("henshinScanReview", {

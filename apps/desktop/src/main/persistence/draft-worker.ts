@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite"
+import { isAbsolute, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import {
@@ -8,6 +9,7 @@ import {
   DraftWorkerMessage,
   DraftWorkerResponse,
   type CommandAttemptRow,
+  type LocalMappingRow,
   type DraftRow,
   type DraftWorkerRequest
 } from "./draft-worker-protocol"
@@ -61,6 +63,15 @@ db.exec(`
     current_revision INTEGER,
     dismissed INTEGER NOT NULL CHECK (dismissed IN (0, 1)),
     PRIMARY KEY (instance_id, operation_id)
+  );
+  CREATE TABLE IF NOT EXISTS client_mappings (
+    instance_id TEXT NOT NULL,
+    root_id TEXT NOT NULL,
+    selected_path TEXT NOT NULL,
+    canonical_path TEXT NOT NULL,
+    mapping_revision INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state = 'active'),
+    PRIMARY KEY (instance_id, root_id)
   );
 `)
 
@@ -154,6 +165,30 @@ const listCommandAttempts = db.prepare(`
 `)
 listCommandAttempts.setReadBigInts(true)
 
+const selectLocalMapping = db.prepare(`
+  SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision
+  FROM client_mappings
+  WHERE instance_id = ? AND root_id = ? AND state = 'active'
+`)
+selectLocalMapping.setReadBigInts(true)
+const listLocalMappings = db.prepare(`
+  SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision
+  FROM client_mappings
+  WHERE instance_id = ? AND state = 'active'
+  ORDER BY rowid ASC
+`)
+listLocalMappings.setReadBigInts(true)
+const upsertLocalMapping = db.prepare(`
+  INSERT INTO client_mappings(
+    instance_id, root_id, selected_path, canonical_path, mapping_revision, state
+  ) VALUES(?, ?, ?, ?, ?, 'active')
+  ON CONFLICT(instance_id, root_id) DO UPDATE SET
+    selected_path = excluded.selected_path,
+    canonical_path = excluded.canonical_path,
+    mapping_revision = excluded.mapping_revision,
+    state = 'active'
+`)
+
 const readDraft = (instanceId: string, noteId: string, formId: string): DraftRow | undefined => {
   const row = selectDraft.get(instanceId, noteId, formId) as
     | {
@@ -244,6 +279,58 @@ const readCommandAttempts = (instanceId: string): ReadonlyArray<CommandAttemptRo
     return attempt
   })
 }
+
+type PersistedLocalMapping = {
+  readonly instance_id: string
+  readonly root_id: string
+  readonly selected_path: string
+  readonly canonical_path: string
+  readonly mapping_revision: bigint
+}
+
+const readLocalMappingRow = (row: PersistedLocalMapping): LocalMappingRow => ({
+  instanceId: row.instance_id,
+  rootId: row.root_id,
+  selectedPath: row.selected_path,
+  canonicalPath: row.canonical_path,
+  mappingRevision: row.mapping_revision.toString()
+})
+
+const readLocalMapping = (instanceId: string, rootId: string): LocalMappingRow | undefined => {
+  const row = selectLocalMapping.get(instanceId, rootId) as PersistedLocalMapping | undefined
+  return row === undefined ? undefined : readLocalMappingRow(row)
+}
+
+const readLocalMappings = (instanceId: string): ReadonlyArray<LocalMappingRow> =>
+  (listLocalMappings.all(instanceId) as unknown as ReadonlyArray<PersistedLocalMapping>).map(readLocalMappingRow)
+
+const isPathWithin = (parent: string, candidate: string): boolean => {
+  if (process.platform === "win32") {
+    return isPathWithinWindows(parent, candidate)
+  }
+  const remainder = relative(parent, candidate)
+  return remainder === "" || (remainder !== ".." && !remainder.startsWith(`..${sep}`) && !isAbsolute(remainder))
+}
+
+const isPathWithinWindows = (parent: string, candidate: string): boolean => {
+  const normalize = (value: string): string => value.replace(/[\\/]+/g, "\\").replace(/\\$/, "").toLowerCase()
+  const normalizedParent = normalize(parent)
+  const normalizedCandidate = normalize(candidate)
+  return normalizedCandidate === normalizedParent || normalizedCandidate.startsWith(`${normalizedParent}\\`)
+}
+
+const pathsOverlap = (left: string, right: string): boolean =>
+  isPathWithin(left, right) || isPathWithin(right, left)
+
+const mappingPathsOverlap = (
+  selectedPath: string,
+  canonicalPath: string,
+  mapping: LocalMappingRow
+): boolean =>
+  pathsOverlap(selectedPath, mapping.selectedPath) ||
+  pathsOverlap(selectedPath, mapping.canonicalPath) ||
+  pathsOverlap(canonicalPath, mapping.selectedPath) ||
+  pathsOverlap(canonicalPath, mapping.canonicalPath)
 
 const handle = (request: DraftWorkerRequest): unknown => {
   switch (request.op) {
@@ -497,6 +584,63 @@ const handle = (request: DraftWorkerRequest): unknown => {
         const attempt = readCommandAttempt(request.instanceId, request.operationId)
         if (attempt === undefined) throw new Error("dismissed command attempt was not readable")
         return { kind: "updated", attempt }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "loadLocalMapping":
+      return readLocalMapping(request.instanceId, request.rootId) ?? null
+    case "listLocalMappings":
+      return readLocalMappings(request.instanceId)
+    case "activateLocalMapping": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const current = readLocalMapping(request.instanceId, request.rootId)
+        const currentRevision = current?.mappingRevision ?? "0"
+        if (currentRevision !== request.expectedMappingRevision) {
+          db.exec("ROLLBACK")
+          return { kind: "revision_conflict", currentMapping: current ?? null }
+        }
+
+        const overlapsRoot = readLocalMappings(request.instanceId).some(
+          (mapping) => mapping.rootId !== request.rootId && mappingPathsOverlap(
+            request.selectedPath,
+            request.canonicalPath,
+            mapping
+          )
+        )
+        if (overlapsRoot) {
+          db.exec("ROLLBACK")
+          return { kind: "root_conflict" }
+        }
+
+        const overlapsWritable = request.protectedWritablePaths.some(
+          (protectedPath) =>
+            pathsOverlap(request.selectedPath, protectedPath) ||
+            pathsOverlap(request.canonicalPath, protectedPath)
+        )
+        if (overlapsWritable) {
+          db.exec("ROLLBACK")
+          return { kind: "writable_overlap" }
+        }
+
+        const mapping: LocalMappingRow = {
+          instanceId: request.instanceId,
+          rootId: request.rootId,
+          selectedPath: request.selectedPath,
+          canonicalPath: request.canonicalPath,
+          mappingRevision: (BigInt(request.expectedMappingRevision) + 1n).toString()
+        }
+        upsertLocalMapping.run(
+          mapping.instanceId,
+          mapping.rootId,
+          mapping.selectedPath,
+          mapping.canonicalPath,
+          BigInt(mapping.mappingRevision)
+        )
+        db.exec("COMMIT")
+        return { kind: "activated", mapping }
       } catch (error) {
         rollbackIfActive()
         throw error
