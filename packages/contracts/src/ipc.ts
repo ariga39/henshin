@@ -6,6 +6,8 @@ import {
   RootRegistrationRequest,
   RootScanCommand
 } from "./root"
+import { LibrarySearchRequest } from "./library"
+import { ReleaseHoldCommand } from "./review"
 import type {
   CommandAttempt,
   CommandReconciliation,
@@ -153,8 +155,22 @@ export const RootCommandIpcRequest = Schema.Union([
 ])
 export type RootCommandIpcRequest = typeof RootCommandIpcRequest.Type
 
+export const LibrarySearchIpcRequest = LibrarySearchRequest
+export type LibrarySearchIpcRequest = typeof LibrarySearchIpcRequest.Type
+
 export const TaskListIpcRequest = Schema.Struct({})
 export type TaskListIpcRequest = typeof TaskListIpcRequest.Type
 
 export const ReviewCandidatesIpcRequest = Schema.Struct({})
 export type ReviewCandidatesIpcRequest = typeof ReviewCandidatesIpcRequest.Type
+
+export const ReleaseHeldDiscoveryIpcRequest = Schema.Struct({
+  candidate_id: Uuid,
+  root_id: Uuid,
+  operation_id: Uuid,
+  expected_candidate_version: Schema.Natural,
+  expected_mapping_revision: Revision,
+  expected_policy_revision: Revision,
+  command: ReleaseHoldCommand
+})
+export type ReleaseHeldDiscoveryIpcRequest = typeof ReleaseHeldDiscoveryIpcRequest.Type

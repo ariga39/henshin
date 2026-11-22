@@ -2,7 +2,7 @@ import type { RootPreviewResult, ScanTask, StagedDiscovery } from "@henshin/cont
 import { useSyncExternalStore } from "react"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { retryScanResults, startHeldScan } from "./workflows"
+import { releaseHeldDiscovery, retryScanResults, startManualScan } from "./workflows"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -39,11 +39,11 @@ export const HeldScanControls = ({ preview }: { readonly preview: RootPreviewRes
   if (!isSavedDiscovery(preview)) return null
 
   const task = latestTaskForRoot(state.scan_tasks, preview.root_id)
-  const disabled = !state.scan_hold_new_discoveries || state.scan_start_status === "loading" || (task !== null && isActive(task))
+  const disabled = state.scan_start_status === "loading" || (task !== null && isActive(task))
   return (
     <section aria-labelledby="held-scan-heading" data-testid="held-scan-controls">
       <h2 id="held-scan-heading">Manual scan</h2>
-      <p data-testid="held-scan-root">Source root: {taskRootLabel(state, preview.root_id)}</p>
+      <p data-testid="held-scan-root">{taskRootLabel(state, preview.root_id)}</p>
       <label>
         <input
           data-testid="scan-hold-new-discoveries"
@@ -53,11 +53,13 @@ export const HeldScanControls = ({ preview }: { readonly preview: RootPreviewRes
         />
         Hold new discoveries for review
       </label>
-      <p>Held mode only: discovered books remain staged and no book is accepted into Library.</p>
+      <p>{state.scan_hold_new_discoveries
+        ? "Held mode: discovered books remain staged and no book is accepted into Library."
+        : "Normal mode: complete, current discoveries are accepted into Library."}</p>
       <button
         data-testid="start-held-scan"
         disabled={disabled}
-        onClick={() => void runtime.runPromise(startHeldScan(preview.root_id))}
+        onClick={() => void runtime.runPromise(startManualScan(preview.root_id))}
       >
         {state.scan_start_status === "loading" ? "Starting manual scan…" : "Start manual scan"}
       </button>
@@ -70,6 +72,9 @@ export const HeldScanControls = ({ preview }: { readonly preview: RootPreviewRes
           <p data-testid="scan-task-status">Status: {taskStatusText(task.status)}</p>
           <p data-testid="scan-task-progress">
             {task.candidates_analyzed} of {task.candidates_discovered} discoveries analyzed; {task.directories_visited} directories visited.
+          </p>
+          <p data-testid="scan-task-coverage">
+            Coverage: {task.coverage?.status ?? "not recorded"}
           </p>
           {scanErrorText(task) !== null && <p role="alert" data-testid="scan-task-error">{scanErrorText(task)}</p>}
         </div>
@@ -95,6 +100,11 @@ export const HeldScanReview = () => {
           </button>
         </>
       )}
+      {state.scan_release_status === "error" && state.scan_release_error !== null && (
+        <p role="alert" data-testid="scan-release-error">
+          Could not release hold: {state.scan_release_error}
+        </p>
+      )}
       {state.scan_status !== "error" && state.scan_tasks.length === 0 && state.staged_discoveries.length === 0 && (
         <p>No held scan results yet.</p>
       )}
@@ -104,6 +114,7 @@ export const HeldScanReview = () => {
             <li key={task.task_id} data-testid="scan-task-summary">
               <strong>{taskStatusText(task.status)}</strong>
               <span> — {taskRootLabel(state, task.root_id)} — {task.candidates_analyzed}/{task.candidates_discovered} analyzed</span>
+              <small data-testid="scan-task-coverage"> — coverage: {task.coverage?.status ?? "not recorded"}</small>
               {scanErrorText(task) !== null && <small> {scanErrorText(task)}</small>}
             </li>
           ))}
@@ -116,6 +127,17 @@ export const HeldScanReview = () => {
               <span data-testid="staged-discovery-root">{taskRootLabel(state, candidate.root_id)}</span>
               <span data-testid="staged-discovery-path">{candidate.relative_path}</span>
               <small>{discoveryStatus(candidate)}; hold: {candidate.hold_state}</small>
+              {candidate.hold_state === "held" && (
+                <button
+                  data-testid={`release-hold-${candidate.candidate_id}`}
+                  disabled={state.scan_release_status === "loading"}
+                  onClick={() => void runtime.runPromise(releaseHeldDiscovery(candidate.candidate_id))}
+                >
+                  {state.scan_release_candidate_id === candidate.candidate_id && state.scan_release_status === "loading"
+                    ? "Releasing hold…"
+                    : "Release hold"}
+                </button>
+              )}
             </li>
           ))}
         </ul>

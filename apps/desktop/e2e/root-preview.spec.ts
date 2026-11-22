@@ -1,7 +1,7 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test"
 import electronPath from "electron"
 import { DatabaseSync } from "node:sqlite"
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, rename, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url"
 const APP_DIR = fileURLToPath(new URL("..", import.meta.url))
 const launched: ElectronApplication[] = []
 
-const launch = async (dbPath: string): Promise<{ app: ElectronApplication; window: Page }> => {
+const launch = async (dbPath: string, environment: Record<string, string> = {}): Promise<{ app: ElectronApplication; window: Page }> => {
   const app = await electron.launch({
     executablePath: electronPath as unknown as string,
     args: ["."],
@@ -17,7 +17,8 @@ const launch = async (dbPath: string): Promise<{ app: ElectronApplication; windo
     env: {
       ...process.env,
       HENSHIN_PROTOTYPE_DB: dbPath,
-      HENSHIN_PROTOTYPE_CLIENT_DB: `${dbPath}.client`
+      HENSHIN_PROTOTYPE_CLIENT_DB: `${dbPath}.client`,
+      ...environment
     }
   })
   launched.push(app)
@@ -178,7 +179,7 @@ test("previews book candidates for an existing saved root after restart", async 
   }
 })
 
-test("runs a held manual scan and restores staged failures after restart", async () => {
+test("runs a held manual scan, reports a disappeared release, and releases another discovery", async () => {
   const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-held-scan-db-"))
   const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-held-scan-fixture-"))
   const dbPath = path.join(dbDirectory, "prototype.db")
@@ -210,7 +211,7 @@ test("runs a held manual scan and restores staged failures after restart", async
     await expect(first.window.getByTestId("root-preview-candidates").locator("li")).toHaveCount(2)
 
     await expect(first.window.getByTestId("scan-hold-new-discoveries")).not.toBeChecked()
-    await expect(first.window.getByTestId("start-held-scan")).toBeDisabled()
+    await expect(first.window.getByTestId("start-held-scan")).toBeEnabled()
     await first.window.getByTestId("scan-hold-new-discoveries").check()
     await expect(first.window.getByTestId("start-held-scan")).toBeEnabled()
     await expect(first.window.getByTestId("held-scan-root")).toContainText("Held books")
@@ -235,6 +236,208 @@ test("runs a held manual scan and restores staged failures after restart", async
     await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("broken.cbz")
     await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("hold: held")
     await expect(reopened.window.getByTestId("staged-discovery-root").first()).toContainText(fixtureDirectory)
+
+    const database = new DatabaseSync(dbPath)
+    try {
+      database.prepare("DELETE FROM staged_discoveries WHERE relative_path = ?").run("healthy-book")
+    } finally {
+      database.close()
+    }
+    await reopened.window
+      .getByTestId("staged-discoveries")
+      .locator("li")
+      .filter({ hasText: "healthy-book" })
+      .getByRole("button", { name: "Release hold" })
+      .click()
+    await expect(reopened.window.getByTestId("staged-discoveries")).not.toContainText("healthy-book")
+    await expect(reopened.window.getByTestId("scan-release-error")).toContainText(
+      "staged discovery not found; refresh Review"
+    )
+    await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("broken.cbz")
+    await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("hold: held")
+
+    await reopened.window
+      .getByTestId("staged-discoveries")
+      .locator("li")
+      .filter({ hasText: "broken.cbz" })
+      .getByRole("button", { name: "Release hold" })
+      .click()
+    await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("hold: eligible")
+    await expect(reopened.window.getByTestId("scan-release-error")).toHaveCount(0)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+  }
+})
+
+test("runs normal scans from the saved-root preview and refreshes accepted books after completion", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-normal-scan-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-normal-scan-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+
+  try {
+    for (const name of ["existing-a", "existing-b", "existing-c", "excluded-book"]) {
+      const directory = path.join(fixtureDirectory, name)
+      await mkdir(directory)
+      await writeFile(path.join(directory, "001.jpg"), name)
+    }
+
+    const first = await launch(dbPath)
+    await expect(first.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await first.window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await first.window.getByTestId("root-preview-submit").click()
+    await first.window.getByTestId("root-label").fill("Normal books")
+    await first.window.getByTestId("root-save").click()
+    await expect(first.window.getByTestId("root-saved")).toContainText("Normal books")
+
+    await first.window.getByTestId("root-saved-preview").click()
+    await expect(first.window.getByTestId("root-preview-candidates").locator("li")).toHaveCount(4)
+    const excludedCandidate = first.window
+      .getByTestId("root-preview-candidates")
+      .locator("li")
+      .filter({ hasText: "excluded-book" })
+    await excludedCandidate.getByRole("button", { name: "Exclude subtree" }).click()
+    await expect(first.window.getByTestId("root-preview-candidates").locator("li")).toHaveCount(3)
+
+    await first.window.getByTestId("scan-hold-new-discoveries").check()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("scan-task-status")).toHaveText("Status: succeeded", { timeout: 30_000 })
+    await expect(first.window.getByTestId("staged-discoveries").locator("li")).toHaveCount(3)
+    await expect(first.window.getByTestId("library-screen")).toHaveCount(0)
+
+    for (const name of ["new-book-a", "new-book-b"]) {
+      const directory = path.join(fixtureDirectory, name)
+      await mkdir(directory)
+      await writeFile(path.join(directory, "001.jpg"), name)
+    }
+
+    await first.window.getByTestId("scan-hold-new-discoveries").uncheck()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("library-screen")).toBeVisible()
+    await expect(first.window.getByTestId("library-scan-status")).toHaveText("Scan task succeeded.", { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(2, { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-entries")).toContainText("new-book-a")
+    await expect(first.window.getByTestId("library-entries")).toContainText("new-book-b")
+    const firstIds = (await first.window.getByTestId("library-entry").locator("small").allTextContents()).sort()
+    expect(firstIds).toHaveLength(2)
+
+    await first.window.getByTestId("library-setup").click()
+    await first.window.getByTestId("root-saved-preview").click()
+    await expect(first.window.getByTestId("scan-hold-new-discoveries")).not.toBeChecked()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("library-scan-status")).toHaveText("Scan task succeeded.", { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(2, { timeout: 30_000 })
+    const repeatedIds = (await first.window.getByTestId("library-entry").locator("small").allTextContents()).sort()
+    expect(repeatedIds).toEqual(firstIds)
+
+    await first.app.close()
+    const reopened = await launch(dbPath)
+    await reopened.window.getByTestId("open-library").click()
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(2, { timeout: 30_000 })
+    const restartedIds = (await reopened.window.getByTestId("library-entry").locator("small").allTextContents()).sort()
+    expect(restartedIds).toEqual(firstIds)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+  }
+})
+
+test("preserves accepted entries across an interrupted normal scan and explicitly retries restored coverage", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-interrupted-scan-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-interrupted-scan-fixture-"))
+  const disconnectedDirectory = `${fixtureDirectory}-disconnected`
+  const dbPath = path.join(dbDirectory, "prototype.db")
+
+  try {
+    const stableBook = path.join(fixtureDirectory, "stable-book")
+    await mkdir(stableBook)
+    await writeFile(path.join(stableBook, "001.jpg"), "stable")
+
+    const scanEnvironment = { HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS: "1000" }
+    const first = await launch(dbPath, scanEnvironment)
+    await first.window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await first.window.getByTestId("root-preview-submit").click()
+    await first.window.getByTestId("root-label").fill("Interrupted books")
+    await first.window.getByTestId("root-save").click()
+    await expect(first.window.getByTestId("root-saved")).toContainText("Interrupted books")
+    await first.window.getByTestId("root-saved-preview").click()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("library-scan-status")).toHaveText("Scan task succeeded.", { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(1)
+    const stableEntryId = await first.window.getByTestId("library-entry").locator("small").textContent()
+    if (stableEntryId === null) throw new Error("stable entry identity was not rendered")
+
+    await first.window.getByTestId("library-setup").click()
+    for (const name of ["new-book-a", "new-book-b"]) {
+      const book = path.join(fixtureDirectory, name)
+      await mkdir(book)
+      await writeFile(path.join(book, "001.jpg"), name)
+    }
+    await first.window.getByTestId("root-saved-preview").click()
+    await first.window.getByTestId("start-held-scan").click()
+    const database = new DatabaseSync(dbPath)
+    try {
+      await expect.poll(() => {
+        const row = database.prepare("SELECT COUNT(*) AS count FROM staged_discoveries WHERE analysis_status = 'ready'").get() as { count: number }
+        return row.count
+      }, { timeout: 30_000 }).toBeGreaterThan(0)
+    } finally {
+      database.close()
+    }
+    await rename(fixtureDirectory, disconnectedDirectory)
+    await expect(first.window.getByTestId("library-scan-status")).toHaveText("Scan task failed.", { timeout: 120_000 })
+    await rename(disconnectedDirectory, fixtureDirectory)
+
+    await first.app.close()
+    const reopened = await launch(dbPath, scanEnvironment)
+    await expect(reopened.window.getByTestId("scan-task-coverage").filter({ hasText: "coverage: partial" })).toHaveCount(1)
+    await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("new-book-a")
+    await expect(reopened.window.getByTestId("staged-discoveries")).toContainText("new-book-b")
+    await reopened.window.getByTestId("open-library").click()
+    await expect(reopened.window.getByTestId("library-entry").locator("small")).toContainText(stableEntryId)
+
+    await reopened.window.getByTestId("library-setup").click()
+    await reopened.window.getByTestId("root-saved-preview").click()
+    await reopened.window.getByTestId("start-held-scan").click()
+    await expect(reopened.window.getByTestId("library-scan-status")).toHaveText("Scan task succeeded.", { timeout: 120_000 })
+    await expect(reopened.window.getByTestId("library-entries")).toContainText("stable-book")
+    await expect(reopened.window.getByTestId("library-entries")).toContainText("new-book-a")
+    await expect(reopened.window.getByTestId("library-entries")).toContainText("new-book-b")
+    await expect(reopened.window.getByTestId("library-entry").filter({ hasText: "stable-book" }).locator("small")).toHaveText(stableEntryId)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+    await rm(disconnectedDirectory, { recursive: true, force: true })
+  }
+})
+
+test("loads an additional Library page after a normal scan", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-pages-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-pages-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+
+  try {
+    for (let index = 0; index < 51; index += 1) {
+      const directory = path.join(fixtureDirectory, `book-${index.toString().padStart(2, "0")}`)
+      await mkdir(directory)
+      await writeFile(path.join(directory, "001.jpg"), `book-${index}`)
+    }
+
+    const first = await launch(dbPath)
+    await first.window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await first.window.getByTestId("root-preview-submit").click()
+    await first.window.getByTestId("root-label").fill("Paged books")
+    await first.window.getByTestId("root-save").click()
+    await expect(first.window.getByTestId("root-saved")).toContainText("Paged books")
+    await first.window.getByTestId("root-saved-preview").click()
+    await first.window.getByTestId("start-held-scan").click()
+
+    await expect(first.window.getByTestId("library-screen")).toBeVisible()
+    await expect(first.window.getByTestId("library-scan-status")).toHaveText("Scan task succeeded.", { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(50, { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-load-more")).toBeVisible()
+    await first.window.getByTestId("library-load-more").click()
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(51, { timeout: 30_000 })
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })
