@@ -1,4 +1,5 @@
 import { Schema } from "effect"
+import { isAbsolute } from "node:path"
 import { DraftFormId, NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import { CommandAttemptStatus } from "@henshin/contracts/note"
 
@@ -96,6 +97,12 @@ export const LocalMappingActivationOutcome = Schema.Union([
 ])
 export type LocalMappingActivationOutcome = typeof LocalMappingActivationOutcome.Type
 
+const AbsoluteLocalPath = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(4096),
+  Schema.makeFilter(isAbsolute)
+)
+
 export const CommandAttemptNote = Schema.Struct({
   note_id: NoteId,
   text: Text,
@@ -157,10 +164,10 @@ export const DraftWorkerRequest = Schema.Union([
     op: Schema.Literal("activateLocalMapping"),
     instanceId: Uuid,
     rootId: Uuid,
-    selectedPath: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-    canonicalPath: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    selectedPath: AbsoluteLocalPath,
+    canonicalPath: AbsoluteLocalPath,
     expectedMappingRevision: Revision,
-    protectedWritablePaths: Schema.Array(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)))
+    protectedWritablePaths: Schema.Array(AbsoluteLocalPath)
   }),
   Schema.Struct({ op: Schema.Literal("close") })
 ])

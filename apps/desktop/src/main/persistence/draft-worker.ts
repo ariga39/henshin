@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite"
-import { isAbsolute, relative, sep } from "node:path"
+import { realpathSync, statSync } from "node:fs"
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import {
@@ -70,10 +71,24 @@ db.exec(`
     selected_path TEXT NOT NULL,
     canonical_path TEXT NOT NULL,
     mapping_revision INTEGER NOT NULL,
+    selected_identity TEXT,
+    canonical_identity TEXT,
     state TEXT NOT NULL CHECK (state = 'active'),
     PRIMARY KEY (instance_id, root_id)
   );
 `)
+
+const clientMappingColumns = new Set(
+  (db.prepare("PRAGMA table_info(client_mappings)").all() as unknown as ReadonlyArray<{ name: string }>).map(
+    (column) => column.name
+  )
+)
+if (!clientMappingColumns.has("selected_identity")) {
+  db.exec("ALTER TABLE client_mappings ADD COLUMN selected_identity TEXT")
+}
+if (!clientMappingColumns.has("canonical_identity")) {
+  db.exec("ALTER TABLE client_mappings ADD COLUMN canonical_identity TEXT")
+}
 
 const selectDraft = db.prepare(`
   SELECT instance_id, note_id, form_id, text, local_revision,
@@ -166,13 +181,15 @@ const listCommandAttempts = db.prepare(`
 listCommandAttempts.setReadBigInts(true)
 
 const selectLocalMapping = db.prepare(`
-  SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision
+  SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision,
+         selected_identity, canonical_identity
   FROM client_mappings
   WHERE instance_id = ? AND root_id = ? AND state = 'active'
 `)
 selectLocalMapping.setReadBigInts(true)
 const listLocalMappings = db.prepare(`
-  SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision
+  SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision,
+         selected_identity, canonical_identity
   FROM client_mappings
   WHERE instance_id = ? AND state = 'active'
   ORDER BY rowid ASC
@@ -180,12 +197,15 @@ const listLocalMappings = db.prepare(`
 listLocalMappings.setReadBigInts(true)
 const upsertLocalMapping = db.prepare(`
   INSERT INTO client_mappings(
-    instance_id, root_id, selected_path, canonical_path, mapping_revision, state
-  ) VALUES(?, ?, ?, ?, ?, 'active')
+    instance_id, root_id, selected_path, canonical_path, mapping_revision,
+    selected_identity, canonical_identity, state
+  ) VALUES(?, ?, ?, ?, ?, ?, ?, 'active')
   ON CONFLICT(instance_id, root_id) DO UPDATE SET
     selected_path = excluded.selected_path,
     canonical_path = excluded.canonical_path,
     mapping_revision = excluded.mapping_revision,
+    selected_identity = excluded.selected_identity,
+    canonical_identity = excluded.canonical_identity,
     state = 'active'
 `)
 
@@ -286,6 +306,8 @@ type PersistedLocalMapping = {
   readonly selected_path: string
   readonly canonical_path: string
   readonly mapping_revision: bigint
+  readonly selected_identity: string | null
+  readonly canonical_identity: string | null
 }
 
 const readLocalMappingRow = (row: PersistedLocalMapping): LocalMappingRow => ({
@@ -301,8 +323,78 @@ const readLocalMapping = (instanceId: string, rootId: string): LocalMappingRow |
   return row === undefined ? undefined : readLocalMappingRow(row)
 }
 
+const readPersistedLocalMappings = (instanceId: string): ReadonlyArray<PersistedLocalMapping> =>
+  listLocalMappings.all(instanceId) as unknown as ReadonlyArray<PersistedLocalMapping>
+
 const readLocalMappings = (instanceId: string): ReadonlyArray<LocalMappingRow> =>
-  (listLocalMappings.all(instanceId) as unknown as ReadonlyArray<PersistedLocalMapping>).map(readLocalMappingRow)
+  readPersistedLocalMappings(instanceId).map(readLocalMappingRow)
+
+type ResolvedLocalPath = {
+  readonly comparisonPath: string
+  readonly endpointIdentity: string | null
+  readonly ancestorIdentities: ReadonlyArray<string>
+}
+
+const identityOf = (path: string): string => {
+  const stats = statSync(path, { bigint: true })
+  return `${stats.dev.toString()}:${stats.ino.toString()}`
+}
+
+const ancestorIdentitiesOf = (path: string): ReadonlyArray<string> => {
+  const identities: Array<string> = []
+  let current = path
+  while (true) {
+    identities.push(identityOf(current))
+    const parent = dirname(current)
+    if (parent === current) return identities
+    current = parent
+  }
+}
+
+const pathErrorCode = (error: unknown): string | undefined =>
+  typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+    ? error.code
+    : undefined
+
+const resolveLocalPath = (input: string): ResolvedLocalPath => {
+  let current = input
+  const missingSuffix: Array<string> = []
+
+  while (true) {
+    try {
+      const realCurrent = realpathSync.native(current)
+      const ancestorIdentities = ancestorIdentitiesOf(current)
+      return {
+        comparisonPath: missingSuffix.length === 0 ? realCurrent : join(realCurrent, ...missingSuffix),
+        endpointIdentity: missingSuffix.length === 0 ? identityOf(current) : null,
+        ancestorIdentities
+      }
+    } catch (error) {
+      const code = pathErrorCode(error)
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        return { comparisonPath: input, endpointIdentity: null, ancestorIdentities: [] }
+      }
+      const parent = dirname(current)
+      if (parent === current) {
+        return { comparisonPath: input, endpointIdentity: null, ancestorIdentities: [] }
+      }
+      missingSuffix.unshift(basename(current))
+      current = parent
+    }
+  }
+}
+
+const persistedPath = (path: string, identity: string | null): ResolvedLocalPath => ({
+  comparisonPath: path,
+  endpointIdentity: identity,
+  ancestorIdentities: identity === null ? [] : [identity]
+})
+
+const identityOverlaps = (left: ResolvedLocalPath, right: ResolvedLocalPath): boolean => {
+  if (left.endpointIdentity !== null && right.ancestorIdentities.includes(left.endpointIdentity)) return true
+  if (right.endpointIdentity !== null && left.ancestorIdentities.includes(right.endpointIdentity)) return true
+  return false
+}
 
 const isPathWithin = (parent: string, candidate: string): boolean => {
   if (process.platform === "win32") {
@@ -323,14 +415,18 @@ const pathsOverlap = (left: string, right: string): boolean =>
   isPathWithin(left, right) || isPathWithin(right, left)
 
 const mappingPathsOverlap = (
-  selectedPath: string,
-  canonicalPath: string,
-  mapping: LocalMappingRow
+  selectedPath: ResolvedLocalPath,
+  canonicalPath: ResolvedLocalPath,
+  mapping: PersistedLocalMapping
 ): boolean =>
-  pathsOverlap(selectedPath, mapping.selectedPath) ||
-  pathsOverlap(selectedPath, mapping.canonicalPath) ||
-  pathsOverlap(canonicalPath, mapping.selectedPath) ||
-  pathsOverlap(canonicalPath, mapping.canonicalPath)
+  pathsOverlap(selectedPath.comparisonPath, mapping.selected_path) ||
+  pathsOverlap(selectedPath.comparisonPath, mapping.canonical_path) ||
+  pathsOverlap(canonicalPath.comparisonPath, mapping.selected_path) ||
+  pathsOverlap(canonicalPath.comparisonPath, mapping.canonical_path) ||
+  identityOverlaps(selectedPath, persistedPath(mapping.selected_path, mapping.selected_identity)) ||
+  identityOverlaps(selectedPath, persistedPath(mapping.canonical_path, mapping.canonical_identity)) ||
+  identityOverlaps(canonicalPath, persistedPath(mapping.selected_path, mapping.selected_identity)) ||
+  identityOverlaps(canonicalPath, persistedPath(mapping.canonical_path, mapping.canonical_identity))
 
 const handle = (request: DraftWorkerRequest): unknown => {
   switch (request.op) {
@@ -603,10 +699,12 @@ const handle = (request: DraftWorkerRequest): unknown => {
           return { kind: "revision_conflict", currentMapping: current ?? null }
         }
 
-        const overlapsRoot = readLocalMappings(request.instanceId).some(
-          (mapping) => mapping.rootId !== request.rootId && mappingPathsOverlap(
-            request.selectedPath,
-            request.canonicalPath,
+        const selectedPath = resolveLocalPath(request.selectedPath)
+        const canonicalPath = resolveLocalPath(request.canonicalPath)
+        const overlapsRoot = readPersistedLocalMappings(request.instanceId).some(
+          (mapping) => mapping.root_id !== request.rootId && mappingPathsOverlap(
+            selectedPath,
+            canonicalPath,
             mapping
           )
         )
@@ -616,9 +714,15 @@ const handle = (request: DraftWorkerRequest): unknown => {
         }
 
         const overlapsWritable = request.protectedWritablePaths.some(
-          (protectedPath) =>
-            pathsOverlap(request.selectedPath, protectedPath) ||
-            pathsOverlap(request.canonicalPath, protectedPath)
+          (protectedPath) => {
+            const writablePath = resolveLocalPath(protectedPath)
+            return pathsOverlap(selectedPath.comparisonPath, writablePath.comparisonPath) ||
+              pathsOverlap(canonicalPath.comparisonPath, writablePath.comparisonPath) ||
+              identityOverlaps(selectedPath, writablePath) ||
+              identityOverlaps(canonicalPath, writablePath) ||
+              identityOverlaps(writablePath, selectedPath) ||
+              identityOverlaps(writablePath, canonicalPath)
+          }
         )
         if (overlapsWritable) {
           db.exec("ROLLBACK")
@@ -637,7 +741,9 @@ const handle = (request: DraftWorkerRequest): unknown => {
           mapping.rootId,
           mapping.selectedPath,
           mapping.canonicalPath,
-          BigInt(mapping.mappingRevision)
+          BigInt(mapping.mappingRevision),
+          selectedPath.endpointIdentity,
+          canonicalPath.endpointIdentity
         )
         db.exec("COMMIT")
         return { kind: "activated", mapping }

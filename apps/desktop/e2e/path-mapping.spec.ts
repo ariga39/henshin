@@ -86,11 +86,6 @@ test("compares a bounded local mapping preview and recovers after cancel or fail
     await expect(mapping).toContainText("Found on this device.")
     await expect(mapping).toContainText("missing-book")
     await expect(mapping).toContainText("Missing on this device.")
-    await expect(mapping.getByTestId("local-mapping-missing-explanation")).toBeVisible()
-    await expect(savedRoot.getByTestId("local-mapping-activate")).toBeEnabled()
-    await savedRoot.getByTestId("local-mapping-activate").click()
-    await expect(savedRoot.getByTestId("local-mapping-effective")).toContainText(localFixture)
-    await expect(savedRoot.getByTestId("local-mapping-effective")).toContainText("revision 1")
     expect(new Uint8Array(await readFile(serverPage))).toEqual(serverBytes)
     expect(new Uint8Array(await readFile(path.join(serverMissing, "001.jpg")))).toEqual(
       new Uint8Array(Buffer.from("missing page"))
@@ -105,16 +100,9 @@ test("compares a bounded local mapping preview and recovers after cancel or fail
     await setDialogResult(app, { canceled: false, filePaths: [inaccessible] })
     await savedRoot.getByTestId("root-local-mapping").click()
     await expect(window.getByTestId("local-mapping-error")).toContainText("could not be inspected")
-    await expect(savedRoot.getByTestId("local-mapping-effective")).toContainText(localFixture)
     await window.getByTestId("open-library").click()
     await expect(window.getByTestId("library-screen")).toBeVisible()
     await expect(window.getByTestId("library-entry")).toHaveCount(2)
-
-    await app.close()
-    const restarted = await launch(dbPath)
-    const restartedRoot = restarted.window.getByTestId("root-saved").filter({ hasText: "Mapping fixture" })
-    await expect(restartedRoot.getByTestId("local-mapping-effective")).toContainText(localFixture)
-    await expect(restartedRoot.getByTestId("local-mapping-effective")).toContainText("revision 1")
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(serverFixture, { recursive: true, force: true })
