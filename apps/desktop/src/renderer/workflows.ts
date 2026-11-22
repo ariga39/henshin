@@ -5,7 +5,9 @@ import type {
   RootPreviewResult,
   ScanTask,
   ReaderProfileSaveIpcRequest,
-  ReaderProfile
+  ReaderProfile,
+  ReaderProfileTestIpcRequest,
+  ReaderProfileTestTargetSelectIpcRequest
 } from "@henshin/contracts"
 import { PrototypeClient, ReaderProfileClient, RootPreviewClient, ScanReviewClient } from "./client"
 import { LibraryClient } from "./client"
@@ -106,13 +108,92 @@ export const clearReaderExecutableSelection = (): void => {
   })
 }
 
+export const selectReaderTestTarget = (input: ReaderProfileTestTargetSelectIpcRequest) =>
+  Effect.gen(function*() {
+    const client = yield* ReaderProfileClient
+    yield* Effect.sync(() => viewStore.set({
+      reader_profile_test_status: "selecting",
+      reader_profile_test_error: null,
+      reader_profile_test_result: null
+    }))
+    const result = yield* client.selectTestTarget(input)
+    if (!result.ok) {
+      if (result.error.code === "reader_profile_conflict") yield* refreshReaderProfilesAfterConflict()
+      yield* Effect.sync(() => viewStore.set({
+        reader_profile_test_status: "error",
+        reader_profile_test_error: result.error.message,
+        reader_profile_test_target: null
+      }))
+      return null
+    }
+    if (result.data === null) {
+      yield* Effect.sync(() => viewStore.set({ reader_profile_test_status: "idle" }))
+      return null
+    }
+    yield* Effect.sync(() => viewStore.set({
+      reader_profile_test_target: result.data,
+      reader_profile_test_status: "ready",
+      reader_profile_test_error: null,
+      reader_profile_test_result: null
+    }))
+    return result.data
+  })
+
+export const clearReaderTestTarget = (): void => {
+  viewStore.set({
+    reader_profile_test_target: null,
+    reader_profile_test_status: "idle",
+    reader_profile_test_result: null,
+    reader_profile_test_error: null
+  })
+}
+
+const refreshReaderProfilesAfterConflict = () =>
+  Effect.gen(function*() {
+    yield* Effect.sync(() => {
+      clearReaderExecutableSelection()
+      clearReaderTestTarget()
+    })
+    yield* loadReaderProfiles
+  })
+
+export const testReaderProfile = (input: ReaderProfileTestIpcRequest) =>
+  Effect.gen(function*() {
+    const client = yield* ReaderProfileClient
+    yield* Effect.sync(() => viewStore.set({
+      reader_profile_test_status: "launching",
+      reader_profile_test_error: null,
+      reader_profile_test_result: null
+    }))
+    const result = yield* client.test(input)
+    if (!result.ok) {
+      if (result.error.code === "reader_profile_conflict") yield* refreshReaderProfilesAfterConflict()
+      if (result.error.code === "reader_test_target_selection_expired") {
+        yield* Effect.sync(clearReaderTestTarget)
+      }
+      yield* Effect.sync(() => viewStore.set({
+        reader_profile_test_status: "error",
+        reader_profile_test_error: result.error.message
+      }))
+      return null
+    }
+    yield* Effect.sync(() => viewStore.set({
+      reader_profile_test_status: "accepted",
+      reader_profile_test_error: null,
+      reader_profile_test_result: result.data
+    }))
+    return result.data
+  })
+
 export const saveReaderProfile = (input: ReaderProfileSaveIpcRequest) =>
   Effect.gen(function*() {
     const client = yield* ReaderProfileClient
     yield* Effect.sync(() => viewStore.set({ reader_profile_save_status: "loading", reader_profile_save_error: null }))
     const result = yield* client.save(input)
     if (!result.ok) {
-      if (result.error.code === "reader_profile_conflict" || result.error.code === "reader_profile_not_found") {
+      if (result.error.code === "reader_profile_conflict") {
+        yield* refreshReaderProfilesAfterConflict()
+      } else if (result.error.code === "reader_profile_not_found") {
         yield* loadReaderProfiles
       }
       if (result.error.code === "reader_executable_invalid") {
@@ -134,7 +215,11 @@ export const saveReaderProfile = (input: ReaderProfileSaveIpcRequest) =>
         reader_profile_save_error: null,
         reader_profile_selection_handle: null,
         reader_profile_selection_name: null,
-        reader_profile_selection_error: null
+        reader_profile_selection_error: null,
+        reader_profile_test_target: null,
+        reader_profile_test_status: "idle",
+        reader_profile_test_result: null,
+        reader_profile_test_error: null
       })
     })
     return result.data
