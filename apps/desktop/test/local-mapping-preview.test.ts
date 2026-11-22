@@ -1,7 +1,7 @@
-import { link, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { link, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { IndexedRootSample } from "@henshin/contracts"
 import { inspectLocalMapping, LocalMappingUnavailableError } from "../src/main/LocalMappingPreview"
 
@@ -67,20 +67,92 @@ describe("local mapping preview boundary", () => {
     }
   })
 
-  it("marks large image-directory evidence partial without presenting a subtotal", async () => {
+  it("keeps an exact single library claim found beside an equivalent local sibling", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-equivalent-sibling-"))
+    try {
+      await writeFile(path.join(root, "Book.cbz"), "book")
+      await writeFile(path.join(root, "book.cbz"), "unrelated local file")
+      const result = await inspectLocalMapping(rootId, root, [sample("Book.cbz")], false)
+      expect(result.samples).toMatchObject([{ relative_path: "Book.cbz", status: "found" }])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("groups equivalent library claims according to the local directory behavior", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-claims-"))
+    try {
+      await writeFile(path.join(root, "Book.cbz"), "book")
+      await writeFile(path.join(root, "book.cbz"), "case variant")
+      const names = await readdir(root)
+      const result = await inspectLocalMapping(rootId, root, [sample("Book.cbz"), sample("book.cbz")], false)
+      expect(result.samples).toMatchObject(names.includes("Book.cbz") && names.includes("book.cbz")
+        ? [
+            { relative_path: "Book.cbz", status: "found" },
+            { relative_path: "book.cbz", status: "found" }
+          ]
+        : [
+            { relative_path: "Book.cbz", status: "collision", collision_kind: "name-equivalence" },
+            { relative_path: "book.cbz", status: "collision", collision_kind: "name-equivalence" }
+          ])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("completes direct-image size evidence for a 100-page directory", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-large-"))
     try {
       const book = path.join(root, "large-book")
       await mkdir(book)
-      for (let index = 0; index < 65; index += 1) {
+      for (let index = 0; index < 101; index += 1) {
         await writeFile(path.join(book, `${index.toString().padStart(3, "0")}.jpg`), "page")
       }
       const result = await inspectLocalMapping(rootId, root, [imageSample("large-book")], false)
       expect(result.samples).toMatchObject([{
         status: "found",
+        local_evidence_status: "complete",
+        local_error: null,
+        local_size_bytes: 404
+      }])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("returns partial evidence when the local time budget expires", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-budget-"))
+    const now = vi.spyOn(Date, "now")
+    let calls = 0
+    now.mockImplementation(() => calls++ < 20 ? 0 : 5_001)
+    try {
+      const book = path.join(root, "slow-book")
+      await mkdir(book)
+      for (let index = 0; index < 20; index += 1) {
+        await writeFile(path.join(book, `${index.toString().padStart(3, "0")}.jpg`), "page")
+      }
+      const result = await inspectLocalMapping(rootId, root, [imageSample("slow-book")], false)
+      expect(result.local_budget_exhausted).toBe(true)
+      expect(result.samples).toMatchObject([{
+        status: "found",
         local_evidence_status: "partial",
-        local_error: "directory-limit",
+        local_error: "budget-exceeded",
         local_size_bytes: null
+      }])
+    } finally {
+      now.mockRestore()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("reports an overlong local segment as unsupported", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-long-name-"))
+    try {
+      const overlongSegment = "a".repeat(300)
+      const result = await inspectLocalMapping(rootId, root, [sample(`${overlongSegment}.cbz`)], false)
+      expect(result.samples).toMatchObject([{
+        status: "unsupported",
+        local_error: "unsupported"
       }])
     } finally {
       await rm(root, { recursive: true, force: true })

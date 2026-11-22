@@ -3,11 +3,9 @@ import type {
   CommandAttempt,
   CommandReconciliation,
   ConnectionStatusView,
-  DeviceRootMapping,
   DiscardedDraft,
   HandshakeView,
   LibraryEntryPage,
-  LocalMappingActivateIpcRequest,
   LocalMappingPreviewIpcResult,
   NoteView,
   PublicError,
@@ -91,8 +89,6 @@ export interface RootPreviewBridge {
 
 export interface LocalMappingBridge {
   preview(input: { readonly root_id: string }): Promise<Result<LocalMappingPreviewIpcResult>>
-  list(input: {}): Promise<Result<ReadonlyArray<DeviceRootMapping>>>
-  activate(input: LocalMappingActivateIpcRequest): Promise<Result<DeviceRootMapping>>
 }
 
 export interface ScanReviewBridge {
@@ -187,16 +183,12 @@ export class LocalMappingClient extends Context.Service<
   LocalMappingClient,
   {
     readonly preview: (rootId: string) => Effect.Effect<Result<LocalMappingPreviewIpcResult>>
-    readonly list: () => Effect.Effect<Result<ReadonlyArray<DeviceRootMapping>>>
-    readonly activate: (input: LocalMappingActivateIpcRequest) => Effect.Effect<Result<DeviceRootMapping>>
   }
 >()("henshin/desktop/renderer/LocalMappingClient") {
   static readonly layer = Layer.succeed(
     LocalMappingClient,
     LocalMappingClient.of({
-      preview: (rootId) => callIpc(() => window.henshinLocalMapping.preview({ root_id: rootId })),
-      list: () => callIpc(() => window.henshinLocalMapping.list({})),
-      activate: (input) => callIpc(() => window.henshinLocalMapping.activate(input))
+      preview: (rootId) => callIpc(() => window.henshinLocalMapping.preview({ root_id: rootId }))
     })
   )
 }

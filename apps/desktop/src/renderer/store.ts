@@ -2,7 +2,6 @@ import type {
   CommandAttempt,
   CommandReconciliation,
   ConnectionStatusView,
-  DeviceRootMapping,
   LocalMappingPreview,
   LibraryEntry,
   NoteView,
@@ -61,9 +60,6 @@ export interface ViewState {
   readonly local_mapping_status: "idle" | "loading" | "ready" | "error"
   readonly local_mapping_preview: LocalMappingPreview | null
   readonly local_mapping_error: string | null
-  readonly local_mapping_activation_status: "idle" | "loading" | "error"
-  readonly local_mapping_activation_error: string | null
-  readonly local_mappings: ReadonlyArray<DeviceRootMapping>
   readonly scan_tasks: ReadonlyArray<ScanTask>
   readonly staged_discoveries: ReadonlyArray<StagedDiscovery>
   readonly scan_status: "idle" | "loading" | "ready" | "error"
@@ -120,9 +116,6 @@ const initialState: ViewState = {
   local_mapping_status: "idle",
   local_mapping_preview: null,
   local_mapping_error: null,
-  local_mapping_activation_status: "idle",
-  local_mapping_activation_error: null,
-  local_mappings: [],
   scan_tasks: [],
   staged_discoveries: [],
   scan_status: "idle",

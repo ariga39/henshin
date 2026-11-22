@@ -5,11 +5,10 @@ import { Option, Schema } from "effect"
 import type { IndexedRootSample, LocalMappingPreview, LocalMappingSample } from "@henshin/contracts"
 import { RootRelativePath } from "@henshin/contracts/root"
 
-const MAX_DIRECT_CHILDREN = 64
 const MAX_DIRECTORY_ENTRIES = 4_096
 const MAX_DIRECTORY_NAME_BYTES = 1_048_576
 const MAX_FORMATS = 8
-export const LOCAL_MAPPING_BUDGET_MS = 5_000
+const LOCAL_MAPPING_BUDGET_MS = 5_000
 const supportedImageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp"])
 
 type LocalError = NonNullable<LocalMappingSample["local_error"]>
@@ -63,8 +62,9 @@ const errorFromSystem = (error: unknown): LocalError => {
     case "EACCES":
     case "EPERM":
       return "permission-denied"
-    case "ENOSPC":
     case "ENAMETOOLONG":
+      return "unsupported"
+    case "ENOSPC":
       return "unavailable"
     default:
       return "unavailable"
@@ -155,7 +155,6 @@ const findExactEntry = async (
     return { kind: "error", error: errorFromSystem(error) }
   }
   if (exactEntry !== undefined) {
-    if (hasEquivalentName) return { kind: "name-equivalence" }
     const entryPath = join(parentPath, exactEntry.name)
     try {
       const stats = await lstat(entryPath)
@@ -170,7 +169,14 @@ const findExactEntry = async (
       return { kind: "error", error: errorFromSystem(error) }
     }
   }
-  return hasEquivalentName ? { kind: "name-equivalence" } : { kind: "missing" }
+  if (hasEquivalentName) return { kind: "name-equivalence" }
+  try {
+    await lstat(join(parentPath, requestedName))
+    return { kind: "name-equivalence" }
+  } catch (error) {
+    if (systemCode(error) === "ENOENT") return { kind: "missing" }
+    return { kind: "error", error: errorFromSystem(error) }
+  }
 }
 
 const inspectDirectory = async (
@@ -184,7 +190,6 @@ const inspectDirectory = async (
 }> => {
   const formats = new Set<string>()
   let sizeBytes = 0
-  let observed = 0
   let directory
   try {
     directory = await opendir(directoryPath)
@@ -196,16 +201,15 @@ const inspectDirectory = async (
       if (!checkBudget(budget)) {
         return { formats: [...formats].slice(0, MAX_FORMATS), sizeBytes: null, status: "partial", error: "budget-exceeded" }
       }
-      observed += 1
-      if (observed > MAX_DIRECT_CHILDREN) {
-        return { formats: [...formats].slice(0, MAX_FORMATS), sizeBytes: null, status: "partial", error: "directory-limit" }
-      }
       if (entry.isSymbolicLink() || !entry.isFile()) continue
       const format = formatFor(entry.name)
       if (!supportedImageExtensions.has(`.${format}`)) continue
       try {
         const stats = await lstat(join(directoryPath, entry.name))
         if (stats.isSymbolicLink()) continue
+        if (!checkBudget(budget)) {
+          return { formats: [...formats].slice(0, MAX_FORMATS), sizeBytes: null, status: "partial", error: "budget-exceeded" }
+        }
         formats.add(format)
         sizeBytes += stats.size
       } catch (error) {
@@ -214,6 +218,9 @@ const inspectDirectory = async (
     }
   } catch (error) {
     return { formats: [...formats].slice(0, MAX_FORMATS), sizeBytes: null, status: "partial", error: errorFromSystem(error) }
+  }
+  if (!checkBudget(budget)) {
+    return { formats: [...formats].slice(0, MAX_FORMATS), sizeBytes: null, status: "partial", error: "budget-exceeded" }
   }
   return { formats: [...formats].slice(0, MAX_FORMATS), sizeBytes, status: "complete", error: null }
 }
@@ -236,7 +243,7 @@ const inspectSample = async (
       case "name-equivalence":
         return collision(sample, "name-equivalence")
       case "error":
-        return errorSample(sample, entry.error)
+        return entry.error === "unsupported" ? unsupported(sample) : errorSample(sample, entry.error)
       case "found":
         currentPath = entry.path
         if (index < segments.length - 1 && !entry.stats.isDirectory()) return errorSample(sample, "unavailable")
@@ -293,6 +300,9 @@ const inspectSample = async (
   return unsupported(sample)
 }
 
+const deviceEquivalentPath = (relativePath: string): string =>
+  relativePath.split("/").map((segment) => segment.normalize("NFC").toLowerCase()).join("/")
+
 export const inspectLocalMapping = async (
   rootId: string,
   selectedPath: string,
@@ -343,10 +353,28 @@ export const inspectLocalMapping = async (
     }
   }
 
+  const claimGroups = new Map<string, Array<number>>()
+  for (const [index, result] of inspected.entries()) {
+    const key = deviceEquivalentPath(result.sample.relative_path)
+    const group = claimGroups.get(key) ?? []
+    group.push(index)
+    claimGroups.set(key, group)
+  }
+  for (const indexes of claimGroups.values()) {
+    if (indexes.length < 2 || !indexes.some((index) => inspected[index]?.sample.collision_kind === "name-equivalence")) continue
+    for (const index of indexes) {
+      const result = inspected[index]
+      if (result === undefined || result.sample.collision_kind === "physical-identity") continue
+      inspected[index] = {
+        ...result,
+        sample: { ...result.sample, status: "collision", collision_kind: "name-equivalence" }
+      }
+    }
+  }
+
   return {
     root_id: rootId,
     selected_local_path: selectedPath,
-    canonical_local_path: canonicalRoot,
     samples: inspected.map((result) => result.sample),
     sample_limit: 32,
     sample_truncated: sampleTruncated,
