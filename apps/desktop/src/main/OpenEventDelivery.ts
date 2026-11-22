@@ -17,6 +17,10 @@ export class OpenEventDeliveryResponseError extends Data.TaggedError("OpenEventD
   readonly message: string
 }> {}
 
+export class OpenEventDeliveryStoppedError extends Data.TaggedError("OpenEventDeliveryStoppedError")<{
+  readonly message: string
+}> {}
+
 export interface OpenEventDeliveryControl {
   readonly isActive?: () => boolean
   readonly batchSize?: number
@@ -157,7 +161,12 @@ export const drainOpenEvents = Effect.fnUntraced(function*(
   const total = { attempted: 0, acknowledged: 0, alreadyAccepted: 0, held: 0 }
   let retry = 0
 
-  while (isActive()) {
+  while (true) {
+    if (!isActive()) {
+      return yield* new OpenEventDeliveryStoppedError({
+        message: "open event delivery stopped because the authenticated connection changed"
+      })
+    }
     const attempt = yield* deliverOpenEvents(store, client, session, control).pipe(
       Effect.match({
         onFailure: (error) => ({ ok: false as const, error }),
@@ -166,7 +175,7 @@ export const drainOpenEvents = Effect.fnUntraced(function*(
     )
     if (!attempt.ok) {
       const error = attempt.error
-      if (isStoppedDeliveryError(error) || !isActive()) return { ...total, missingResults: false }
+      if (isStoppedDeliveryError(error) || !isActive()) return yield* Effect.fail(error)
       yield* sleep(retryDelay(retry, random))
       retry += 1
       continue
