@@ -1,4 +1,5 @@
 import { Schema } from "effect"
+import { INDEXED_ROOT_SAMPLE_LIMIT } from "@henshin/contracts"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import { RootExclusions, RootPolicyCommand, RootRelativePath } from "@henshin/contracts/root"
 import { ThumbnailReference } from "@henshin/contracts/thumbnail"
@@ -322,7 +323,11 @@ export const WorkerRequest = Schema.Union([
   }),
   Schema.Struct({ op: Schema.Literal("readLibrary") }),
   Schema.Struct({ op: Schema.Literal("listLibraryEntries"), pageSize: Schema.Natural, cursor: Schema.NullOr(Uuid) }),
-  Schema.Struct({ op: Schema.Literal("listIndexedRootSamples"), rootId: Uuid, sampleLimit: Schema.Literal(33) }),
+  Schema.Struct({
+    op: Schema.Literal("listIndexedRootSamples"),
+    rootId: Uuid,
+    sampleLimit: Schema.Literal(INDEXED_ROOT_SAMPLE_LIMIT + 1)
+  }),
   Schema.Struct({ op: Schema.Literal("readAcceptedThumbnailEntry"), entryId: Uuid }),
   Schema.Struct({ op: Schema.Literal("acceptOpenEvents"), events: Schema.Array(OpenEvent) }),
   Schema.Struct({

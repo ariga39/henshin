@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron"
+import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from "electron"
 import { Duration, Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
@@ -13,7 +13,6 @@ import {
   HandshakeIpcRequest,
   IpcChannels,
   LibraryHttpClient,
-  LocalMappingPreviewIpcRequest,
   LibrarySearchIpcRequest,
   ThumbnailGetIpcRequest,
   ThumbnailHttpClient,
@@ -37,7 +36,6 @@ import {
   type PublicError,
   type RootPreviewResult
 } from "@henshin/contracts"
-import { inspectLocalMapping, LocalMappingUnavailableError } from "./LocalMappingPreview"
 import { startServerChild, type ServerChild } from "./server-child"
 import { DraftConflictError, DraftStore, DraftStoreFullError } from "./persistence/DraftStore"
 import {
@@ -59,7 +57,6 @@ import {
 } from "./ConnectionLifecycle"
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
-const LOCAL_MAPPING_REQUEST_TIMEOUT = Duration.seconds(12)
 // The server gives one thumbnail request a 30-second aggregate producer
 // budget; keep a small allowance for HTTP and IPC teardown.
 const THUMBNAIL_NETWORK_DEADLINE = Duration.seconds(32)
@@ -105,13 +102,6 @@ const decodePublicError = Schema.decodeUnknownOption(PublicApiError)
  * message, stack, or internal cause never crosses the IPC boundary.
  */
 const toPublicError = (error: unknown): PublicError => {
-  if (error instanceof LocalMappingUnavailableError) {
-    return {
-      code: "local_mapping_unavailable",
-      message: error.message,
-      retryable: true
-    }
-  }
   if (error instanceof CommandAttemptConflictError) {
     return {
       code: "operation_conflict",
@@ -341,36 +331,6 @@ const registerIpc = (): void => {
           return yield* client.command({ params: { id: root_id }, payload })
         })
       )
-    )
-  })
-
-  ipcMain.handle(IpcChannels.localMappingPreview, async (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(LocalMappingPreviewIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    const selected = await dialog.showOpenDialog(mainWindow!, {
-      title: "Select the local collection directory",
-      properties: ["openDirectory"]
-    })
-    if (selected.canceled || selected.filePaths.length === 0) return { ok: true as const, data: null }
-    const selectedPath = selected.filePaths[0]
-    return runNetworkResult(
-      toRawResult(
-        Effect.gen(function*() {
-          const client = yield* LibraryHttpClient
-          const indexed = yield* client.indexedSamples({ params: { id: decoded.value.root_id } })
-          return yield* Effect.tryPromise({
-            try: () => inspectLocalMapping(
-              decoded.value.root_id,
-              selectedPath,
-              indexed.data.samples,
-              indexed.data.sample_truncated
-            ),
-            catch: (error) => error
-          })
-        })
-      ),
-      LOCAL_MAPPING_REQUEST_TIMEOUT
     )
   })
 
