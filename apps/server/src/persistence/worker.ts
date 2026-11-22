@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite"
 import { basename, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
-import { canonicalEditPayload } from "@henshin/contracts/canonical"
+import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contracts/canonical"
 import { MAX_ROOT_EXCLUSIONS, RootExclusions } from "@henshin/contracts/root"
 import {
   WorkerMessage,
@@ -36,7 +36,7 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
-const CURRENT_SCHEMA_VERSION = 5
+const CURRENT_SCHEMA_VERSION = 6
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
@@ -171,6 +171,23 @@ db.exec(`
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     UNIQUE (root_id, relative_path)
+  );
+  CREATE TABLE IF NOT EXISTS open_events (
+    event_id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL REFERENCES library_entries(entry_id),
+    device_id TEXT NOT NULL,
+    observed_location_revision INTEGER NOT NULL,
+    observed_content_version INTEGER NOT NULL,
+    occurred_at_ms INTEGER NOT NULL,
+    receipt_at_ms INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS open_events_entry_occurrence
+    ON open_events(entry_id, occurred_at_ms DESC, event_id ASC);
+  CREATE TABLE IF NOT EXISTS entry_statistics (
+    entry_id TEXT PRIMARY KEY REFERENCES library_entries(entry_id) ON DELETE CASCADE,
+    open_count INTEGER NOT NULL DEFAULT 0,
+    last_opened_at_ms INTEGER
   );
 `)
 
@@ -329,6 +346,20 @@ const selectStagedById = db.prepare(
 selectStagedById.setReadBigInts(true)
 const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC")
 const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ? AND state = 'accepted'")
+const selectEntryById = db.prepare("SELECT entry_id FROM library_entries WHERE entry_id = ? AND state = 'accepted'")
+const selectOpenEvent = db.prepare(
+  "SELECT event_id, instance_id, entry_id, device_id, observed_location_revision, observed_content_version, occurred_at_ms, receipt_at_ms FROM open_events WHERE event_id = ?"
+)
+selectOpenEvent.setReadBigInts(true)
+const insertOpenEvent = db.prepare(
+  "INSERT INTO open_events(event_id, instance_id, entry_id, device_id, observed_location_revision, observed_content_version, occurred_at_ms, receipt_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?)"
+)
+const insertEntryStatistics = db.prepare(
+  "INSERT OR IGNORE INTO entry_statistics(entry_id, open_count, last_opened_at_ms) VALUES(?, 0, NULL)"
+)
+const updateEntryStatistics = db.prepare(
+  "UPDATE entry_statistics SET open_count = open_count + 1, last_opened_at_ms = CASE WHEN last_opened_at_ms IS NULL OR last_opened_at_ms < ? THEN ? ELSE last_opened_at_ms END WHERE entry_id = ?"
+)
 const insertEntry = db.prepare(
   "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, ?, ?, ?)"
 )
@@ -1194,6 +1225,94 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
   }
 }
 
+const openEventPayload = (event: Extract<WorkerRequest, { op: "acceptOpenEvents" }>['events'][number]): string =>
+  canonicalOpenEventPayload({
+    eventId: event.event_id,
+    instanceId: event.instance_id,
+    entryId: event.entry_id,
+    deviceId: event.device_id,
+    observedLocationRevision: event.observed_location_revision,
+    observedContentVersion: event.observed_content_version,
+    occurredAtMs: event.occurred_at_ms
+  })
+
+const storedOpenEventPayload = (row: {
+  event_id: string
+  instance_id: string
+  entry_id: string
+  device_id: string
+  observed_location_revision: bigint
+  observed_content_version: bigint
+  occurred_at_ms: bigint
+}): string => canonicalOpenEventPayload({
+  eventId: row.event_id,
+  instanceId: row.instance_id,
+  entryId: row.entry_id,
+  deviceId: row.device_id,
+  observedLocationRevision: row.observed_location_revision.toString(),
+  observedContentVersion: row.observed_content_version.toString(),
+  occurredAtMs: Number(row.occurred_at_ms)
+})
+
+const acceptOpenEvents = (
+  request: Extract<WorkerRequest, { op: "acceptOpenEvents" }>
+): import("./worker-protocol").OpenEventBatchOutcome => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const results: Array<import("@henshin/contracts/event").OpenEventOutcome> = []
+    for (const event of request.events) {
+      const existing = selectOpenEvent.get(event.event_id) as {
+        event_id: string
+        instance_id: string
+        entry_id: string
+        device_id: string
+        observed_location_revision: bigint
+        observed_content_version: bigint
+        occurred_at_ms: bigint
+        receipt_at_ms: bigint
+      } | undefined
+      if (existing !== undefined) {
+        results.push(
+          storedOpenEventPayload(existing) === openEventPayload(event)
+            ? {
+                event_id: event.event_id,
+                outcome: "already_accepted",
+                receipt_at_ms: Number(existing.receipt_at_ms)
+              }
+            : { event_id: event.event_id, outcome: "conflict" }
+        )
+        continue
+      }
+
+      if (selectEntryById.get(event.entry_id) === undefined) {
+        results.push({ event_id: event.event_id, outcome: "missing_entry" })
+        continue
+      }
+
+      const receiptAtMs = Date.now()
+      insertOpenEvent.run(
+        event.event_id,
+        event.instance_id,
+        event.entry_id,
+        event.device_id,
+        BigInt(event.observed_location_revision),
+        BigInt(event.observed_content_version),
+        BigInt(event.occurred_at_ms),
+        receiptAtMs
+      )
+      insertEntryStatistics.run(event.entry_id)
+      updateEntryStatistics.run(event.occurred_at_ms, event.occurred_at_ms, event.entry_id)
+      bumpLibraryRevision.run()
+      results.push({ event_id: event.event_id, outcome: "accepted", receipt_at_ms: receiptAtMs })
+    }
+    db.exec("COMMIT")
+    return { results }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
 const finishScan = (request: Extract<WorkerRequest, { op: "finishScan" }>): void => {
   db.exec("BEGIN IMMEDIATE")
   try {
@@ -1355,6 +1474,10 @@ const handle = (request: WorkerRequest): unknown => {
       if (schemaVersion !== undefined && schemaVersion < CURRENT_SCHEMA_VERSION) {
         db.prepare("UPDATE server_state SET schema_version = ? WHERE id = 1").run(CURRENT_SCHEMA_VERSION)
       }
+      db.exec(`
+        INSERT OR IGNORE INTO entry_statistics(entry_id, open_count, last_opened_at_ms)
+        SELECT entry_id, 0, NULL FROM library_entries
+      `)
       db.prepare("INSERT OR IGNORE INTO prototype_note(note_id, text, revision) VALUES(?, ?, 0)").run(
         SEED_NOTE_ID,
         SEED_NOTE_TEXT
@@ -1389,6 +1512,8 @@ const handle = (request: WorkerRequest): unknown => {
       return librarySummary()
     case "listLibraryEntries":
       return libraryEntries(request)
+    case "acceptOpenEvents":
+      return acceptOpenEvents(request)
     case "recordDiscovery":
       requireScanTransition(db.prepare(`UPDATE scan_tasks SET directories_visited = ?, candidates_discovered = ?, coverage_json = ?,
         updated_at_ms = ? WHERE task_id = ? AND status = 'running'`).run(
