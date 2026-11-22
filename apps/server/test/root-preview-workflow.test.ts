@@ -27,6 +27,8 @@ const savedRoot: ServerRoot = {
   selected_server_path: "/collections/a",
   canonical_server_path: "/collections/a",
   mapping_revision: "1",
+  policy_revision: "0",
+  exclusions: [],
   state: "active"
 }
 

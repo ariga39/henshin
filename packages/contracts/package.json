@@ -8,7 +8,8 @@
     "./canonical": "./src/canonical.ts",
     "./channels": "./src/channels.ts",
     "./ids": "./src/ids.ts",
-    "./note": "./src/note.ts"
+    "./note": "./src/note.ts",
+    "./root": "./src/root.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"
