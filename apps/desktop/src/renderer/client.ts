@@ -5,7 +5,6 @@ import type {
   ConnectionStatusView,
   DiscardedDraft,
   HandshakeView,
-  LibraryEntryPage,
   NoteView,
   PublicError,
   SavedDraft,
@@ -13,6 +12,8 @@ import type {
   RootPreviewRequest,
   RootCommandIpcRequest,
   RootRegistrationRequest,
+  ReleaseHeldDiscoveryIpcRequest,
+  ReviewCommandResult,
   ScanTask,
   ScanTaskSubmission,
   StagedDiscovery,
@@ -72,8 +73,7 @@ declare global {
   interface Window {
     readonly henshinPrototype: PrototypeBridge
     readonly henshinRootPreview: RootPreviewBridge
-    readonly henshinLibrary: LibraryBridge
-    readonly henshinScanReview: ScanReviewBridge
+  readonly henshinScanReview: ScanReviewBridge
   }
 }
 
@@ -87,10 +87,7 @@ export interface RootPreviewBridge {
 export interface ScanReviewBridge {
   listTasks(): Promise<Result<ReadonlyArray<ScanTask>>>
   candidates(): Promise<Result<ReadonlyArray<StagedDiscovery>>>
-}
-
-export interface LibraryBridge {
-  search(input: { readonly page_size?: number; readonly cursor?: string }): Promise<Result<LibraryEntryPage>>
+  command(input: ReleaseHeldDiscoveryIpcRequest): Promise<Result<ReviewCommandResult>>
 }
 
 /**
@@ -176,27 +173,15 @@ export class ScanReviewClient extends Context.Service<
   {
     readonly listTasks: () => Effect.Effect<Result<ReadonlyArray<ScanTask>>>
     readonly candidates: () => Effect.Effect<Result<ReadonlyArray<StagedDiscovery>>>
+    readonly release: (input: ReleaseHeldDiscoveryIpcRequest) => Effect.Effect<Result<ReviewCommandResult>>
   }
 >()("henshin/desktop/renderer/ScanReviewClient") {
   static readonly layer = Layer.succeed(
     ScanReviewClient,
     ScanReviewClient.of({
       listTasks: () => callIpc(() => window.henshinScanReview.listTasks()),
-      candidates: () => callIpc(() => window.henshinScanReview.candidates())
-    })
-  )
-}
-
-export class LibraryClient extends Context.Service<
-  LibraryClient,
-  {
-    readonly search: (input: { readonly page_size?: number; readonly cursor?: string }) => Effect.Effect<Result<LibraryEntryPage>>
-  }
->()("henshin/desktop/renderer/LibraryClient") {
-  static readonly layer = Layer.succeed(
-    LibraryClient,
-    LibraryClient.of({
-      search: (input) => callIpc(() => window.henshinLibrary.search(input))
+      candidates: () => callIpc(() => window.henshinScanReview.candidates()),
+      release: (input) => callIpc(() => window.henshinScanReview.command(input))
     })
   )
 }

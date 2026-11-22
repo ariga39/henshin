@@ -8,10 +8,6 @@
 }
 .collection h1 { font-size: 1.9rem; margin: 0; }
 .collection h2 { font-size: 1.1rem; margin-top: 2rem; }
-.library-header { display: flex; justify-content: space-between; align-items: start; gap: 1rem; }
-.library-header p { margin-top: .25rem; }
-.collection li span { flex: 1; }
-.collection li small { font-family: ui-monospace, monospace; }
 .collection form {
   display: flex;
   flex-wrap: wrap;

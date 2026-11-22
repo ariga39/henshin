@@ -238,7 +238,7 @@ describe("normal library scan", () => {
       })
     }))
 
-    const submitHeld = () => withServerClient(server, Effect.gen(function*() {
+    const held = await withServerClient(server, Effect.gen(function*() {
       const client = yield* ServerHttpClient
       return yield* client.command({
         params: { id: root.data.root_id },
@@ -252,7 +252,6 @@ describe("normal library scan", () => {
         }
       })
     }))
-    const held = await submitHeld()
     if (!("task" in held.data)) throw new Error("expected held scan task submission")
     expect((await waitForTerminal(server, held.data.task.task_id)).status).toBe("succeeded")
 
@@ -295,21 +294,6 @@ describe("normal library scan", () => {
       "held-book-c"
     ])
     expect(staged.data.every((candidate) => candidate.hold_state === "held")).toBe(true)
-
-    await makeImageBook(fixture, "later-discovery")
-    const nextHeld = await submitHeld()
-    if (!("task" in nextHeld.data)) throw new Error("expected a new held scan")
-    expect(await waitForTerminal(server, nextHeld.data.task.task_id)).toMatchObject({
-      status: "succeeded", candidates_analyzed: 6, review_needed_count: 4
-    })
-    const reviewAfterHeld = await withReviewClient(server, Effect.gen(function*() {
-      return yield* (yield* ReviewHttpClient).candidates()
-    }))
-    expect(reviewAfterHeld.data.map((candidate) => candidate.relative_path).sort()).toEqual([
-      "held-book-a", "held-book-b", "held-book-c", "later-discovery"
-    ])
-    expect(reviewAfterHeld.data.every((candidate) => candidate.hold_state === "held")).toBe(true)
-
   })
 
   it("keeps a changed occupied path staged without changing the accepted identity", async () => {

@@ -1,7 +1,6 @@
 import { Data, Duration, Effect, Fiber, Layer, ManagedRuntime } from "effect"
 import { NodeHttpClient } from "@effect/platform-node"
 import {
-  LibraryHttpClient,
   PrototypeHttpClient,
   ReviewHttpClient,
   ServerHttpClient,
@@ -29,7 +28,7 @@ export interface ConnectionLifecycleOptions {
 interface Lease {
   readonly generation: number
   readonly runtime: ManagedRuntime.ManagedRuntime<
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient,
+    PrototypeHttpClient | ServerHttpClient | TaskHttpClient | ReviewHttpClient,
     never
   >
   readonly instanceId: string
@@ -39,7 +38,7 @@ interface Lease {
 interface Candidate {
   readonly generation: number
   readonly runtime: ManagedRuntime.ManagedRuntime<
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient,
+    PrototypeHttpClient | ServerHttpClient | TaskHttpClient | ReviewHttpClient,
     never
   >
 }
@@ -48,7 +47,7 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 const disposeBounded = async (
   runtime: ManagedRuntime.ManagedRuntime<
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient,
+    PrototypeHttpClient | ServerHttpClient | TaskHttpClient | ReviewHttpClient,
     never
   >
 ): Promise<void> => {
@@ -130,7 +129,6 @@ export class ConnectionLifecycle {
     const runtime = ManagedRuntime.make(Layer.mergeAll(
       PrototypeHttpClient.layer(options),
       ServerHttpClient.layer(options),
-      LibraryHttpClient.layer(options),
       TaskHttpClient.layer(options),
       ReviewHttpClient.layer(options)
     ))
@@ -211,7 +209,7 @@ export class ConnectionLifecycle {
     effect: Effect.Effect<
       A,
       E,
-      PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient
+      PrototypeHttpClient | ServerHttpClient | TaskHttpClient | ReviewHttpClient
     >
   ): Promise<A> {
     const lease = this.lease
