@@ -22,7 +22,6 @@ import {
   ERR_UNSUPPORTED_FORMAT,
   ERR_UNSUPPORTED_UINT64,
   Reader,
-  Uint8ArrayWriter,
   ZipReader,
   type Entry,
   type ZipReaderConstructorOptions
@@ -892,15 +891,24 @@ export const readArchivePage = async (
       if (entry.filename !== pageName) continue
       if (entry.directory || entry.symlink || entry.encrypted) throw new SourceChanged()
       const declaredBytes = safeStatNumber(entry.uncompressedSize, combined.maxMemberUncompressedBytes)
-      if (declaredBytes > combined.maxMemberUncompressedBytes) throw new LimitExceeded()
-      const writer = new Uint8ArrayWriter()
-      await writer.init(declaredBytes)
-      await entry.getData(writer, {
+      const bytes = new Uint8Array(declaredBytes)
+      let offset = 0
+      await entry.getData(new WritableStream<Uint8Array>({
+        write(chunk) {
+          checkBudget(context)
+          if (chunk.length > bytes.length - offset) throw new LimitExceeded()
+          bytes.set(chunk, offset)
+          offset += chunk.length
+        }
+      }), {
+        signal: context.signal,
+        checkSignature: true,
         useWebWorkers: false,
         checkOverlappingEntryOnly: false,
         checkOverlappingEntry: true
       })
-      result = await writer.getData()
+      if (offset !== bytes.length) throw new SourceChanged()
+      result = bytes
       break
     }
     const afterStats = await observePath(sourcePath, context)
