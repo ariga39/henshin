@@ -17,6 +17,12 @@ Henshin is in early development. On startup, the desktop connects to its
 managed local server. Enter a collection directory to see a read-only sample
 of its contents. Root registration and indexing are upcoming features.
 
+The separately isolated source-manifest precursor has current executed evidence
+in [docs/validation/source-manifests-prototype.md](docs/validation/source-manifests-prototype.md).
+The bounded native source-boundary precursor is recorded in
+[docs/validation/native-source-boundaries-prototype.md](docs/validation/native-source-boundaries-prototype.md);
+it is not a G3 completion claim.
+
 ## Runtime persistence prototype
 
 The prototype lives in `apps/server`, `apps/desktop`, and `packages/contracts`.

@@ -1,0 +1,100 @@
+# Source Manifest Prototype Evidence
+
+Status: **Focused bounded prototype evidence** for source commit
+`8eed2746f17424802b497ac508535c99183a31b0`. This is a G3/G4 precursor, not
+completion of either gate or of the production indexer.
+
+## Scope
+
+The isolated server analysis service inspects one trusted local regular-file
+ZIP/CBZ or one direct-image directory in read-only mode. It returns a complete
+naturally ordered manifest of JPEG, PNG, and WebP pages, or a typed
+candidate error. Directory children, nested archives, sidecars, and unknown
+extensions are outside the page manifest. Recognized unsupported page formats
+produce an unsupported-pages error with bounded diagnostic counts rather than
+partial success.
+
+Archive enumeration uses exact-pinned `@zip.js/zip.js` 2.24.0. Its maintained
+`checkOverlappingEntryOnly` path is invoked with an inert writer and the
+cooperative signal to validate local-header, data-descriptor, entry-range, and
+overlap structure without deliberately streaming or decompressing page
+payloads. Central-directory tail reads are bounded and may incidentally
+include payload bytes. One instrumented large stored-member fixture showed no
+payload-overlapping read for that fixture; this is not a universal zero-payload
+read claim. The manifest does not claim page decode validity or CRC validation.
+
+Archive failures match exact zip.js sentinels. A genuine overlapping-data fixture
+asserts the library error and its structural-corruption result; native EACCES/EIO
+failures remain redacted read-failure results regardless of words in the path.
+
+Names are preserved as decoded member names, with CP437 and declared UTF-8
+handling supplied by zip.js. Leading U+FEFF is preserved in direct names,
+EFS names, and Unicode-path extras. Unsafe names, lossy decoding, exact duplicates,
+encryption, malformed structure, archive page-suffixed symlinks, zero pages,
+and finite-limit violations are rejected. Directories use lossless buffer-name
+enumeration and reject page-suffixed symlink children. Natural ordering is
+tested with numeric runs, zero padding, Unicode, case, normalization, nested,
+and backslash-name fixtures.
+
+Run the sanitized probe after `pnpm build`:
+
+```sh
+node apps/server/dist/manifest-probe.mjs /path/to/disposable-source
+```
+
+It prints aggregate counts, declared bytes, and elapsed time, or a redacted
+error code. It does not print page names or contents.
+
+## Finite defaults
+
+| Limit | Default |
+| --- | ---: |
+| Archive bytes | 4 GiB |
+| Entries or direct children | 100,000 |
+| Manifest pages | 20,000 |
+| Name and metadata accounting | 32 MiB |
+| Central-directory/read allocation | 64 MiB |
+| Cumulative declared uncompressed bytes | 8 GiB |
+| One member's declared uncompressed bytes | 1 GiB |
+| Cooperative deadline | 30 seconds |
+
+The deadline is checked between bounded filesystem reads, enumeration, sorting,
+and final observations. Native filesystem I/O is not hard-preemptible; no NAS
+deadline or stalled-I/O guarantee is claimed. Interruption is wired through
+Effect and the caller signal, and an instrumented local fixture proves that the
+interrupted fiber does not complete until its owned file handle close settles.
+
+Cancellation during the zip.js header-read boundary is classified as cancelled
+after owned cleanup. Directory after-observations are captured after the
+second enumeration; a deterministic mutation fixture verifies that boundary.
+Small fixtures exercise archive, entry, metadata, member, cumulative-byte,
+and page/read limits, plus a positive deadline expiring during a held read.
+
+## Executed evidence
+
+Primary independently accepted the source commit above with the checks below.
+The subsequent evidence commit changes documentation only.
+
+| Check | Result |
+| --- | --- |
+| `pnpm typecheck` | Pass |
+| `pnpm build` | Pass |
+| `pnpm test` | Pass; 100 Vitest tests and 6 Electron tests |
+| Read-only sample probe | 3 ZIP samples; aggregate 726014572 bytes; complete manifests of 148, 201, and 299 pages |
+
+The sample probe recorded process-inclusive times of 128 ms, 150 ms, and 152
+ms. Its before/after source observations were unchanged size and mtime only;
+they do not establish quiet-interval stability or snapshot semantics. Sample
+filenames, paths, and contents are intentionally not recorded.
+
+Synthetic fixtures also cover unsafe names, CP437 and malformed UTF-8,
+Unicode-path extras, exact duplicates, unsupported-only and mixed pages,
+encryption, empty candidates, local-header corruption, invalid central member
+offsets, overlapping entries, page symlinks, limits, cancellation, direct
+source links and changes, direct-name boundaries, natural order, and source
+write auditing.
+
+The write audit covers only the instrumented `FileHandle` opens, `writeFile`,
+and source inventory used by these tests. It is not an audit of every native
+write capability. This evidence makes no production API, indexer, decoder,
+CRC, fingerprint, cover, full-G3/G4, platform, NAS, or NAS-permission claim.

@@ -1,18 +1,13 @@
 # G1/G2 Runtime Persistence Prototype Evidence
 
-Status: **Prototype pass** for the executed cases below. This is not a gate
-completion: every other G1/G2 case remains **Not run** and is listed at the end.
-The current operation-results acceptance is recorded in the linked evidence.
-The prototype is a synthetic, isolated slice, not a product client or server.
+Status: **Primary-accepted bounded prototype evidence** for the executed cases
+below. This is not a gate completion: every other G1/G2 case remains **Not
+run** and is listed at the end. The prototype is a synthetic, isolated slice,
+not a product client or server.
 
 ## Source under test
 
-- Current candidate source: `485718e5e36c394ce6b78cf4ffc1d7ac605a3717`;
-  its focused main-owned command-attempt evidence is recorded below.
-- Accepted operation-results predecessor: `8350c34adcaf432461d16034ca6c40b8fa852724`;
-  see [operation-results prototype evidence](operation-results-prototype.md).
-- Historical precursor source: `a016244cba000e522573146f558359a5ded69f83`;
-  the earlier counts and cases below remain anchored to that revision.
+- Current candidate source: `707291215b09c4ad9a2b6ec1195228a6d7f20e2a`.
 
 ## Scope and fixtures
 
@@ -28,19 +23,20 @@ The prototype is a synthetic, isolated slice, not a product client or server.
 
 ## Current main-owned command-attempt slice
 
-The focused implementation is recorded at code commit
-`485718e5e36c394ce6b78cf4ffc1d7ac605a3717`. It is an additional prototype
-precursor, not completion of the G1 gate or a production command contract.
+The bounded main-owned command-attempt and connection-lifecycle implementation
+is recorded at the candidate source above. It is not completion of the G1
+gate or a production command contract.
 
 Final candidate checks on that source were:
 
 | Check | Result |
 | --- | --- |
 | `pnpm typecheck` | Pass; contracts, server, and desktop |
-| `pnpm test` | Pass; build, 56 Vitest tests in 8 files, and 4 real Electron tests |
+| `pnpm test` | Pass; build, 83 Vitest tests in 9 files, and 6 real Electron tests |
 
-Primary independently accepted this candidate with the same typecheck, build,
-and full-suite result: 56 Vitest tests and 4 Electron tests passed.
+Primary independently accepted this exact source with pinned Node 24.19.0:
+typecheck, build, and the full suite passed with 83 Vitest tests in 9 files and
+6 real Electron tests.
 
 The executed command-attempt cases include:
 
@@ -71,32 +67,69 @@ The executed command-attempt cases include:
   cancellation. Terminal succeeded/rejected rows become eligible for bounded
   cleanup after seven days; unresolved rows become eligible only after explicit
   dismissal, while undismissed unresolved rows are not evicted.
-- Real worker tests verify that SQLite auto-rollback preserves the original
-  failure, dismissal hides but retains records, seven-day cleanup removes
-  eligible terminal/dismissed records, and undismissed unresolved records
-  survive compaction. Retryable server storage failures remain unresolved;
-  repeating the same operation does not dispatch again. Dismissing a selected
-  recovery record clears its comparison without clearing another record.
+- The integrated command-attempt regressions verify original SQLite errors
+  after auto-rollback, seven-day terminal/dismissed retention, non-eviction of
+  undismissed unresolved records, and clearing only a dismissed comparison.
+  Retryable storage failures remain unresolved without redispatch.
 - A real Electron restart opens a retained unresolved row through main IPC,
   observes a changed authority epoch, fetches the current note without
   mutation, and renders original intent/base revision, historical result or
   unavailability, current text/revision, expiry metadata, and the recovery
   reason. The fixture seeds the unresolved row only after the first Electron
   launch has created the production schema; it is not a crash-induced row.
+- Explicit Disconnect synchronously closes main network admission, interrupts
+  active request interest, and disposes the generation-owned Node/Undici HTTP
+  transport under bounded cleanup. The owned server remains supervised; a
+  Disconnect does not shut it down or delete data. Admission is checked again
+  at dispatch, so a locally held admission released after Disconnect produces
+  zero PUTs and persists a terminal `not_dispatched` rejection. Guard failure
+  and interruption during held local bookkeeping are covered; potentially
+  dispatched commands retain unresolved recovery semantics.
+- A real proxy committed a mutation and dropped its response before the client
+  received it. Disconnect retained the unresolved attempt; deliberate
+  Reconnect performed read-only reconciliation and recovered the committed
+  result with exactly one PUT total, without mutation replay or a new ID.
+- Reconnect authentication is bound to the retained endpoint and namespace.
+  Wrong-instance and explicit 401/403 responses remain blocked, retain local
+  drafts and attempts, and emit no mutation. Late lifecycle responses cannot
+  reopen a stopped generation.
+- A connection transition during an in-flight renderer load releases the abandoned loading
+  state, keeping local editing and draft actions available; its late response
+  cannot overwrite a newer generation, including when Reconnect fails authentication.
+- Electron coverage verifies direct IPC network denial while disconnected,
+  continued local draft/attempt-list/dismiss availability, and retained form
+  text across reconnect. A clean form adopts a refreshed server note; a dirty
+  form, including text edited during reconnect, keeps its text and original
+  edit base. Reconnect also preserves text entered before any note load and
+  explicitly restored empty drafts, while an untouched empty form or a clean
+  loaded form refreshes normally, even if saved-draft metadata is retained.
 
 The slice does not establish full G1. In particular, profile/connection
-switching, explicit Disconnect, multi-window ownership, renderer crash
+switching, broad profile management, multi-window ownership, renderer crash
 recovery, deliberate reapplication UX, and the broader resource/native-reader
-cases remain outside this prototype. The loopback and Electron checks require
+cases remain outside this prototype. The bounded explicit Disconnect and
+Reconnect lifecycle above is executed. The loopback and Electron checks require
 the permitted host environment; sandboxed loopback binding is not evidence of
 a product failure.
+
+The reviewed connection fixes also preserve the form’s original base epoch.
+Typed edit IPC rejects a stale base epoch before admission or HTTP dispatch,
+including after Electron restart with a retained draft. Same-instance local
+draft/recovery replies survive network transitions while changed-instance
+replies remain fenced. Real lifecycle tests interrupt both an in-flight PUT
+and held terminal persistence, then verify unresolved storage and no replay.
+
+Failed handshakes retain their original error and settle to blocked even if
+owned-runtime disposal rejects. The gated handshake cleanup fixtures observe
+the specific blocked handshake socket rather than an earlier connection.
 
 ## Environment
 
 - macOS 26.7.1 (build 25G241), arm64.
 - Primary verification runtime: Node 24.19.0 (the command-PATH `node`).
 - Desktop/server runtime: Electron 44.9.0, which bundles Node 24.22.0.
-- Separate evidence runtime: Node 22.23.2.
+- Separate Node 22.23.2 evidence is unsupported-runtime limitation data only;
+  it is not part of acceptance.
 - effect 4.0.5, @effect/platform-node 4.0.5, typescript 5.9.3, vitest 5.0.5,
   @playwright/test 1.64.1, react/react-dom 19.3.1.
 - SQLite driver: built-in `node:sqlite` (`DatabaseSync`) on a dedicated
@@ -114,28 +147,26 @@ runtime that must run the server:
 | --- | --- | --- |
 | Node 24.19.0 (primary) | Pass | Pass (`a\u0000b` length 3, equal) |
 | Electron 44.9.0 / Node 24.22.0 | Pass | Pass |
-| Node 22.23.2 (separate) | Pass | **Fail** (TEXT truncated at U+0000) |
+| Node 22.23.2 (unsupported runtime) | Pass | **Fail** (TEXT truncated at U+0000; not an acceptance result) |
 
 Because the pinned runtimes (Node >= 24.19.0 and Electron's Node 24.22.0)
 preserve NUL exactly, no native rebuild adapter was needed and public text was
 not narrowed. Node 22 is unsupported: `package.json` `engines.node` is
-`>=24.19.0`.
+`>=24.19.0`. Its NUL truncation is a native runtime limitation, not a product
+acceptance failure.
 
 `BigInt` binding and `StatementSync.setReadBigInts(true)` were verified to read
 and write `9223372036854775807` exactly.
 
 ## Executed commands and outcomes
 
-All commands were run on the primary Node 24.19.0 runtime unless noted.
-The command counts in this section are historical precursor results; current
-operation-results counts are maintained in the linked evidence above.
+The primary acceptance commands ran on Node 24.19.0. The public commands and
+their current results are:
 
 | Command | Result |
 | --- | --- |
-| `pnpm install` | Pass (locked install, explicit `allowBuilds` for electron/esbuild) |
 | `pnpm typecheck` | Pass (contracts, server, desktop) |
-| `pnpm build` | Pass (server `dist/server.mjs` + `dist/worker.mjs`; desktop main/preload/renderer) |
-| `pnpm test` | Pass, 35 Vitest tests plus 3/3 real Electron e2e tests |
+| `pnpm test` | Pass; build, 83 Vitest tests in 9 files, and 6 real Electron tests |
 
 ### Durable draft precursor checks
 
@@ -252,12 +283,13 @@ bundled Node runtime. Mixed-runtime contention, hardlinks, mount aliases, NAS
 locks, and hostile path changes during acquisition were not tested. This is a
 bounded G2/G6 precursor, not complete deployment or path-safety validation.
 
-## Pending G1/G2 cases (Not run)
+## Remaining G1/G2 cases (Not run)
 
-- G1 case 2 remainder: React remount/unmount, live window/profile switching,
-  namespace/epoch late-response guards, subscription ownership, duplicate-command
+- G1 case 2 remainder: React remount/unmount, broad live profile/connection
+  switching, multi-window ownership, subscription ownership, duplicate-command
   prevention, and full deliberate reapplication/reconciliation. The bounded
-  saved-draft and input-race cases above are executed; they do not complete this gate.
+  saved-draft, input-race, and explicit Disconnect/Reconnect cases above are
+  executed; they do not complete this gate.
 - G1 case 3: native reader adapter plus journal (pre-dispatch cancellation,
   accepted handoff after teardown, no automatic relaunch, event retry).
 - G1 case 4: durable task scheduling, cancellation/restart, stale-generation
@@ -265,7 +297,8 @@ bounded G2/G6 precursor, not complete deployment or path-safety validation.
 - G1 case 5 remainder: resource counters and crash fixtures for sockets, bodies,
   Blob URLs, and the broader temporary-resource surface. This revision only
   executes the bounded worker/server-child precursor above.
-- G1 remainder: lost-reply reconciliation and explicit Disconnect.
+- G1 remainder: the broader resource, reader, and deliberate-reapplication
+  cases not covered by this bounded lifecycle slice.
 - G2 remainder: executable DDL for the full authoritative schema,
   pagination/cursor limits and stale-cursor restart, live-refresh fixtures,
   published API/IPC schema snapshot, SQLite backup/rollback, measured
