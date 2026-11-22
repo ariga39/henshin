@@ -3,6 +3,7 @@ import type { RootPreviewResult } from "@henshin/contracts"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
 import { canSaveRoot, excludeRootPath, previewRoot, refreshRootPolicy, removeRootExclusion, saveRoot } from "./workflows"
+import { HeldScanControls, HeldScanReview } from "./HeldScanReview"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -155,6 +156,8 @@ export const RootPreviewScreen = () => {
           Refresh preview
         </button>
       )}
+      <HeldScanControls preview={state.root_preview} />
+      <HeldScanReview />
       <section aria-labelledby="saved-roots-heading">
         <h2 id="saved-roots-heading">Saved server roots</h2>
         {state.root_roots_status === "loading" && <p>Loading saved roots…</p>}
