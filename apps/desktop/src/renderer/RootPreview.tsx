@@ -230,7 +230,7 @@ export const RootPreviewScreen = () => {
               {state.local_mapping_root_id === root.root_id && state.local_mapping_status === "error" && (
                 <p role="alert" data-testid="local-mapping-error">Local directory check failed: {state.local_mapping_error}</p>
               )}
-              {state.local_mapping_root_id === root.root_id && state.local_mapping_status === "ready" && state.local_mapping_preview !== null && (
+              {state.local_mapping_preview?.root_id === root.root_id && (
                 <section data-testid="local-mapping-preview" aria-labelledby="local-mapping-heading">
                   <h3 id="local-mapping-heading">Local directory check</h3>
                   <p data-testid="local-mapping-selected-path">Selected local directory: {state.local_mapping_preview.selected_local_path}</p>
