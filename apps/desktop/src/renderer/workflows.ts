@@ -104,22 +104,28 @@ export const loadScanResults = Effect.gen(function*() {
   return yield* loadScanResultsFor(client)
 })
 
-const watchScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
+const watchScanResultsFor = (client: ScanReviewClient["Service"], taskId?: string) => Effect.gen(function*() {
   while (true) {
     const loaded = yield* loadScanResultsFor(client)
-    if (!loaded || !viewStore.getState().scan_tasks.some(scanIsActive)) return
+    if (!loaded) return
+    if (taskId === undefined) {
+      if (!viewStore.getState().scan_tasks.some(scanIsActive)) return
+    } else {
+      const task = viewStore.getState().scan_tasks.find((candidate) => candidate.task_id === taskId)
+      if (task === undefined || !scanIsActive(task)) return
+    }
     yield* Effect.sleep("250 millis")
   }
 })
 
 let scanResultsWatcher: Fiber.Fiber<void, never> | null = null
 
-export const watchHeldScans = Effect.gen(function*() {
+const watchScanResults = (taskId?: string) => Effect.gen(function*() {
   const existing = scanResultsWatcher
   if (existing !== null) return yield* Fiber.join(existing)
 
   const client = yield* ScanReviewClient
-  const watcher = yield* Effect.forkChild(watchScanResultsFor(client))
+  const watcher = yield* Effect.forkChild(watchScanResultsFor(client, taskId))
   scanResultsWatcher = watcher
   yield* Fiber.join(watcher).pipe(
     Effect.ensuring(Effect.sync(() => {
@@ -127,6 +133,8 @@ export const watchHeldScans = Effect.gen(function*() {
     }))
   )
 })
+
+export const watchHeldScans = watchScanResults()
 
 export const retryScanResults = Effect.gen(function*() {
   const loaded = yield* loadScanResults
@@ -142,10 +150,11 @@ export const loadRootWorkspace = Effect.gen(function*() {
 const watchScanTask = (taskId: string) =>
   Effect.gen(function*() {
     while (true) {
-      yield* loadScanResults
-      const task = viewStore.getState().scan_tasks.find((candidate) => candidate.task_id === taskId)
-      if (task !== undefined && !scanIsActive(task)) return
-      yield* Effect.sleep("250 millis")
+      yield* watchScanResults(taskId)
+      const state = viewStore.getState()
+      if (state.scan_status === "error") return
+      const task = state.scan_tasks.find((candidate) => candidate.task_id === taskId)
+      if (task === undefined || !scanIsActive(task)) return
     }
   })
 
@@ -248,8 +257,21 @@ export const removeRootExclusion = (input: {
   readonly expectedPolicyRevision: string
 }) => updateRootExclusion(input, "remove-exclusion")
 
-const taskError = (task: ScanTask): string | null =>
-  task.readiness_error?.message ?? task.error?.message ?? null
+const taskError = (task: ScanTask): string | null => {
+  if (task.status !== "failed") return null
+  return task.readiness_error?.message ?? task.error?.message ?? "normal scan failed"
+}
+
+const finishNormalScanFailure = (message: string) =>
+  Effect.gen(function*() {
+    yield* loadLibrary()
+    yield* Effect.sync(() => viewStore.set({
+      scan_start_status: "error",
+      scan_start_error: message,
+      library_scan_status: "error",
+      library_scan_error: message
+    }))
+  })
 
 const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
   Effect.gen(function*() {
@@ -263,6 +285,7 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
       scan_start_status: "loading",
       scan_start_error: null,
       library_scan_status: holdNewDiscoveries ? viewStore.getState().library_scan_status : "starting",
+      library_scan_error: holdNewDiscoveries ? viewStore.getState().library_scan_error : null,
       library_scan_task: null,
       ...(!holdNewDiscoveries ? { screen: "library" as const, library_status: "loading" as const, library_error: null } : {})
     }))
@@ -277,19 +300,20 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
     })
     if (!result.ok) {
       if (result.error.code === "revision_conflict") yield* loadRoots
-      yield* Effect.sync(() => viewStore.set({
-        scan_start_status: "error",
-        scan_start_error: result.error.message,
-        ...(!holdNewDiscoveries ? { library_scan_status: "error" as const, library_error: result.error.message } : {})
-      }))
+      if (holdNewDiscoveries) {
+        yield* Effect.sync(() => viewStore.set({ scan_start_status: "error", scan_start_error: result.error.message }))
+      } else {
+        yield* finishNormalScanFailure(result.error.message)
+      }
       return
     }
     if (!("task" in result.data)) {
-      yield* Effect.sync(() => viewStore.set({
-        scan_start_status: "error",
-        scan_start_error: "server returned a root policy result instead of a scan task",
-        ...(!holdNewDiscoveries ? { library_scan_status: "error" as const, library_error: "server returned an invalid scan result" } : {})
-      }))
+      const message = "server returned a root policy result instead of a scan task"
+      if (holdNewDiscoveries) {
+        yield* Effect.sync(() => viewStore.set({ scan_start_status: "error", scan_start_error: message }))
+      } else {
+        yield* finishNormalScanFailure(message)
+      }
       return
     }
     const submittedTask = result.data.task
@@ -305,9 +329,23 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
     })
     yield* watchScanTask(submittedTask.task_id)
 
-    const terminal = viewStore.getState().scan_tasks.find((task) => task.task_id === submittedTask.task_id) ?? submittedTask
+    const watchedState = viewStore.getState()
+    const terminal = watchedState.scan_tasks.find((task) => task.task_id === submittedTask.task_id)
     if (holdNewDiscoveries) {
       yield* Effect.sync(() => viewStore.set({ scan_start_status: "idle" }))
+      return
+    }
+
+    if (watchedState.scan_status === "error") {
+      yield* finishNormalScanFailure(watchedState.scan_error ?? "could not load normal scan results")
+      return
+    }
+    if (terminal === undefined) {
+      yield* finishNormalScanFailure("submitted scan task was not found in scan results")
+      return
+    }
+    if (scanIsActive(terminal)) {
+      yield* finishNormalScanFailure("normal scan did not reach a terminal state")
       return
     }
 
@@ -317,7 +355,7 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
       scan_start_status: error === null ? "idle" : "error",
       scan_start_error: error,
       library_scan_status: error === null ? "started" : "error",
-      library_error: error
+      library_scan_error: error
     }))
   })
 
@@ -349,7 +387,6 @@ export const loadLibrary = (append = false) =>
     const current = viewStore.getState()
     const cursor = append ? current.library_cursor : null
     yield* Effect.sync(() => viewStore.set({
-      screen: "library",
       library_status: "loading",
       library_error: null,
       ...(append ? {} : { library_entries: [], library_cursor: null, library_has_more: false })
