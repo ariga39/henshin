@@ -522,7 +522,8 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
             epoch: scanPayload.epoch,
             rootId: root.rootId,
             expectedMappingRevision: scanPayload.expected_mapping_revision,
-            expectedPolicyRevision: scanPayload.expected_policy_revision
+            expectedPolicyRevision: scanPayload.expected_policy_revision,
+            holdNewDiscoveries: scanPayload.command.hold_new_discoveries
           }).pipe(
             Effect.mapError(() => new InternalError({
               code: "internal_error",

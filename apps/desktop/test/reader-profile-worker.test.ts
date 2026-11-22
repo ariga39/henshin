@@ -26,6 +26,10 @@ const profileInput = {
   argumentTokens: ["--safe", "{target}"] as const
 }
 
+const openStore = () => ManagedRuntime.make(
+  ReaderProfileStore.layerFromWorker.pipe(Layer.provide(LocalDatabaseWorker.layer(databasePath, { workerUrl })))
+)
+
 beforeAll(async () => {
   workerDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-reader-profile-worker-"))
   const workerPath = path.join(workerDirectory, "draft-worker.mjs")
@@ -40,8 +44,7 @@ beforeAll(async () => {
   })
   workerUrl = pathToFileURL(workerPath)
   databasePath = path.join(workerDirectory, "profiles.db")
-  const localWorker = LocalDatabaseWorker.layer(databasePath, { workerUrl })
-  runtime = ManagedRuntime.make(ReaderProfileStore.layerFromWorker.pipe(Layer.provide(localWorker)))
+  runtime = openStore()
 })
 
 afterAll(async () => {
@@ -68,11 +71,20 @@ describe("reader profile persistence", () => {
       return yield* store.save({ ...profileInput, name: "stale", expectedRevision: "0" })
     }))).rejects.toBeInstanceOf(ReaderProfileConflictError)
 
+    await runtime.dispose()
+    runtime = openStore()
     const reopened = await runtime.runPromise(Effect.gen(function*() {
       const store = yield* ReaderProfileStore
       return yield* store.get(profileInput.profileId)
     }))
-    expect(reopened).toMatchObject({ revision: "1", name: profileInput.name, argument_tokens: profileInput.argumentTokens })
+    expect(reopened).toMatchObject({
+      revision: "1",
+      name: profileInput.name,
+      target_mode: profileInput.targetMode,
+      launch_mode: profileInput.launchMode,
+      supported_formats: profileInput.supportedFormats,
+      argument_tokens: profileInput.argumentTokens
+    })
   })
 })
 
