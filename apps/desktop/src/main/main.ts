@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron"
-import { Cause, Duration, Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
+import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
+import { randomUUID } from "node:crypto"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import {
@@ -13,10 +14,7 @@ import {
   HandshakeIpcRequest,
   IpcChannels,
   LibraryHttpClient,
-  LocalMappingPreviewIpcRequest,
   LibrarySearchIpcRequest,
-  ThumbnailGetIpcRequest,
-  ThumbnailHttpClient,
   LoadDraftIpcRequest,
   ListCommandAttemptsIpcRequest,
   PrototypeHttpClient,
@@ -35,9 +33,11 @@ import {
   ReconcileCommandIpcRequest,
   ConnectionStatusView,
   type PublicError,
-  type RootPreviewResult
+  type RootPreviewResult,
+  ReaderExecutableSelectIpcRequest,
+  ReaderProfileListIpcRequest,
+  ReaderProfileSaveIpcRequest
 } from "@henshin/contracts"
-import { inspectLocalMapping, LocalMappingUnavailableError } from "./LocalMappingPreview"
 import { startServerChild, type ServerChild } from "./server-child"
 import { DraftConflictError, DraftStore, DraftStoreFullError } from "./persistence/DraftStore"
 import {
@@ -53,16 +53,26 @@ import {
 } from "./CommandCoordinator"
 import { LocalDatabaseWorker } from "./persistence/LocalDatabaseWorker"
 import {
+  ReaderProfileConflictError,
+  ReaderProfileNotFoundError,
+  ReaderProfileStore,
+  ReaderProfileStoreFullError,
+  toReaderProfileView
+} from "./persistence/ReaderProfileStore"
+import {
+  ReaderExecutableSelectionError,
+  ReaderExecutableSelectionRequiredError,
+  ReaderProfileValidationError,
+  validateExecutablePath,
+  validateReaderProfile
+} from "./reader-profile-validation"
+import {
   ConnectionInstanceMismatchError,
   ConnectionLifecycle,
   ConnectionPausedError
 } from "./ConnectionLifecycle"
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
-const LOCAL_MAPPING_REQUEST_TIMEOUT = Duration.seconds(12)
-// The server gives one thumbnail request a 30-second aggregate producer
-// budget; keep a small allowance for HTTP and IPC teardown.
-const THUMBNAIL_NETWORK_DEADLINE = Duration.seconds(32)
 
 interface Session {
   readonly instanceId: string
@@ -80,22 +90,20 @@ interface IpcErr {
 
 let mainWindow: BrowserWindow | null = null
 let serverChild: ServerChild | null = null
-type MainServices = DraftStore | CommandAttemptStore
+type MainServices = DraftStore | CommandAttemptStore | ReaderProfileStore
 let runtime: ManagedRuntime.ManagedRuntime<MainServices, never> | null = null
 let connection: ConnectionLifecycle | null = null
 let rendererUrl = ""
 let shutdownPromise: Promise<void> | null = null
 let readyToQuit = false
 const prototypeMode = process.env.HENSHIN_PROTOTYPE_MODE === "1"
+const executableSelections = new Map<string, { readonly path: string; readonly createdAt: number }>()
+const EXECUTABLE_SELECTION_TTL_MS = 10 * 60 * 1000
+const MAX_EXECUTABLE_SELECTIONS = 32
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 const opaqueError: PublicError = { code: "internal_error", message: "request failed", retryable: false }
-const localMappingTimeoutError: PublicError = {
-  code: "local_mapping_unavailable",
-  message: "the selected local directory could not be inspected",
-  retryable: true
-}
 const invalidRequestError: PublicError = {
   code: "invalid_request",
   message: "invalid IPC request",
@@ -110,13 +118,6 @@ const decodePublicError = Schema.decodeUnknownOption(PublicApiError)
  * message, stack, or internal cause never crosses the IPC boundary.
  */
 const toPublicError = (error: unknown): PublicError => {
-  if (error instanceof LocalMappingUnavailableError) {
-    return {
-      code: "local_mapping_unavailable",
-      message: error.message,
-      retryable: true
-    }
-  }
   if (error instanceof CommandAttemptConflictError) {
     return {
       code: "operation_conflict",
@@ -171,6 +172,23 @@ const toPublicError = (error: unknown): PublicError => {
   if (error instanceof DraftStoreFullError) {
     return { code: "draft_store_full", message: "saved draft storage is full", retryable: false }
   }
+  if (error instanceof ReaderProfileConflictError) {
+    return {
+      code: "reader_profile_conflict",
+      message: "reader profile changed in another window",
+      retryable: false,
+      current_revision: error.currentRevision
+    }
+  }
+  if (error instanceof ReaderProfileNotFoundError) {
+    return { code: "reader_profile_not_found", message: "reader profile no longer exists", retryable: false }
+  }
+  if (error instanceof ReaderProfileStoreFullError) {
+    return { code: "reader_profile_store_full", message: "reader profile storage is full", retryable: false }
+  }
+  if (error instanceof ReaderProfileValidationError || error instanceof ReaderExecutableSelectionRequiredError || error instanceof ReaderExecutableSelectionError) {
+    return { code: error.code, message: error.message, retryable: false }
+  }
   const decoded = decodePublicError(error)
   if (Option.isNone(decoded)) return opaqueError
   const value = decoded.value
@@ -193,22 +211,11 @@ const toPublicError = (error: unknown): PublicError => {
   return { code: value.code, message: value.message, retryable: value.retryable }
 }
 
-export const localMappingError = (error: unknown): PublicError =>
-  Cause.isTimeoutError(error) ? localMappingTimeoutError : toPublicError(error)
-
 const toResult = <A, R>(effect: Effect.Effect<{ readonly data: A }, unknown, R>): Effect.Effect<IpcOk<A> | IpcErr, never, R> =>
   effect.pipe(
     Effect.match({
       onFailure: (error) => ({ ok: false as const, error: toPublicError(error) }),
       onSuccess: (envelope) => ({ ok: true as const, data: envelope.data })
-    })
-  )
-
-const toRawResult = <A, R>(effect: Effect.Effect<A, unknown, R>): Effect.Effect<IpcOk<A> | IpcErr, never, R> =>
-  effect.pipe(
-    Effect.match({
-      onFailure: (error) => ({ ok: false as const, error: toPublicError(error) }),
-      onSuccess: (data) => ({ ok: true as const, data })
     })
   )
 
@@ -253,14 +260,12 @@ const runNetworkResult = <A>(
   effect: Effect.Effect<
     IpcOk<A> | IpcErr,
     never,
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | ThumbnailHttpClient
-  >,
-  timeout?: Duration.Duration,
-  errorMapper: (error: unknown) => PublicError = toPublicError
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient
+  >
 ): Promise<IpcOk<A> | IpcErr> =>
   requireConnection()
-    .run(effect, timeout)
-    .catch((error) => ({ ok: false as const, error: errorMapper(error) }))
+    .run(effect)
+    .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
 
 const connectionStatusResult = (status: ConnectionStatusView): IpcOk<ConnectionStatusView> => ({
   ok: true,
@@ -353,35 +358,122 @@ const registerIpc = (): void => {
     )
   })
 
-  ipcMain.handle(IpcChannels.localMappingPreview, async (event, raw: unknown) => {
+  ipcMain.handle(IpcChannels.readerProfileList, (event, raw: unknown) => {
     assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(LocalMappingPreviewIpcRequest)(raw)
+    const decoded = Schema.decodeUnknownOption(ReaderProfileListIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    const selected = await dialog.showOpenDialog(mainWindow!, {
-      title: "Select the local collection directory",
-      properties: ["openDirectory"]
-    })
-    if (selected.canceled || selected.filePaths.length === 0) return { ok: true as const, data: null }
-    const selectedPath = selected.filePaths[0]
-    return runNetworkResult(
-      toRawResult(
-        Effect.gen(function*() {
-          const client = yield* LibraryHttpClient
-          const indexed = yield* client.indexedSamples({ params: { id: decoded.value.root_id } })
-          return yield* Effect.tryPromise({
-            try: () => inspectLocalMapping(
-              decoded.value.root_id,
-              selectedPath,
-              indexed.data.samples,
-              indexed.data.sample_truncated
-            ),
-            catch: (error) => error
+    try {
+      return requireRuntime().runPromise(
+        toResult(
+          Effect.gen(function*() {
+            const store = yield* ReaderProfileStore
+            return { data: yield* store.list() }
           })
-        })
-      ),
-      LOCAL_MAPPING_REQUEST_TIMEOUT,
-      localMappingError
-    )
+        )
+      )
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
+  })
+
+  ipcMain.handle(IpcChannels.readerSelectExecutable, async (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ReaderExecutableSelectIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    if (mainWindow === null) return { ok: false as const, error: opaqueError }
+    const picker = await dialog.showOpenDialog(mainWindow, {
+      title: "Choose a reader executable",
+      properties: ["openFile"],
+      filters: process.platform === "win32"
+        ? [{ name: "Native executable", extensions: ["exe", "com"] }]
+        : undefined
+    })
+    if (picker.canceled || picker.filePaths.length === 0) return { ok: true as const, data: null }
+    const selectedPath = picker.filePaths[0]
+    if (selectedPath === undefined) return { ok: true as const, data: null }
+    try {
+      await validateExecutablePath(selectedPath)
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
+    const now = Date.now()
+    for (const [handle, selection] of executableSelections) {
+      if (selection.createdAt + EXECUTABLE_SELECTION_TTL_MS <= now) executableSelections.delete(handle)
+    }
+    while (executableSelections.size >= MAX_EXECUTABLE_SELECTIONS) {
+      const oldest = executableSelections.keys().next().value
+      if (oldest === undefined) break
+      executableSelections.delete(oldest)
+    }
+    const selectionHandle = randomUUID()
+    executableSelections.set(selectionHandle, { path: selectedPath, createdAt: now })
+    return {
+      ok: true as const,
+      data: { selection_handle: selectionHandle, executable_name: path.basename(selectedPath) }
+    }
+  })
+
+  ipcMain.handle(IpcChannels.readerProfileSave, async (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ReaderProfileSaveIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    const request = decoded.value
+    try {
+      const profileIdToEdit = request.profile_id
+      const existing = profileIdToEdit === null
+        ? undefined
+        : await requireRuntime().runPromise(
+            Effect.gen(function*() {
+              const store = yield* ReaderProfileStore
+              return yield* store.get(profileIdToEdit)
+            })
+          )
+      if (request.profile_id !== null && existing === undefined) {
+        return { ok: false as const, error: toPublicError(new ReaderProfileNotFoundError()) }
+      }
+
+      let executablePath: string | null = null
+      if (request.launch_mode === "explicit-executable") {
+        if (request.selection_handle !== null) {
+          const selection = executableSelections.get(request.selection_handle)
+          if (selection === undefined || selection.createdAt + EXECUTABLE_SELECTION_TTL_MS <= Date.now()) {
+            executableSelections.delete(request.selection_handle)
+            throw new ReaderExecutableSelectionError("the executable selection expired; choose it again")
+          }
+          await validateExecutablePath(selection.path)
+          executablePath = selection.path
+        } else {
+          executablePath = existing?.executablePath ?? null
+        }
+      } else if (request.selection_handle !== null) {
+        throw new ReaderProfileValidationError("system association profiles cannot use an executable selection")
+      }
+
+      validateReaderProfile(request, executablePath)
+      const profileId = request.profile_id ?? randomUUID()
+      const saved = await requireRuntime().runPromise(
+        toResult(
+          Effect.gen(function*() {
+            const store = yield* ReaderProfileStore
+            const profile = yield* store.save({
+              profileId,
+              expectedRevision: request.expected_revision,
+              name: request.name.trim(),
+              launchMode: request.launch_mode,
+              supportedFormats: request.supported_formats,
+              targetMode: request.target_mode,
+              executablePath,
+              argumentTokens: request.argument_tokens
+            })
+            return { data: toReaderProfileView(profile) }
+          })
+        )
+      )
+      if (saved.ok && request.selection_handle !== null) executableSelections.delete(request.selection_handle)
+      return saved
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
   })
 
   ipcMain.handle(IpcChannels.librarySearch, (event, raw: unknown) => {
@@ -395,21 +487,6 @@ const registerIpc = (): void => {
           return yield* client.search({ payload: decoded.value })
         })
       )
-    )
-  })
-
-  ipcMain.handle(IpcChannels.thumbnailGet, (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ThumbnailGetIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    return runNetworkResult(
-      toRawResult(
-        Effect.gen(function*() {
-          const client = yield* ThumbnailHttpClient
-          return yield* client.get({ params: { key: decoded.value.key } })
-        })
-      ),
-      THUMBNAIL_NETWORK_DEADLINE
     )
   })
 
@@ -804,7 +881,8 @@ const bootstrap = async (): Promise<void> => {
   runtime = ManagedRuntime.make(
     Layer.mergeAll(
       DraftStore.layerFromWorker,
-      CommandAttemptStore.layerFromWorker
+      CommandAttemptStore.layerFromWorker,
+      ReaderProfileStore.layerFromWorker
     ).pipe(Layer.provide(localWorker))
   )
 

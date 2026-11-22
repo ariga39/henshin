@@ -6,7 +6,6 @@ import {
   ReviewHttpClient,
   ServerHttpClient,
   TaskHttpClient,
-  ThumbnailHttpClient,
   type ConnectionStatusView
 } from "@henshin/contracts"
 
@@ -30,7 +29,7 @@ export interface ConnectionLifecycleOptions {
 interface Lease {
   readonly generation: number
   readonly runtime: ManagedRuntime.ManagedRuntime<
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | ThumbnailHttpClient,
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient,
     never
   >
   readonly instanceId: string
@@ -40,7 +39,7 @@ interface Lease {
 interface Candidate {
   readonly generation: number
   readonly runtime: ManagedRuntime.ManagedRuntime<
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | ThumbnailHttpClient,
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient,
     never
   >
 }
@@ -49,7 +48,7 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 const disposeBounded = async (
   runtime: ManagedRuntime.ManagedRuntime<
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | ThumbnailHttpClient,
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient,
     never
   >
 ): Promise<void> => {
@@ -133,8 +132,7 @@ export class ConnectionLifecycle {
       ServerHttpClient.layer(options),
       LibraryHttpClient.layer(options),
       TaskHttpClient.layer(options),
-      ReviewHttpClient.layer(options),
-      ThumbnailHttpClient.layer(options)
+      ReviewHttpClient.layer(options)
     ))
     const candidate = { generation, runtime }
     this.candidates.set(generation, candidate)
@@ -213,13 +211,12 @@ export class ConnectionLifecycle {
     effect: Effect.Effect<
       A,
       E,
-      PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | ThumbnailHttpClient
-    >,
-    timeout = NETWORK_DEADLINE
+      PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient
+    >
   ): Promise<A> {
     const lease = this.lease
     if (lease === null) return Promise.reject(new ConnectionPausedError({ state: this.status.state }))
-    const fiber = lease.runtime.runFork(effect.pipe(Effect.timeout(timeout))) as Fiber.Fiber<A, E | never>
+    const fiber = lease.runtime.runFork(effect.pipe(Effect.timeout(NETWORK_DEADLINE))) as Fiber.Fiber<A, E | never>
     const fibers = this.activeFibers.get(lease.generation) ?? new Set<Fiber.Fiber<unknown, unknown>>()
     fibers.add(fiber as Fiber.Fiber<unknown, unknown>)
     this.activeFibers.set(lease.generation, fibers)

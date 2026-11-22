@@ -1,6 +1,8 @@
 import { DatabaseSync } from "node:sqlite"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
+import { canonicalOpenEventPayload } from "@henshin/contracts/canonical"
+import { OpenEvent } from "@henshin/contracts/event"
 import {
   CommandAttemptAdmission,
   CommandAttemptMutation,
@@ -10,14 +12,18 @@ import {
   type ReaderProfileRow,
   type CommandAttemptRow,
   type DraftRow,
+  type OpenJournalRow,
   type DraftWorkerRequest
 } from "./draft-worker-protocol"
 
 const MAX_DRAFT_ROWS = 64
 const MAX_COMMAND_ATTEMPTS = 64
 const MAX_READER_PROFILES = 64
+const MAX_OPEN_JOURNAL_ROWS = 64
 const COMMAND_ATTEMPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const COMMAND_ATTEMPT_COMPACTION_BATCH = 64
+const OPEN_JOURNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const OPEN_JOURNAL_COMPACTION_BATCH = 64
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const db = new DatabaseSync(dbPath)
 
@@ -75,7 +81,30 @@ db.exec(`
     argument_tokens TEXT NOT NULL,
     updated_at_ms INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS launch_journal (
+    instance_id TEXT NOT NULL,
+    action_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    observed_location_revision INTEGER NOT NULL,
+    observed_content_version INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('prepared', 'accepted', 'failed', 'unknown')),
+    event_json TEXT,
+    failure_code TEXT,
+    failure_message TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (instance_id, action_id),
+    CHECK ((status = 'accepted' AND event_json IS NOT NULL) OR (status <> 'accepted' AND event_json IS NULL)),
+    CHECK ((status = 'failed' AND failure_code IS NOT NULL AND failure_message IS NOT NULL) OR
+      (status <> 'failed' AND failure_code IS NULL AND failure_message IS NULL))
+  );
 `)
+
+// A prepared intent has no reliable dispatch outcome after this worker has
+// been closed and reopened. Preserve it as diagnostic unknown rather than
+// allowing any caller to turn it back into a launch.
+db.prepare("UPDATE launch_journal SET status = 'unknown', updated_at_ms = ? WHERE status = 'prepared'").run(Date.now())
 
 const selectDraft = db.prepare(`
   SELECT instance_id, note_id, form_id, text, local_revision,
@@ -120,6 +149,53 @@ const listReaderProfiles = db.prepare(`
   ORDER BY name COLLATE NOCASE ASC, profile_id ASC
 `)
 listReaderProfiles.setReadBigInts(true)
+
+const selectOpenJournal = db.prepare(`
+  SELECT instance_id, action_id, entry_id, device_id,
+         observed_location_revision, observed_content_version, status,
+         event_json, failure_code, failure_message, created_at_ms, updated_at_ms
+  FROM launch_journal
+  WHERE instance_id = ? AND action_id = ?
+`)
+selectOpenJournal.setReadBigInts(true)
+const listOpenJournal = db.prepare(`
+  SELECT instance_id, action_id, entry_id, device_id,
+         observed_location_revision, observed_content_version, status,
+         event_json, failure_code, failure_message, created_at_ms, updated_at_ms
+  FROM launch_journal
+  WHERE instance_id = ?
+  ORDER BY updated_at_ms DESC, action_id ASC
+`)
+listOpenJournal.setReadBigInts(true)
+const selectOpenJournalCount = db.prepare("SELECT COUNT(*) AS count FROM launch_journal")
+selectOpenJournalCount.setReadBigInts(true)
+const compactOpenJournal = db.prepare(`
+  DELETE FROM launch_journal
+  WHERE rowid IN (
+    SELECT rowid
+    FROM launch_journal
+    WHERE status = 'failed' AND updated_at_ms + ? <= ?
+    ORDER BY updated_at_ms ASC, rowid ASC
+    LIMIT ?
+  )
+`)
+const insertOpenJournal = db.prepare(`
+  INSERT INTO launch_journal(
+    instance_id, action_id, entry_id, device_id,
+    observed_location_revision, observed_content_version, status,
+    event_json, failure_code, failure_message, created_at_ms, updated_at_ms
+  ) VALUES(?, ?, ?, ?, ?, ?, 'prepared', NULL, NULL, NULL, ?, ?)
+`)
+const updateOpenAccepted = db.prepare(`
+  UPDATE launch_journal
+  SET status = 'accepted', event_json = ?, updated_at_ms = ?
+  WHERE instance_id = ? AND action_id = ? AND status = 'prepared'
+`)
+const updateOpenFailed = db.prepare(`
+  UPDATE launch_journal
+  SET status = 'failed', failure_code = ?, failure_message = ?, updated_at_ms = ?
+  WHERE instance_id = ? AND action_id = ? AND status = 'prepared'
+`)
 const selectReaderProfileCount = db.prepare("SELECT COUNT(*) AS count FROM reader_profiles")
 selectReaderProfileCount.setReadBigInts(true)
 const insertReaderProfile = db.prepare(`
@@ -267,6 +343,84 @@ const readReaderProfiles = (): ReadonlyArray<ReaderProfileRow> =>
     executable_path: string | null
     argument_tokens: string
   }>).map(toReaderProfileRow)
+
+type OpenJournalDbRow = {
+  instance_id: string
+  action_id: string
+  entry_id: string
+  device_id: string
+  observed_location_revision: bigint
+  observed_content_version: bigint
+  status: OpenJournalRow["status"]
+  event_json: string | null
+  failure_code: string | null
+  failure_message: string | null
+  created_at_ms: bigint
+  updated_at_ms: bigint
+}
+
+const toOpenJournalRow = (row: OpenJournalDbRow): OpenJournalRow => ({
+  instanceId: row.instance_id,
+  actionId: row.action_id,
+  entryId: row.entry_id,
+  deviceId: row.device_id,
+  observedLocationRevision: row.observed_location_revision.toString(),
+  observedContentVersion: row.observed_content_version.toString(),
+  status: row.status,
+  event: row.event_json === null
+    ? null
+    : Schema.decodeUnknownSync(OpenEvent)(JSON.parse(row.event_json)),
+  failureCode: row.failure_code,
+  failureMessage: row.failure_message,
+  createdAtMs: Number(row.created_at_ms),
+  updatedAtMs: Number(row.updated_at_ms)
+})
+
+const readOpenJournal = (instanceId: string, actionId: string): OpenJournalRow | undefined => {
+  const row = selectOpenJournal.get(instanceId, actionId) as OpenJournalDbRow | undefined
+  return row === undefined ? undefined : toOpenJournalRow(row)
+}
+
+const readOpenJournalRows = (instanceId: string): ReadonlyArray<OpenJournalRow> =>
+  (listOpenJournal.all(instanceId) as unknown as ReadonlyArray<OpenJournalDbRow>).map(toOpenJournalRow)
+
+const sameOpenIntent = (
+  row: OpenJournalRow,
+  request: Extract<DraftWorkerRequest, { op: "prepareOpen" }>
+): boolean =>
+  row.instanceId === request.instanceId &&
+  row.actionId === request.actionId &&
+  row.entryId === request.entryId &&
+  row.deviceId === request.deviceId &&
+  row.observedLocationRevision === request.observedLocationRevision &&
+  row.observedContentVersion === request.observedContentVersion
+
+const sameOpenEvent = (left: OpenEvent, right: OpenEvent): boolean =>
+  canonicalOpenEventPayload({
+    eventId: left.event_id,
+    instanceId: left.instance_id,
+    entryId: left.entry_id,
+    deviceId: left.device_id,
+    observedLocationRevision: left.observed_location_revision,
+    observedContentVersion: left.observed_content_version,
+    occurredAtMs: left.occurred_at_ms
+  }) === canonicalOpenEventPayload({
+    eventId: right.event_id,
+    instanceId: right.instance_id,
+    entryId: right.entry_id,
+    deviceId: right.device_id,
+    observedLocationRevision: right.observed_location_revision,
+    observedContentVersion: right.observed_content_version,
+    occurredAtMs: right.occurred_at_ms
+  })
+
+const openEventMatchesIntent = (row: OpenJournalRow, event: OpenEvent): boolean =>
+  event.event_id === row.actionId &&
+  event.instance_id === row.instanceId &&
+  event.entry_id === row.entryId &&
+  event.device_id === row.deviceId &&
+  event.observed_location_revision === row.observedLocationRevision &&
+  event.observed_content_version === row.observedContentVersion
 
 const readCommandAttempt = (instanceId: string, operationId: string): CommandAttemptRow | undefined => {
   const row = selectCommandAttempt.get(instanceId, operationId) as
@@ -665,6 +819,121 @@ const handle = (request: DraftWorkerRequest): unknown => {
         throw error
       }
     }
+    case "prepareOpen": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const existing = readOpenJournal(request.instanceId, request.actionId)
+        if (existing !== undefined) {
+          db.exec("COMMIT")
+          return sameOpenIntent(existing, request)
+            ? { kind: "existing", entry: existing }
+            : { kind: "conflict" }
+        }
+
+        const now = Date.now()
+        compactOpenJournal.run(OPEN_JOURNAL_RETENTION_MS, now, OPEN_JOURNAL_COMPACTION_BATCH)
+        const count = (selectOpenJournalCount.get() as { count: bigint }).count
+        if (count >= BigInt(MAX_OPEN_JOURNAL_ROWS)) {
+          db.exec("COMMIT")
+          return { kind: "full" }
+        }
+
+        insertOpenJournal.run(
+          request.instanceId,
+          request.actionId,
+          request.entryId,
+          request.deviceId,
+          BigInt(request.observedLocationRevision),
+          BigInt(request.observedContentVersion),
+          now,
+          now
+        )
+        db.exec("COMMIT")
+        const entry = readOpenJournal(request.instanceId, request.actionId)
+        if (entry === undefined) throw new Error("prepared open intent was not readable")
+        return { kind: "admitted", entry }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "recordOpenAccepted": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const current = readOpenJournal(request.instanceId, request.actionId)
+        if (current === undefined) {
+          db.exec("ROLLBACK")
+          return { kind: "not_found" }
+        }
+        if (!openEventMatchesIntent(current, request.event)) {
+          db.exec("COMMIT")
+          return { kind: "conflict" }
+        }
+        if (current.status === "accepted") {
+          db.exec("COMMIT")
+          return current.event !== null && sameOpenEvent(current.event, request.event)
+            ? { kind: "existing", entry: current }
+            : { kind: "conflict" }
+        }
+        if (current.status !== "prepared") {
+          db.exec("COMMIT")
+          return { kind: "conflict" }
+        }
+
+        updateOpenAccepted.run(
+          JSON.stringify(request.event),
+          Date.now(),
+          request.instanceId,
+          request.actionId
+        )
+        db.exec("COMMIT")
+        const entry = readOpenJournal(request.instanceId, request.actionId)
+        if (entry === undefined) throw new Error("accepted open event was not readable")
+        return { kind: "updated", entry }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "recordOpenFailed": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const current = readOpenJournal(request.instanceId, request.actionId)
+        if (current === undefined) {
+          db.exec("ROLLBACK")
+          return { kind: "not_found" }
+        }
+        if (current.status === "failed") {
+          db.exec("COMMIT")
+          return current.failureCode === request.failureCode && current.failureMessage === request.failureMessage
+            ? { kind: "existing", entry: current }
+            : { kind: "conflict" }
+        }
+        if (current.status !== "prepared") {
+          db.exec("COMMIT")
+          return { kind: "conflict" }
+        }
+
+        updateOpenFailed.run(
+          request.failureCode,
+          request.failureMessage,
+          Date.now(),
+          request.instanceId,
+          request.actionId
+        )
+        db.exec("COMMIT")
+        const entry = readOpenJournal(request.instanceId, request.actionId)
+        if (entry === undefined) throw new Error("failed open intent was not readable")
+        return { kind: "updated", entry }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "listOpenJournal":
+      return readOpenJournalRows(request.instanceId)
+    case "getOpenJournal":
+      return readOpenJournal(request.instanceId, request.actionId) ?? null
     case "close":
       db.close()
       return null

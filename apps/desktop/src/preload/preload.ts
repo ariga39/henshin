@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type {
-  LocalMappingPreviewIpcRequest,
+  ReaderProfileSaveIpcRequest,
   ReleaseHeldDiscoveryIpcRequest,
   RootCommandIpcRequest,
   RootPreviewRequest,
@@ -16,21 +16,21 @@ contextBridge.exposeInMainWorld("henshinRootPreview", {
   command: (input: RootCommandIpcRequest) => ipcRenderer.invoke(IpcChannels.rootCommand, input)
 })
 
-contextBridge.exposeInMainWorld("henshinLocalMapping", {
-  preview: (input: LocalMappingPreviewIpcRequest) =>
-    ipcRenderer.invoke(IpcChannels.localMappingPreview, input)
-})
-
 contextBridge.exposeInMainWorld("henshinScanReview", {
   listTasks: () => ipcRenderer.invoke(IpcChannels.taskList, {}),
   candidates: () => ipcRenderer.invoke(IpcChannels.reviewCandidates, {}),
   command: (input: ReleaseHeldDiscoveryIpcRequest) => ipcRenderer.invoke(IpcChannels.reviewCommand, input)
 })
 
+contextBridge.exposeInMainWorld("henshinReaderProfiles", {
+  list: () => ipcRenderer.invoke(IpcChannels.readerProfileList, {}),
+  selectExecutable: () => ipcRenderer.invoke(IpcChannels.readerSelectExecutable, {}),
+  save: (input: ReaderProfileSaveIpcRequest) => ipcRenderer.invoke(IpcChannels.readerProfileSave, input)
+})
+
 contextBridge.exposeInMainWorld("henshinLibrary", {
   search: (input: { readonly page_size?: number; readonly cursor?: string }) =>
-    ipcRenderer.invoke(IpcChannels.librarySearch, input),
-  getThumbnail: (key: string) => ipcRenderer.invoke(IpcChannels.thumbnailGet, { key })
+    ipcRenderer.invoke(IpcChannels.librarySearch, input)
 })
 
 if (new URLSearchParams(window.location.search).get("mode") === "prototype") {

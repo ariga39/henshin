@@ -69,7 +69,12 @@ const manifestView = (manifest: SourceManifest) => ({
 const makeServices = async (
   cachePublish: "succeed" | "fail",
   sourceKind: "directory" | "archive" = "directory",
-  options: { readonly legacyObservations?: boolean; readonly nonNaturalArchiveOrder?: boolean } = {}
+  options: {
+    readonly legacyObservations?: boolean
+    readonly nonNaturalArchiveOrder?: boolean
+    readonly warmCache?: Uint8Array
+    readonly cacheReadFails?: boolean
+  } = {}
 ) => {
   const rootPath = await mkdtemp(join(os.tmpdir(), "henshin-thumbnail-producer-"))
   temporaryRoots.push(rootPath)
@@ -151,24 +156,30 @@ const makeServices = async (
   const library = {
     acceptedThumbnailEntry: () => Effect.succeed(accepted)
   } as unknown as LibraryStore["Service"]
-  const roots = {
-    list: () => Effect.succeed([root])
-  } as unknown as RootStore["Service"]
+  let cacheReads = 0
   const cache = {
-    read: () => Effect.succeed(null),
+    read: () => options.cacheReadFails
+      ? Effect.fail(new ThumbnailCacheError({ message: "simulated cache read failure" }))
+      : Effect.sync(() => {
+          cacheReads += 1
+          return options.warmCache ?? null
+        }),
     publish: (_key: string, bytes: Uint8Array) => cachePublish === "fail"
       ? Effect.fail(new ThumbnailCacheError({ message: "simulated cache publication failure" }))
       : Effect.sync(() => { published = bytes })
   } as unknown as ThumbnailCache["Service"]
+  const rootService = {
+    list: () => Effect.succeed([root])
+  } as unknown as RootStore["Service"]
   const layer = ThumbnailProducer.layer.pipe(
     Layer.provide(Layer.mergeAll(
       Layer.succeed(LibraryStore, library),
-      Layer.succeed(RootStore, roots),
+      Layer.succeed(RootStore, rootService),
       Layer.succeed(ThumbnailCache, cache),
       NodeServices.layer
     ))
   )
-  return { entryId, layer, getPublished: () => published }
+  return { entryId, layer, bookPath, getPublished: () => published, getCacheReads: () => cacheReads }
 }
 
 describe("real default-cover producer", () => {
@@ -235,5 +246,52 @@ describe("real default-cover producer", () => {
       }).pipe(Effect.provide(fixture.layer))
     )
     expect(result.kind).toBe("ready")
+  })
+
+  it("does not serve a warm legacy cache entry after the source changes", async () => {
+    const fixture = await makeServices("succeed", "directory", {
+      legacyObservations: true,
+      warmCache: new Uint8Array([1, 2, 3])
+    })
+    await writeFile(join(fixture.bookPath, "002.png"), Buffer.from("changed page"))
+    const result = await Effect.runPromise(
+      Effect.gen(function*() {
+        const producer = yield* ThumbnailProducer
+        return yield* producer.load(`default-v1.${fixture.entryId}.1`)
+      }).pipe(Effect.provide(fixture.layer))
+    )
+    expect(result).toEqual({ kind: "missing" })
+    expect(fixture.getCacheReads()).toBe(0)
+  })
+
+  it("regenerates when reading the optional cache fails", async () => {
+    const fixture = await makeServices("succeed", "directory", { cacheReadFails: true })
+    const result = await Effect.runPromise(
+      Effect.gen(function*() {
+        const producer = yield* ThumbnailProducer
+        return yield* producer.load(`default-v1.${fixture.entryId}.1`)
+      }).pipe(Effect.provide(fixture.layer))
+    )
+    expect(result.kind).toBe("ready")
+  })
+
+  it("keeps a budget timeout retryable and backs off the next render", async () => {
+    const fixture = await makeServices("succeed")
+    const values = [0, 31_000]
+    const now = vi.spyOn(Date, "now").mockImplementation(() => values.shift() ?? 31_000)
+    try {
+      const [first, second] = await Effect.runPromise(
+        Effect.gen(function*() {
+          const producer = yield* ThumbnailProducer
+          const first = yield* producer.load(`default-v1.${fixture.entryId}.1`)
+          const second = yield* producer.load(`default-v1.${fixture.entryId}.1`)
+          return [first, second] as const
+        }).pipe(Effect.provide(fixture.layer))
+      )
+      expect(first).toEqual({ kind: "updating" })
+      expect(second).toEqual({ kind: "updating" })
+    } finally {
+      now.mockRestore()
+    }
   })
 })

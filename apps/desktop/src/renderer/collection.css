@@ -37,25 +37,4 @@
   padding: .45rem 0;
   border-bottom: 1px solid #dce2df;
 }
-.library-entry-details { display: grid; flex: 1; min-width: 0; gap: .15rem; align-content: center; }
-.library-cover-frame, .library-cover-image, .library-cover-placeholder {
-  width: 4.5rem;
-  height: 6.75rem;
-  flex: 0 0 4.5rem;
-  border-radius: .25rem;
-}
-.library-cover-frame { overflow: hidden; }
-.library-cover-image { display: block; object-fit: cover; background: #e7ecea; }
-.library-cover-placeholder {
-  display: grid;
-  align-content: center;
-  gap: .25rem;
-  padding: .4rem;
-  box-sizing: border-box;
-  background: #e7ecea;
-  color: #495955;
-  font-size: .8rem;
-  text-align: center;
-}
-.library-cover-placeholder strong { font-size: .75rem; overflow-wrap: anywhere; }
 .collection small { color: #54635e; }
