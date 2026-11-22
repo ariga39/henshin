@@ -69,6 +69,13 @@ export const loadRoots = Effect.gen(function*() {
   }
 })
 
+export const refreshRootPolicy = Effect.gen(function*() {
+  const request = viewStore.getState().root_preview_request
+  if (request === null) return
+  yield* previewRoot(request)
+  yield* loadRoots
+})
+
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
 
@@ -79,10 +86,28 @@ const updateRootExclusion = (input: {
 }, type: "exclude" | "remove-exclusion") =>
   Effect.gen(function*() {
     const client = yield* RootPreviewClient
-    const preview = viewStore.getState().root_preview
-    if (!isSavedDiscovery(preview) || preview.root_id !== input.rootId) return
+    const initialState = viewStore.getState()
+    const previewGeneration = initialState.root_preview_generation
+    const currentPreview = initialState.root_preview
+    let preview = isSavedDiscovery(currentPreview) && currentPreview.root_id === input.rootId
+      ? currentPreview
+      : null
 
     yield* Effect.sync(() => viewStore.set({ root_policy_status: "loading", root_policy_error: null }))
+    if (preview === null) {
+      const fresh = yield* client.preview({ kind: "saved-root", root_id: input.rootId })
+      if (!fresh.ok || !isSavedDiscovery(fresh.data) || fresh.data.root_id !== input.rootId) {
+        if (viewStore.getState().root_preview_generation === previewGeneration) {
+          yield* Effect.sync(() => viewStore.set({
+            root_policy_status: "error",
+            root_policy_error: fresh.ok ? "saved root preview was not available" : fresh.error.message
+          }))
+        }
+        return
+      }
+      preview = fresh.data
+    }
+
     const result = yield* client.command({
       root_id: preview.root_id,
       operation_id: newOperationId(),
@@ -92,19 +117,25 @@ const updateRootExclusion = (input: {
       command: { type, exclusion: { path: input.path, scope: input.scope } }
     })
     if (!result.ok) {
-      yield* Effect.sync(() => viewStore.set({ root_policy_status: "error", root_policy_error: result.error.message }))
+      if (viewStore.getState().root_preview_generation === previewGeneration) {
+        yield* Effect.sync(() => viewStore.set({ root_policy_status: "error", root_policy_error: result.error.message }))
+      }
       return
     }
 
     yield* Effect.sync(() => {
       const roots = viewStore.getState().root_saved_roots
+      const current = viewStore.getState()
       viewStore.set({
         root_saved_roots: roots.map((root) => root.root_id === result.data.root_id ? result.data : root),
-        root_policy_status: "idle",
-        root_policy_error: null
+        ...(current.root_preview_generation === previewGeneration
+          ? { root_policy_status: "idle" as const, root_policy_error: null }
+          : {})
       })
     })
-    yield* previewRoot({ kind: "saved-root", root_id: result.data.root_id })
+    if (viewStore.getState().root_preview_generation === previewGeneration) {
+      yield* previewRoot({ kind: "saved-root", root_id: result.data.root_id })
+    }
   })
 
 export const excludeRootPath = (input: {
