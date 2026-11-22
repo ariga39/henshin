@@ -18,7 +18,7 @@ import {
   RootPreviewClient,
   ScanReviewClient
 } from "./client"
-import { viewStore, type ViewState } from "./store"
+import { viewStore, type LibraryOpenState, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
 export const FORM_ID = "synthetic-note"
@@ -853,6 +853,116 @@ export const canSaveRoot = (state: ViewState): boolean => {
 
 export const showLibrary = Effect.sync(() => viewStore.set({ screen: "library" }))
 export const showSetup = Effect.sync(() => viewStore.set({ screen: "setup" }))
+
+const libraryEntry = (state: ViewState, entryId: string) =>
+  state.library_entries.find((entry) => entry.entry_id === entryId)
+
+const libraryNamespace = (state: ViewState, entryId: string): string | null => {
+  const entry = libraryEntry(state, entryId)
+  const connectedNamespace = state.connection.state === "connected" ? state.connection.instance_id : null
+  return connectedNamespace ?? entry?.library_id ?? null
+}
+
+const sameLibraryOpenState = (left: LibraryOpenState, namespaceId: string, entryId: string): boolean =>
+  left.namespace_id === namespaceId && left.entry_id === entryId
+
+export const libraryOpenStateFor = (state: ViewState, entryId: string): LibraryOpenState | null => {
+  const namespaceId = libraryNamespace(state, entryId)
+  return namespaceId === null
+    ? null
+    : state.library_open_states.find((openState) =>
+        openState.connection_generation === state.connection_generation &&
+        sameLibraryOpenState(openState, namespaceId, entryId)
+      ) ?? null
+}
+
+const replaceLibraryOpenState = (
+  states: ReadonlyArray<LibraryOpenState>,
+  next: LibraryOpenState
+): ReadonlyArray<LibraryOpenState> => [
+  ...states.filter((openState) => !sameLibraryOpenState(openState, next.namespace_id, next.entry_id)),
+  next
+]
+
+export const selectLibraryEntry = (entryId: string) => Effect.sync(() => {
+  const state = viewStore.getState()
+  const openState = libraryOpenStateFor(state, entryId)
+  viewStore.set({
+    library_selected_entry_id: entryId,
+    library_open_profile_id: openState?.profile_id ?? null
+  })
+})
+
+export const chooseLibraryOpenProfile = (profileId: string) => Effect.sync(() => {
+  const state = viewStore.getState()
+  const entryId = state.library_selected_entry_id
+  if (entryId === null) return
+  const openState = libraryOpenStateFor(state, entryId)
+  if (openState?.status === "loading") return
+  const namespaceId = libraryNamespace(state, entryId)
+  viewStore.set({
+    library_open_profile_id: profileId,
+    ...(namespaceId === null
+      ? {}
+      : { library_open_states: state.library_open_states.filter((item) => !sameLibraryOpenState(item, namespaceId, entryId)) })
+  })
+})
+
+export const openSelectedLibraryEntry = Effect.gen(function*() {
+  const client = yield* LibraryClient
+  const state = viewStore.getState()
+  const entryId = state.library_selected_entry_id
+  const profileId = state.library_open_profile_id
+  const namespaceId = entryId === null ? null : libraryNamespace(state, entryId)
+  const openState = entryId === null ? null : libraryOpenStateFor(state, entryId)
+  if (entryId === null || profileId === null || namespaceId === null || openState?.status === "loading") return
+  if (client.open === undefined) return
+  const actionId = newOperationId()
+  const connectionGeneration = state.connection_generation
+  yield* Effect.sync(() => viewStore.set({
+    library_open_states: replaceLibraryOpenState(viewStore.getState().library_open_states, {
+      namespace_id: namespaceId,
+      entry_id: entryId,
+      profile_id: profileId,
+      connection_generation: connectionGeneration,
+      status: "loading",
+      result: null
+    })
+  }))
+  const result = yield* client.open({ entry_id: entryId, profile_id: profileId, action_id: actionId })
+  const current = viewStore.getState()
+  const currentOpenState = current.library_open_states.find((item) => sameLibraryOpenState(item, namespaceId, entryId))
+  if (
+    current.connection_generation !== connectionGeneration ||
+    libraryNamespace(current, entryId) !== namespaceId ||
+    currentOpenState?.status !== "loading" ||
+    currentOpenState.profile_id !== profileId
+  ) return
+  if (!result.ok) {
+    yield* Effect.sync(() => viewStore.set({
+      library_open_states: replaceLibraryOpenState(viewStore.getState().library_open_states, {
+        ...currentOpenState,
+        status: "failed",
+        result: {
+          action_id: actionId,
+          entry_id: entryId,
+          status: "failed",
+          message: result.error.message,
+          event_durable: false
+        }
+      })
+    }))
+    return
+  }
+  if (result.data.entry_id !== entryId) return
+  yield* Effect.sync(() => viewStore.set({
+    library_open_states: replaceLibraryOpenState(viewStore.getState().library_open_states, {
+      ...currentOpenState,
+      status: result.data.status === "in-flight" ? "loading" : result.data.status,
+      result: result.data
+    })
+  }))
+})
 
 export const loadLibrary = (append = false) =>
   Effect.gen(function*() {

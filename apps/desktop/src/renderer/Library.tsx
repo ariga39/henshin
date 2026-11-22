@@ -5,7 +5,15 @@ import { LibraryClient } from "./client"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
 import { createThumbnailLoadRequest } from "./thumbnail-loading"
-import { loadLibrary, showSetup } from "./workflows"
+import {
+  chooseLibraryOpenProfile,
+  libraryOpenStateFor,
+  loadLibrary,
+  loadReaderProfiles,
+  openSelectedLibraryEntry,
+  selectLibraryEntry,
+  showSetup
+} from "./workflows"
 
 type CoverState =
   | { readonly key: string | null; readonly request: number; readonly status: "loading" | "unavailable"; readonly src: null }
@@ -149,7 +157,19 @@ export const LibraryScreen = () => {
 
   useEffect(() => {
     if (viewStore.getState().library_status === "idle") void runtime.runPromise(loadLibrary())
+    if (viewStore.getState().reader_profiles_status === "idle") void runtime.runPromise(loadReaderProfiles)
   }, [])
+
+  const selectedEntry = state.library_entries.find((entry) => entry.entry_id === state.library_selected_entry_id) ?? null
+  const compatibleProfiles = selectedEntry === null
+    ? []
+    : state.reader_profiles.filter((profile) =>
+        profile.supported_formats.includes(selectedEntry.kind) &&
+        (selectedEntry.kind === "archive" ? profile.target_mode === "archive" : profile.target_mode !== "archive")
+      )
+  const selectedOpenState = selectedEntry === null ? null : libraryOpenStateFor(state, selectedEntry.entry_id)
+  const openIsPending = selectedOpenState?.status === "loading"
+  const openResult = selectedOpenState?.result ?? null
 
   return (
     <main className="collection" data-testid="library-screen">
@@ -198,6 +218,13 @@ export const LibraryScreen = () => {
                 <strong>{entry.title}</strong>
                 <span>{entry.source_path}</span>
                 <small>{entry.entry_id}</small>
+                <button
+                  type="button"
+                  data-testid={`library-entry-details-${entry.entry_id}`}
+                  onClick={() => void runtime.runPromise(selectLibraryEntry(entry.entry_id))}
+                >
+                  Details
+                </button>
               </div>
             </li>
           ))}
@@ -206,6 +233,50 @@ export const LibraryScreen = () => {
           <button data-testid="library-load-more" onClick={() => void runtime.runPromise(loadLibrary(true))}>
             Load more
           </button>
+        )}
+        {selectedEntry !== null && (
+          <section aria-labelledby="library-entry-details-heading" data-testid="library-details">
+            <h3 id="library-entry-details-heading">{selectedEntry.title}</h3>
+            <p>Accepted {selectedEntry.kind}; target resolution is checked by the desktop main process.</p>
+            {state.reader_profiles_status === "loading" && <p role="status">Loading compatible reader profiles…</p>}
+            {compatibleProfiles.length === 0 && (
+              <p data-testid="library-no-compatible-profile">Configure a compatible reader profile in Collection setup.</p>
+            )}
+            {compatibleProfiles.length > 0 && (
+              <>
+                <label htmlFor="library-open-profile">Reader profile</label>
+                <select
+                  id="library-open-profile"
+                  data-testid="library-open-profile"
+                  value={state.library_open_profile_id ?? ""}
+                  disabled={openIsPending}
+                  onChange={(event) => void runtime.runPromise(chooseLibraryOpenProfile(event.target.value))}
+                >
+                  <option value="" disabled>Choose a compatible profile</option>
+                  {compatibleProfiles.map((profile) => (
+                    <option key={profile.profile_id} value={profile.profile_id}>{profile.name}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  data-testid="library-open"
+                  disabled={state.library_open_profile_id === null || openIsPending}
+                  onClick={() => void runtime.runPromise(openSelectedLibraryEntry)}
+                >
+                  {openIsPending ? "Opening…" : "Open"}
+                </button>
+              </>
+            )}
+            {openResult !== null && (
+              <p
+                role={openResult.status === "failed" ? "alert" : "status"}
+                data-testid="library-open-result"
+              >
+                {openResult.status}: {openResult.message}
+                {openResult.status === "accepted" && !openResult.event_durable ? " Local history is not durable yet." : ""}
+              </p>
+            )}
+          </section>
         )}
       </section>
     </main>

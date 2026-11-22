@@ -7,6 +7,8 @@ import type {
   DiscardedDraft,
   HandshakeView,
   LibraryEntryPage,
+  OpenBookIpcRequest,
+  OpenBookIpcResult,
   LocalMappingActivateIpcRequest,
   LocalMappingPreviewIpcResult,
   NoteView,
@@ -143,6 +145,7 @@ export interface ScanReviewBridge {
 
 export interface LibraryBridge {
   search(input: { readonly page_size?: number; readonly cursor?: string }): Promise<Result<LibraryEntryPage>>
+  open(input: OpenBookIpcRequest): Promise<Result<OpenBookIpcResult>>
   getThumbnail(key: ThumbnailKey): Promise<Result<Uint8Array>>
 }
 
@@ -288,6 +291,7 @@ export class LibraryClient extends Context.Service<
   LibraryClient,
   {
     readonly search: (input: { readonly page_size?: number; readonly cursor?: string }) => Effect.Effect<Result<LibraryEntryPage>>
+    readonly open?: (input: OpenBookIpcRequest) => Effect.Effect<Result<OpenBookIpcResult>>
     readonly getThumbnail: (key: ThumbnailKey) => Effect.Effect<Result<Uint8Array>>
   }
 >()("henshin/desktop/renderer/LibraryClient") {
@@ -295,6 +299,7 @@ export class LibraryClient extends Context.Service<
     LibraryClient,
     LibraryClient.of({
       search: (input) => callIpc(() => window.henshinLibrary.search(input)),
+      open: (input) => callIpc(() => window.henshinLibrary.open(input)),
       getThumbnail: (key) => callIpc(() => window.henshinLibrary.getThumbnail(key))
     })
   )

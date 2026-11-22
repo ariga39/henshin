@@ -125,7 +125,18 @@ export const ReaderProfiles = () => {
         Reader profiles are stored only on this desktop. Saving a profile never opens an application or records history.
       </p>
       {state.reader_profiles_status === "loading" && <p>Loading reader profiles…</p>}
-      {state.reader_profiles_status === "error" && <p role="alert">Could not load reader profiles: {state.reader_profiles_error}</p>}
+      {state.reader_profiles_status === "error" && (
+        <p role="alert">
+          Could not load reader profiles: {state.reader_profiles_error}{" "}
+          <button
+            type="button"
+            data-testid="reader-profile-list-retry"
+            onClick={() => void runtime.runPromise(loadReaderProfiles)}
+          >
+            Retry loading reader profiles
+          </button>
+        </p>
+      )}
       <ul data-testid="reader-profile-list">
         {state.reader_profiles.map((profile) => (
           <li key={profile.profile_id} data-testid={`reader-profile-${profile.profile_id}`}>
