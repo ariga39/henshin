@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { DatabaseSync } from "node:sqlite"
 import os from "node:os"
 import path from "node:path"
@@ -128,6 +128,7 @@ const downgradeLibraryEntriesToPreReplacementSchema = (dbPath: string): void => 
       DROP TABLE library_entries;
       ALTER TABLE library_entries_pre_replacement RENAME TO library_entries;
     `)
+    db.prepare("UPDATE server_state SET schema_version = 6 WHERE id = 1").run()
     db.exec("COMMIT")
   } catch (error) {
     db.exec("ROLLBACK")
@@ -266,6 +267,62 @@ describe("replacement comparison read model", () => {
     expect(after.entries[0]?.replacement?.candidate_observation.page_count).toBe(3)
   })
 
+  it("keeps a transient accepted read failure openable across v6 migration and classifies corruption", async () => {
+    const { dbPath, server, fixture, root } = await makeScenario(
+      "henshin-replacement-transient-read-",
+      "Replacement transient read",
+      async (fixture) => {
+        const writer = new ZipWriter(new BlobWriter("application/zip"))
+        await writer.add("001.jpg", new Uint8ArrayReader(new Uint8Array(Buffer.from("Book A"))), { compressionMethod: 0 })
+        const archive = await writer.close()
+        await writeFile(path.join(fixture, "book.cbz"), Buffer.from(await archive.arrayBuffer()))
+      }
+    )
+    const archivePath = path.join(fixture, "book.cbz")
+
+    const first = await scan(server, root)
+    expect(first.status).toBe("succeeded")
+    const accepted = await listLibrary(server)
+    const acceptedEntry = accepted.entries[0]
+    if (acceptedEntry === undefined) throw new Error("expected accepted archive")
+
+    await chmod(archivePath, 0o000)
+    const transient = await scan(server, root)
+    expect(transient.status).toBe("completed_with_errors")
+    expect(transient.analysis_error_count).toBe(1)
+    const transientEntries = await listLibrary(server)
+    expect(transientEntries.entries[0]).toMatchObject({ entry_id: acceptedEntry.entry_id, state: "accepted", replacement: null })
+    const transientResolution = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: acceptedEntry.entry_id }, query: {} })
+    }))
+    expect(transientResolution.data).toMatchObject({ status: "usable", reason: null })
+
+    await server.stop()
+    downgradeLibraryEntriesToPreReplacementSchema(dbPath)
+    const migrated = await startServer(dbPath)
+    servers.push(migrated)
+    const afterMigration = await listLibrary(migrated)
+    expect(afterMigration.entries[0]).toMatchObject({ entry_id: acceptedEntry.entry_id, state: "accepted", replacement: null })
+    const migratedResolution = await withLibraryClient(migrated, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: acceptedEntry.entry_id }, query: {} })
+    }))
+    expect(migratedResolution.data).toMatchObject({ status: "usable", reason: null })
+
+    await chmod(archivePath, 0o644)
+    await writeFile(archivePath, "not a zip")
+    const corrupt = await scan(migrated, root)
+    expect(corrupt.status).toBe("completed_with_errors")
+    const pending = await listLibrary(migrated)
+    expect(pending.entries[0]).toMatchObject({ entry_id: acceptedEntry.entry_id, state: "replacement-pending" })
+    expect(pending.entries[0]?.replacement?.candidate_observation.analysis_error).toMatchObject({
+      code: "structural-corruption"
+    })
+    const blocked = await withLibraryClient(migrated, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: acceptedEntry.entry_id }, query: {} })
+    }))
+    expect(blocked.data).toMatchObject({ status: "unresolved", reason: "known-change" })
+  })
+
   it("keeps a known replacement pending when same-sized content and apparent metadata return", async () => {
     const { server, fixture, root } = await makeScenario(
       "henshin-replacement-restore-",
@@ -337,6 +394,6 @@ describe("replacement comparison read model", () => {
       size_bytes: null,
       analysis_status: "error"
     })
-    expect(entry?.replacement?.candidate_observation.analysis_error).not.toBeNull()
+    expect(entry?.replacement?.candidate_observation.analysis_error).toMatchObject({ code: "structural-corruption" })
   })
 })

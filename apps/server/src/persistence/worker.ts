@@ -121,7 +121,7 @@ const confirmedReplacement = (
     try {
       const decoded = Schema.decodeUnknownOption(ScanAnalysisError)(JSON.parse(analysisError))
       if (Option.isNone(decoded)) return 0
-      return ["location-unavailable", "missing-target", "root-changed", "root-unavailable"].includes(decoded.value.code)
+      return ["location-unavailable", "missing-target", "read-failure", "root-changed", "root-unavailable"].includes(decoded.value.code)
         ? 0
         : 1
     } catch {
