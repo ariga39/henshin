@@ -155,6 +155,89 @@ describe("durable held manual scan", () => {
     expect((await listCandidates(restarted)).every((candidate) => candidate.hold_state === "held")).toBe(true)
   })
 
+  it("scans all books beyond the bounded saved-root preview sample", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-held-scan-many-books-"))
+    fixturePaths.add(fixture)
+    const bookCount = 65
+    for (let index = 1; index <= bookCount; index += 1) {
+      const book = path.join(fixture, `book-${String(index).padStart(3, "0")}`)
+      await mkdir(book)
+      await writeFile(path.join(book, "001.jpg"), "source page")
+    }
+
+    const preview = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const result = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in result.data)) throw new Error("expected setup preview")
+      return result.data as RootPreview
+    }))
+    expect(preview).toMatchObject({ outcome: "truncated", sample_limit: 32 })
+    expect(preview.children).toHaveLength(32)
+
+    const saved = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: preview.instance_id,
+          epoch: preview.epoch,
+          label: "Many held books",
+          path: fixture,
+          preview_identity: preview.preview_identity
+        }
+      })
+    }))
+
+    const savedPreview = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.preview({ payload: { kind: "saved-root", root_id: saved.data.root_id } })
+    }))
+    if (!("kind" in savedPreview.data) || savedPreview.data.kind !== "saved-root-discovery") {
+      throw new Error("expected saved-root discovery")
+    }
+    const savedRootPreview = savedPreview.data
+    expect(savedRootPreview).toMatchObject({
+      sample_limit: 32,
+      candidates: expect.any(Array),
+      coverage: { candidate_sample_truncated: true }
+    })
+    expect(savedRootPreview.candidates).toHaveLength(32)
+    expect(savedRootPreview.coverage.candidate_count).toBeGreaterThan(32)
+    expect(savedRootPreview.coverage.candidate_count).toBeLessThan(bookCount)
+
+    const submitted = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.command({
+        params: { id: saved.data.root_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: preview.instance_id,
+          epoch: preview.epoch,
+          expected_mapping_revision: saved.data.mapping_revision,
+          expected_policy_revision: saved.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: true }
+        }
+      })
+    }))
+    if (!("task" in submitted.data)) throw new Error("expected scan task submission")
+
+    const terminal = await waitForTerminal(server, submitted.data.task.task_id)
+    expect(terminal).toMatchObject({
+      status: "succeeded",
+      candidates_discovered: bookCount,
+      candidates_analyzed: bookCount,
+      review_needed_count: bookCount,
+      coverage: {
+        status: "complete",
+        candidate_count: bookCount,
+        candidate_sample_truncated: false
+      },
+      error: null
+    })
+    expect(await listCandidates(server)).toHaveLength(bookCount)
+  })
+
   it("recovers a persisted running task before readiness and allows a new scan after restart", async () => {
     const first = await start()
     const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-held-scan-restart-"))
