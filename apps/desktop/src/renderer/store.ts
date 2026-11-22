@@ -4,6 +4,7 @@ import type {
   ConnectionStatusView,
   NoteView,
   RootPreview,
+  ServerRoot,
   SavedDraft
 } from "@henshin/contracts"
 
@@ -36,6 +37,15 @@ export interface ViewState {
   readonly root_preview_status: "idle" | "loading" | "ready" | "error"
   readonly root_preview: RootPreview | null
   readonly root_preview_error: string | null
+  readonly root_label: string
+  readonly root_saved_roots: ReadonlyArray<ServerRoot>
+  readonly root_roots_status: "idle" | "loading" | "ready" | "error"
+  readonly root_roots_error: string | null
+  readonly root_save_status: "idle" | "loading" | "ready" | "error"
+  readonly root_save_operation_id: string | null
+  readonly root_save_error: string | null
+  readonly root_save_target_label: string | null
+  readonly root_save_target_path: string | null
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
 }
@@ -59,6 +69,15 @@ const initialState: ViewState = {
   root_preview_status: "idle",
   root_preview: null,
   root_preview_error: null,
+  root_label: "",
+  root_saved_roots: [],
+  root_roots_status: "idle",
+  root_roots_error: null,
+  root_save_status: "idle",
+  root_save_operation_id: null,
+  root_save_error: null,
+  root_save_target_label: null,
+  root_save_target_path: null,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
   connection_generation: 0
 }
