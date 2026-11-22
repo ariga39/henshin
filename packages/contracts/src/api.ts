@@ -15,6 +15,7 @@ import {
   RootNotFound,
   RootVerificationFailed,
   RootPreviewUnavailable,
+  ActiveScanConflict,
   TaskNotFound,
   StorageFull
 } from "./errors"
@@ -122,6 +123,7 @@ export const ServerApi = HttpApi.make("henshin-server").add(
         error: [
           AuthenticationRequired,
           RootNotFound,
+          ActiveScanConflict,
           InvalidRequest,
           OperationExpired,
           StorageFull,

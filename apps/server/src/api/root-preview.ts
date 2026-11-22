@@ -3,6 +3,7 @@ import { opendir } from "node:fs/promises"
 import { isAbsolute } from "node:path"
 import { Effect } from "effect"
 import {
+  ActiveScanConflict,
   EpochChanged,
   InstanceMismatch,
   InvalidRequest,
@@ -533,6 +534,12 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
           )
 
           switch (started.kind) {
+            case "active_scan_conflict":
+              return yield* new ActiveScanConflict({
+                code: "active_scan_conflict", retryable: true,
+                message: "A scan with different settings is already running. Retry when it finishes.",
+                details: { task_id: started.taskId, policy_revision: started.policyRevision }, ...errorBase
+              })
             case "operation_conflict":
               return yield* new OperationConflict({
                 code: "operation_conflict",

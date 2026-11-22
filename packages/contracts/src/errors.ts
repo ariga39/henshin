@@ -1,5 +1,5 @@
 import { Schema } from "effect"
-import { Revision } from "./ids"
+import { Revision, Uuid } from "./ids"
 
 /**
  * Fields every public prototype error carries. `request_id` is a random
@@ -186,6 +186,18 @@ export class RootVerificationFailed extends Schema.TaggedError<RootVerificationF
   { httpApiStatus: 409 }
 ) {}
 
+export class ActiveScanConflict extends Schema.TaggedError<ActiveScanConflict>()(
+  "ActiveScanConflict",
+  {
+    code: Schema.Literal("active_scan_conflict"),
+    message: Schema.String,
+    retryable: Schema.Literal(true),
+    details: Schema.Struct({ task_id: Uuid, policy_revision: Revision }),
+    ...envelope
+  },
+  { httpApiStatus: 409 }
+) {}
+
 export class TaskNotFound extends Schema.TaggedError<TaskNotFound>()(
   "TaskNotFound",
   {
@@ -218,6 +230,7 @@ export const PublicApiError = Schema.Union([
   RootPreviewUnavailable,
   RootVerificationFailed,
   RootNotFound,
+  ActiveScanConflict,
   TaskNotFound,
   InternalError
 ])
