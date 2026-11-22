@@ -40,8 +40,11 @@ describe("saved root scan policy", () => {
     fixturePaths.add(fixture)
     await mkdir(path.join(fixture, "series"))
     await mkdir(path.join(fixture, "series-extra"))
+    await mkdir(path.join(fixture, "series-extra-sibling"))
     const source = path.join(fixture, "series", "book.cbz")
     await writeFile(source, "source-bytes")
+    await writeFile(path.join(fixture, "series-extra", "001.jpg"), "page")
+    await writeFile(path.join(fixture, "series-extra-sibling", "001.jpg"), "page")
     const sourceBefore = await readFile(source)
 
     const saved = await withClient(
@@ -104,6 +107,58 @@ describe("saved root scan policy", () => {
       { path: "series/book.cbz", scope: "exact" },
       { path: "series-extra", scope: "subtree" }
     ])
+
+    const discovery = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        return yield* client.preview({ payload: { kind: "saved-root", root_id: saved.data.root_id } })
+      })
+    )
+    expect(discovery.data).toMatchObject({
+      kind: "saved-root-discovery",
+      policy_revision: "2",
+      candidates: [{ relative_path: "series-extra-sibling", kind: "image-directory" }]
+    })
+    expect(discovery.data).not.toMatchObject({
+      candidates: expect.arrayContaining([
+        { relative_path: "series/book.cbz" },
+        { relative_path: "series-extra" }
+      ])
+    })
+
+    const restored = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        return yield* client.command({
+          params: { id: saved.data.root_id },
+          payload: {
+            operation_id: randomUUID(),
+            instance_id: server.instanceId,
+            epoch: server.epoch,
+            expected_policy_revision: subtree.data.policy_revision,
+            command: { type: "remove-exclusion", exclusion: { path: "series/book.cbz", scope: "exact" } }
+          }
+        })
+      })
+    )
+    expect(restored.data.policy_revision).toBe("3")
+    expect(restored.data.exclusions).toEqual([{ path: "series-extra", scope: "subtree" }])
+
+    const restoredDiscovery = await withClient(
+      server,
+      Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        return yield* client.preview({ payload: { kind: "saved-root", root_id: saved.data.root_id } })
+      })
+    )
+    if (!("kind" in restoredDiscovery.data)) throw new Error("expected saved-root discovery")
+    expect(restoredDiscovery.data.candidates.map((candidate) => candidate.relative_path).sort()).toEqual([
+      "series-extra-sibling",
+      "series/book.cbz"
+    ])
+    expect(restoredDiscovery.data.candidates).toHaveLength(2)
 
     const replay = await withClient(
       server,
@@ -231,7 +286,7 @@ describe("saved root scan policy", () => {
         return yield* client.list()
       })
     )
-    expect(listedBeforeRestart.data[0]?.exclusions).toEqual(subtree.data.exclusions)
+    expect(listedBeforeRestart.data[0]?.exclusions).toEqual(restored.data.exclusions)
 
     await server.stop()
     const restarted = await startServer(server.dbPath)
@@ -243,8 +298,8 @@ describe("saved root scan policy", () => {
         return yield* client.list()
       })
     )
-    expect(listedAfterRestart.data[0]?.policy_revision).toBe("2")
-    expect(listedAfterRestart.data[0]?.exclusions).toEqual(subtree.data.exclusions)
+    expect(listedAfterRestart.data[0]?.policy_revision).toBe("3")
+    expect(listedAfterRestart.data[0]?.exclusions).toEqual(restored.data.exclusions)
   })
   it("rejects excess exclusions and reclaims obsolete receipts without evicting a live replay", async () => {
     const server = await start()
@@ -259,13 +314,18 @@ describe("saved root scan policy", () => {
         label: "Bounded policy", path: fixture, preview_identity: preview.preview_identity
       } })).data
     }))
-    const apply = (path: string, operationId = randomUUID()) => withClient(server, Effect.gen(function*() {
+    const apply = (
+      path: string,
+      operationId = randomUUID(),
+      expectedPolicyRevision = "0",
+      type: "exclude" | "remove-exclusion" = "exclude"
+    ) => withClient(server, Effect.gen(function*() {
       const client = yield* ServerHttpClient
       return yield* Effect.result(client.command({
         params: { id: saved.root_id },
         payload: {
           operation_id: operationId, instance_id: server.instanceId, epoch: server.epoch,
-          expected_policy_revision: "0", command: { type: "exclude", exclusion: { path, scope: "exact" } }
+          expected_policy_revision: expectedPolicyRevision, command: { type, exclusion: { path, scope: "exact" } }
         }
       }))
     }))
@@ -273,18 +333,28 @@ describe("saved root scan policy", () => {
     try {
       const paths = Array.from({ length: MAX_ROOT_EXCLUSIONS }, (_, i) => ({ path: `book-${i}.cbz`, scope: "exact" }))
       db.prepare("UPDATE server_roots SET exclusions = ? WHERE root_id = ?").run(JSON.stringify(paths), saved.root_id)
-      expect(await apply("overflow.cbz")).toMatchObject({ _tag: "Failure", failure: { _tag: "InvalidRequest" } })
+      const reduced = await apply(paths[0]!.path, randomUUID(), "0", "remove-exclusion")
+      expect(reduced).toMatchObject({ _tag: "Success", value: { data: { policy_revision: "1", exclusions: paths.slice(1) } } })
+      const refilled = await apply("overflow.cbz", randomUUID(), "1")
+      expect(refilled).toMatchObject({
+        _tag: "Success",
+        value: { data: { policy_revision: "2", exclusions: [...paths.slice(1), { path: "overflow.cbz", scope: "exact" }] } }
+      })
+      expect(await apply("second-overflow.cbz", randomUUID(), "2")).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "InvalidRequest" }
+      })
       const live = randomUUID()
-      expect(await apply(paths[0]!.path, live)).toMatchObject({ _tag: "Success" })
+      expect(await apply(paths[1]!.path, live, "2")).toMatchObject({ _tag: "Success" })
       const insert = db.prepare(`
         INSERT INTO root_policy_operations(epoch, operation_id, root_id, payload, result, created_at_ms)
         VALUES (?, ?, ?, '{}', '{}', ?)
       `)
       insert.run(server.epoch, "expired", saved.root_id, 0)
       insert.run("obsolete-epoch", "obsolete", saved.root_id, Date.now())
-      expect(await apply(paths[1]!.path)).toMatchObject({ _tag: "Success" })
-      expect(db.prepare("SELECT COUNT(*) AS n FROM root_policy_operations").get()?.n).toBe(2)
-      expect(await apply(paths[0]!.path, live)).toMatchObject({ _tag: "Success" })
+      expect(await apply(paths[2]!.path, randomUUID(), "2")).toMatchObject({ _tag: "Success" })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM root_policy_operations").get()?.n).toBe(4)
+      expect(await apply(paths[1]!.path, live, "2")).toMatchObject({ _tag: "Success" })
     } finally {
       db.close()
     }
