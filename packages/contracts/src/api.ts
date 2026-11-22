@@ -116,6 +116,9 @@ export const ServerApi = HttpApi.make("henshin-server").add(
         error: [
           AuthenticationRequired,
           RootNotFound,
+          InvalidRequest,
+          OperationExpired,
+          StorageFull,
           RevisionConflict,
           OperationConflict,
           EpochChanged,

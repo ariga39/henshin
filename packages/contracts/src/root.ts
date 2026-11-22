@@ -26,7 +26,8 @@ export const RootExclusion = Schema.Struct({
 })
 export type RootExclusion = typeof RootExclusion.Type
 
-export const RootExclusions = Schema.Array(RootExclusion)
+export const MAX_ROOT_EXCLUSIONS = 256
+export const RootExclusions = Schema.Array(RootExclusion).check(Schema.isMaxLength(MAX_ROOT_EXCLUSIONS))
 export type RootExclusions = typeof RootExclusions.Type
 
 /** Root-policy commands for suppressing or restoring one exact path or subtree. */
