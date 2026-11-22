@@ -1,9 +1,15 @@
 import { link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { Dirent } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import type { IndexedRootSample } from "@henshin/contracts"
-import { inspectLocalMapping, LocalMappingUnavailableError } from "../src/main/LocalMappingPreview"
+import {
+  inspectLocalMapping,
+  isWindowsInvalidSegment,
+  localPhysicalIdentity,
+  LocalMappingUnavailableError
+} from "../src/main/LocalMappingPreview"
 
 const rootId = "11111111-1111-4111-8111-111111111111"
 
@@ -85,6 +91,26 @@ describe("local mapping preview boundary", () => {
       const result = await inspectLocalMapping(rootId, root, [sample("Book.cbz")], false)
       expect(result.samples).toMatchObject([{ relative_path: "Book.cbz", status: "found" }])
     } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("uses lstat metadata instead of unknown directory-entry type flags for image pages", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-unknown-dirent-"))
+    const isFile = vi.spyOn(Dirent.prototype, "isFile").mockReturnValue(false)
+    try {
+      const book = path.join(root, "unknown-types")
+      await mkdir(book)
+      await writeFile(path.join(book, "001.jpg"), "page")
+      const result = await inspectLocalMapping(rootId, root, [imageSample("unknown-types")], false)
+      expect(result.samples).toMatchObject([{
+        status: "found",
+        local_evidence_status: "complete",
+        local_format_evidence: ["jpg"],
+        local_size_bytes: 4
+      }])
+    } finally {
+      isFile.mockRestore()
       await rm(root, { recursive: true, force: true })
     }
   })
@@ -187,6 +213,18 @@ describe("local mapping preview boundary", () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  it("does not create a physical collision from an unavailable inode", () => {
+    expect(localPhysicalIdentity({ dev: 1, ino: 0 })).toBeUndefined()
+    expect(localPhysicalIdentity({ dev: 1, ino: 9 })).toBe("1:9")
+  })
+
+  it("recognizes Windows-invalid segments without depending on the host volume", () => {
+    expect(isWindowsInvalidSegment("AUX.zip", "win32")).toBe(true)
+    expect(isWindowsInvalidSegment("book:stream.cbz", "win32")).toBe(true)
+    expect(isWindowsInvalidSegment("book.cbz", "win32")).toBe(false)
+    expect(isWindowsInvalidSegment("AUX.zip", "darwin")).toBe(false)
   })
 
   it("isolates a failed sample from other samples in the same bounded check", async () => {

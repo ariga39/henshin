@@ -1,6 +1,4 @@
 import { DatabaseSync } from "node:sqlite"
-import { realpathSync, statSync } from "node:fs"
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import {
@@ -10,7 +8,6 @@ import {
   DraftWorkerMessage,
   DraftWorkerResponse,
   type CommandAttemptRow,
-  type LocalMappingRow,
   type DraftRow,
   type DraftWorkerRequest
 } from "./draft-worker-protocol"
@@ -65,38 +62,7 @@ db.exec(`
     dismissed INTEGER NOT NULL CHECK (dismissed IN (0, 1)),
     PRIMARY KEY (instance_id, operation_id)
   );
-  CREATE TABLE IF NOT EXISTS client_mappings (
-    instance_id TEXT NOT NULL,
-    root_id TEXT NOT NULL,
-    selected_path TEXT NOT NULL,
-    canonical_path TEXT NOT NULL,
-    mapping_revision INTEGER NOT NULL,
-    selected_identity TEXT,
-    canonical_identity TEXT,
-    selected_resolution TEXT,
-    canonical_resolution TEXT,
-    state TEXT NOT NULL CHECK (state = 'active'),
-    PRIMARY KEY (instance_id, root_id)
-  );
 `)
-
-const clientMappingColumns = new Set(
-  (db.prepare("PRAGMA table_info(client_mappings)").all() as unknown as ReadonlyArray<{ name: string }>).map(
-    (column) => column.name
-  )
-)
-if (!clientMappingColumns.has("selected_identity")) {
-  db.exec("ALTER TABLE client_mappings ADD COLUMN selected_identity TEXT")
-}
-if (!clientMappingColumns.has("canonical_identity")) {
-  db.exec("ALTER TABLE client_mappings ADD COLUMN canonical_identity TEXT")
-}
-if (!clientMappingColumns.has("selected_resolution")) {
-  db.exec("ALTER TABLE client_mappings ADD COLUMN selected_resolution TEXT")
-}
-if (!clientMappingColumns.has("canonical_resolution")) {
-  db.exec("ALTER TABLE client_mappings ADD COLUMN canonical_resolution TEXT")
-}
 
 const selectDraft = db.prepare(`
   SELECT instance_id, note_id, form_id, text, local_revision,
@@ -188,37 +154,6 @@ const listCommandAttempts = db.prepare(`
 `)
 listCommandAttempts.setReadBigInts(true)
 
-const selectLocalMapping = db.prepare(`
-  SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision,
-         selected_identity, canonical_identity, selected_resolution, canonical_resolution
-  FROM client_mappings
-  WHERE instance_id = ? AND root_id = ? AND state = 'active'
-`)
-selectLocalMapping.setReadBigInts(true)
-const listLocalMappings = db.prepare(`
-  SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision,
-         selected_identity, canonical_identity, selected_resolution, canonical_resolution
-  FROM client_mappings
-  WHERE instance_id = ? AND state = 'active'
-  ORDER BY rowid ASC
-`)
-listLocalMappings.setReadBigInts(true)
-const upsertLocalMapping = db.prepare(`
-  INSERT INTO client_mappings(
-    instance_id, root_id, selected_path, canonical_path, mapping_revision,
-    selected_identity, canonical_identity, selected_resolution, canonical_resolution, state
-  ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
-  ON CONFLICT(instance_id, root_id) DO UPDATE SET
-    selected_path = excluded.selected_path,
-    canonical_path = excluded.canonical_path,
-    mapping_revision = excluded.mapping_revision,
-    selected_identity = excluded.selected_identity,
-    canonical_identity = excluded.canonical_identity,
-    selected_resolution = excluded.selected_resolution,
-    canonical_resolution = excluded.canonical_resolution,
-    state = 'active'
-`)
-
 const readDraft = (instanceId: string, noteId: string, formId: string): DraftRow | undefined => {
   const row = selectDraft.get(instanceId, noteId, formId) as
     | {
@@ -309,198 +244,6 @@ const readCommandAttempts = (instanceId: string): ReadonlyArray<CommandAttemptRo
     return attempt
   })
 }
-
-type PersistedLocalMapping = {
-  readonly instance_id: string
-  readonly root_id: string
-  readonly selected_path: string
-  readonly canonical_path: string
-  readonly mapping_revision: bigint
-  readonly selected_identity: string | null
-  readonly canonical_identity: string | null
-  readonly selected_resolution: string | null
-  readonly canonical_resolution: string | null
-}
-
-const readLocalMappingRow = (row: PersistedLocalMapping): LocalMappingRow => ({
-  instanceId: row.instance_id,
-  rootId: row.root_id,
-  selectedPath: row.selected_path,
-  canonicalPath: row.canonical_path,
-  mappingRevision: row.mapping_revision.toString()
-})
-
-const readLocalMapping = (instanceId: string, rootId: string): LocalMappingRow | undefined => {
-  const row = selectLocalMapping.get(instanceId, rootId) as PersistedLocalMapping | undefined
-  return row === undefined ? undefined : readLocalMappingRow(row)
-}
-
-const readPersistedLocalMappings = (instanceId: string): ReadonlyArray<PersistedLocalMapping> =>
-  listLocalMappings.all(instanceId) as unknown as ReadonlyArray<PersistedLocalMapping>
-
-const readLocalMappings = (instanceId: string): ReadonlyArray<LocalMappingRow> =>
-  readPersistedLocalMappings(instanceId).map(readLocalMappingRow)
-
-type ResolvedLocalPath = {
-  readonly comparisonPath: string
-  readonly endpointIdentity: string | null
-  readonly ancestorIdentities: ReadonlyArray<string>
-  readonly exact: boolean
-  readonly directory: boolean
-}
-
-const LocalPathResolution = Schema.Struct({
-  comparisonPath: Schema.String,
-  endpointIdentity: Schema.NullOr(Schema.String),
-  ancestorIdentities: Schema.Array(Schema.String),
-  exact: Schema.Boolean,
-  directory: Schema.Boolean
-})
-
-const identityOf = (path: string): string => {
-  const stats = statSync(path, { bigint: true })
-  return `${stats.dev.toString()}:${stats.ino.toString()}`
-}
-
-const ancestorIdentitiesOf = (path: string): ReadonlyArray<string> => {
-  const identities: Array<string> = []
-  let current = path
-  while (true) {
-    identities.push(identityOf(current))
-    const parent = dirname(current)
-    if (parent === current) return identities
-    current = parent
-  }
-}
-
-const pathErrorCode = (error: unknown): string | undefined =>
-  typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
-    ? error.code
-    : undefined
-
-const resolveLocalPath = (input: string): ResolvedLocalPath => {
-  let current = input
-  const missingSuffix: Array<string> = []
-
-  while (true) {
-    try {
-      const realCurrent = realpathSync.native(current)
-      const stats = statSync(current, { bigint: true })
-      const ancestorIdentities = ancestorIdentitiesOf(current)
-      return {
-        comparisonPath: missingSuffix.length === 0 ? realCurrent : join(realCurrent, ...missingSuffix),
-        endpointIdentity: missingSuffix.length === 0 ? identityOf(current) : null,
-        ancestorIdentities,
-        exact: missingSuffix.length === 0,
-        directory: missingSuffix.length === 0 && stats.isDirectory()
-      }
-    } catch (error) {
-      const code = pathErrorCode(error)
-      if (code !== "ENOENT" && code !== "ENOTDIR") {
-        return {
-          comparisonPath: input,
-          endpointIdentity: null,
-          ancestorIdentities: [],
-          exact: false,
-          directory: false
-        }
-      }
-      const parent = dirname(current)
-      if (parent === current) {
-        return {
-          comparisonPath: input,
-          endpointIdentity: null,
-          ancestorIdentities: [],
-          exact: false,
-          directory: false
-        }
-      }
-      missingSuffix.unshift(basename(current))
-      current = parent
-    }
-  }
-}
-
-const persistedPath = (path: string, identity: string | null): ResolvedLocalPath => ({
-  comparisonPath: path,
-  endpointIdentity: identity,
-  ancestorIdentities: identity === null ? [] : [identity],
-  exact: identity !== null,
-  directory: identity !== null
-})
-
-const persistedResolution = (
-  path: string,
-  identity: string | null,
-  resolution: string | null
-): ResolvedLocalPath => {
-  if (resolution !== null) {
-    try {
-      const decoded = Schema.decodeUnknownOption(LocalPathResolution)(JSON.parse(resolution))
-      if (Option.isSome(decoded)) return decoded.value
-    } catch {
-      // Fall through to the legacy path and identity evidence.
-    }
-  }
-  return persistedPath(path, identity)
-}
-
-const encodeResolution = (resolution: ResolvedLocalPath): string => JSON.stringify(resolution)
-
-const identityOverlaps = (left: ResolvedLocalPath, right: ResolvedLocalPath): boolean => {
-  if (left.endpointIdentity !== null && right.ancestorIdentities.includes(left.endpointIdentity)) return true
-  if (right.endpointIdentity !== null && left.ancestorIdentities.includes(right.endpointIdentity)) return true
-  return false
-}
-
-const isPathWithin = (parent: string, candidate: string): boolean => {
-  if (process.platform === "win32") {
-    return isPathWithinWindows(parent, candidate)
-  }
-  const remainder = relative(parent, candidate)
-  return remainder === "" || (remainder !== ".." && !remainder.startsWith(`..${sep}`) && !isAbsolute(remainder))
-}
-
-const isPathWithinWindows = (parent: string, candidate: string): boolean => {
-  const normalize = (value: string): string => value.replace(/[\\/]+/g, "\\").replace(/\\$/, "").toLowerCase()
-  const normalizedParent = normalize(parent)
-  const normalizedCandidate = normalize(candidate)
-  return normalizedCandidate === normalizedParent || normalizedCandidate.startsWith(`${normalizedParent}\\`)
-}
-
-const pathsOverlap = (left: string, right: string): boolean =>
-  isPathWithin(left, right) || isPathWithin(right, left)
-
-type MappingPathEvidence = {
-  readonly selectedPath: ResolvedLocalPath
-  readonly canonicalPath: ResolvedLocalPath
-}
-
-const pathsOverlapWithEvidence = (left: ResolvedLocalPath, right: ResolvedLocalPath): boolean =>
-  pathsOverlap(left.comparisonPath, right.comparisonPath) || identityOverlaps(left, right)
-
-const mappingPathsOverlap = (
-  selectedPath: ResolvedLocalPath,
-  canonicalPath: ResolvedLocalPath,
-  mapping: MappingPathEvidence
-): boolean =>
-  pathsOverlapWithEvidence(selectedPath, mapping.selectedPath) ||
-  pathsOverlapWithEvidence(selectedPath, mapping.canonicalPath) ||
-  pathsOverlapWithEvidence(canonicalPath, mapping.selectedPath) ||
-  pathsOverlapWithEvidence(canonicalPath, mapping.canonicalPath)
-
-const storedMappingPathEvidence = (mapping: PersistedLocalMapping): MappingPathEvidence => ({
-  selectedPath: persistedResolution(
-    mapping.selected_path,
-    mapping.selected_identity,
-    mapping.selected_resolution
-  ),
-  canonicalPath: persistedResolution(
-    mapping.canonical_path,
-    mapping.canonical_identity,
-    mapping.canonical_resolution
-  )
-})
 
 const handle = (request: DraftWorkerRequest): unknown => {
   switch (request.op) {
@@ -754,112 +497,6 @@ const handle = (request: DraftWorkerRequest): unknown => {
         const attempt = readCommandAttempt(request.instanceId, request.operationId)
         if (attempt === undefined) throw new Error("dismissed command attempt was not readable")
         return { kind: "updated", attempt }
-      } catch (error) {
-        rollbackIfActive()
-        throw error
-      }
-    }
-    case "loadLocalMapping":
-      return readLocalMapping(request.instanceId, request.rootId) ?? null
-    case "listLocalMappings":
-      return readLocalMappings(request.instanceId)
-    case "activateLocalMapping": {
-      const activationDeadlineMs = request.activationDeadlineMs ?? Date.now() + 4_000
-      const ensureBeforeDeadline = (): void => {
-        if (Date.now() >= activationDeadlineMs) {
-          throw new Error("local mapping activation deadline exceeded")
-        }
-      }
-
-      ensureBeforeDeadline()
-      const selectedPath = resolveLocalPath(request.selectedPath)
-      const canonicalPath = resolveLocalPath(request.canonicalPath)
-      const protectedWritablePaths = request.protectedWritablePaths.map(resolveLocalPath)
-      if (!selectedPath.exact || !selectedPath.directory || !canonicalPath.exact || !canonicalPath.directory) {
-        throw new Error("local mapping roots must be existing directories")
-      }
-
-      const preparedMappings = new Map<string, {
-        readonly mappingRevision: string
-        readonly selectedPath: string
-        readonly canonicalPath: string
-        readonly evidence: MappingPathEvidence
-      }>()
-      for (const mapping of readPersistedLocalMappings(request.instanceId)) {
-        preparedMappings.set(mapping.root_id, {
-          mappingRevision: mapping.mapping_revision.toString(),
-          selectedPath: mapping.selected_path,
-          canonicalPath: mapping.canonical_path,
-          evidence: mapping.selected_resolution === null || mapping.canonical_resolution === null
-            ? {
-                selectedPath: resolveLocalPath(mapping.selected_path),
-                canonicalPath: resolveLocalPath(mapping.canonical_path)
-              }
-            : storedMappingPathEvidence(mapping)
-        })
-      }
-      ensureBeforeDeadline()
-
-      db.exec("BEGIN IMMEDIATE")
-      try {
-        ensureBeforeDeadline()
-        const current = readLocalMapping(request.instanceId, request.rootId)
-        const currentRevision = current?.mappingRevision ?? "0"
-        if (currentRevision !== request.expectedMappingRevision) {
-          db.exec("ROLLBACK")
-          return { kind: "revision_conflict", currentMapping: current ?? null }
-        }
-
-        const overlapsRoot = readPersistedLocalMappings(request.instanceId).some(
-          (mapping) => {
-            if (mapping.root_id === request.rootId) return false
-            const prepared = preparedMappings.get(mapping.root_id)
-            const evidence = prepared !== undefined &&
-              prepared.mappingRevision === mapping.mapping_revision.toString() &&
-              prepared.selectedPath === mapping.selected_path &&
-              prepared.canonicalPath === mapping.canonical_path
-              ? prepared.evidence
-              : storedMappingPathEvidence(mapping)
-            return mappingPathsOverlap(selectedPath, canonicalPath, evidence)
-          }
-        )
-        if (overlapsRoot) {
-          db.exec("ROLLBACK")
-          return { kind: "root_conflict" }
-        }
-
-        const overlapsWritable = protectedWritablePaths.some(
-          (writablePath) =>
-            pathsOverlapWithEvidence(selectedPath, writablePath) ||
-            pathsOverlapWithEvidence(canonicalPath, writablePath)
-        )
-        if (overlapsWritable) {
-          db.exec("ROLLBACK")
-          return { kind: "writable_overlap" }
-        }
-
-        const mapping: LocalMappingRow = {
-          instanceId: request.instanceId,
-          rootId: request.rootId,
-          selectedPath: request.selectedPath,
-          canonicalPath: request.canonicalPath,
-          mappingRevision: (BigInt(request.expectedMappingRevision) + 1n).toString()
-        }
-        ensureBeforeDeadline()
-        upsertLocalMapping.run(
-          mapping.instanceId,
-          mapping.rootId,
-          mapping.selectedPath,
-          mapping.canonicalPath,
-          BigInt(mapping.mappingRevision),
-          selectedPath.endpointIdentity,
-          canonicalPath.endpointIdentity,
-          encodeResolution(selectedPath),
-          encodeResolution(canonicalPath)
-        )
-        ensureBeforeDeadline()
-        db.exec("COMMIT")
-        return { kind: "activated", mapping }
       } catch (error) {
         rollbackIfActive()
         throw error

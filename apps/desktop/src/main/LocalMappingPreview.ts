@@ -10,6 +10,7 @@ const MAX_DIRECTORY_NAME_BYTES = 1_048_576
 const MAX_FORMATS = 8
 const LOCAL_MAPPING_BUDGET_MS = 5_000
 const supportedImageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp"])
+const windowsReservedName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i
 
 type LocalError = NonNullable<LocalMappingSample["local_error"]>
 
@@ -30,7 +31,7 @@ interface ResolvedEntry {
   readonly kind: "found"
   readonly path: string
   readonly stats: Awaited<ReturnType<typeof lstat>>
-  readonly identity: string
+  readonly identity: string | undefined
 }
 
 type NativeLookup = (
@@ -56,8 +57,22 @@ const isWithin = (root: string, candidate: string): boolean => {
 
 const formatFor = (name: string): string => extname(name).slice(1).toLowerCase()
 
-const identityOf = (stats: Awaited<ReturnType<typeof lstat>>): string =>
-  `${stats.dev.toString()}:${stats.ino.toString()}`
+export const localPhysicalIdentity = (stats: {
+  readonly dev: number | bigint
+  readonly ino: number | bigint
+}): string | undefined =>
+  stats.ino.toString() === "0" ? undefined : `${stats.dev.toString()}:${stats.ino.toString()}`
+
+const identityOf = (stats: Awaited<ReturnType<typeof lstat>>): string | undefined => localPhysicalIdentity(stats)
+
+export const isWindowsInvalidSegment = (
+  segment: string,
+  platform: NodeJS.Platform = process.platform
+): boolean => platform === "win32" && (
+  windowsReservedName.test(segment) ||
+  /[<>:"|?*]/u.test(segment) ||
+  /[. ]$/u.test(segment)
+)
 
 const systemCode = (error: unknown): string | undefined =>
   typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
@@ -169,6 +184,7 @@ const findExactEntry = async (
     const stats = await nativeLookup(parentPath, requestedName)
     if (stats.isSymbolicLink()) return { kind: "unsafe" }
     const identity = identityOf(stats)
+    if (identity === undefined) return { kind: "error", error: "unsupported" }
     let matchingObservedEntry: Dirent | undefined
     for (const entry of observedEntries) {
       if (!checkBudget(budget)) return { kind: "error", error: "budget-exceeded" }
@@ -216,12 +232,12 @@ const inspectDirectory = async (
       if (!checkBudget(budget)) {
         return { formats: [...formats].slice(0, MAX_FORMATS), sizeBytes: null, status: "partial", error: "budget-exceeded" }
       }
-      if (entry.isSymbolicLink() || !entry.isFile()) continue
       const format = formatFor(entry.name)
       if (!supportedImageExtensions.has(`.${format}`)) continue
       try {
         const stats = await lstat(join(directoryPath, entry.name))
         if (stats.isSymbolicLink()) continue
+        if (!stats.isFile()) continue
         if (!checkBudget(budget)) {
           return { formats: [...formats].slice(0, MAX_FORMATS), sizeBytes: null, status: "partial", error: "budget-exceeded" }
         }
@@ -250,6 +266,7 @@ const inspectSample = async (
   let currentPath = canonicalRoot
   const segments = sample.relative_path.split("/")
   for (const [index, segment] of segments.entries()) {
+    if (isWindowsInvalidSegment(segment)) return unsupported(sample)
     const entry = await findExactEntry(currentPath, segment, budget, nativeLookup)
     switch (entry.kind) {
       case "missing":
