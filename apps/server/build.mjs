@@ -26,3 +26,9 @@ await build({
   entryPoints: [path.join(dir, "src/persistence/worker.ts")],
   outfile: path.join(dir, "dist/worker.mjs")
 })
+
+await build({
+  ...shared,
+  entryPoints: [path.join(dir, "src/analysis/manifest-probe.ts")],
+  outfile: path.join(dir, "dist/manifest-probe.mjs")
+})

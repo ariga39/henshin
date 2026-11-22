@@ -16,6 +16,7 @@ export class PrototypeHttpClient extends Context.Service<
   static readonly layer = (options: {
     readonly baseUrl: string
     readonly bearerToken: string
+    readonly transportLayer?: Layer.Layer<HttpClient.HttpClient>
   }): Layer.Layer<PrototypeHttpClient> => {
     const AuthenticationClient = HttpApiMiddleware.layerClient(Authentication, ({ next, request }) =>
       next(HttpClientRequest.bearerToken(request, options.bearerToken))
@@ -27,7 +28,10 @@ export class PrototypeHttpClient extends Context.Service<
         transformClient: (client) =>
           client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
       })
-    ).pipe(Layer.provide(AuthenticationClient), Layer.provide(FetchHttpClient.layer))
+    ).pipe(
+      Layer.provide(AuthenticationClient),
+      Layer.provide(options.transportLayer ?? FetchHttpClient.layer)
+    )
   }
 }
 
@@ -39,6 +43,7 @@ export class ServerHttpClient extends Context.Service<
   static readonly layer = (options: {
     readonly baseUrl: string
     readonly bearerToken: string
+    readonly transportLayer?: Layer.Layer<HttpClient.HttpClient>
   }): Layer.Layer<ServerHttpClient> => {
     const AuthenticationClient = HttpApiMiddleware.layerClient(Authentication, ({ next, request }) =>
       next(HttpClientRequest.bearerToken(request, options.bearerToken))
@@ -50,6 +55,6 @@ export class ServerHttpClient extends Context.Service<
         transformClient: (client) =>
           client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
       })
-    ).pipe(Layer.provide(AuthenticationClient), Layer.provide(FetchHttpClient.layer))
+    ).pipe(Layer.provide(AuthenticationClient), Layer.provide(options.transportLayer ?? FetchHttpClient.layer))
   }
 }

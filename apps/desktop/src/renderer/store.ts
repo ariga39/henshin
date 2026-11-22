@@ -1,4 +1,11 @@
-import type { CommandAttempt, CommandReconciliation, NoteView, RootPreview, SavedDraft } from "@henshin/contracts"
+import type {
+  CommandAttempt,
+  CommandReconciliation,
+  ConnectionStatusView,
+  NoteView,
+  RootPreview,
+  SavedDraft
+} from "@henshin/contracts"
 
 export type Outcome =
   | { readonly kind: "committed"; readonly revision: string }
@@ -16,6 +23,7 @@ export interface ViewState {
   readonly epoch: string | null
   readonly note: NoteView | null
   readonly base_revision: string | null
+  readonly base_epoch: string | null
   readonly form_text: string
   readonly form_edit_version: number
   readonly draft_local_revision: string
@@ -28,6 +36,8 @@ export interface ViewState {
   readonly root_preview_status: "idle" | "loading" | "ready" | "error"
   readonly root_preview: RootPreview | null
   readonly root_preview_error: string | null
+  readonly connection: ConnectionStatusView
+  readonly connection_generation: number
 }
 
 const initialState: ViewState = {
@@ -36,6 +46,7 @@ const initialState: ViewState = {
   epoch: null,
   note: null,
   base_revision: null,
+  base_epoch: null,
   form_text: "",
   form_edit_version: 0,
   draft_local_revision: "0",
@@ -47,8 +58,16 @@ const initialState: ViewState = {
   root_preview_selected_path: null,
   root_preview_status: "idle",
   root_preview: null,
-  root_preview_error: null
+  root_preview_error: null,
+  connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
+  connection_generation: 0
 }
+
+const sameConnection = (left: ConnectionStatusView, right: ConnectionStatusView): boolean =>
+  left.state === right.state &&
+  left.instance_id === right.instance_id &&
+  left.epoch === right.epoch &&
+  left.reason === right.reason
 
 const createViewStore = () => {
   let state: ViewState = initialState
@@ -69,6 +88,38 @@ const createViewStore = () => {
     editFormText: (text: string): void => {
       state = { ...state, form_text: text, form_edit_version: state.form_edit_version + 1 }
       for (const listener of listeners) listener()
+    },
+    setConnection: (connection: ConnectionStatusView): void => {
+      if (sameConnection(state.connection, connection)) return
+      state = {
+        ...state,
+        connection,
+        connection_generation: state.connection_generation + 1
+      }
+      for (const listener of listeners) listener()
+    },
+    beginConnectionTransition: (stateName: ConnectionStatusView["state"]): number => {
+      const connection = { ...state.connection, state: stateName }
+      state = {
+        ...state,
+        connection,
+        status:
+          state.status === "loading"
+            ? state.note === null
+              ? "idle"
+              : "ready"
+            : state.status,
+        connection_generation: state.connection_generation + 1
+      }
+      for (const listener of listeners) listener()
+      return state.connection_generation
+    },
+    publishConnection: (connection: ConnectionStatusView, generation: number): boolean => {
+      if (state.connection_generation !== generation) return false
+      if (sameConnection(state.connection, connection)) return true
+      state = { ...state, connection }
+      for (const listener of listeners) listener()
+      return true
     }
   }
 }
