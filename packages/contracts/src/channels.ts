@@ -6,7 +6,6 @@ export const IpcChannels = {
   rootPreview: "henshin:root-preview",
   rootList: "henshin:root-list",
   rootSave: "henshin:root-save",
-  rootCommand: "henshin:root-command",
   handshake: "henshin-prototype:handshake",
   connect: "henshin-prototype:connect",
   disconnect: "henshin-prototype:disconnect",

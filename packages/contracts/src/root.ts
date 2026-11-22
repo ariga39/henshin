@@ -29,17 +29,11 @@ export type RootExclusion = typeof RootExclusion.Type
 export const RootExclusions = Schema.Array(RootExclusion)
 export type RootExclusions = typeof RootExclusions.Type
 
-/** Root-policy commands for suppressing or restoring one exact path or subtree. */
-export const RootPolicyCommand = Schema.Union([
-  Schema.Struct({
-    type: Schema.Literal("exclude"),
-    exclusion: RootExclusion
-  }),
-  Schema.Struct({
-    type: Schema.Literal("remove-exclusion"),
-    exclusion: RootExclusion
-  })
-])
+/** The first root-policy command: suppress one exact file or directory subtree. */
+export const RootPolicyCommand = Schema.Struct({
+  type: Schema.Literal("exclude"),
+  exclusion: RootExclusion
+})
 export type RootPolicyCommand = typeof RootPolicyCommand.Type
 
 export const RootCommandRequest = Schema.Struct({
@@ -135,7 +129,6 @@ export const SavedRootPreview = Schema.Struct({
   selected_server_path: Schema.String,
   instance_id: Uuid,
   epoch: Uuid,
-  policy_revision: Revision,
   candidates: Schema.Array(RootPreviewCandidate),
   sample_limit: Schema.Natural,
   unassigned_loose_images: Schema.Array(Schema.String),
