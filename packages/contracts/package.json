@@ -7,8 +7,10 @@
     ".": "./src/index.ts",
     "./canonical": "./src/canonical.ts",
     "./channels": "./src/channels.ts",
+    "./event": "./src/event.ts",
     "./ids": "./src/ids.ts",
     "./note": "./src/note.ts",
+    "./open-event-api": "./src/open-event-api.ts",
     "./root": "./src/root.ts"
   },
   "scripts": {
