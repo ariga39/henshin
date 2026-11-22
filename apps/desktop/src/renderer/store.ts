@@ -3,6 +3,7 @@ import type {
   CommandReconciliation,
   ConnectionStatusView,
   NoteView,
+  RootPreview,
   SavedDraft
 } from "@henshin/contracts"
 
@@ -30,6 +31,11 @@ export interface ViewState {
   readonly outcome: Outcome | null
   readonly recovery_attempts: ReadonlyArray<CommandAttempt>
   readonly recovery_result: CommandReconciliation | null
+  readonly root_preview_path: string
+  readonly root_preview_selected_path: string | null
+  readonly root_preview_status: "idle" | "loading" | "ready" | "error"
+  readonly root_preview: RootPreview | null
+  readonly root_preview_error: string | null
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
 }
@@ -48,6 +54,11 @@ const initialState: ViewState = {
   outcome: null,
   recovery_attempts: [],
   recovery_result: null,
+  root_preview_path: "",
+  root_preview_selected_path: null,
+  root_preview_status: "idle",
+  root_preview: null,
+  root_preview_error: null,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
   connection_generation: 0
 }

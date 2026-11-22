@@ -1,0 +1,36 @@
+.collection {
+  color: #242c30;
+  font: 1rem/1.5 "Source Sans 3", system-ui, sans-serif;
+  max-width: 43rem;
+  margin: 3rem auto;
+  padding: 0 1.5rem;
+  overflow-wrap: anywhere;
+}
+.collection h1 { font-size: 1.9rem; margin: 0; }
+.collection h2 { font-size: 1.1rem; margin-top: 2rem; }
+.collection form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .6rem;
+  margin: 1.75rem 0;
+}
+.collection label { width: 100%; font-weight: 600; }
+.collection input, .collection button {
+  border: 1px solid #758186;
+  border-radius: .35rem;
+  font: inherit;
+  padding: .5rem .8rem;
+}
+.collection input { flex: 1 1 16rem; min-width: 0; }
+.collection button { background: #17554d; color: white; cursor: pointer; }
+.collection button:disabled { background: #e7ecea; color: #495955; cursor: default; }
+.collection ul { list-style: none; padding: 0; }
+.collection li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: .45rem 0;
+  border-bottom: 1px solid #dce2df;
+}
+.collection small { color: #54635e; }

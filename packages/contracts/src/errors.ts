@@ -153,6 +153,17 @@ export class InternalError extends Schema.TaggedError<InternalError>()(
   { httpApiStatus: 500 }
 ) {}
 
+export class RootPreviewUnavailable extends Schema.TaggedError<RootPreviewUnavailable>()(
+  "RootPreviewUnavailable",
+  {
+    code: Schema.Literal("root_preview_inaccessible"),
+    message: Schema.String,
+    retryable: Schema.Literal(true),
+    ...envelope
+  },
+  { httpApiStatus: 503 }
+) {}
+
 /**
  * Every public error, as a single schema. Clients map an unknown failure to the
  * public shape only when it decodes here; anything else becomes an opaque
@@ -170,6 +181,7 @@ export const PublicApiError = Schema.Union([
   DraftStoreFull,
   EpochChanged,
   InstanceMismatch,
+  RootPreviewUnavailable,
   InternalError
 ])
 export type PublicApiError = typeof PublicApiError.Type

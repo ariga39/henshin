@@ -8,6 +8,7 @@ import type {
   NoteView,
   PublicError,
   SavedDraft,
+  RootPreview,
   SavedDraftAbsent
 } from "@henshin/contracts"
 
@@ -61,7 +62,12 @@ export interface DiscardDraftInput {
 declare global {
   interface Window {
     readonly henshinPrototype: PrototypeBridge
+    readonly henshinRootPreview: RootPreviewBridge
   }
+}
+
+export interface RootPreviewBridge {
+  preview(path: string): Promise<Result<RootPreview>>
 }
 
 /**
@@ -118,6 +124,18 @@ export class PrototypeClient extends Context.Service<
       listCommandAttempts: () => callIpc(() => window.henshinPrototype.listCommandAttempts()),
       reconcileCommand: (operationId) => callIpc(() => window.henshinPrototype.reconcileCommand(operationId)),
       dismissCommand: (operationId) => callIpc(() => window.henshinPrototype.dismissCommand(operationId))
+    })
+  )
+}
+
+export class RootPreviewClient extends Context.Service<
+  RootPreviewClient,
+  { readonly preview: (path: string) => Effect.Effect<Result<RootPreview>> }
+>()("henshin/desktop/renderer/RootPreviewClient") {
+  static readonly layer = Layer.succeed(
+    RootPreviewClient,
+    RootPreviewClient.of({
+      preview: (path) => callIpc(() => window.henshinRootPreview.preview(path))
     })
   )
 }

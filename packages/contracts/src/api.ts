@@ -7,14 +7,17 @@ import {
   EpochChanged,
   InstanceMismatch,
   InternalError,
+  InvalidRequest,
   NoteNotFound,
   OperationExpired,
   OperationConflict,
   RevisionConflict,
+  RootPreviewUnavailable,
   StorageFull
 } from "./errors"
 import { NoteId, Uuid } from "./ids"
 import { EditNotePayload, HandshakeData, Note, OperationResult } from "./note"
+import { RootPreview, RootPreviewRequest } from "./root"
 
 /**
  * Isolated synthetic prototype API. The `/prototype/v1` prefix and the
@@ -63,5 +66,23 @@ export const PrototypeApi = HttpApi.make("henshin-prototype").add(
       })
     )
     .prefix("/prototype/v1")
+    .middleware(Authentication)
+)
+
+/**
+ * Product server API. It is separate from the synthetic prototype so the
+ * prototype remains explicitly available without making its routes look like
+ * production endpoints.
+ */
+export const ServerApi = HttpApi.make("henshin-server").add(
+  HttpApiGroup.make("roots", { topLevel: true })
+    .add(
+      HttpApiEndpoint.post("preview", "/roots/preview", {
+        payload: RootPreviewRequest,
+        success: SuccessEnvelope(RootPreview),
+        error: [AuthenticationRequired, InvalidRequest, RootPreviewUnavailable, InternalError]
+      })
+    )
+    .prefix("/api/v1")
     .middleware(Authentication)
 )
