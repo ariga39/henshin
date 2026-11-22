@@ -12,6 +12,7 @@ import {
   OperationExpired,
   OperationConflict,
   RevisionConflict,
+  RootNotFound,
   RootVerificationFailed,
   RootPreviewUnavailable,
   StorageFull
@@ -22,6 +23,7 @@ import {
   RootPreview,
   RootPreviewRequest,
   RootPreviewResult,
+  RootCommandRequest,
   RootRegistrationRequest,
   ServerRoot,
   ServerRootList
@@ -104,6 +106,20 @@ export const ServerApi = HttpApi.make("henshin-server").add(
           EpochChanged,
           InstanceMismatch,
           RootVerificationFailed,
+          InternalError
+        ]
+      }),
+      HttpApiEndpoint.post("command", "/roots/:id/commands", {
+        params: { id: Uuid },
+        payload: RootCommandRequest,
+        success: SuccessEnvelope(ServerRoot),
+        error: [
+          AuthenticationRequired,
+          RootNotFound,
+          RevisionConflict,
+          OperationConflict,
+          EpochChanged,
+          InstanceMismatch,
           InternalError
         ]
       })

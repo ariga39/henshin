@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
+import { RootExclusions, RootPolicyCommand } from "@henshin/contracts/root"
 
 /** A persisted prototype note row, always with a canonical decimal revision. */
 export const NoteRow = Schema.Struct({
@@ -21,6 +22,8 @@ export const ServerRootRow = Schema.Struct({
   device: Schema.String,
   inode: Schema.String,
   mappingRevision: Revision,
+  policyRevision: Revision,
+  exclusions: RootExclusions,
   state: Schema.Literal("active")
 })
 export type ServerRootRow = typeof ServerRootRow.Type
@@ -39,6 +42,15 @@ export const RootReplayLookup = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("operation_conflict") })
 ])
 export type RootReplayLookup = typeof RootReplayLookup.Type
+
+export const RootPolicyCommandOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("committed"), root: ServerRootRow }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), root: ServerRootRow }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("root_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("policy_revision_conflict"), currentPolicyRevision: Revision })
+])
+export type RootPolicyCommandOutcome = typeof RootPolicyCommandOutcome.Type
 
 export const OperationResultRow = Schema.Struct({
   operationId: Uuid,
@@ -102,6 +114,14 @@ export const WorkerRequest = Schema.Union([
     canonicalPath: Schema.String,
     device: Schema.String,
     inode: Schema.String
+  }),
+  Schema.Struct({
+    op: Schema.Literal("commitRootPolicy"),
+    rootId: Uuid,
+    operationId: Uuid,
+    epoch: Uuid,
+    expectedPolicyRevision: Revision,
+    command: RootPolicyCommand
   }),
   Schema.Struct({ op: Schema.Literal("close") })
 ])

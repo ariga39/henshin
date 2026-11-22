@@ -48,6 +48,17 @@ export class NoteNotFound extends Schema.TaggedError<NoteNotFound>()(
   { httpApiStatus: 404 }
 ) {}
 
+export class RootNotFound extends Schema.TaggedError<RootNotFound>()(
+  "RootNotFound",
+  {
+    code: Schema.Literal("not_found"),
+    message: Schema.String,
+    retryable: Schema.Literal(false),
+    ...envelope
+  },
+  { httpApiStatus: 404 }
+) {}
+
 export class RevisionConflict extends Schema.TaggedError<RevisionConflict>()(
   "RevisionConflict",
   {
@@ -184,6 +195,7 @@ export const PublicApiError = Schema.Union([
   AuthenticationRequired,
   InvalidRequest,
   NoteNotFound,
+  RootNotFound,
   RevisionConflict,
   OperationConflict,
   OperationExpired,
