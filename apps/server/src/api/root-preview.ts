@@ -11,11 +11,13 @@ import {
   RootVerificationFailed,
   RootPreviewUnavailable,
   ServerApi,
-  type RootPreview
+  type RootPreview,
+  type SavedRootPreview
 } from "@henshin/contracts"
 import { HttpApiBuilder } from "effect/http-api"
 import {
   revalidateSourceRoot,
+  discoverSourceRoot,
   selectSourceRoot,
   validateLocationSeparation,
   type SourceRootObservation
@@ -90,6 +92,56 @@ const enumerateChildren = (
     catch: (error) => error
   })
 
+const enumerateSavedRootCandidates = (
+  root: SourceRootObservation,
+  rootId: string,
+  instanceId: string,
+  epoch: string
+): Effect.Effect<SavedRootPreview, unknown> =>
+  Effect.tryPromise({
+    try: async () => {
+      const discovered = await discoverSourceRoot(root, {
+        limits: { maxCandidates: ROOT_PREVIEW_SAMPLE_LIMIT }
+      })
+      if (!discovered.ok) throw new Error(discovered.code)
+      const value = discovered.value
+      return {
+        kind: "saved-root-discovery" as const,
+        root_id: rootId,
+        selected_server_path: root.selectedPath,
+        instance_id: instanceId,
+        epoch,
+        candidates: value.candidates.map((candidate) => ({
+          relative_path: candidate.relativePath,
+          kind: candidate.kind,
+          direct_image_count: candidate.directImageCount,
+          unsupported_direct_image_count: candidate.unsupportedDirectImageCount
+        })),
+        sample_limit: ROOT_PREVIEW_SAMPLE_LIMIT,
+        unassigned_loose_images: value.unassignedLooseImages,
+        unassigned_loose_image_count: value.unassignedLooseImageCount,
+        unsupported_loose_images: value.unsupportedLooseImages,
+        unsupported_loose_image_count: value.unsupportedLooseImageCount,
+        coverage: {
+          status: value.coverage.status,
+          directories_visited: value.coverage.directoriesVisited,
+          entries_observed: value.coverage.entriesObserved,
+          candidate_count: value.coverage.candidateCount,
+          candidate_sample_truncated: value.coverage.candidateSampleTruncated,
+          excluded_links: value.coverage.excludedLinks,
+          excluded_link_count: value.coverage.excludedLinkCount,
+          unsupported_names: value.coverage.unsupportedNames,
+          unsupported_name_count: value.coverage.unsupportedNameCount,
+          unsupported_directories: value.coverage.unsupportedDirectories,
+          unsupported_directory_count: value.coverage.unsupportedDirectoryCount,
+          issues: value.coverage.issues,
+          issue_count: value.coverage.issueCount
+        }
+      }
+    },
+    catch: (error) => error
+  })
+
 export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(ServerApi, "roots", (handlers) =>
   Effect.gen(function*() {
     const server = yield* ServerState
@@ -132,80 +184,97 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
       )
       .handle("preview", ({ payload }) =>
         Effect.gen(function*() {
-        const context = yield* RequestContext
-        const errorBase = base(context.request_id)
+          const context = yield* RequestContext
+          const errorBase = base(context.request_id)
 
-        if (!isAbsolute(payload.path)) {
-          return yield* new InvalidRequest({
-            code: "invalid_request",
-            message: "path must be an absolute directory path",
-            retryable: false,
-            details: { field: "path" },
-            ...errorBase
-          })
-        }
-
-        const selected = yield* Effect.tryPromise({
-          try: () => selectSourceRoot(payload.path),
-          catch: () => undefined
-        }).pipe(
-          Effect.mapError(() => new RootPreviewUnavailable({
-            code: "root_preview_inaccessible",
-            message: "selected directory is unavailable or inaccessible",
-            retryable: true,
-            ...errorBase
-          })),
-          Effect.flatMap((result) =>
-            result.ok
-              ? Effect.succeed(result.value)
-              : Effect.fail(new RootPreviewUnavailable({
-                  code: "root_preview_inaccessible",
-                  message: "selected directory is unavailable or inaccessible",
-                  retryable: true,
-                  ...errorBase
-                }))
-          )
-        )
-
-        const preview = yield* enumerateChildren(selected, server.instanceId, server.epoch).pipe(
-          Effect.mapError(
-            () =>
-              new RootPreviewUnavailable({
-                code: "root_preview_inaccessible",
-                message: "selected directory is unavailable or inaccessible",
-                retryable: true,
+          const unavailable = (message: string) =>
+            new RootPreviewUnavailable({
+              code: "root_preview_inaccessible",
+              message,
+              retryable: true,
               ...errorBase
-              })
+            })
+
+          if ("kind" in payload && payload.kind === "saved-root") {
+            const listed = yield* roots.list().pipe(
+              Effect.mapError(() => new InternalError({
+                code: "internal_error",
+                message: "internal error",
+                retryable: false,
+                ...errorBase
+              }))
+            )
+            const saved = listed.find((root) => root.rootId === payload.root_id)
+            if (saved === undefined) return yield* unavailable("saved server root is unavailable")
+
+            const observed: SourceRootObservation = {
+              selectedPath: saved.selectedPath,
+              canonicalPath: saved.canonicalPath,
+              identity: { device: saved.device, inode: saved.inode }
+            }
+            const current = yield* Effect.tryPromise({
+              try: () => revalidateSourceRoot(observed),
+              catch: () => undefined
+            }).pipe(Effect.mapError(() => unavailable("saved server root changed or is unavailable")))
+            if (!current.ok) return yield* unavailable("saved server root changed or is unavailable")
+
+            const preview = yield* enumerateSavedRootCandidates(
+              current.value,
+              saved.rootId,
+              server.instanceId,
+              server.epoch
+            ).pipe(Effect.mapError(() => unavailable("saved server root is unavailable or inaccessible")))
+
+            return {
+              instance_id: server.instanceId,
+              epoch: server.epoch,
+              request_id: context.request_id,
+              server_time: Date.now(),
+              data: preview
+            }
+          }
+
+          if (!("path" in payload)) return yield* unavailable("invalid preview request")
+
+          // Keep the setup preview bounded to immediate children. It is also
+          // the identity-bearing DTO used by root registration.
+          if (!isAbsolute(payload.path)) {
+            return yield* new InvalidRequest({
+              code: "invalid_request",
+              message: "path must be an absolute directory path",
+              retryable: false,
+              details: { field: "path" },
+              ...errorBase
+            })
+          }
+
+          const selected = yield* Effect.tryPromise({
+            try: () => selectSourceRoot(payload.path),
+            catch: () => undefined
+          }).pipe(
+            Effect.mapError(() => unavailable("selected directory is unavailable or inaccessible")),
+            Effect.flatMap((result) =>
+              result.ok ? Effect.succeed(result.value) : Effect.fail(unavailable("selected directory is unavailable or inaccessible"))
+            )
           )
-        )
 
-        const current = yield* Effect.tryPromise({
-          try: () => revalidateSourceRoot(selected),
-          catch: () => undefined
-        }).pipe(
-          Effect.mapError(() => new RootPreviewUnavailable({
-            code: "root_preview_inaccessible",
-            message: "selected directory changed during preview",
-            retryable: true,
-            ...errorBase
-          }))
-        )
-        if (!current.ok) {
-          return yield* new RootPreviewUnavailable({
-            code: "root_preview_inaccessible",
-            message: "selected directory changed during preview",
-            retryable: true,
-            ...errorBase
-          })
-        }
+          const preview = yield* enumerateChildren(selected, server.instanceId, server.epoch).pipe(
+            Effect.mapError(() => unavailable("selected directory is unavailable or inaccessible"))
+          )
 
-        return {
-          instance_id: server.instanceId,
-          epoch: server.epoch,
-          request_id: context.request_id,
-          server_time: Date.now(),
-          data: preview
-        }
+          const current = yield* Effect.tryPromise({
+            try: () => revalidateSourceRoot(selected),
+            catch: () => undefined
+          }).pipe(Effect.mapError(() => unavailable("selected directory changed during preview")))
+          if (!current.ok) return yield* unavailable("selected directory changed during preview")
+
+          return {
+            instance_id: server.instanceId,
+            epoch: server.epoch,
+            request_id: context.request_id,
+            server_time: Date.now(),
+            data: preview
+          }
       })
       )
       .handle("save", ({ payload }) =>
