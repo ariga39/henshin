@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import { Revision, Uuid } from "./ids"
 import { ServerRootList } from "./root"
+import { ThumbnailReference } from "./thumbnail"
 
 export const LibraryEntry = Schema.Struct({
   entry_id: Uuid,
@@ -13,7 +14,8 @@ export const LibraryEntry = Schema.Struct({
   page_count: Schema.Natural,
   state: Schema.Literal("accepted"),
   content_version: Revision,
-  location_revision: Revision
+  location_revision: Revision,
+  cover: Schema.NullOr(ThumbnailReference)
 })
 export type LibraryEntry = typeof LibraryEntry.Type
 

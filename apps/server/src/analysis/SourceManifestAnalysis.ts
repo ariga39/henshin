@@ -22,6 +22,7 @@ import {
   ERR_UNSUPPORTED_FORMAT,
   ERR_UNSUPPORTED_UINT64,
   Reader,
+  Uint8ArrayWriter,
   ZipReader,
   type Entry,
   type ZipReaderConstructorOptions
@@ -861,6 +862,55 @@ const analyze = async (input: AnalyzeSourceManifestInput): Promise<SourceManifes
   const extension = extname(basename(input.sourcePath)).toLowerCase()
   if (extension !== ".zip" && extension !== ".cbz") throw new UnsupportedSource()
   return analyzeArchive(input.sourcePath, stats, context)
+}
+
+/** Reads one already-accepted archive member without extracting the archive. */
+export const readArchivePage = async (
+  sourcePath: string,
+  pageName: string,
+  limits?: Partial<ManifestLimits>
+): Promise<Uint8Array> => {
+  const combined = combineLimits(limits)
+  const context: AnalysisContext = {
+    limits: combined,
+    deadlineAt: Date.now() + combined.deadlineMs
+  }
+  const sourceStats = await observePath(sourcePath, context)
+  if (!sourceStats.isFile()) throw new UnsupportedSource()
+  const sourceBytes = safeStatNumber(sourceStats.size, combined.maxArchiveBytes)
+  const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0
+  let file: FileHandle | undefined
+  let reader: ZipReader<FileHandle> | undefined
+  try {
+    file = await open(sourcePath, constants.O_RDONLY | noFollow)
+    const openedStats = await file.stat({ bigint: false })
+    if (!openedStats.isFile() || !sameStats(sourceStats, openedStats)) throw new SourceChanged()
+    reader = new ZipReader(new SourceFileReader(file, sourceBytes, context), archiveOptions)
+    let result: Uint8Array | undefined
+    for await (const entry of reader.getEntriesGenerator()) {
+      checkBudget(context)
+      if (entry.filename !== pageName) continue
+      if (entry.directory || entry.symlink || entry.encrypted) throw new SourceChanged()
+      const declaredBytes = safeStatNumber(entry.uncompressedSize, combined.maxMemberUncompressedBytes)
+      if (declaredBytes > combined.maxMemberUncompressedBytes) throw new LimitExceeded()
+      const writer = new Uint8ArrayWriter()
+      await writer.init(declaredBytes)
+      await entry.getData(writer, {
+        useWebWorkers: false,
+        checkOverlappingEntryOnly: false,
+        checkOverlappingEntry: true
+      })
+      result = await writer.getData()
+      break
+    }
+    const afterStats = await observePath(sourcePath, context)
+    if (!afterStats.isFile() || !sameStats(sourceStats, afterStats)) throw new SourceChanged()
+    if (result === undefined) throw new Error("accepted archive member is missing")
+    return result
+  } finally {
+    if (reader !== undefined) await reader.close().catch(() => undefined)
+    if (file !== undefined) await closeQuietly(file)
+  }
 }
 
 export const analyzeSourceManifest = (

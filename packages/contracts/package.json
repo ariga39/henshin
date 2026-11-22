@@ -9,7 +9,8 @@
     "./channels": "./src/channels.ts",
     "./ids": "./src/ids.ts",
     "./note": "./src/note.ts",
-    "./root": "./src/root.ts"
+    "./root": "./src/root.ts",
+    "./thumbnail": "./src/thumbnail.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"
