@@ -194,6 +194,8 @@ export const makeAppLayer = (
 
   const ReadyLayer = Layer.effectDiscard(
     Effect.gen(function*() {
+      const scans = yield* ScanStore
+      yield* scans.recoverInterrupted()
       const httpServer = yield* HttpServer.HttpServer
       const state = yield* ServerState
       const address = httpServer.address

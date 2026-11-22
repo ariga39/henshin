@@ -203,7 +203,12 @@ export const WorkerRequest = Schema.Union([
   Schema.Struct({
     op: Schema.Literal("finishScan"),
     taskId: Uuid,
-    status: Schema.Union([Schema.Literal("succeeded"), Schema.Literal("completed_with_errors"), Schema.Literal("failed")]),
+    status: Schema.Union([
+      Schema.Literal("succeeded"),
+      Schema.Literal("completed_with_errors"),
+      Schema.Literal("failed"),
+      Schema.Literal("interrupted")
+    ]),
     directoriesVisited: Schema.Natural,
     candidatesDiscovered: Schema.Natural,
     candidatesAnalyzed: Schema.Natural,
