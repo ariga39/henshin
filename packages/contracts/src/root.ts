@@ -26,7 +26,8 @@ export const RootExclusion = Schema.Struct({
 })
 export type RootExclusion = typeof RootExclusion.Type
 
-export const RootExclusions = Schema.Array(RootExclusion)
+export const MAX_ROOT_EXCLUSIONS = 256
+export const RootExclusions = Schema.Array(RootExclusion).check(Schema.isMaxLength(MAX_ROOT_EXCLUSIONS))
 export type RootExclusions = typeof RootExclusions.Type
 
 /** The first root-policy command: suppress one exact file or directory subtree. */
