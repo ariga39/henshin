@@ -1,19 +1,57 @@
 import { Context, Data, Effect, Layer, Option, Schema } from "effect"
-import { EntryResolution, INDEXED_ROOT_SAMPLE_LIMIT, IndexedRootSamplePage, LibraryEntryPage } from "@henshin/contracts"
+import { EntryResolution, INDEXED_ROOT_SAMPLE_LIMIT, IndexedRootSamplePage, LibraryEntryPage, StagedDiscovery } from "@henshin/contracts"
 import { DatabaseWorker, DatabaseWorkerError } from "./DatabaseWorker"
 import {
   AcceptedThumbnailEntryRow,
   IndexedRootSamplePageRow,
   LibraryEntryPageRow,
   LibraryEntryResolutionResult,
-  LibrarySummaryRow
+  LibrarySummaryRow,
+  EntryResolutionLookupOutcome,
+  ResolveReplacementOutcome
 } from "./worker-protocol"
+
+export interface ReplacementResolutionInput {
+  readonly candidateId: string
+  readonly rootId: string
+  readonly entryId: string
+  readonly operationId: string
+  readonly epoch: string
+  readonly decision: "keep"
+  readonly expectedCandidateVersion: number
+  readonly expectedDecisionVersion: string
+  readonly expectedLocationRevision: string
+  readonly expectedMappingRevision: string
+  readonly expectedPolicyRevision: string
+}
+
+export type ReplacementResolutionResult =
+  | Extract<typeof ResolveReplacementOutcome.Type, { readonly kind: "committed" | "replayed" }> & {
+      readonly candidate: StagedDiscovery
+    }
+  | Exclude<typeof ResolveReplacementOutcome.Type, { readonly kind: "committed" | "replayed" }>
+
+export type EntryResolutionLookupResult =
+  | Extract<ReplacementResolutionResult, { readonly kind: "replayed" }>
+  | { readonly kind: "operation_conflict" | "operation_expired" | "not_found" }
 
 const decodeSummary = Schema.decodeUnknownOption(LibrarySummaryRow)
 const decodePage = Schema.decodeUnknownOption(LibraryEntryPageRow)
 const decodeResolution = Schema.decodeUnknownOption(LibraryEntryResolutionResult)
 const decodeAcceptedThumbnailEntry = Schema.decodeUnknownOption(Schema.NullOr(AcceptedThumbnailEntryRow))
 const decodeIndexedRootSamples = Schema.decodeUnknownOption(IndexedRootSamplePageRow)
+const decodeReplacement = Schema.decodeUnknownOption(ResolveReplacementOutcome)
+const decodeEntryResolutionLookup = Schema.decodeUnknownOption(EntryResolutionLookupOutcome)
+const decodeStaged = Schema.decodeUnknownOption(StagedDiscovery)
+
+const jsonValue = (value: string | null): unknown => {
+  if (value === null) return null
+  try {
+    return JSON.parse(value) as unknown
+  } catch {
+    return undefined
+  }
+}
 
 export class InvalidLibraryEntryResolutionCursor extends Data.TaggedError("InvalidLibraryEntryResolutionCursor")<{}> {}
 
@@ -36,6 +74,13 @@ export class LibraryStore extends Context.Service<
       readonly siblingClaimsRevision?: string
     }) => Effect.Effect<EntryResolution | null, DatabaseWorkerError | InvalidLibraryEntryResolutionCursor>
     readonly acceptedThumbnailEntry: (entryId: string) => Effect.Effect<typeof AcceptedThumbnailEntryRow.Type | null, DatabaseWorkerError>
+    readonly lookupReplacementOperation: (input: ReplacementResolutionInput) => Effect.Effect<
+      EntryResolutionLookupResult,
+      DatabaseWorkerError
+    >
+    readonly resolveReplacement: (input: ReplacementResolutionInput & {
+      readonly freshManifestJson: string | null
+    }) => Effect.Effect<ReplacementResolutionResult, DatabaseWorkerError>
   }
 >()("henshin/server/LibraryStore") {
   static readonly layer: Layer.Layer<LibraryStore, never, DatabaseWorker> = Layer.effect(
@@ -86,7 +131,60 @@ export class LibraryStore extends Context.Service<
         Effect.flatMap((value) => decodeOrFail(decodeIndexedRootSamples, value, "invalid indexed root samples result")),
         Effect.map((page) => ({ root_id: rootId, sample_limit: INDEXED_ROOT_SAMPLE_LIMIT, ...page }))
       )
-      return LibraryStore.of({ acceptedThumbnailEntry, indexedRootSamples, resolution, summary, page })
+      const normalizeReplacementResult = (
+        result: typeof ResolveReplacementOutcome.Type
+      ): Effect.Effect<ReplacementResolutionResult, DatabaseWorkerError> => {
+        if (result.kind !== "committed" && result.kind !== "replayed") {
+          return Effect.succeed(result as Exclude<ReplacementResolutionResult, { readonly kind: "committed" | "replayed" }>)
+        }
+        const candidate = decodeStaged({
+          candidate_id: result.candidate.candidate_id,
+          task_id: result.candidate.task_id,
+          root_id: result.candidate.root_id,
+          relative_path: result.candidate.relative_path,
+          kind: result.candidate.kind,
+          candidate_version: result.candidate.candidate_version,
+          hold_state: result.candidate.hold_state,
+          analysis_status: result.candidate.analysis_status,
+          manifest: jsonValue(result.candidate.manifest_json),
+          analysis_error: jsonValue(result.candidate.analysis_error_json),
+          updated_at_ms: result.candidate.updated_at_ms
+        })
+        return Option.isNone(candidate)
+          ? Effect.fail(new DatabaseWorkerError({ message: "invalid persisted replacement candidate" }))
+          : Effect.succeed({ ...result, candidate: candidate.value } as ReplacementResolutionResult)
+      }
+      const lookupReplacementOperation = (input: ReplacementResolutionInput): Effect.Effect<EntryResolutionLookupResult, DatabaseWorkerError> =>
+        worker.call({ op: "lookupEntryResolution", ...input }).pipe(
+          Effect.flatMap((value) => decodeOrFail(
+            decodeEntryResolutionLookup,
+            value,
+            "invalid replacement resolution lookup result"
+          )),
+          Effect.flatMap((result): Effect.Effect<EntryResolutionLookupResult, DatabaseWorkerError> => {
+            if (result.kind !== "replayed") {
+              return Effect.succeed(result as Exclude<EntryResolutionLookupResult, { readonly kind: "replayed" }>)
+            }
+            return normalizeReplacementResult(result as typeof ResolveReplacementOutcome.Type) as Effect.Effect<
+              Extract<ReplacementResolutionResult, { readonly kind: "replayed" }>,
+              DatabaseWorkerError
+            >
+          })
+        )
+      const resolveReplacement = (input: Parameters<LibraryStore["Service"]["resolveReplacement"]>[0]) =>
+        worker.call({ op: "resolveReplacement", ...input }).pipe(
+          Effect.flatMap((value) => decodeOrFail(decodeReplacement, value, "invalid replacement resolution result")),
+          Effect.flatMap(normalizeReplacementResult)
+        )
+      return LibraryStore.of({
+        acceptedThumbnailEntry,
+        indexedRootSamples,
+        lookupReplacementOperation,
+        resolution,
+        resolveReplacement,
+        summary,
+        page
+      })
     })
   )
 }

@@ -147,6 +147,55 @@ export const LibraryEntryRow = Schema.Struct({
 })
 export type LibraryEntryRow = typeof LibraryEntryRow.Type
 
+export const ResolveReplacementOutcome = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("committed"),
+    decision: Schema.Literal("keep"),
+    candidate: StagedDiscoveryRow,
+    entry: LibraryEntryRow,
+    detachedEntryId: Schema.NullOr(Uuid)
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("replayed"),
+    decision: Schema.Literal("keep"),
+    candidate: StagedDiscoveryRow,
+    entry: LibraryEntryRow,
+    detachedEntryId: Schema.NullOr(Uuid)
+  }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("operation_expired") }),
+  Schema.Struct({ kind: Schema.Literal("storage_full") }),
+  Schema.Struct({ kind: Schema.Literal("candidate_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("entry_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("candidate_version_conflict"), currentCandidateVersion: Schema.Natural }),
+  Schema.Struct({
+    kind: Schema.Literal("entry_revision_conflict"),
+    currentDecisionVersion: Revision,
+    currentLocationRevision: Revision
+  }),
+  Schema.Struct({ kind: Schema.Literal("entry_not_pending") }),
+  Schema.Struct({ kind: Schema.Literal("fresh_observation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("candidate_not_ready") }),
+  Schema.Struct({ kind: Schema.Literal("root_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("mapping_revision_conflict"), currentMappingRevision: Revision }),
+  Schema.Struct({ kind: Schema.Literal("policy_revision_conflict"), currentPolicyRevision: Revision })
+])
+export type ResolveReplacementOutcome = typeof ResolveReplacementOutcome.Type
+
+export const EntryResolutionLookupOutcome = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("replayed"),
+    decision: Schema.Literal("keep"),
+    candidate: StagedDiscoveryRow,
+    entry: LibraryEntryRow,
+    detachedEntryId: Schema.NullOr(Uuid)
+  }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("operation_expired") }),
+  Schema.Struct({ kind: Schema.Literal("not_found") })
+])
+export type EntryResolutionLookupOutcome = typeof EntryResolutionLookupOutcome.Type
+
 const LibraryEntryResolution = Schema.Struct({
   entry_id: Uuid,
   root_id: Uuid,
@@ -351,6 +400,35 @@ export const WorkerRequest = Schema.Union([
     expectedCandidateVersion: Schema.Natural,
     expectedMappingRevision: Revision,
     expectedPolicyRevision: Revision
+  }),
+  Schema.Struct({
+    op: Schema.Literal("lookupEntryResolution"),
+    candidateId: Uuid,
+    rootId: Uuid,
+    entryId: Uuid,
+    operationId: Uuid,
+    epoch: Uuid,
+    decision: Schema.Literal("keep"),
+    expectedCandidateVersion: Schema.Natural,
+    expectedDecisionVersion: Revision,
+    expectedLocationRevision: Revision,
+    expectedMappingRevision: Revision,
+    expectedPolicyRevision: Revision
+  }),
+  Schema.Struct({
+    op: Schema.Literal("resolveReplacement"),
+    candidateId: Uuid,
+    rootId: Uuid,
+    entryId: Uuid,
+    operationId: Uuid,
+    epoch: Uuid,
+    decision: Schema.Literal("keep"),
+    expectedCandidateVersion: Schema.Natural,
+    expectedDecisionVersion: Revision,
+    expectedLocationRevision: Revision,
+    expectedMappingRevision: Revision,
+    expectedPolicyRevision: Revision,
+    freshManifestJson: Schema.NullOr(Schema.String)
   }),
   Schema.Struct({ op: Schema.Literal("readLibrary") }),
   Schema.Struct({ op: Schema.Literal("listLibraryEntries"), pageSize: Schema.Natural, cursor: Schema.NullOr(Uuid) }),

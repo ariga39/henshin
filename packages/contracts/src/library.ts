@@ -88,6 +88,21 @@ export const IndexedRootSamplePage = Schema.Struct({
   library_change_revision: Revision
 })
 export type IndexedRootSamplePage = typeof IndexedRootSamplePage.Type
+
+export const ReplacementResolutionCommand = Schema.Struct({
+  type: Schema.Literal("resolve-replacement"),
+  entry_id: Uuid,
+  decision: Schema.Literal("keep")
+})
+export type ReplacementResolutionCommand = typeof ReplacementResolutionCommand.Type
+
+export const ReplacementResolutionResult = Schema.Struct({
+  operation_id: Uuid,
+  decision: Schema.Literal("keep"),
+  entry: LibraryEntry,
+  detached_entry_id: Schema.NullOr(Uuid)
+})
+export type ReplacementResolutionResult = typeof ReplacementResolutionResult.Type
 export const EntryResolutionSiblingClaim = Schema.Struct({
   entry_id: Uuid,
   relative_path: Schema.String
