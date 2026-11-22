@@ -4,6 +4,12 @@ Write and maintain repository documentation in English.
 
 Keep the repository focused on current design and implementation. Do not commit review briefs, review reports, verdict logs, or historical progress records. Keep review feedback and verification summaries in pull requests; incorporate accepted decisions into the current design documents.
 
+# Stacked pull requests
+
+Follow the [GitHub stacked pull request workflow](https://docs.github.com/en/pull-requests/how-tos/stacked-pull-requests) for dependent PRs. Keep each PR focused on one reviewable change and target the branch directly below it. Use `gh stack submit` to publish or update the stack.
+
+When the base or a lower layer changes, use `gh stack rebase` or `gh stack sync` to rebase the dependent branches in order. Do not create merge commits to sync `main` or a parent branch into a stack branch. After a lower PR lands, let GitHub rebase and retarget the remaining PRs, then sync the local stack.
+
 # Learning more about Effect
 
 This repository uses the Effect TypeScript library (v4).
