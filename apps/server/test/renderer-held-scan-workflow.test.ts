@@ -7,10 +7,12 @@ import type {
   StagedDiscovery
 } from "@henshin/contracts"
 import { afterEach, describe, expect, it } from "vitest"
-import { RootPreviewClient, ScanReviewClient, type Result } from "../../desktop/src/renderer/client"
+import { LibraryClient, RootPreviewClient, ScanReviewClient, type Result } from "../../desktop/src/renderer/client"
 import {
   loadRootWorkspace,
+  loadLibrary,
   retryScanResults,
+  startManualScan,
   startHeldScan,
   watchHeldScans
 } from "../../desktop/src/renderer/workflows"
@@ -60,8 +62,8 @@ const preview: Extract<RootPreviewResult, { kind: "saved-root-discovery" }> = {
   }
 }
 
-const task = (status: ScanTask["status"]): ScanTask => ({
-  task_id: "55555555-5555-4555-8555-555555555555",
+const task = (status: ScanTask["status"], taskId = "55555555-5555-4555-8555-555555555555"): ScanTask => ({
+  task_id: taskId,
   root_id: root.root_id,
   kind: "manual-scan",
   mode: "manual",
@@ -113,21 +115,32 @@ const resetView = () => {
     scan_error: null,
     scan_start_status: "idle",
     scan_start_error: null,
-    scan_hold_new_discoveries: false
+    scan_hold_new_discoveries: false,
+    screen: "setup",
+    library_entries: [],
+    library_cursor: null,
+    library_has_more: false,
+    library_status: "idle",
+    library_error: null,
+    library_scan_status: "idle",
+    library_scan_error: null,
+    library_scan_task: null
   })
 }
 
 afterEach(resetView)
 
 const run = <A>(
-  effect: Effect.Effect<A, unknown, RootPreviewClient | ScanReviewClient>,
+  effect: Effect.Effect<A, unknown, RootPreviewClient | ScanReviewClient | LibraryClient>,
   rootClient: RootPreviewClient["Service"],
-  scanClient: ScanReviewClient["Service"]
+  scanClient: ScanReviewClient["Service"],
+  libraryClient: LibraryClient["Service"] = libraryClientWith()
 ) => Effect.runPromise(Effect.provide(
   effect,
   Layer.mergeAll(
     Layer.succeed(RootPreviewClient, rootClient),
-    Layer.succeed(ScanReviewClient, scanClient)
+    Layer.succeed(ScanReviewClient, scanClient),
+    Layer.succeed(LibraryClient, libraryClient)
   )
 ))
 
@@ -144,6 +157,13 @@ const scanClientWith = (overrides: Partial<ScanReviewClient["Service"]> = {}): S
   candidates: () => Effect.succeed({ ok: true, data: [] }),
   ...overrides
 })
+
+function libraryClientWith(overrides: Partial<LibraryClient["Service"]> = {}): LibraryClient["Service"] {
+  return LibraryClient.of({
+    search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "0" } }),
+    ...overrides
+  })
+}
 
 describe("held scan renderer workflows", () => {
   it("starts from the policy revision observed by the saved-root preview", async () => {
@@ -266,5 +286,273 @@ describe("held scan renderer workflows", () => {
 
     expect(taskCalls).toBe(2)
     expect(viewStore.getState().scan_tasks).toEqual([completed])
+  })
+
+  it("lets a normal scan finish while the shared watcher tracks another task", async () => {
+    const heldActive = task("running", "77777777-7777-4777-8777-777777777777")
+    const heldCompleted = { ...heldActive, status: "succeeded" as const }
+    const normalSubmitted = {
+      ...task("queued", "88888888-8888-4888-8888-888888888888"),
+      hold_new_discoveries: false
+    }
+    const normalCompleted = { ...normalSubmitted, status: "succeeded" as const }
+    let taskCalls = 0
+    let releaseHeld!: () => void
+    const heldRelease = new Promise<void>((resolve) => { releaseHeld = resolve })
+    let firstPoll!: () => void
+    const firstPollStarted = new Promise<void>((resolve) => { firstPoll = resolve })
+    const scanClient = scanClientWith({
+      listTasks: () => Effect.promise(async () => {
+        taskCalls += 1
+        if (taskCalls === 1) {
+          firstPoll()
+          return { ok: true as const, data: [heldActive] }
+        }
+        if (taskCalls === 2) return { ok: true as const, data: [heldActive, normalCompleted] }
+        await heldRelease
+        return { ok: true as const, data: [heldCompleted, normalCompleted] }
+      })
+    })
+    viewStore.set({
+      root_preview_status: "ready",
+      root_preview: preview,
+      root_saved_roots: [root],
+      scan_hold_new_discoveries: false
+    })
+
+    const heldRun = run(watchHeldScans, rootClientWith(), scanClient)
+    await firstPollStarted
+    const normalRun = run(
+      startManualScan(root.root_id),
+      rootClientWith({ command: () => Effect.succeed({ ok: true, data: { task: normalSubmitted } }) }),
+      scanClient
+    )
+
+    await normalRun
+    expect(viewStore.getState()).toMatchObject({
+      library_scan_status: "started",
+      library_scan_task: normalCompleted
+    })
+    releaseHeld()
+    await heldRun
+    expect(taskCalls).toBe(3)
+  })
+
+  it("surfaces normal scan result-load failure instead of waiting forever", async () => {
+    const submitted = { ...task("running"), hold_new_discoveries: false }
+    const rootClient = rootClientWith({
+      command: () => Effect.succeed({ ok: true, data: { task: submitted } })
+    })
+    viewStore.set({
+      root_preview_status: "ready",
+      root_preview: preview,
+      root_saved_roots: [root],
+      scan_hold_new_discoveries: false
+    })
+
+    await run(startManualScan(root.root_id), rootClient, scanClientWith({ listTasks: () => Effect.succeed(scanError) }))
+
+    expect(viewStore.getState()).toMatchObject({
+      screen: "library",
+      scan_start_status: "error",
+      library_scan_status: "error",
+      library_scan_error: "candidate reply lost",
+      library_status: "ready"
+    })
+  })
+
+  it("clears the Library loading state when normal scan admission fails", async () => {
+    const rootClient = rootClientWith({
+      command: () => Effect.succeed({
+        ok: false as const,
+        error: { code: "active_scan_conflict", message: "scan is already running", retryable: true }
+      })
+    })
+    viewStore.set({
+      root_preview_status: "ready",
+      root_preview: preview,
+      root_saved_roots: [root],
+      scan_hold_new_discoveries: false
+    })
+
+    await run(startManualScan(root.root_id), rootClient, scanClientWith())
+
+    expect(viewStore.getState()).toMatchObject({
+      scan_start_status: "error",
+      library_scan_status: "error",
+      library_scan_error: "scan is already running",
+      library_status: "ready"
+    })
+  })
+
+  it("reports a submitted normal task that disappears from scan results", async () => {
+    const submitted = { ...task("running"), hold_new_discoveries: false }
+    const rootClient = rootClientWith({
+      command: () => Effect.succeed({ ok: true, data: { task: submitted } })
+    })
+    viewStore.set({
+      root_preview_status: "ready",
+      root_preview: preview,
+      root_saved_roots: [root],
+      scan_hold_new_discoveries: false
+    })
+
+    await run(startManualScan(root.root_id), rootClient, scanClientWith())
+
+    expect(viewStore.getState()).toMatchObject({
+      scan_start_status: "error",
+      library_scan_status: "error",
+      library_scan_error: "submitted scan task was not found in scan results",
+      library_status: "ready"
+    })
+  })
+
+  it("keeps partial normal completion successful while preserving library fetch errors", async () => {
+    const partial = {
+      ...task("completed_with_errors"),
+      hold_new_discoveries: false,
+      error: { code: "analysis_error", message: "one discovery could not be analyzed" }
+    }
+    const rootClient = rootClientWith({
+      command: () => Effect.succeed({ ok: true, data: { task: partial } })
+    })
+    viewStore.set({
+      root_preview_status: "ready",
+      root_preview: preview,
+      root_saved_roots: [root],
+      scan_hold_new_discoveries: false
+    })
+
+    await run(
+      startManualScan(root.root_id),
+      rootClient,
+      scanClientWith({ listTasks: () => Effect.succeed({ ok: true, data: [partial] }) }),
+      libraryClientWith({ search: () => Effect.succeed({ ok: false, error: { code: "library_unavailable", message: "library read failed", retryable: true } }) })
+    )
+
+    expect(viewStore.getState()).toMatchObject({
+      scan_start_status: "idle",
+      scan_start_error: null,
+      library_scan_status: "started",
+      library_scan_error: "one discovery could not be analyzed",
+      library_scan_task: partial,
+      library_status: "error",
+      library_error: "library read failed"
+    })
+  })
+
+  it("surfaces interrupted normal completion after refreshing accepted results", async () => {
+    const interrupted = {
+      ...task("interrupted"),
+      hold_new_discoveries: false,
+      error: { code: "scan_interrupted", message: "scan interrupted by server restart" }
+    }
+    const rootClient = rootClientWith({
+      command: () => Effect.succeed({ ok: true, data: { task: interrupted } })
+    })
+    viewStore.set({
+      root_preview_status: "ready",
+      root_preview: preview,
+      root_saved_roots: [root],
+      scan_hold_new_discoveries: false
+    })
+
+    await run(
+      startManualScan(root.root_id),
+      rootClient,
+      scanClientWith({ listTasks: () => Effect.succeed({ ok: true, data: [interrupted] }) })
+    )
+
+    expect(viewStore.getState()).toMatchObject({
+      scan_start_status: "error",
+      scan_start_error: "scan interrupted by server restart",
+      library_scan_status: "error",
+      library_scan_error: "scan interrupted by server restart",
+      library_scan_task: interrupted
+    })
+  })
+
+  it("surfaces a terminal normal scan failure separately from Library loading", async () => {
+    const failed = {
+      ...task("failed"),
+      hold_new_discoveries: false,
+      readiness_error: { code: "policy_changed", message: "saved root policy changed during scan" }
+    }
+    const rootClient = rootClientWith({
+      command: () => Effect.succeed({ ok: true, data: { task: failed } })
+    })
+    viewStore.set({
+      root_preview_status: "ready",
+      root_preview: preview,
+      root_saved_roots: [root],
+      scan_hold_new_discoveries: false
+    })
+
+    await run(
+      startManualScan(root.root_id),
+      rootClient,
+      scanClientWith({ listTasks: () => Effect.succeed({ ok: true, data: [failed] }) })
+    )
+
+    expect(viewStore.getState()).toMatchObject({
+      scan_start_status: "error",
+      scan_start_error: "saved root policy changed during scan",
+      library_scan_status: "error",
+      library_scan_error: "saved root policy changed during scan",
+      library_status: "ready"
+    })
+  })
+
+  it("does not navigate when loading Library data", async () => {
+    viewStore.set({ screen: "setup" })
+    await run(loadLibrary(), rootClientWith(), scanClientWith())
+    expect(viewStore.getState().screen).toBe("setup")
+  })
+
+  it("keeps visible Library entries when a refresh fails and appends pages without duplicates", async () => {
+    const existing = {
+      entry_id: "99999999-9999-4999-8999-999999999999",
+      library_id: root.library_id,
+      root_id: root.root_id,
+      relative_path: "existing",
+      title: "Existing",
+      source_path: "/collections/existing",
+      kind: "image-directory" as const,
+      page_count: 1,
+      state: "accepted" as const,
+      content_version: "1",
+      location_revision: "1"
+    }
+    const appended = {
+      ...existing,
+      entry_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      title: "Appended",
+      source_path: "/collections/appended"
+    }
+    let calls = 0
+    const libraryClient = libraryClientWith({
+      search: () => {
+        calls += 1
+        if (calls === 1) return Effect.succeed({ ok: true as const, data: { entries: [existing], has_more: true, next_cursor: "next", library_change_revision: "1" } })
+        if (calls === 2) return Effect.succeed({ ok: false as const, error: { code: "library_unavailable", message: "refresh failed", retryable: true } })
+        return Effect.succeed({ ok: true as const, data: { entries: [existing, appended], has_more: false, next_cursor: null, library_change_revision: "2" } })
+      }
+    })
+
+    await run(loadLibrary(), rootClientWith(), scanClientWith(), libraryClient)
+    await run(loadLibrary(), rootClientWith(), scanClientWith(), libraryClient)
+    expect(viewStore.getState()).toMatchObject({
+      library_status: "error",
+      library_error: "refresh failed",
+      library_entries: [existing]
+    })
+
+    await run(loadLibrary(true), rootClientWith(), scanClientWith(), libraryClient)
+    expect(viewStore.getState()).toMatchObject({
+      library_status: "ready",
+      library_entries: [existing, appended],
+      library_has_more: false,
+      library_cursor: null
+    })
   })
 })

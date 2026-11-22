@@ -5,6 +5,7 @@ import type {
   ConnectionStatusView,
   DiscardedDraft,
   HandshakeView,
+  LibraryEntryPage,
   NoteView,
   PublicError,
   SavedDraft,
@@ -71,7 +72,8 @@ declare global {
   interface Window {
     readonly henshinPrototype: PrototypeBridge
     readonly henshinRootPreview: RootPreviewBridge
-  readonly henshinScanReview: ScanReviewBridge
+    readonly henshinLibrary: LibraryBridge
+    readonly henshinScanReview: ScanReviewBridge
   }
 }
 
@@ -85,6 +87,10 @@ export interface RootPreviewBridge {
 export interface ScanReviewBridge {
   listTasks(): Promise<Result<ReadonlyArray<ScanTask>>>
   candidates(): Promise<Result<ReadonlyArray<StagedDiscovery>>>
+}
+
+export interface LibraryBridge {
+  search(input: { readonly page_size?: number; readonly cursor?: string }): Promise<Result<LibraryEntryPage>>
 }
 
 /**
@@ -177,6 +183,20 @@ export class ScanReviewClient extends Context.Service<
     ScanReviewClient.of({
       listTasks: () => callIpc(() => window.henshinScanReview.listTasks()),
       candidates: () => callIpc(() => window.henshinScanReview.candidates())
+    })
+  )
+}
+
+export class LibraryClient extends Context.Service<
+  LibraryClient,
+  {
+    readonly search: (input: { readonly page_size?: number; readonly cursor?: string }) => Effect.Effect<Result<LibraryEntryPage>>
+  }
+>()("henshin/desktop/renderer/LibraryClient") {
+  static readonly layer = Layer.succeed(
+    LibraryClient,
+    LibraryClient.of({
+      search: (input) => callIpc(() => window.henshinLibrary.search(input))
     })
   )
 }
