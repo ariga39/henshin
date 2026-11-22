@@ -1,5 +1,6 @@
 import { build } from "esbuild"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { DatabaseSync } from "node:sqlite"
 import { Worker } from "node:worker_threads"
 import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
@@ -8,6 +9,7 @@ import { randomUUID } from "node:crypto"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 const repoDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..")
+const OPEN_JOURNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
 interface WorkerResponse {
   readonly id: number
@@ -270,5 +272,94 @@ describe("desktop open journal SQLite worker", () => {
       status: "accepted",
       event: firstEvent
     })
+  })
+
+  it("retains acknowledged rows through the cutoff, then compacts only them after restart", async () => {
+    const first = await startWorker()
+    const instanceId = randomUUID()
+
+    const acknowledged = {
+      instanceId,
+      actionId: randomUUID(),
+      entryId: randomUUID(),
+      deviceId: randomUUID(),
+      observedLocationRevision: "3",
+      observedContentVersion: "5"
+    }
+    const held = {
+      instanceId,
+      actionId: randomUUID(),
+      entryId: randomUUID(),
+      deviceId: randomUUID(),
+      observedLocationRevision: "3",
+      observedContentVersion: "5"
+    }
+    const pending = {
+      instanceId,
+      actionId: randomUUID(),
+      entryId: randomUUID(),
+      deviceId: randomUUID(),
+      observedLocationRevision: "3",
+      observedContentVersion: "5"
+    }
+
+    for (const input of [acknowledged, held, pending]) {
+      await expect(prepare(first.running, input)).resolves.toMatchObject({ kind: "admitted" })
+      await expect(first.running.call({
+        op: "recordOpenAccepted",
+        instanceId,
+        actionId: input.actionId,
+        event: eventFor(input)
+      })).resolves.toMatchObject({ kind: "updated", entry: { status: "accepted", deliveryStatus: "pending" } })
+    }
+    await expect(first.running.call({
+      op: "acknowledgeOpenEvent",
+      instanceId,
+      actionId: acknowledged.actionId
+    })).resolves.toMatchObject({ kind: "updated", entry: { deliveryStatus: "acknowledged" } })
+    await expect(first.running.call({
+      op: "holdOpenEvent",
+      instanceId,
+      actionId: held.actionId,
+      deliveryErrorCode: "offline",
+      deliveryErrorMessage: "server unavailable"
+    })).resolves.toMatchObject({ kind: "updated", entry: { deliveryStatus: "held" } })
+
+    for (let index = 3; index < 64; index += 1) {
+      await expect(prepare(first.running, { instanceId })).resolves.toMatchObject({ kind: "admitted" })
+    }
+
+    await expect(prepare(first.running, { instanceId })).resolves.toEqual({ kind: "full" })
+
+    await first.running.close()
+    workers.delete(first.running)
+    const database = new DatabaseSync(first.dbPath)
+    try {
+      const expiredAt = Date.now() - OPEN_JOURNAL_RETENTION_MS - 1
+      database
+        .prepare("UPDATE launch_journal SET updated_at_ms = ? WHERE action_id IN (?, ?, ?)")
+        .run(expiredAt, acknowledged.actionId, held.actionId, pending.actionId)
+    } finally {
+      database.close()
+    }
+
+    const reopened = await startWorker(first.dbPath)
+    await expect(prepare(reopened.running, { instanceId })).resolves.toMatchObject({ kind: "admitted" })
+    await expect(reopened.running.call({
+      op: "getOpenJournal",
+      instanceId,
+      actionId: acknowledged.actionId
+    })).resolves.toBeNull()
+    await expect(reopened.running.call({
+      op: "getOpenJournal",
+      instanceId,
+      actionId: held.actionId
+    })).resolves.toMatchObject({ status: "accepted", deliveryStatus: "held" })
+    await expect(reopened.running.call({
+      op: "getOpenJournal",
+      instanceId,
+      actionId: pending.actionId
+    })).resolves.toMatchObject({ status: "accepted", deliveryStatus: "pending" })
+    await expect(reopened.running.call({ op: "listOpenJournal", instanceId })).resolves.toHaveLength(64)
   })
 })

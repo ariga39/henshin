@@ -225,7 +225,11 @@ const compactOpenJournal = db.prepare(`
   WHERE rowid IN (
     SELECT rowid
     FROM launch_journal
-    WHERE status = 'failed' AND updated_at_ms + ? <= ?
+    WHERE (
+      status = 'failed'
+      OR (status = 'accepted' AND delivery_status = 'acknowledged')
+    )
+      AND updated_at_ms + ? <= ?
     ORDER BY updated_at_ms ASC, rowid ASC
     LIMIT ?
   )
