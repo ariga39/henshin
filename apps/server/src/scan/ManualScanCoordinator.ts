@@ -1,3 +1,4 @@
+import { discoveryCoverageView } from "../analysis/discovery-coverage"
 import { randomUUID } from "node:crypto"
 import { Effect, Result } from "effect"
 import {
@@ -10,7 +11,6 @@ import {
   revalidateSourceRoot,
   resolveSourceCandidate,
   type SourceRootObservation,
-  type SourceDiscoveryCoverage
 } from "../analysis/NativeSourceBoundary"
 import { ScanStore, type FinishScanInput } from "../persistence/ScanStore"
 import type { ScanTask } from "@henshin/contracts"
@@ -21,22 +21,6 @@ const emptyDiagnostics = () => ({
   unsupported_pages: 0,
   ignored_entries: 0,
   directory_records: 0
-})
-
-const coverageView = (coverage: SourceDiscoveryCoverage) => ({
-  status: coverage.status,
-  directories_visited: coverage.directoriesVisited,
-  entries_observed: coverage.entriesObserved,
-  candidate_count: coverage.candidateCount,
-  candidate_sample_truncated: coverage.candidateSampleTruncated,
-  excluded_links: coverage.excludedLinks,
-  excluded_link_count: coverage.excludedLinkCount,
-  unsupported_names: coverage.unsupportedNames,
-  unsupported_name_count: coverage.unsupportedNameCount,
-  unsupported_directories: coverage.unsupportedDirectories,
-  unsupported_directory_count: coverage.unsupportedDirectoryCount,
-  issues: coverage.issues,
-  issue_count: coverage.issueCount
 })
 
 const manifestView = (manifest: SourceManifest) => ({
@@ -197,7 +181,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
     }
   }
 
-  const coverage = coverageView(discovered.value.coverage)
+  const coverage = discoveryCoverageView(discovered.value.coverage)
   const hasErrors = analysisErrorCount > 0 || coverage.status === "partial"
   yield* finish(store, {
     taskId: task.task_id,
