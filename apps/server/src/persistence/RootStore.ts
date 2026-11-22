@@ -3,10 +3,12 @@ import { DatabaseWorker, DatabaseWorkerError } from "./DatabaseWorker"
 import {
   RootRegistrationOutcome,
   RootReplayLookup,
+  RootPolicyCommandOutcome,
   ServerRootRow,
   type RootRegistrationOutcome as RootRegistrationOutcomeType,
   type ServerRootRow as ServerRootRowType
 } from "./worker-protocol"
+import type { RootPolicyCommand } from "@henshin/contracts/root"
 
 export interface RegisterRootInput {
   readonly operationId: string
@@ -17,9 +19,18 @@ export interface RegisterRootInput {
   readonly inode: string
 }
 
+export interface CommitRootPolicyInput {
+  readonly rootId: string
+  readonly operationId: string
+  readonly epoch: string
+  readonly expectedPolicyRevision: string
+  readonly command: RootPolicyCommand
+}
+
 const decodeRoots = Schema.decodeUnknownOption(Schema.Array(ServerRootRow))
 const decodeRegistration = Schema.decodeUnknownOption(RootRegistrationOutcome)
 const decodeReplayLookup = Schema.decodeUnknownOption(RootReplayLookup)
+const decodePolicyCommand = Schema.decodeUnknownOption(RootPolicyCommandOutcome)
 
 /** Server-owned durable registration of verified native source roots. */
 export class RootStore extends Context.Service<
@@ -32,6 +43,9 @@ export class RootStore extends Context.Service<
     readonly lookup: (
       input: RegisterRootInput
     ) => Effect.Effect<import("./worker-protocol").RootReplayLookup, DatabaseWorkerError>
+    readonly commitPolicy: (
+      input: CommitRootPolicyInput
+    ) => Effect.Effect<import("./worker-protocol").RootPolicyCommandOutcome, DatabaseWorkerError>
   }
 >()("henshin/server/RootStore") {
   static readonly layer: Layer.Layer<RootStore, never, DatabaseWorker> = Layer.effect(
@@ -69,7 +83,17 @@ export class RootStore extends Context.Service<
           })
         )
 
-      return RootStore.of({ list, lookup, register })
+      const commitPolicy = (input: CommitRootPolicyInput) =>
+        worker.call({ op: "commitRootPolicy", ...input }).pipe(
+          Effect.flatMap((value) => {
+            const decoded = decodePolicyCommand(value)
+            return Option.isNone(decoded)
+              ? Effect.fail(new DatabaseWorkerError({ message: "invalid root-policy result" }))
+              : Effect.succeed(decoded.value)
+          })
+        )
+
+      return RootStore.of({ commitPolicy, list, lookup, register })
     })
   )
 }
