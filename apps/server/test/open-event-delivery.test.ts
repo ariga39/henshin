@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto"
 import { Effect, Layer, ManagedRuntime } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import { LibraryHttpClient, OpenEventHttpClient, ServerHttpClient, TaskHttpClient, type ScanTask } from "@henshin/contracts"
-import { deliverOpenEvents } from "../../desktop/src/main/OpenEventDelivery"
+import { drainOpenEvents } from "../../desktop/src/main/OpenEventDelivery"
 import { ConnectionLifecycle } from "../../desktop/src/main/ConnectionLifecycle"
 import { LocalDatabaseWorker } from "../../desktop/src/main/persistence/LocalDatabaseWorker"
 import { OpenJournalStore } from "../../desktop/src/main/persistence/OpenJournalStore"
@@ -150,26 +150,29 @@ describe("desktop open event delivery boundary", () => {
     const store = await localRuntime.runPromise(Effect.gen(function*() {
       return yield* OpenJournalStore
     }))
-    const actionId = randomUUID()
-    const deviceId = randomUUID()
-    const prepared = await localRuntime.runPromise(store.prepare({
-      instanceId: server.instanceId,
-      actionId,
-      entryId: entry.entry_id,
-      deviceId,
-      observedLocationRevision: entry.location_revision,
-      observedContentVersion: entry.content_version
-    }))
-    const event = {
-      event_id: actionId,
-      instance_id: server.instanceId,
-      entry_id: prepared.entry.entryId,
-      device_id: deviceId,
-      observed_location_revision: entry.location_revision,
-      observed_content_version: entry.content_version,
-      occurred_at_ms: 1_700_000_000_000
+    const eventIds: string[] = []
+    for (let index = 0; index < 33; index += 1) {
+      const actionId = randomUUID()
+      const deviceId = randomUUID()
+      const prepared = await localRuntime.runPromise(store.prepare({
+        instanceId: server.instanceId,
+        actionId,
+        entryId: entry.entry_id,
+        deviceId,
+        observedLocationRevision: entry.location_revision,
+        observedContentVersion: entry.content_version
+      }))
+      await localRuntime.runPromise(store.recordAccepted({ instanceId: server.instanceId, actionId }, {
+        event_id: actionId,
+        instance_id: server.instanceId,
+        entry_id: prepared.entry.entryId,
+        device_id: deviceId,
+        observed_location_revision: entry.location_revision,
+        observed_content_version: entry.content_version,
+        occurred_at_ms: 1_700_000_000_000 + index
+      }))
+      eventIds.push(actionId)
     }
-    await localRuntime.runPromise(store.recordAccepted({ instanceId: server.instanceId, actionId }, event))
 
     const proxy = await startResponseDroppingProxy(server.baseUrl)
     const lifecycle = new ConnectionLifecycle({ baseUrl: proxy.baseUrl, bearerToken: server.bearerToken })
@@ -177,36 +180,24 @@ describe("desktop open event delivery boundary", () => {
     await lifecycle.connect()
     const firstSession = lifecycle.getSession()
     if (firstSession === null) throw new Error("connection did not establish a session")
-    await expect(lifecycle.run(Effect.gen(function*() {
+    const drain = await lifecycle.run(Effect.gen(function*() {
       const client = yield* OpenEventHttpClient
-      return yield* deliverOpenEvents(store, client, firstSession)
-    }))).rejects.toBeDefined()
-    expect(proxy.requestCount()).toBe(1)
-    await expect(localRuntime.runPromise(store.get({ instanceId: server.instanceId, actionId }))).resolves.toMatchObject({
-      status: "accepted",
-      deliveryStatus: "pending"
-    })
-
-    await lifecycle.disconnect()
-    await lifecycle.connect()
-    const secondSession = lifecycle.getSession()
-    if (secondSession === null) throw new Error("reconnection did not establish a session")
-    const retry = await lifecycle.run(Effect.gen(function*() {
-      const client = yield* OpenEventHttpClient
-      return yield* deliverOpenEvents(store, client, secondSession)
+      return yield* drainOpenEvents(store, client, firstSession, { random: () => 0 })
     }))
-    expect(retry).toMatchObject({ attempted: 1, acknowledged: 1, alreadyAccepted: 1, held: 0 })
-    expect(proxy.requestCount()).toBe(2)
-    await expect(localRuntime.runPromise(store.get({ instanceId: server.instanceId, actionId }))).resolves.toMatchObject({
-      status: "accepted",
-      deliveryStatus: "acknowledged"
-    })
+    expect(drain).toMatchObject({ attempted: 33, acknowledged: 33, alreadyAccepted: 32, held: 0 })
+    expect(proxy.requestCount()).toBe(3)
+    for (const actionId of eventIds) {
+      await expect(localRuntime.runPromise(store.get({ instanceId: server.instanceId, actionId }))).resolves.toMatchObject({
+        status: "accepted",
+        deliveryStatus: "acknowledged"
+      })
+    }
 
     await server.stop()
     const db = new DatabaseSync(serverDbPath)
     try {
-      expect(db.prepare("SELECT COUNT(*) AS count FROM open_events WHERE event_id = ?").get(actionId)).toEqual({ count: 1 })
-      expect(db.prepare("SELECT open_count FROM entry_statistics WHERE entry_id = ?").get(entry.entry_id)).toEqual({ open_count: 1 })
+      expect(db.prepare("SELECT COUNT(*) AS count FROM open_events WHERE entry_id = ?").get(entry.entry_id)).toEqual({ count: 33 })
+      expect(db.prepare("SELECT open_count FROM entry_statistics WHERE entry_id = ?").get(entry.entry_id)).toEqual({ open_count: 33 })
     } finally {
       db.close()
     }

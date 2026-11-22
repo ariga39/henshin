@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest"
 import { OpenEventHttpClient } from "@henshin/contracts"
 import { OpenJournalStore } from "../src/main/persistence/OpenJournalStore"
 import type { OpenJournalRow } from "../src/main/persistence/draft-worker-protocol"
-import { deliverOpenEvents } from "../src/main/OpenEventDelivery"
+import { deliverOpenEvents, drainOpenEvents } from "../src/main/OpenEventDelivery"
 
 const session = { instanceId: randomUUID(), epoch: randomUUID() }
 
@@ -99,6 +99,26 @@ describe("accepted open event delivery", () => {
     expect(acknowledged).toEqual([row.actionId])
   })
 
+  it("reports zero already-accepted outcomes for a fresh acceptance", async () => {
+    const row = makeRow()
+    const { store, acknowledged } = makeStore([row])
+    const client = clientFor(({ payload }) => Effect.succeed({
+      instance_id: session.instanceId,
+      epoch: session.epoch,
+      request_id: randomUUID(),
+      server_time: Date.now(),
+      data: { results: [{ event_id: payload.events[0]!.event_id, outcome: "accepted" as const, receipt_at_ms: 1 }] }
+    }))
+
+    await expect(Effect.runPromise(deliverOpenEvents(store, client, session))).resolves.toMatchObject({
+      attempted: 1,
+      acknowledged: 1,
+      alreadyAccepted: 0,
+      held: 0
+    })
+    expect(acknowledged).toEqual([row.actionId])
+  })
+
   it("applies independent per-event outcomes and refuses a different namespace", async () => {
     const first = makeRow()
     const second = makeRow()
@@ -142,5 +162,28 @@ describe("accepted open event delivery", () => {
       _tag: "OpenEventDeliveryNamespaceError"
     })
     expect(sent).toBe(1)
+  })
+
+  it("stops after a response omits an event instead of spinning", async () => {
+    const row = makeRow()
+    const { store } = makeStore([row])
+    let calls = 0
+    let sleeps = 0
+    const client = clientFor(() => {
+      calls += 1
+      return Effect.succeed({
+        instance_id: session.instanceId,
+        epoch: session.epoch,
+        request_id: randomUUID(),
+        server_time: Date.now(),
+        data: { results: [] }
+      })
+    })
+
+    await expect(Effect.runPromise(drainOpenEvents(store, client, session, {
+      sleep: () => Effect.sync(() => { sleeps += 1 })
+    }))).resolves.toMatchObject({ attempted: 1, acknowledged: 0, held: 0, missingResults: true })
+    expect(calls).toBe(1)
+    expect(sleeps).toBe(0)
   })
 })
