@@ -19,6 +19,11 @@ contextBridge.exposeInMainWorld("henshinScanReview", {
   candidates: () => ipcRenderer.invoke(IpcChannels.reviewCandidates, {})
 })
 
+contextBridge.exposeInMainWorld("henshinLibrary", {
+  search: (input: { readonly page_size?: number; readonly cursor?: string }) =>
+    ipcRenderer.invoke(IpcChannels.librarySearch, input)
+})
+
 if (new URLSearchParams(window.location.search).get("mode") === "prototype") {
   contextBridge.exposeInMainWorld("henshinPrototype", {
     handshake: () => ipcRenderer.invoke(IpcChannels.handshake, {}),
