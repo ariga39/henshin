@@ -1,3 +1,4 @@
+import { discoveryCoverageView } from "../analysis/discovery-coverage"
 import { opendir } from "node:fs/promises"
 import { isAbsolute } from "node:path"
 import { Effect } from "effect"
@@ -17,7 +18,8 @@ import {
   RootNotFound,
   ServerApi,
   type RootPreview,
-  type SavedRootPreview
+  type SavedRootPreview,
+  type RootScanCommandRequest
 } from "@henshin/contracts"
 import { HttpApiBuilder } from "effect/http-api"
 import {
@@ -29,6 +31,8 @@ import {
 } from "../analysis/NativeSourceBoundary"
 import { ServerState } from "../identity"
 import { RootStore } from "../persistence/RootStore"
+import { ScanStore } from "../persistence/ScanStore"
+import { runManualHeldScan } from "../scan/ManualScanCoordinator"
 
 const rootView = (root: {
   rootId: string
@@ -135,21 +139,7 @@ const enumerateSavedRootCandidates = (
         unassigned_loose_image_count: value.unassignedLooseImageCount,
         unsupported_loose_images: value.unsupportedLooseImages,
         unsupported_loose_image_count: value.unsupportedLooseImageCount,
-        coverage: {
-          status: value.coverage.status,
-          directories_visited: value.coverage.directoriesVisited,
-          entries_observed: value.coverage.entriesObserved,
-          candidate_count: value.coverage.candidateCount,
-          candidate_sample_truncated: value.coverage.candidateSampleTruncated,
-          excluded_links: value.coverage.excludedLinks,
-          excluded_link_count: value.coverage.excludedLinkCount,
-          unsupported_names: value.coverage.unsupportedNames,
-          unsupported_name_count: value.coverage.unsupportedNameCount,
-          unsupported_directories: value.coverage.unsupportedDirectories,
-          unsupported_directory_count: value.coverage.unsupportedDirectoryCount,
-          issues: value.coverage.issues,
-          issue_count: value.coverage.issueCount
-        }
+        coverage: discoveryCoverageView(value.coverage)
       }
     },
     catch: (error) => error
@@ -159,6 +149,7 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
   Effect.gen(function*() {
     const server = yield* ServerState
     const roots = yield* RootStore
+    const scans = yield* ScanStore
 
     const base = (requestId: string) => ({
       request_id: requestId,
@@ -431,18 +422,104 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
           if (payload.epoch !== server.epoch) {
             return yield* new EpochChanged({
               code: "epoch_changed",
-              message: "authority epoch changed; refresh the root policy",
+              message: "authority epoch changed; refresh the saved root or policy",
               retryable: true,
               ...errorBase
             })
           }
 
-          const result = yield* roots.commitPolicy({
-            rootId: params.id,
-            operationId: payload.operation_id,
-            epoch: payload.epoch,
-            expectedPolicyRevision: payload.expected_policy_revision,
-            command: payload.command
+          if (payload.command.type === "exclude" || payload.command.type === "remove-exclusion") {
+            const result = yield* roots.commitPolicy({
+              rootId: params.id,
+              operationId: payload.operation_id,
+              epoch: payload.epoch,
+              expectedPolicyRevision: payload.expected_policy_revision,
+              command: payload.command
+            }).pipe(
+              Effect.mapError(() => new InternalError({
+                code: "internal_error",
+                message: "internal error",
+                retryable: false,
+                ...errorBase
+              }))
+            )
+
+            switch (result.kind) {
+              case "exclusion_limit":
+                return yield* new InvalidRequest({
+                  code: "invalid_request", message: `A collection can have up to ${MAX_ROOT_EXCLUSIONS} exclusions.`,
+                  retryable: false, ...errorBase
+                })
+              case "operation_expired":
+                return yield* new OperationExpired({
+                  code: "operation_expired", message: "Root policy result expired. Refresh the collection.",
+                  retryable: false, ...errorBase
+                })
+              case "storage_full":
+                return yield* new StorageFull({
+                  code: "storage_full503", message: "Root policy operation storage is full.",
+                  retryable: true, ...errorBase
+                })
+              case "operation_conflict":
+                return yield* new OperationConflict({
+                  code: "operation_conflict",
+                  message: "operation id reused with a different root-policy command",
+                  retryable: false,
+                  ...errorBase
+                })
+              case "root_not_found":
+                return yield* new RootNotFound({
+                  code: "not_found",
+                  message: "root not found",
+                  retryable: false,
+                  ...errorBase
+                })
+              case "policy_revision_conflict":
+                return yield* new RevisionConflict({
+                  code: "revision_conflict",
+                  message: "stale root policy revision",
+                  retryable: false,
+                  details: { current_revision: result.currentPolicyRevision },
+                  ...errorBase
+                })
+              case "committed":
+              case "replayed":
+                return {
+                  instance_id: server.instanceId,
+                  epoch: server.epoch,
+                  request_id: context.request_id,
+                  server_time: Date.now(),
+                  data: rootView(result.root)
+                }
+            }
+          }
+
+          const listed = yield* roots.list().pipe(
+            Effect.mapError(() => new InternalError({
+              code: "internal_error",
+              message: "internal error",
+              retryable: false,
+              ...errorBase
+            }))
+          )
+          const root = listed.find((candidate) => candidate.rootId === params.id)
+          if (root === undefined) {
+            return yield* new RootNotFound({
+              code: "not_found",
+              message: "saved root not found",
+              retryable: false,
+              ...errorBase
+            })
+          }
+
+          const scanPayload = payload as RootScanCommandRequest
+          const started = yield* scans.start({
+            taskId: crypto.randomUUID(),
+            operationId: scanPayload.operation_id,
+            epoch: scanPayload.epoch,
+            rootId: root.rootId,
+            expectedMappingRevision: scanPayload.expected_mapping_revision,
+            expectedPolicyRevision: scanPayload.expected_policy_revision
           }).pipe(
             Effect.mapError(() => new InternalError({
               code: "internal_error",
@@ -452,52 +529,54 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
             }))
           )
 
-          switch (result.kind) {
-            case "exclusion_limit":
-              return yield* new InvalidRequest({
-                code: "invalid_request", message: `A collection can have up to ${MAX_ROOT_EXCLUSIONS} exclusions.`,
-                retryable: false, ...errorBase
-              })
-            case "operation_expired":
-              return yield* new OperationExpired({
-                code: "operation_expired", message: "Root policy result expired. Refresh the collection.",
-                retryable: false, ...errorBase
-              })
-            case "storage_full":
-              return yield* new StorageFull({
-                code: "storage_full503", message: "Root policy operation storage is full.",
-                retryable: true, ...errorBase
-              })
+          switch (started.kind) {
             case "operation_conflict":
               return yield* new OperationConflict({
                 code: "operation_conflict",
-                message: "operation id reused with a different root-policy command",
+                message: "operation id reused with a different scan command",
                 retryable: false,
                 ...errorBase
               })
             case "root_not_found":
               return yield* new RootNotFound({
                 code: "not_found",
-                message: "root not found",
+                message: "saved root not found",
                 retryable: false,
+                ...errorBase
+              })
+            case "mapping_revision_conflict":
+              return yield* new RevisionConflict({
+                code: "revision_conflict",
+                message: "saved root changed; refresh it before scanning",
+                retryable: false,
+                details: { current_revision: started.currentMappingRevision },
                 ...errorBase
               })
             case "policy_revision_conflict":
               return yield* new RevisionConflict({
                 code: "revision_conflict",
-                message: "stale root policy revision",
+                message: "saved root policy changed; refresh it before scanning",
                 retryable: false,
-                details: { current_revision: result.currentPolicyRevision },
+                details: { current_revision: started.currentPolicyRevision },
                 ...errorBase
               })
-            case "committed":
-            case "replayed":
+            case "created":
+              yield* runManualHeldScan(started.task, root).pipe(Effect.forkDetach)
               return {
                 instance_id: server.instanceId,
                 epoch: server.epoch,
                 request_id: context.request_id,
                 server_time: Date.now(),
-                data: rootView(result.root)
+                data: { task: started.task }
+              }
+            case "replayed":
+            case "active":
+              return {
+                instance_id: server.instanceId,
+                epoch: server.epoch,
+                request_id: context.request_id,
+                server_time: Date.now(),
+                data: { task: started.task }
               }
           }
         })

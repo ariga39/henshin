@@ -48,7 +48,7 @@ export interface StageDiscoveryInput {
 
 export interface FinishScanInput {
   readonly taskId: string
-  readonly status: "succeeded" | "completed_with_errors" | "failed"
+  readonly status: "succeeded" | "completed_with_errors" | "failed" | "interrupted"
   readonly directoriesVisited: number
   readonly candidatesDiscovered: number
   readonly candidatesAnalyzed: number
