@@ -516,6 +516,7 @@ describe("held scan renderer workflows", () => {
       root_id: root.root_id,
       relative_path: "existing",
       title: "Existing",
+      cover: null,
       source_path: "/collections/existing",
       kind: "image-directory" as const,
       page_count: 1,
