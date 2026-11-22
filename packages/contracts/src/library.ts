@@ -1,7 +1,8 @@
 import { Schema } from "effect"
 import { Revision, Uuid } from "./ids"
-import { RootRelativePath, ScanManifestObservation, ScanManifestPage, ServerRootList } from "./root"
+import { RootRelativePath } from "./root"
 import { ThumbnailReference } from "./thumbnail"
+import { ScanManifestObservation, ScanManifestPage, ServerRootList } from "./root"
 
 export const LibraryEntry = Schema.Struct({
   entry_id: Uuid,
@@ -66,12 +67,6 @@ export const EntryResolutionSiblingClaim = Schema.Struct({
 })
 export type EntryResolutionSiblingClaim = typeof EntryResolutionSiblingClaim.Type
 
-export const EntryResolutionQuery = Schema.Struct({
-  sibling_cursor: Schema.optional(Uuid),
-  sibling_claims_revision: Schema.optional(Revision)
-})
-export type EntryResolutionQuery = typeof EntryResolutionQuery.Type
-
 export const EntryResolution = Schema.Struct({
   entry_id: Uuid,
   root_id: Uuid,
@@ -88,8 +83,6 @@ export const EntryResolution = Schema.Struct({
   accepted_observation: ScanManifestObservation,
   first_page: Schema.NullOr(ScanManifestPage),
   sibling_claims: Schema.Array(EntryResolutionSiblingClaim),
-  sibling_claims_truncated: Schema.Boolean,
-  sibling_claims_next_cursor: Schema.NullOr(Uuid),
-  sibling_claims_revision: Revision
+  sibling_claims_truncated: Schema.Boolean
 })
 export type EntryResolution = typeof EntryResolution.Type

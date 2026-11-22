@@ -10,14 +10,8 @@ import type {
   ReaderProfileTestIpcRequest,
   ReaderProfileTestTargetSelectIpcRequest
 } from "@henshin/contracts"
-import {
-  LibraryClient,
-  LocalMappingClient,
-  PrototypeClient,
-  ReaderProfileClient,
-  RootPreviewClient,
-  ScanReviewClient
-} from "./client"
+import { LibraryClient, LocalMappingClient, PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
+import { ReaderProfileClient } from "./client"
 import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"

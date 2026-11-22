@@ -41,7 +41,6 @@ import {
 import {
   IndexedRootSamplePage,
   EntryResolution,
-  EntryResolutionQuery,
   LibraryEntryPage,
   LibrarySearchRequest,
   LibraryView
@@ -217,9 +216,8 @@ export const LibraryApi = HttpApi.make("henshin-library").add(
       }),
       HttpApiEndpoint.get("resolution", "/entries/:id/resolution", {
         params: { id: Uuid },
-        query: EntryResolutionQuery,
         success: SuccessEnvelope(EntryResolution),
-        error: [AuthenticationRequired, EntryNotFound, InvalidRequest, InternalError]
+        error: [AuthenticationRequired, EntryNotFound, InternalError]
       })
     )
     .prefix("/api/v1")

@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import { EntryNotFound, InternalError, InvalidRequest, LibraryApi, RequestContext, RootNotFound } from "@henshin/contracts"
+import { EntryNotFound, InternalError, LibraryApi, RequestContext, RootNotFound } from "@henshin/contracts"
 import { HttpApiBuilder } from "effect/http-api"
 import { ServerState } from "../identity"
 import { LibraryStore } from "../persistence/LibraryStore"
@@ -123,25 +123,10 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
           }
         })
       )
-      .handle("resolution", ({ params, query }) =>
+      .handle("resolution", ({ params }) =>
         Effect.gen(function*() {
           const context = yield* RequestContext
-          const hasCursor = query.sibling_cursor !== undefined
-          const hasRevision = query.sibling_claims_revision !== undefined
-          if (hasCursor !== hasRevision) {
-            return yield* new InvalidRequest({
-              code: "invalid_request",
-              message: "sibling cursor and sibling claims revision must be supplied together",
-              retryable: false,
-              details: { field: "sibling_cursor" },
-              ...errorBase(server, context.request_id)
-            })
-          }
-          const resolution = yield* library.resolution({
-            entryId: params.id,
-            siblingCursor: query.sibling_cursor,
-            siblingClaimsRevision: query.sibling_claims_revision
-          }).pipe(
+          const resolution = yield* library.resolution(params.id).pipe(
             Effect.mapError(() => new InternalError({
               code: "internal_error",
               message: "internal error",

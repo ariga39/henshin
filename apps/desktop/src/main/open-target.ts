@@ -1,4 +1,4 @@
-import { access, constants as fsConstants, lstat, realpath, stat } from "node:fs/promises"
+import { access, constants as fsConstants, lstat, realpath } from "node:fs/promises"
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { Option, Schema } from "effect"
 import { RootRelativePath, type EntryResolution } from "@henshin/contracts"
@@ -16,21 +16,6 @@ export class OpenTargetError extends Error {
 const isWithin = (root: string, candidate: string): boolean => {
   const remainder = relative(root, candidate)
   return remainder === "" || (remainder !== ".." && !remainder.startsWith(`..${sep}`) && !isAbsolute(remainder))
-}
-
-const sameNativePath = (left: string, right: string): boolean => {
-  const normalize = (value: string): string => resolve(value)
-  const normalizedLeft = normalize(left)
-  const normalizedRight = normalize(right)
-  return process.platform === "win32"
-    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
-    : normalizedLeft === normalizedRight
-}
-
-const nativeIdentity = (metadata: { readonly dev: number | bigint; readonly ino: number | bigint }): string | null => {
-  const device = metadata.dev.toString()
-  const inode = metadata.ino.toString()
-  return device === "0" && inode === "0" ? null : `${device}:${inode}`
 }
 
 const safeSegments = (value: string): ReadonlyArray<string> => {
@@ -54,58 +39,8 @@ const rejectLinksAlongPath = async (root: string, target: string): Promise<void>
   }
 }
 
-const resolveConfiguredRoot = async (mapping: {
-  readonly selectedPath: string
-  readonly canonicalPath: string
-}): Promise<string> => {
-  const selected = await realpath(mapping.selectedPath).catch(() => null)
-  const canonical = await realpath(mapping.canonicalPath).catch(() => null)
-  if (selected === null || canonical === null || !sameNativePath(selected, canonical)) {
-    throw new OpenTargetError("the configured local mapping root changed")
-  }
-  const metadata = await lstat(selected).catch(() => null)
-  if (metadata === null || metadata.isSymbolicLink() || !metadata.isDirectory()) {
-    throw new OpenTargetError("the configured local mapping root is unavailable")
-  }
-  return canonical
-}
-
-const ensureSiblingClaimsAreUnambiguous = async (
-  root: string,
-  resolution: EntryResolution
-): Promise<void> => {
-  if (resolution.sibling_claims_truncated || resolution.sibling_claims_next_cursor !== null) {
-    throw new OpenTargetError("sibling identity evidence is incomplete; refresh before opening")
-  }
-  const targetSegments = safeSegments(resolution.relative_path)
-  const targetParent = targetSegments.slice(0, -1).join("/")
-  const target = resolve(root, ...targetSegments)
-  const targetRealPath = await realpath(target).catch(() => null)
-  const targetStats = await stat(target).catch(() => null)
-  if (targetRealPath === null || targetStats === null) throw new OpenTargetError("the accepted target is missing on this device")
-  const targetIdentity = nativeIdentity(targetStats)
-  for (const sibling of resolution.sibling_claims) {
-    const siblingSegments = safeSegments(sibling.relative_path)
-    if (siblingSegments.slice(0, -1).join("/") !== targetParent) continue
-    const siblingPath = resolve(root, ...siblingSegments)
-    const siblingRealPath = await realpath(siblingPath).catch(() => null)
-    const siblingStats = await stat(siblingPath).catch(() => null)
-    if (siblingRealPath === null || siblingStats === null) continue
-    const siblingIdentity = nativeIdentity(siblingStats)
-    if (
-      sameNativePath(targetRealPath, siblingRealPath) ||
-      (targetIdentity !== null && siblingIdentity !== null && targetIdentity === siblingIdentity)
-    ) {
-      throw new OpenTargetError("the accepted target is ambiguous with another entry on this device")
-    }
-  }
-}
-
 export const resolveAcceptedTarget = async (
-  mapping: {
-    readonly selectedPath: string
-    readonly canonicalPath: string
-  },
+  mappingRoot: string,
   resolution: EntryResolution,
   profile: StoredReaderProfile
 ): Promise<string> => {
@@ -127,11 +62,13 @@ export const resolveAcceptedTarget = async (
   if (resolution.kind === "archive" && profile.target_mode === "first-image") {
     throw new OpenTargetError("first-image mode cannot open an archive")
   }
-  const root = await resolveConfiguredRoot(mapping)
+  const root = await realpath(mappingRoot).catch(() => null)
+  if (root === null || !isWithin(mappingRoot, root)) {
+    throw new OpenTargetError("the configured local mapping root changed")
+  }
   const entrySegments = safeSegments(resolution.relative_path)
   const entryTarget = resolve(root, ...entrySegments)
   if (!isWithin(root, entryTarget)) throw new OpenTargetError("the accepted target escaped the configured mapping")
-  await rejectLinksAlongPath(root, entryTarget)
   const entryMetadata = await lstat(entryTarget).catch(() => null)
   if (entryMetadata === null || entryMetadata.isSymbolicLink()) throw new OpenTargetError("the accepted source is unavailable on this device")
   if (resolution.kind === "archive" && !entryMetadata.isFile()) throw new OpenTargetError("the accepted archive target is unavailable")
@@ -139,7 +76,6 @@ export const resolveAcceptedTarget = async (
   if (Math.trunc(entryMetadata.mtimeMs) !== Math.trunc(resolution.accepted_observation.mtime_ms)) {
     throw new OpenTargetError("the accepted source changed; reconcile the library before opening")
   }
-  await ensureSiblingClaimsAreUnambiguous(root, resolution)
   let target = entryTarget
   if (profile.target_mode === "first-image") {
     const firstPage = resolution.first_page
@@ -169,9 +105,6 @@ export const resolveAcceptedTarget = async (
   }
   if (resolution.kind === "archive" && metadata.size !== resolution.accepted_observation.bytes) {
     throw new OpenTargetError("the accepted archive changed; reconcile the library before opening")
-  }
-  if (profile.target_mode === "first-image" && resolution.first_page !== null && metadata.size !== resolution.first_page.declared_bytes) {
-    throw new OpenTargetError("the accepted first page changed; reconcile the library before opening")
   }
   return target
 }

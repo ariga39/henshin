@@ -181,6 +181,27 @@ export type LibrarySearchIpcRequest = typeof LibrarySearchIpcRequest.Type
 export const ThumbnailGetIpcRequest = Schema.Struct({ key: ThumbnailKey })
 export type ThumbnailGetIpcRequest = typeof ThumbnailGetIpcRequest.Type
 
+export const OpenBookIpcRequest = Schema.Struct({
+  entry_id: Uuid,
+  profile_id: Uuid,
+  action_id: Uuid
+})
+export type OpenBookIpcRequest = typeof OpenBookIpcRequest.Type
+
+export const OpenBookIpcResult = Schema.Struct({
+  action_id: Uuid,
+  entry_id: Uuid,
+  status: Schema.Union([
+    Schema.Literal("in-flight"),
+    Schema.Literal("accepted"),
+    Schema.Literal("failed"),
+    Schema.Literal("unknown")
+  ]),
+  message: Schema.String,
+  event_durable: Schema.Boolean
+})
+export type OpenBookIpcResult = typeof OpenBookIpcResult.Type
+
 export const TaskListIpcRequest = Schema.Struct({})
 export type TaskListIpcRequest = typeof TaskListIpcRequest.Type
 

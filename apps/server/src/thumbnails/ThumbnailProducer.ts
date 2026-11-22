@@ -29,8 +29,6 @@ const MAX_DECODE_ATTEMPTS = 8
 const MAX_CONCURRENT_RENDERS = 4
 const FAILED_RENDER_TTL_MS = 30_000
 const MAX_FAILED_RENDER_KEYS = 128
-const RETRYABLE_RENDER_BACKOFF_MS = 1_000
-const MAX_RETRYABLE_RENDER_KEYS = 128
 
 const verificationLimits = DEFAULT_MANIFEST_LIMITS
 
@@ -91,47 +89,32 @@ const normalizeObservation = (
     }
   : observation
 
-const sameObservation = (
-  left: typeof ScanManifest.Type["after"] | SourceObservation,
-  right: typeof ScanManifest.Type["after"] | SourceObservation
-): boolean => JSON.stringify(observationIdentity(normalizeObservation(left))) === JSON.stringify(observationIdentity(normalizeObservation(right)))
-
-const sameAcceptedObservation = (
-  current: SourceObservation,
-  accepted: typeof ScanManifest.Type["after"]
-): boolean => {
-  const observed = normalizeObservation(current)
-  const expected = normalizeObservation(accepted)
-  return observed.kind === expected.kind &&
-    observed.bytes === expected.bytes &&
-    observed.mtimeMs === expected.mtimeMs &&
-    observed.entryCount === expected.entryCount &&
-    (expected.observationToken === undefined ||
-      expected.observationToken.length === 0 ||
-      observed.observationToken === expected.observationToken)
-}
-
-const sameAcceptedManifest = (
-  current: {
+const manifestIdentity = (
+  manifest: typeof ScanManifest.Type | {
     readonly sourceKind: "archive" | "directory"
     readonly pages: ReadonlyArray<{ readonly name: string; readonly format: string; readonly declaredBytes: number }>
     readonly before: SourceObservation
     readonly after: SourceObservation
-  },
-  accepted: typeof ScanManifest.Type
-): boolean =>
-  current.sourceKind === accepted.source_kind &&
-  JSON.stringify(current.pages.map((page) => ({
-    name: page.name,
-    format: page.format,
-    declared_bytes: page.declaredBytes
-  }))) === JSON.stringify(accepted.pages.map((page) => ({
-    name: page.name,
-    format: page.format,
-    declared_bytes: page.declared_bytes
-  }))) &&
-  sameAcceptedObservation(current.before, accepted.before) &&
-  sameAcceptedObservation(current.after, accepted.after)
+  }
+): string => JSON.stringify({
+  source_kind: "source_kind" in manifest ? manifest.source_kind : manifest.sourceKind,
+  pages: manifest.pages.map((page) => "declared_bytes" in page
+    ? page
+    : { name: page.name, format: page.format, declared_bytes: page.declaredBytes }),
+  before: normalizeObservation(manifest.before),
+  after: normalizeObservation(manifest.after)
+})
+
+const hasObservationEvidence = (manifest: typeof ScanManifest.Type): boolean =>
+  typeof manifest.before.observation_token === "string" &&
+  manifest.before.observation_token.length > 0 &&
+  typeof manifest.after.observation_token === "string" &&
+  manifest.after.observation_token.length > 0
+
+const sameObservation = (
+  left: typeof ScanManifest.Type["after"] | SourceObservation,
+  right: typeof ScanManifest.Type["after"] | SourceObservation
+): boolean => JSON.stringify(observationIdentity(normalizeObservation(left))) === JSON.stringify(observationIdentity(normalizeObservation(right)))
 
 const sameStats = (
   left: { readonly dev: bigint; readonly ino: bigint; readonly size: bigint; readonly mtimeNs: bigint },
@@ -206,13 +189,6 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
       const decoderPath = fileURLToPath(new URL("./thumbnail-decoder.mjs", import.meta.url))
       const inFlight = new Set<string>()
       const failedUntil = new Map<string, number>()
-      const retryUntil = new Map<string, number>()
-      const phaseLimits = (deadlineAt: number): typeof verificationLimits | null => {
-        const remainingMs = deadlineAt - Date.now()
-        return remainingMs > 0
-          ? { ...verificationLimits, deadlineMs: remainingMs }
-          : null
-      }
 
       const decode = (input: Uint8Array): Effect.Effect<Uint8Array | null, ThumbnailRenderError> =>
         Effect.scoped(
@@ -241,7 +217,7 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
           }))
         )
 
-      const render = Effect.fnUntraced(function*(key: string, signal: AbortSignal, deadlineAt: number): Effect.fn.Return<Uint8Array | null, ThumbnailRenderError | ThumbnailCacheError | ThumbnailBudgetError> {
+      const render = Effect.fnUntraced(function*(key: string, signal: AbortSignal): Effect.fn.Return<Uint8Array | null, ThumbnailRenderError | ThumbnailCacheError> {
         const parsed = parseKey(key)
         if (parsed === null) return null
         const accepted = yield* library.acceptedThumbnailEntry(parsed.entryId).pipe(
@@ -260,6 +236,7 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
         const decoded = decodeManifest(persistedManifest)
         if (Option.isNone(decoded) || decoded.value.pages.length === 0) return null
         const acceptedManifest = decoded.value
+        if (!hasObservationEvidence(acceptedManifest)) return null
         if (
           (accepted.kind === "archive" && acceptedManifest.source_kind !== "archive") ||
           (accepted.kind === "image-directory" && acceptedManifest.source_kind !== "directory")
@@ -279,48 +256,27 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
         const candidate = yield* Effect.promise(() => resolveSourceCandidate(currentRoot.value, accepted.relative_path))
         if (!candidate.ok || candidate.value.kind !== accepted.kind) return null
 
-        const hasAcceptedTokens =
-          typeof acceptedManifest.before.observation_token === "string" &&
-          acceptedManifest.before.observation_token.length > 0 &&
-          typeof acceptedManifest.after.observation_token === "string" &&
-          acceptedManifest.after.observation_token.length > 0
-        if (hasAcceptedTokens) {
-          const cheapLimits = phaseLimits(deadlineAt)
-          if (cheapLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
-          const cheapObservation = yield* Effect.result(Effect.tryPromise({
-            try: () => recheckSourceObservation(
-              candidate.value.nativePath,
-              accepted.kind === "archive" ? "archive" : "directory",
-              acceptedManifest.after.entry_count,
-              { limits: cheapLimits, signal }
-            ),
-            catch: () => new ThumbnailSourceError({ message: "accepted source observation is unavailable" })
-          }))
-          if (Result.isFailure(cheapObservation) || !sameObservation(cheapObservation.success, acceptedManifest.after)) return null
-        }
+        const cheapObservation = yield* Effect.result(Effect.tryPromise({
+          try: () => recheckSourceObservation(
+            candidate.value.nativePath,
+            accepted.kind === "archive" ? "archive" : "directory",
+            acceptedManifest.after.entry_count,
+            { limits: verificationLimits, signal }
+          ),
+          catch: () => new ThumbnailSourceError({ message: "accepted source observation is unavailable" })
+        }))
+        if (Result.isFailure(cheapObservation) || !sameObservation(cheapObservation.success, acceptedManifest.after)) return null
 
-        const readCache = () => cache.read(key).pipe(
-          Effect.catchTag("ThumbnailCacheError", () => Effect.succeed(null))
-        )
-        let cached: Uint8Array | null = null
-        if (hasAcceptedTokens) {
-          cached = yield* readCache()
-          if (cached !== null) return cached
-        }
+        const cached = yield* cache.read(key)
+        if (cached !== null) return cached
 
-        const analysisLimits = phaseLimits(deadlineAt)
-        if (analysisLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
         const freshResult = yield* Effect.result(analyzeSourceManifest({
           sourcePath: candidate.value.nativePath,
-          limits: analysisLimits,
+          limits: verificationLimits,
           signal
         }))
         if (Result.isFailure(freshResult)) return null
-        if (!sameAcceptedManifest(freshResult.success, acceptedManifest)) return null
-        if (!hasAcceptedTokens) {
-          cached = yield* readCache()
-          if (cached !== null) return cached
-        }
+        if (manifestIdentity(freshResult.success) !== manifestIdentity(acceptedManifest)) return null
 
         const readPage = (page: typeof acceptedManifest.pages[number]): Effect.Effect<Uint8Array, ThumbnailSourceError> =>
           accepted.kind === "archive"
@@ -336,48 +292,40 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
 
         // Keep the first-decodable policy bounded without changing the accepted page count.
         const candidatePages = acceptedManifest.pages.slice(0, MAX_DECODE_ATTEMPTS)
+        let archivePages: ReadonlyMap<string, Uint8Array> = new Map()
         let archiveAfter = freshResult.success.after
-        let rendered: Uint8Array | null = null
-        let lastRenderError: ThumbnailRenderError | undefined
         if (accepted.kind === "archive") {
-          const archiveLimits = phaseLimits(deadlineAt)
-          if (archiveLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
           const archiveRead = yield* Effect.result(Effect.tryPromise({
             try: () => readArchivePages(candidate.value.nativePath, candidatePages.map((page) => page.name), {
-              limits: archiveLimits,
+              limits: verificationLimits,
               maxPageBytes: MAX_SOURCE_PAGE_BYTES,
-              signal,
-              expectedEntryCount: freshResult.success.after.entryCount,
-              onPage: async (_name, bytes) => {
-                if (signal.aborted) return false
-                const outputResult = await Effect.runPromise(Effect.result(decode(bytes)))
-                if (Result.isFailure(outputResult)) {
-                  lastRenderError = outputResult.failure
-                  return false
-                }
-                if (outputResult.success === null) return false
-                rendered = outputResult.success
-                return true
-              }
+              signal
             }),
             catch: () => new ThumbnailSourceError({ message: "accepted archive pages are unavailable" })
           }))
           if (Result.isFailure(archiveRead)) return null
+          archivePages = archiveRead.success.pages
           archiveAfter = archiveRead.success.after
         }
-        if (accepted.kind === "image-directory") {
-          for (const page of candidatePages) {
-            const input = yield* Effect.result(readPage(page))
-            if (Result.isFailure(input)) continue
-            const outputResult = yield* Effect.result(decode(input.success))
-            if (Result.isFailure(outputResult)) {
-              lastRenderError = outputResult.failure
-              continue
-            }
-            if (outputResult.success !== null) {
-              rendered = outputResult.success
-              break
-            }
+        let rendered: Uint8Array | null = null
+        let lastRenderError: ThumbnailRenderError | undefined
+        for (const page of candidatePages) {
+          let input: Uint8Array | undefined
+          if (accepted.kind === "archive") {
+            input = archivePages.get(page.name)
+          } else {
+            const pageResult = yield* Effect.result(readPage(page))
+            if (Result.isSuccess(pageResult)) input = pageResult.success
+          }
+          if (input === undefined) continue
+          const outputResult = yield* Effect.result(decode(input))
+          if (Result.isFailure(outputResult)) {
+            lastRenderError = outputResult.failure
+            continue
+          }
+          if (outputResult.success !== null) {
+            rendered = outputResult.success
+            break
           }
         }
         if (rendered === null) {
@@ -386,14 +334,12 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
         }
 
         if (accepted.kind === "image-directory") {
-          const finalLimits = phaseLimits(deadlineAt)
-          if (finalLimits === null) return yield* new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" })
           const afterResult = yield* Effect.result(Effect.tryPromise({
             try: () => recheckSourceObservation(
               candidate.value.nativePath,
               "directory",
               freshResult.success.after.entryCount,
-              { limits: finalLimits, signal }
+              { limits: verificationLimits, signal }
             ),
             catch: () => new ThumbnailSourceError({ message: "accepted image directory changed" })
           }))
@@ -415,35 +361,10 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
         return rendered
       })
 
-      const rememberFailed = (key: string): ThumbnailLoad => {
-        failedUntil.set(key, Date.now() + FAILED_RENDER_TTL_MS)
-        while (failedUntil.size > MAX_FAILED_RENDER_KEYS) {
-          const oldest = failedUntil.keys().next().value
-          if (oldest === undefined) break
-          failedUntil.delete(oldest)
-        }
-        return { kind: "missing" }
-      }
-
-      const rememberUpdating = (key: string): ThumbnailLoad => {
-        retryUntil.set(key, Date.now() + RETRYABLE_RENDER_BACKOFF_MS)
-        while (retryUntil.size > MAX_RETRYABLE_RENDER_KEYS) {
-          const oldest = retryUntil.keys().next().value
-          if (oldest === undefined) break
-          retryUntil.delete(oldest)
-        }
-        return { kind: "updating" }
-      }
-
       const load = (key: string): Effect.Effect<ThumbnailLoad, ThumbnailRenderError | ThumbnailCacheError> =>
         Effect.suspend(() => {
           if (inFlight.has(key) || inFlight.size >= MAX_CONCURRENT_RENDERS) {
             return Effect.succeed({ kind: "updating" } as ThumbnailLoad)
-          }
-          const retryExpiry = retryUntil.get(key)
-          if (retryExpiry !== undefined) {
-            if (retryExpiry > Date.now()) return Effect.succeed({ kind: "updating" } as ThumbnailLoad)
-            retryUntil.delete(key)
           }
           const failedExpiry = failedUntil.get(key)
           if (failedExpiry !== undefined) {
@@ -452,14 +373,22 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
           }
           inFlight.add(key)
           const controller = new AbortController()
-          const deadlineAt = Date.now() + RENDER_REQUEST_DEADLINE_MS
-          return render(key, controller.signal, deadlineAt).pipe(
+          return render(key, controller.signal).pipe(
             Effect.timeoutOrElse({
               duration: RENDER_REQUEST_DEADLINE_MS,
               orElse: () => Effect.fail(new ThumbnailBudgetError({ message: "thumbnail render budget exhausted" }))
             }),
-            Effect.map((bytes) => bytes === null ? rememberFailed(key) : { kind: "ready", bytes } as const),
-            Effect.catchTag("ThumbnailBudgetError", () => Effect.succeed(rememberUpdating(key))),
+            Effect.map((bytes) => {
+              if (bytes !== null) return { kind: "ready", bytes } as const
+              failedUntil.set(key, Date.now() + FAILED_RENDER_TTL_MS)
+              while (failedUntil.size > MAX_FAILED_RENDER_KEYS) {
+                const oldest = failedUntil.keys().next().value
+                if (oldest === undefined) break
+                failedUntil.delete(oldest)
+              }
+              return { kind: "missing" } as const
+            }),
+            Effect.catchTag("ThumbnailBudgetError", () => Effect.succeed({ kind: "updating" } as ThumbnailLoad)),
             Effect.ensuring(Effect.sync(() => {
               controller.abort()
               inFlight.delete(key)

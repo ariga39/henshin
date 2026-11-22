@@ -16,6 +16,7 @@ afterEach(async () => {
   const roots = temporaryRoots.splice(0)
   await Promise.all(roots.map((root) => rm(root, { force: true, recursive: true })))
 })
+
 it("rejects recognized unsupported image formats, including mixed directories", async () => {
   const root = await makeFixture()
   const unsupported = join(root, "unsupported")
@@ -58,3 +59,4 @@ it("selects the first direct page using natural numeric and Unicode ordering", a
   await expect(resolveReaderTestTarget(numeric, "first-image")).resolves.toBe(join(numeric, "01.jpg"))
   await expect(resolveReaderTestTarget(unicode, "first-image")).resolves.toBe(join(unicode, privateUseName))
 })
+

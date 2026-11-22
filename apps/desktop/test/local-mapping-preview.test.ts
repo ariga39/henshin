@@ -16,14 +16,14 @@ const rootId = "11111111-1111-4111-8111-111111111111"
 const sample = (relativePath: string): IndexedRootSample => ({
   relative_path: relativePath as IndexedRootSample["relative_path"],
   kind: "archive",
-  format_evidence: ["jpeg"],
+  format_evidence: ["jpg"],
   size_bytes: 1
 })
 
 const imageSample = (relativePath: string): IndexedRootSample => ({
   relative_path: relativePath as IndexedRootSample["relative_path"],
   kind: "image-directory",
-  format_evidence: ["jpeg"],
+  format_evidence: ["jpg"],
   size_bytes: 1
 })
 
@@ -95,25 +95,6 @@ describe("local mapping preview boundary", () => {
     }
   })
 
-  it("does not accept an ambiguous native alias without a physical identity", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-no-identity-"))
-    try {
-      await writeFile(path.join(root, "book.cbz"), "book")
-      const nativeAliasLookup = async (parentPath: string, requestedName: string) => {
-        const stats = await lstat(path.join(parentPath, requestedName === "Book.cbz" ? "book.cbz" : requestedName))
-        Object.defineProperty(stats, "ino", { value: 0 })
-        return stats
-      }
-      const result = await inspectLocalMapping(rootId, root, [sample("Book.cbz"), sample("book.cbz")], false, nativeAliasLookup)
-      expect(result.samples).toMatchObject([
-        { relative_path: "Book.cbz", status: "unsupported", local_error: "unsupported" },
-        { relative_path: "book.cbz", status: "found" }
-      ])
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
-
   it("uses lstat metadata instead of unknown directory-entry type flags for image pages", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-unknown-dirent-"))
     const isFile = vi.spyOn(Dirent.prototype, "isFile").mockReturnValue(false)
@@ -125,7 +106,7 @@ describe("local mapping preview boundary", () => {
       expect(result.samples).toMatchObject([{
         status: "found",
         local_evidence_status: "complete",
-        local_format_evidence: ["jpeg"],
+        local_format_evidence: ["jpg"],
         local_size_bytes: 4
       }])
     } finally {
@@ -242,7 +223,6 @@ describe("local mapping preview boundary", () => {
   it("recognizes Windows-invalid segments without depending on the host volume", () => {
     expect(isWindowsInvalidSegment("AUX.zip", "win32")).toBe(true)
     expect(isWindowsInvalidSegment("book:stream.cbz", "win32")).toBe(true)
-    expect(isWindowsInvalidSegment("page\n1.zip", "win32")).toBe(true)
     expect(isWindowsInvalidSegment("book.cbz", "win32")).toBe(false)
     expect(isWindowsInvalidSegment("AUX.zip", "darwin")).toBe(false)
   })

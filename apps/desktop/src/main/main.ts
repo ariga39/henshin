@@ -1,7 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from "electron"
-import { Cause, Duration, Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
+import { Duration, Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
+import { readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import {
@@ -20,6 +21,7 @@ import {
   LocalMappingListIpcRequest,
   LocalMappingPreviewIpcRequest,
   LibrarySearchIpcRequest,
+  OpenBookIpcRequest,
   ThumbnailGetIpcRequest,
   ThumbnailHttpClient,
   LoadDraftIpcRequest,
@@ -66,6 +68,7 @@ import {
 } from "./CommandCoordinator"
 import { LocalDatabaseWorker } from "./persistence/LocalDatabaseWorker"
 import { LocalMappingStore, type LocalMappingActivationOutcome } from "./persistence/LocalMappingStore"
+import { OpenJournalStore } from "./persistence/OpenJournalStore"
 import {
   ReaderProfileConflictError,
   ReaderProfileNotFoundError,
@@ -89,6 +92,7 @@ import {
   ConnectionLifecycle,
   ConnectionPausedError
 } from "./ConnectionLifecycle"
+import { OpenCoordinator, type OpenCoordinatorPorts } from "./OpenCoordinator"
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
 const LOCAL_MAPPING_REQUEST_TIMEOUT = Duration.seconds(12)
@@ -112,14 +116,16 @@ interface IpcErr {
 
 let mainWindow: BrowserWindow | null = null
 let serverChild: ServerChild | null = null
-type MainServices = DraftStore | CommandAttemptStore | LocalMappingStore | ReaderProfileStore
+type MainServices = DraftStore | CommandAttemptStore | LocalMappingStore | ReaderProfileStore | OpenJournalStore
 let runtime: ManagedRuntime.ManagedRuntime<MainServices, never> | null = null
 let connection: ConnectionLifecycle | null = null
+let openCoordinator: OpenCoordinator | null = null
 let rendererUrl = ""
 let shutdownPromise: Promise<void> | null = null
 let readyToQuit = false
 const prototypeMode = process.env.HENSHIN_PROTOTYPE_MODE === "1"
 let protectedWritablePaths: ReadonlyArray<string> = []
+let deviceId = ""
 const localMappingPreviews = new Map<string, {
   readonly epoch: string
   readonly previewToken: string
@@ -175,12 +181,37 @@ const dispatchExplicitReaderTest = (executablePath: string, argumentsList: Reado
     }
   })
 
-const opaqueError: PublicError = { code: "internal_error", message: "request failed", retryable: false }
-const localMappingTimeoutError: PublicError = {
-  code: "local_mapping_unavailable",
-  message: "the selected local directory could not be inspected",
-  retryable: true
+const dispatchReader = (profile: {
+  readonly launch_mode: "explicit-executable" | "system-association"
+  readonly executablePath: string | null
+  readonly argument_tokens: ReadonlyArray<string>
+}, resolvedTarget: string): Promise<void> => {
+  if (profile.launch_mode === "explicit-executable") {
+    if (profile.executablePath === null) return Promise.reject(new ReaderTestLaunchError("the saved profile has no executable"))
+    return dispatchExplicitReaderTest(
+      profile.executablePath,
+      profile.argument_tokens.map((token) => token === "{target}" ? resolvedTarget : token)
+    )
+  }
+  return shell.openPath(resolvedTarget).then((error) => {
+    if (error !== "") throw new ReaderTestLaunchError("the operating system could not open the resolved target")
+  })
 }
+
+const loadDeviceId = async (userDataPath: string): Promise<string> => {
+  const filePath = path.join(userDataPath, "device-id")
+  try {
+    const stored = (await readFile(filePath, "utf8")).trim()
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(stored)) return stored
+  } catch {
+    // A first launch creates the installation identity below.
+  }
+  const created = randomUUID()
+  await writeFile(filePath, `${created}\n`, { encoding: "utf8", mode: 0o600 })
+  return created
+}
+
+const opaqueError: PublicError = { code: "internal_error", message: "request failed", retryable: false }
 const invalidRequestError: PublicError = {
   code: "invalid_request",
   message: "invalid IPC request",
@@ -298,9 +329,6 @@ const toPublicError = (error: unknown): PublicError => {
   return { code: value.code, message: value.message, retryable: value.retryable }
 }
 
-export const localMappingError = (error: unknown): PublicError =>
-  Cause.isTimeoutError(error) ? localMappingTimeoutError : toPublicError(error)
-
 const toResult = <A, R>(effect: Effect.Effect<{ readonly data: A }, unknown, R>): Effect.Effect<IpcOk<A> | IpcErr, never, R> =>
   effect.pipe(
     Effect.match({
@@ -360,12 +388,11 @@ const runNetworkResult = <A>(
     never,
     PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | ThumbnailHttpClient
   >,
-  timeout?: Duration.Duration,
-  errorMapper: (error: unknown) => PublicError = toPublicError
+  timeout?: Duration.Duration
 ): Promise<IpcOk<A> | IpcErr> =>
   requireConnection()
     .run(effect, timeout)
-    .catch((error) => ({ ok: false as const, error: errorMapper(error) }))
+    .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
 
 const runLocalResult = <A>(
   effect: Effect.Effect<IpcOk<A> | IpcErr, never, MainServices>
@@ -386,6 +413,64 @@ const endLocalMappingCheck = (key: string): void => {
 
 const hasBlockingLocalEvidence = (preview: LocalMappingPreview): boolean =>
   preview.samples.some((sample) => !localMappingSampleCanActivate(sample))
+
+const createOpenCoordinator = (): OpenCoordinator => {
+  const ports: OpenCoordinatorPorts = {
+    deviceId,
+    journal: {
+      get: (instanceId, actionId) => requireRuntime().runPromise(
+        Effect.gen(function*() {
+          const store = yield* OpenJournalStore
+          return yield* store.get({ instanceId, actionId })
+        })
+      ),
+      prepare: (input) => requireRuntime().runPromise(
+        Effect.gen(function*() {
+          const store = yield* OpenJournalStore
+          return yield* store.prepare(input)
+        })
+      ),
+      recordAccepted: (key, event) => requireRuntime().runPromise(
+        Effect.gen(function*() {
+          const store = yield* OpenJournalStore
+          return yield* store.recordAccepted(key, event)
+        })
+      ),
+      recordFailed: (key, failure) => requireRuntime().runPromise(
+        Effect.gen(function*() {
+          const store = yield* OpenJournalStore
+          return yield* store.recordFailed({ ...key, ...failure })
+        })
+      )
+    },
+    loadMapping: (instanceId, rootId) => requireRuntime().runPromise(
+      Effect.gen(function*() {
+        const store = yield* LocalMappingStore
+        return yield* store.load({ instanceId, rootId })
+      })
+    ),
+    loadProfile: (profileId) => requireRuntime().runPromise(
+      Effect.gen(function*() {
+        const store = yield* ReaderProfileStore
+        return yield* store.get(profileId)
+      })
+    ),
+    resolve: (entryId) => requireConnection().run(
+      Effect.gen(function*() {
+        const client = yield* LibraryHttpClient
+        return (yield* client.resolution({ params: { id: entryId } })).data
+      })
+    ),
+    dispatch: (profile, target) => dispatchReader(profile, target),
+    assertCurrent: (instanceId, epoch) => {
+      const current = requireSession()
+      if (current.instanceId !== instanceId || current.epoch !== epoch) {
+        throw new ConnectionPausedError({ state: requireConnection().getStatus().state })
+      }
+    }
+  }
+  return new OpenCoordinator(ports)
+}
 
 const stableSample = (sample: LocalMappingPreview["samples"][number]) => ({
   ...sample,
@@ -542,8 +627,7 @@ const registerIpc = (): void => {
           })
         })
       ),
-      LOCAL_MAPPING_REQUEST_TIMEOUT,
-      localMappingError
+      LOCAL_MAPPING_REQUEST_TIMEOUT
     )
     .then((result) => {
       endLocalMappingCheck(mappingKey)
@@ -949,6 +1033,25 @@ const registerIpc = (): void => {
     )
   })
 
+  ipcMain.handle(IpcChannels.openBook, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(OpenBookIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    try {
+      const session = requireSession()
+      if (openCoordinator === null) return { ok: false as const, error: opaqueError }
+      return openCoordinator.open({
+        instanceId: session.instanceId,
+        epoch: session.epoch,
+        entryId: decoded.value.entry_id,
+        profileId: decoded.value.profile_id,
+        actionId: decoded.value.action_id
+      }).then((data) => ({ ok: true as const, data })).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+    } catch (error) {
+      return Promise.resolve({ ok: false as const, error: toPublicError(error) })
+    }
+  })
+
   ipcMain.handle(IpcChannels.thumbnailGet, (event, raw: unknown) => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(ThumbnailGetIpcRequest)(raw)
@@ -1333,6 +1436,7 @@ const shutdown = (): Promise<void> => {
     runtime = null
     const activeConnection = connection
     connection = null
+    openCoordinator = null
     if (activeConnection !== null) await activeConnection.close()
     if (activeRuntime !== null) {
       await Promise.race([activeRuntime.dispose(), delay(SHUTDOWN_TIMEOUT_MS)])
@@ -1348,6 +1452,7 @@ const bootstrap = async (): Promise<void> => {
   const dbPath = process.env.HENSHIN_PROTOTYPE_DB ?? path.join(app.getPath("userData"), "prototype.db")
   const clientDbPath =
     process.env.HENSHIN_PROTOTYPE_CLIENT_DB ?? path.join(app.getPath("userData"), "prototype-client.db")
+  deviceId = await loadDeviceId(app.getPath("userData"))
   protectedWritablePaths = [
     app.getPath("userData"),
     app.getPath("sessionData"),
@@ -1364,7 +1469,8 @@ const bootstrap = async (): Promise<void> => {
       DraftStore.layerFromWorker,
       CommandAttemptStore.layerFromWorker,
       LocalMappingStore.layerFromWorker,
-      ReaderProfileStore.layerFromWorker
+      ReaderProfileStore.layerFromWorker,
+      OpenJournalStore.layerFromWorker
     ).pipe(Layer.provide(localWorker))
   )
 
@@ -1375,6 +1481,7 @@ const bootstrap = async (): Promise<void> => {
     bearerToken: serverChild.bearerToken
   })
   await connection.connect()
+  openCoordinator = createOpenCoordinator()
 
   registerIpc()
   createWindow()

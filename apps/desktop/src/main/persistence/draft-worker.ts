@@ -586,7 +586,6 @@ type ResolvedLocalPath = {
   readonly comparisonPath: string
   readonly endpointIdentity: string | null
   readonly ancestorIdentities: ReadonlyArray<string>
-  readonly resolutionError: string | null
   readonly exact: boolean
   readonly directory: boolean
 }
@@ -595,25 +594,20 @@ const LocalPathResolution = Schema.Struct({
   comparisonPath: Schema.String,
   endpointIdentity: Schema.NullOr(Schema.String),
   ancestorIdentities: Schema.Array(Schema.String),
-  resolutionError: Schema.optional(Schema.NullOr(Schema.String)),
   exact: Schema.Boolean,
   directory: Schema.Boolean
 })
 
-const localPhysicalIdentity = (stats: { readonly dev: number | bigint; readonly ino: number | bigint }): string | undefined =>
-  stats.ino.toString() === "0" ? undefined : `${stats.dev.toString()}:${stats.ino.toString()}`
-
-const identityOf = (path: string): string | undefined => {
+const identityOf = (path: string): string => {
   const stats = statSync(path, { bigint: true })
-  return localPhysicalIdentity(stats)
+  return `${stats.dev.toString()}:${stats.ino.toString()}`
 }
 
 const ancestorIdentitiesOf = (path: string): ReadonlyArray<string> => {
   const identities: Array<string> = []
   let current = path
   while (true) {
-    const identity = identityOf(current)
-    if (identity !== undefined) identities.push(identity)
+    identities.push(identityOf(current))
     const parent = dirname(current)
     if (parent === current) return identities
     current = parent
@@ -633,12 +627,11 @@ const resolveLocalPath = (input: string): ResolvedLocalPath => {
     try {
       const realCurrent = realpathSync.native(current)
       const stats = statSync(current, { bigint: true })
-      const ancestorIdentities = ancestorIdentitiesOf(realCurrent)
+      const ancestorIdentities = ancestorIdentitiesOf(current)
       return {
         comparisonPath: missingSuffix.length === 0 ? realCurrent : join(realCurrent, ...missingSuffix),
-        endpointIdentity: missingSuffix.length === 0 ? identityOf(realCurrent) ?? null : null,
+        endpointIdentity: missingSuffix.length === 0 ? identityOf(current) : null,
         ancestorIdentities,
-        resolutionError: null,
         exact: missingSuffix.length === 0,
         directory: missingSuffix.length === 0 && stats.isDirectory()
       }
@@ -649,7 +642,6 @@ const resolveLocalPath = (input: string): ResolvedLocalPath => {
           comparisonPath: input,
           endpointIdentity: null,
           ancestorIdentities: [],
-          resolutionError: code ?? "unknown",
           exact: false,
           directory: false
         }
@@ -660,7 +652,6 @@ const resolveLocalPath = (input: string): ResolvedLocalPath => {
           comparisonPath: input,
           endpointIdentity: null,
           ancestorIdentities: [],
-          resolutionError: null,
           exact: false,
           directory: false
         }
@@ -671,26 +662,12 @@ const resolveLocalPath = (input: string): ResolvedLocalPath => {
   }
 }
 
-const usableIdentity = (identity: string | null | undefined): string | null =>
-  identity === null || identity === undefined || identity.endsWith(":0") ? null : identity
-
-const persistedPath = (path: string, identity: string | null): ResolvedLocalPath => {
-  const normalizedIdentity = usableIdentity(identity)
-  return {
-    comparisonPath: path,
-    endpointIdentity: normalizedIdentity,
-    ancestorIdentities: normalizedIdentity === null ? [] : [normalizedIdentity],
-    resolutionError: null,
-    exact: normalizedIdentity !== null,
-    directory: normalizedIdentity !== null
-  }
-}
-
-const normalizeResolution = (resolution: typeof LocalPathResolution.Type): ResolvedLocalPath => ({
-  ...resolution,
-  endpointIdentity: usableIdentity(resolution.endpointIdentity),
-  ancestorIdentities: resolution.ancestorIdentities.filter((identity) => usableIdentity(identity) !== null),
-  resolutionError: resolution.resolutionError ?? null
+const persistedPath = (path: string, identity: string | null): ResolvedLocalPath => ({
+  comparisonPath: path,
+  endpointIdentity: identity,
+  ancestorIdentities: identity === null ? [] : [identity],
+  exact: identity !== null,
+  directory: identity !== null
 })
 
 const persistedResolution = (
@@ -701,7 +678,7 @@ const persistedResolution = (
   if (resolution !== null) {
     try {
       const decoded = Schema.decodeUnknownOption(LocalPathResolution)(JSON.parse(resolution))
-      if (Option.isSome(decoded)) return normalizeResolution(decoded.value)
+      if (Option.isSome(decoded)) return decoded.value
     } catch {
       // Fall through to the legacy path and identity evidence.
     }
@@ -765,16 +742,6 @@ const storedMappingPathEvidence = (mapping: PersistedLocalMapping): MappingPathE
     mapping.canonical_resolution
   )
 })
-
-const refreshedMappingPathEvidence = (mapping: PersistedLocalMapping): MappingPathEvidence => {
-  const stored = storedMappingPathEvidence(mapping)
-  const selectedPath = resolveLocalPath(mapping.selected_path)
-  const canonicalPath = resolveLocalPath(mapping.canonical_path)
-  return {
-    selectedPath: selectedPath.resolutionError === null ? selectedPath : stored.selectedPath,
-    canonicalPath: canonicalPath.resolutionError === null ? canonicalPath : stored.canonicalPath
-  }
-}
 
 const handle = (request: DraftWorkerRequest): unknown => {
   switch (request.op) {
@@ -1122,21 +1089,11 @@ const handle = (request: DraftWorkerRequest): unknown => {
 
       ensureBeforeDeadline()
       const selectedPath = resolveLocalPath(request.selectedPath)
-      const canonicalHint = resolveLocalPath(request.canonicalPath)
+      const canonicalPath = resolveLocalPath(request.canonicalPath)
       const protectedWritablePaths = request.protectedWritablePaths.map(resolveLocalPath)
-      if (!selectedPath.exact || !selectedPath.directory || !canonicalHint.exact || !canonicalHint.directory) {
+      if (!selectedPath.exact || !selectedPath.directory || !canonicalPath.exact || !canonicalPath.directory) {
         throw new Error("local mapping roots must be existing directories")
       }
-      const sameNativeTarget =
-        selectedPath.comparisonPath === canonicalHint.comparisonPath ||
-        (selectedPath.endpointIdentity !== null && selectedPath.endpointIdentity === canonicalHint.endpointIdentity)
-      if (!sameNativeTarget) {
-        throw new Error("local mapping canonical path does not match selected path")
-      }
-      if (protectedWritablePaths.some((path) => path.resolutionError !== null)) {
-        throw new Error("protected writable path could not be resolved")
-      }
-      const canonicalPath = selectedPath
 
       const preparedMappings = new Map<string, {
         readonly mappingRevision: string
@@ -1149,7 +1106,12 @@ const handle = (request: DraftWorkerRequest): unknown => {
           mappingRevision: mapping.mapping_revision.toString(),
           selectedPath: mapping.selected_path,
           canonicalPath: mapping.canonical_path,
-          evidence: refreshedMappingPathEvidence(mapping)
+          evidence: mapping.selected_resolution === null || mapping.canonical_resolution === null
+            ? {
+                selectedPath: resolveLocalPath(mapping.selected_path),
+                canonicalPath: resolveLocalPath(mapping.canonical_path)
+              }
+            : storedMappingPathEvidence(mapping)
         })
       }
       ensureBeforeDeadline()
@@ -1196,7 +1158,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
           instanceId: request.instanceId,
           rootId: request.rootId,
           selectedPath: request.selectedPath,
-          canonicalPath: canonicalPath.comparisonPath,
+          canonicalPath: request.canonicalPath,
           mappingRevision: (BigInt(request.expectedMappingRevision) + 1n).toString()
         }
         ensureBeforeDeadline()

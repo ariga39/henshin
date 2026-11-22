@@ -55,10 +55,7 @@ const isWithin = (root: string, candidate: string): boolean => {
   return remainder === "" || (remainder !== ".." && !remainder.startsWith(`..${sep}`) && !isAbsolute(remainder))
 }
 
-const formatFor = (name: string): string => {
-  const extension = extname(name).toLowerCase()
-  return extension === ".jpg" || extension === ".jpeg" ? "jpeg" : extension.slice(1)
-}
+const formatFor = (name: string): string => extname(name).slice(1).toLowerCase()
 
 export const localPhysicalIdentity = (stats: {
   readonly dev: number | bigint
@@ -73,7 +70,6 @@ export const isWindowsInvalidSegment = (
   platform: NodeJS.Platform = process.platform
 ): boolean => platform === "win32" && (
   windowsReservedName.test(segment) ||
-  /[\u0001-\u001F]/u.test(segment) ||
   /[<>:"|?*]/u.test(segment) ||
   /[. ]$/u.test(segment)
 )

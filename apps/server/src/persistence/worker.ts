@@ -4,8 +4,7 @@ import { basename, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contracts/canonical"
-import { MAX_ROOT_EXCLUSIONS, RootExclusions } from "@henshin/contracts/root"
-import { INDEXED_ROOT_SAMPLE_LIMIT, ScanManifest } from "@henshin/contracts"
+import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanManifest } from "@henshin/contracts/root"
 import {
   WorkerMessage,
   WorkerResponse,
@@ -363,9 +362,6 @@ const selectEntryResolution = db.prepare(
 selectEntryResolution.setReadBigInts(true)
 const selectStagedForResolution = db.prepare(
   "SELECT analysis_status, manifest_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
-)
-const selectResolutionSiblingCursor = db.prepare(
-  "SELECT entry_id, root_id, relative_path FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
 )
 const MAX_RESOLUTION_SIBLINGS = 128
 const selectEntryById = db.prepare("SELECT entry_id FROM library_entries WHERE entry_id = ? AND state = 'accepted'")
@@ -1278,7 +1274,7 @@ const indexedRootSamples = (
     kind: "archive" | "image-directory"
     manifest_json: string
   }>
-  const page = rows.slice(0, INDEXED_ROOT_SAMPLE_LIMIT)
+  const page = rows.slice(0, 32)
   return {
     samples: page.map((row) => {
       const parsed = JSON.parse(row.manifest_json) as unknown
@@ -1294,7 +1290,7 @@ const indexedRootSamples = (
           : manifest.value.pages.reduce((total, page) => total + page.declared_bytes, 0)
       }
     }),
-    sample_truncated: rows.length > INDEXED_ROOT_SAMPLE_LIMIT,
+    sample_truncated: rows.length > 32,
     library_change_revision: librarySummary().change_revision
   }
 }
@@ -1319,48 +1315,25 @@ const entryResolution = (
   const manifest = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(row.manifest_json))
   if (manifest._tag === "None") throw new Error("invalid persisted accepted manifest")
 
-  const libraryState = selectLibraryState.get() as { library_id: string; change_revision: bigint } | undefined
-  if (libraryState === undefined) throw new Error("server library is not initialized")
-  const siblingClaimsRevision = libraryState.change_revision.toString()
-  const cursorIsCurrent = request.siblingClaimsRevision === siblingClaimsRevision
-  const cursorRow = request.siblingCursor !== undefined && cursorIsCurrent
-    ? selectResolutionSiblingCursor.get(request.siblingCursor) as { root_id: string; relative_path: string; entry_id: string } | undefined
-    : undefined
-
   const separator = row.relative_path.lastIndexOf("/")
   const parentPath = separator < 0 ? "" : row.relative_path.slice(0, separator)
-  const cursorSeparator = cursorRow?.relative_path.lastIndexOf("/") ?? -1
-  const cursorParentPath = cursorSeparator < 0 ? "" : cursorRow?.relative_path.slice(0, cursorSeparator)
-  const cursor = cursorRow !== undefined && cursorRow.root_id === row.root_id && cursorParentPath === parentPath
-    ? cursorRow
-    : undefined
-  const cursorClause = cursor === undefined ? "" : " AND (relative_path > ? OR (relative_path = ? AND entry_id > ?))"
   const siblingRows = parentPath.length === 0
     ? db.prepare(
-      `SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND entry_id <> ? AND instr(relative_path, '/') = 0${cursorClause} ORDER BY relative_path ASC, entry_id ASC LIMIT ?`
-    ).all(
-      row.root_id,
-      row.entry_id,
-      ...(cursor === undefined ? [] : [cursor.relative_path, cursor.relative_path, cursor.entry_id]),
-      MAX_RESOLUTION_SIBLINGS + 1
-    ) as unknown as ReadonlyArray<{ entry_id: string; relative_path: string }>
+      "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND instr(relative_path, '/') = 0 ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
+    ).all(row.root_id, MAX_RESOLUTION_SIBLINGS + 2) as unknown as ReadonlyArray<{ entry_id: string; relative_path: string }>
     : db.prepare(
-      `SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND entry_id <> ? AND relative_path LIKE ? ESCAPE '\\' AND instr(substr(relative_path, length(?) + 2), '/') = 0${cursorClause} ORDER BY relative_path ASC, entry_id ASC LIMIT ?`
+      "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND relative_path LIKE ? ESCAPE '\\' AND instr(substr(relative_path, length(?) + 2), '/') = 0 ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
     ).all(
       row.root_id,
-      row.entry_id,
       `${escapeLikePrefix(parentPath)}/%`,
       parentPath,
-      ...(cursor === undefined ? [] : [cursor.relative_path, cursor.relative_path, cursor.entry_id]),
-      MAX_RESOLUTION_SIBLINGS + 1
+      MAX_RESOLUTION_SIBLINGS + 2
     ) as unknown as ReadonlyArray<{ entry_id: string; relative_path: string }>
   const siblingClaims = siblingRows
+    .filter((sibling) => sibling.entry_id !== row.entry_id)
     .slice(0, MAX_RESOLUTION_SIBLINGS)
     .map((sibling) => ({ entry_id: sibling.entry_id, relative_path: sibling.relative_path }))
-  const siblingClaimsTruncated = siblingRows.length > MAX_RESOLUTION_SIBLINGS
-  const siblingClaimsNextCursor = siblingClaimsTruncated
-    ? siblingClaims[siblingClaims.length - 1]?.entry_id ?? null
-    : null
+  const siblingClaimsTruncated = siblingRows.filter((sibling) => sibling.entry_id !== row.entry_id).length > MAX_RESOLUTION_SIBLINGS
 
   const staged = selectStagedForResolution.get(row.root_id, row.relative_path) as {
     analysis_status: "ready" | "error"
@@ -1368,16 +1341,15 @@ const entryResolution = (
   } | undefined
   let reason: "known-change" | "insufficient-evidence" | null = null
   if (staged !== undefined) {
-    if (staged.analysis_status === "ready" && staged.manifest_json !== null) {
-      reason = staged.manifest_json === row.manifest_json ? null : "known-change"
-    } else {
-      reason = "insufficient-evidence"
-    }
+    reason = staged.analysis_status === "ready" && staged.manifest_json !== null && staged.manifest_json !== row.manifest_json
+      ? "known-change"
+      : "insufficient-evidence"
   }
   if (
     manifest.value.after.observation_token === undefined ||
     manifest.value.after.observation_token.length === 0 ||
-    manifest.value.pages[0] === undefined
+    manifest.value.pages[0] === undefined ||
+    siblingClaimsTruncated
   ) {
     reason = reason ?? "insufficient-evidence"
   }
@@ -1395,11 +1367,10 @@ const entryResolution = (
     accepted_observation: manifest.value.after,
     first_page: manifest.value.pages[0] ?? null,
     sibling_claims: siblingClaims,
-    sibling_claims_truncated: siblingClaimsTruncated,
-    sibling_claims_next_cursor: siblingClaimsNextCursor,
-    sibling_claims_revision: siblingClaimsRevision
+    sibling_claims_truncated: siblingClaimsTruncated
   }
 }
+
 const openEventPayload = (event: Extract<WorkerRequest, { op: "acceptOpenEvents" }>['events'][number]): string =>
   canonicalOpenEventPayload({
     eventId: event.event_id,

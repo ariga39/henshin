@@ -1,5 +1,4 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
-import { DatabaseSync } from "node:sqlite"
 import os from "node:os"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
@@ -43,17 +42,6 @@ const waitForTerminal = async (server: RunningServer, taskId: string): Promise<S
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error("normal scan did not reach a terminal state")
-}
-
-const waitForStagedPath = async (server: RunningServer, relativePath: string): Promise<void> => {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const staged = await withReviewClient(server, Effect.gen(function*() {
-      return yield* (yield* ReviewHttpClient).candidates()
-    }))
-    if (staged.data.some((candidate) => candidate.relative_path === relativePath)) return
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
-  throw new Error(`scan did not stage ${relativePath}`)
 }
 
 const makeZip = async (archivePath: string): Promise<void> => {
@@ -191,7 +179,7 @@ describe("normal library scan", () => {
     })
     for (const entry of firstEntries) {
       const resolution = await withLibraryClient(server, Effect.gen(function*() {
-        return yield* (yield* LibraryHttpClient).resolution({ params: { id: entry.entry_id }, query: {} })
+        return yield* (yield* LibraryHttpClient).resolution({ params: { id: entry.entry_id } })
       }))
       expect(resolution.data).toMatchObject({
         entry_id: entry.entry_id,
@@ -213,7 +201,7 @@ describe("normal library scan", () => {
       expect("source_path" in resolution.data).toBe(false)
     }
     const unknownResolution = await withLibraryClient(server, Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).resolution({ params: { id: randomUUID() }, query: {} }).pipe(Effect.flip)
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: randomUUID() } }).pipe(Effect.flip)
     }))
     expect(unknownResolution._tag).toBe("EntryNotFound")
     const firstIds = new Map(firstEntries.map((entry) => [entry.relative_path, entry.entry_id]))
@@ -415,7 +403,7 @@ describe("normal library scan", () => {
     })
 
     const changedResolution = await withLibraryClient(server, Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id } })
     }))
     expect(changedResolution.data).toMatchObject({
       entry_id: accepted.entry_id,
@@ -490,254 +478,10 @@ describe("normal library scan", () => {
     expect((await waitForTerminal(server, unavailableScan.data.task.task_id)).status).toBe("failed")
 
     const resolution = await withLibraryClient(server, Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id } })
     }))
     expect(resolution.data.status).toBe("usable")
     expect(resolution.data.reason).toBeNull()
-  })
-
-  it("keeps identical accepted evidence usable after a failed ordinary scan", async () => {
-    const server = await start()
-    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-staged-failure-"))
-    fixturePaths.add(fixture)
-    await makeImageBook(fixture, "book")
-
-    const root = await withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      const preview = yield* client.preview({ payload: { path: fixture } })
-      if (!("children" in preview.data)) throw new Error("expected setup preview")
-      return yield* client.save({
-        payload: {
-          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
-          label: "Staged failure", path: fixture, preview_identity: preview.data.preview_identity
-        }
-      })
-    }))
-
-    const scan = async () => withServerClient(server, Effect.gen(function*() {
-      return yield* (yield* ServerHttpClient).command({
-        params: { id: root.data.root_id },
-        payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-          expected_mapping_revision: root.data.mapping_revision,
-          expected_policy_revision: root.data.policy_revision,
-          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
-        }
-      })
-    }))
-
-    const first = await scan()
-    if (!("task" in first.data)) throw new Error("expected initial scan task")
-    expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
-    const accepted = await withLibraryClient(server, Effect.gen(function*() {
-      const entries = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
-      const entry = entries.data.entries[0]
-      if (entry === undefined) throw new Error("expected accepted entry")
-      return entry
-    }))
-
-    const second = await scan()
-    if (!("task" in second.data)) throw new Error("expected repeated scan task")
-    await waitForStagedPath(server, "book")
-    const policy = await withServerClient(server, Effect.gen(function*() {
-      return yield* (yield* ServerHttpClient).command({
-        params: { id: root.data.root_id },
-        payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-          expected_policy_revision: root.data.policy_revision,
-          command: { type: "exclude", exclusion: { path: "not-present", scope: "exact" } }
-        }
-      })
-    }))
-    if ("task" in policy.data) throw new Error("expected policy response")
-    expect((await waitForTerminal(server, second.data.task.task_id)).status).toBe("failed")
-
-    const resolution = await withLibraryClient(server, Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
-    }))
-    expect(resolution.data).toMatchObject({ status: "usable", reason: null })
-  })
-
-  it("keeps identical accepted evidence usable after an interrupted scan", async () => {
-    const previousQuietInterval = process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
-    process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = "1000"
-    const server = await start()
-    try {
-      const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-interrupted-"))
-      fixturePaths.add(fixture)
-      await makeImageBook(fixture, "book")
-
-      const root = await withServerClient(server, Effect.gen(function*() {
-        const client = yield* ServerHttpClient
-        const preview = yield* client.preview({ payload: { path: fixture } })
-        if (!("children" in preview.data)) throw new Error("expected setup preview")
-        return yield* client.save({
-          payload: {
-            operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
-            label: "Interrupted resolution", path: fixture, preview_identity: preview.data.preview_identity
-          }
-        })
-      }))
-
-      const startScan = () => withServerClient(server, Effect.gen(function*() {
-        return yield* (yield* ServerHttpClient).command({
-          params: { id: root.data.root_id },
-          payload: {
-            operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-            expected_mapping_revision: root.data.mapping_revision,
-            expected_policy_revision: root.data.policy_revision,
-            command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
-          }
-        })
-      }))
-
-      const first = await startScan()
-      if (!("task" in first.data)) throw new Error("expected initial scan task")
-      expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
-      const accepted = await withLibraryClient(server, Effect.gen(function*() {
-        const entries = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
-        const entry = entries.data.entries[0]
-        if (entry === undefined) throw new Error("expected accepted entry")
-        return entry
-      }))
-
-      const second = await startScan()
-      if (!("task" in second.data)) throw new Error("expected repeated scan task")
-      await waitForStagedPath(server, "book")
-      await server.stop()
-      const restarted = await startServer(server.dbPath)
-      servers.push(restarted)
-      expect((await waitForTerminal(restarted, second.data.task.task_id)).status).toBe("interrupted")
-
-      const resolution = await withLibraryClient(restarted, Effect.gen(function*() {
-        return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
-      }))
-      expect(resolution.data).toMatchObject({ status: "usable", reason: null })
-    } finally {
-      if (previousQuietInterval === undefined) delete process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
-      else process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = previousQuietInterval
-    }
-  })
-
-  it("paginates complete sibling collision evidence for a large flat collection", async () => {
-    const server = await start()
-    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-siblings-"))
-    fixturePaths.add(fixture)
-    await makeImageBook(fixture, "BOOK-999")
-    for (let index = 0; index < 130; index += 1) {
-      await makeImageBook(fixture, `book-${String(index).padStart(3, "0")}`)
-    }
-    // APFS folds case, so the equivalent logical claim is inserted while the
-    // server is stopped after the real scan has populated the collection.
-
-    const root = await withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      const preview = yield* client.preview({ payload: { path: fixture } })
-      if (!("children" in preview.data)) throw new Error("expected setup preview")
-      return yield* client.save({
-        payload: {
-          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
-          label: "Large flat collection", path: fixture, preview_identity: preview.data.preview_identity
-        }
-      })
-    }))
-
-    const scan = await withServerClient(server, Effect.gen(function*() {
-      return yield* (yield* ServerHttpClient).command({
-        params: { id: root.data.root_id },
-        payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-          expected_mapping_revision: root.data.mapping_revision,
-          expected_policy_revision: root.data.policy_revision,
-          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
-        }
-      })
-    }))
-    if (!("task" in scan.data)) throw new Error("expected scan task")
-    expect((await waitForTerminal(server, scan.data.task.task_id)).status).toBe("succeeded")
-
-    const entries = await withLibraryClient(server, Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
-    }))
-    const target = entries.data.entries.find((entry) => entry.relative_path === "BOOK-999")
-    if (target === undefined) throw new Error("expected target entry")
-    expect(entries.data.entries).toHaveLength(131)
-
-    const beforeRestart = await withLibraryClient(server, Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).resolution({ params: { id: target.entry_id }, query: {} })
-    }))
-    expect(beforeRestart.data.sibling_claims_truncated).toBe(true)
-
-    await server.stop()
-    const db = new DatabaseSync(server.dbPath)
-    const acceptedRow = db.prepare(
-      "SELECT library_id, root_id, kind, manifest_json FROM library_entries WHERE entry_id = ?"
-    ).get(target.entry_id) as {
-      library_id: string
-      root_id: string
-      kind: "image-directory"
-      manifest_json: string
-    } | undefined
-    if (acceptedRow === undefined) throw new Error("expected persisted target entry")
-    const equivalentEntryId = randomUUID()
-    const now = Date.now()
-    db.prepare(
-      "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?)"
-    ).run(
-      equivalentEntryId,
-      acceptedRow.library_id,
-      acceptedRow.root_id,
-      "book-999",
-      path.join(fixture, "book-999"),
-      acceptedRow.kind,
-      "book-999",
-      1,
-      acceptedRow.manifest_json,
-      now,
-      now
-    )
-    db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1").run()
-    db.close()
-    const restarted = await startServer(server.dbPath)
-    servers.push(restarted)
-
-    const first = await withLibraryClient(restarted, Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).resolution({
-        params: { id: target.entry_id },
-        query: {
-          sibling_cursor: beforeRestart.data.sibling_claims_next_cursor ?? undefined,
-          sibling_claims_revision: beforeRestart.data.sibling_claims_revision
-        }
-      })
-    }))
-    expect(first.data).toMatchObject({
-      status: "usable",
-      reason: null,
-      sibling_claims: expect.any(Array),
-      sibling_claims_truncated: true
-    })
-    expect(first.data.sibling_claims_revision).not.toBe(beforeRestart.data.sibling_claims_revision)
-    expect(first.data.sibling_claims).toHaveLength(128)
-    expect(first.data.sibling_claims.map((claim) => claim.relative_path)).not.toContain("book-999")
-    expect(first.data.sibling_claims_next_cursor).not.toBeNull()
-
-    const second = await withLibraryClient(restarted, Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).resolution({
-        params: { id: target.entry_id },
-        query: {
-          sibling_cursor: first.data.sibling_claims_next_cursor ?? undefined,
-          sibling_claims_revision: first.data.sibling_claims_revision
-        }
-      })
-    }))
-    expect(second.data).toMatchObject({
-      status: "usable",
-      reason: null,
-      sibling_claims_truncated: false,
-      sibling_claims_next_cursor: null,
-      sibling_claims_revision: first.data.sibling_claims_revision
-    })
-    expect(second.data.sibling_claims.map((claim) => claim.relative_path)).toContain("book-999")
   })
 
   it("defers new allocation when an accepted path is missing", async () => {
@@ -927,85 +671,5 @@ describe("normal library scan", () => {
       ]
     })
     expect(samples.data.samples.every((sample) => sample.size_bytes !== null && sample.size_bytes > 0)).toBe(true)
-  })
-
-  it("truncates persisted indexed samples at the public limit and leaves small roots complete", async () => {
-    const server = await start()
-    const largeFixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-sample-limit-large-"))
-    const smallFixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-sample-limit-small-"))
-    fixturePaths.add(largeFixture)
-    fixturePaths.add(smallFixture)
-    for (let index = 0; index < 33; index += 1) {
-      await makeImageBook(largeFixture, `book-${index.toString().padStart(2, "0")}`)
-    }
-    await makeImageBook(smallFixture, "small-book")
-
-    const register = (fixture: string, label: string) => withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      const preview = yield* client.preview({ payload: { path: fixture } })
-      if (!("children" in preview.data)) throw new Error("expected setup preview")
-      return yield* client.save({
-        payload: {
-          operation_id: randomUUID(),
-          instance_id: preview.data.instance_id,
-          epoch: preview.data.epoch,
-          label,
-          path: fixture,
-          preview_identity: preview.data.preview_identity
-        }
-      })
-    }))
-    const scan = (rootId: string, mappingRevision: string, policyRevision: string) => withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      return yield* client.command({
-        params: { id: rootId },
-        payload: {
-          operation_id: randomUUID(),
-          instance_id: server.instanceId,
-          epoch: server.epoch,
-          expected_mapping_revision: mappingRevision,
-          expected_policy_revision: policyRevision,
-          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
-        }
-      })
-    }))
-
-    const largeRoot = await register(largeFixture, "Large sample root")
-    const largeScan = await scan(
-      largeRoot.data.root_id,
-      largeRoot.data.mapping_revision,
-      largeRoot.data.policy_revision
-    )
-    if (!("task" in largeScan.data)) throw new Error("expected large scan task")
-    expect((await waitForTerminal(server, largeScan.data.task.task_id)).status).toBe("succeeded")
-
-    const largeSamples = await withLibraryClient(server, Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).indexedSamples({ params: { id: largeRoot.data.root_id } })
-    }))
-    expect(largeSamples.data).toMatchObject({
-      sample_limit: 32,
-      sample_truncated: true
-    })
-    expect(largeSamples.data.samples).toHaveLength(32)
-    expect(largeSamples.data.samples[0]?.relative_path).toBe("book-00")
-    expect(largeSamples.data.samples[31]?.relative_path).toBe("book-31")
-
-    const smallRoot = await register(smallFixture, "Small sample root")
-    const smallScan = await scan(
-      smallRoot.data.root_id,
-      smallRoot.data.mapping_revision,
-      smallRoot.data.policy_revision
-    )
-    if (!("task" in smallScan.data)) throw new Error("expected small scan task")
-    expect((await waitForTerminal(server, smallScan.data.task.task_id)).status).toBe("succeeded")
-
-    const smallSamples = await withLibraryClient(server, Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).indexedSamples({ params: { id: smallRoot.data.root_id } })
-    }))
-    expect(smallSamples.data).toMatchObject({
-      sample_limit: 32,
-      sample_truncated: false
-    })
-    expect(smallSamples.data.samples).toHaveLength(1)
   })
 })

@@ -1,5 +1,4 @@
 import { Schema } from "effect"
-import { INDEXED_ROOT_SAMPLE_LIMIT } from "@henshin/contracts"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import { OpenEvent, OpenEventOutcome } from "@henshin/contracts/event"
 import { RootExclusions, RootPolicyCommand, RootRelativePath, ScanManifestObservation, ScanManifestPage } from "@henshin/contracts/root"
@@ -170,9 +169,7 @@ const LibraryEntryResolution = Schema.Struct({
   accepted_observation: ScanManifestObservation,
   first_page: Schema.NullOr(ScanManifestPage),
   sibling_claims: Schema.Array(Schema.Struct({ entry_id: Uuid, relative_path: Schema.String })),
-  sibling_claims_truncated: Schema.Boolean,
-  sibling_claims_next_cursor: Schema.NullOr(Uuid),
-  sibling_claims_revision: Revision
+  sibling_claims_truncated: Schema.Boolean
 })
 export const LibraryEntryResolutionRow = Schema.NullOr(LibraryEntryResolution)
 export type LibraryEntryResolutionRow = typeof LibraryEntryResolutionRow.Type
@@ -345,18 +342,9 @@ export const WorkerRequest = Schema.Union([
   }),
   Schema.Struct({ op: Schema.Literal("readLibrary") }),
   Schema.Struct({ op: Schema.Literal("listLibraryEntries"), pageSize: Schema.Natural, cursor: Schema.NullOr(Uuid) }),
-  Schema.Struct({
-    op: Schema.Literal("listIndexedRootSamples"),
-    rootId: Uuid,
-    sampleLimit: Schema.Literal(INDEXED_ROOT_SAMPLE_LIMIT + 1)
-  }),
-  Schema.Struct({
-    op: Schema.Literal("readEntryResolution"),
-    entryId: Uuid,
-    siblingCursor: Schema.optional(Uuid),
-    siblingClaimsRevision: Schema.optional(Revision)
-  }),
+  Schema.Struct({ op: Schema.Literal("listIndexedRootSamples"), rootId: Uuid, sampleLimit: Schema.Literal(33) }),
   Schema.Struct({ op: Schema.Literal("readAcceptedThumbnailEntry"), entryId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("readEntryResolution"), entryId: Uuid }),
   Schema.Struct({ op: Schema.Literal("acceptOpenEvents"), events: Schema.Array(OpenEvent) }),
   Schema.Struct({
     op: Schema.Literal("finishScan"),

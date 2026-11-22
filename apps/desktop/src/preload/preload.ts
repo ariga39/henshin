@@ -3,6 +3,7 @@ import type {
   LocalMappingActivateIpcRequest,
   LocalMappingListIpcRequest,
   LocalMappingPreviewIpcRequest,
+  OpenBookIpcRequest,
   ReaderProfileSaveIpcRequest,
   ReaderProfileTestIpcRequest,
   ReaderProfileTestTargetSelectIpcRequest,
@@ -48,6 +49,7 @@ contextBridge.exposeInMainWorld("henshinReaderProfiles", {
 contextBridge.exposeInMainWorld("henshinLibrary", {
   search: (input: { readonly page_size?: number; readonly cursor?: string }) =>
     ipcRenderer.invoke(IpcChannels.librarySearch, input),
+  open: (input: OpenBookIpcRequest) => ipcRenderer.invoke(IpcChannels.openBook, input),
   getThumbnail: (key: string) => ipcRenderer.invoke(IpcChannels.thumbnailGet, { key })
 })
 
