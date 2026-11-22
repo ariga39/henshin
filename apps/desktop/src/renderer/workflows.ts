@@ -109,9 +109,16 @@ export const saveRoot = Effect.gen(function*() {
       })
     })
   } else {
-    yield* Effect.sync(() =>
-      viewStore.set({ root_save_status: "error", root_save_error: result.error.message })
-    )
+    const listed = yield* client.list()
+    const existing = listed.ok
+      ? listed.data.find((root) => root.canonical_server_path === preview.preview_identity.canonical_server_path)
+      : undefined
+    viewStore.set({
+      ...(listed.ok ? { root_saved_roots: listed.data, root_roots_status: "ready", root_roots_error: null } : {}),
+      root_save_status: existing?.label === confirmedLabel ? "ready" : "error",
+      root_save_error: existing === undefined ? result.error.message
+        : existing.label === confirmedLabel ? null : `Directory is already saved as ${existing.label}.`
+    })
   }
 })
 
