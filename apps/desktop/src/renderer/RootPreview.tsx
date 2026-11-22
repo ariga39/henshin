@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react"
 import type { RootPreviewResult } from "@henshin/contracts"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { excludeRootPath, previewRoot, removeRootExclusion, saveRoot } from "./workflows"
+import { canSaveRoot, excludeRootPath, previewRoot, removeRootExclusion, saveRoot } from "./workflows"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -46,11 +46,6 @@ export const RootPreviewScreen = () => {
   const loading = state.root_preview_status === "loading"
   const saving = state.root_save_status === "loading"
   const changingPolicy = state.root_policy_status === "loading"
-  const canSave = state.root_preview !== null &&
-    !isSavedDiscovery(state.root_preview) &&
-    state.root_preview_status === "ready" &&
-    state.root_preview_path === state.root_preview.selected_server_path &&
-    state.root_label.length > 0
   return (
     <main className="collection">
       <h1>Collection setup</h1>
@@ -81,7 +76,7 @@ export const RootPreviewScreen = () => {
       )}
       <p role="status" data-testid="root-preview-outcome">{rootPreviewStatusText(state)}</p>
       {!isSavedDiscovery(state.root_preview) && (
-        <button data-testid="root-save" disabled={!canSave || saving || changingPolicy} onClick={() => void runtime.runPromise(saveRoot)}>
+        <button data-testid="root-save" disabled={!canSaveRoot(state) || changingPolicy} onClick={() => void runtime.runPromise(saveRoot)}>
           {saving ? "Saving…" : "Save server root"}
         </button>
       )}
