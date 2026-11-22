@@ -1,6 +1,51 @@
 import { Schema } from "effect"
 import { Revision, Uuid } from "./ids"
 
+/** A portable path relative to a saved source root. */
+export const RootRelativePath = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(4096),
+  Schema.makeFilter((value) => {
+    if (value.includes("\\") || value.includes("\u0000") || value.startsWith("/")) return false
+    const segments = value.split("/")
+    return segments.every(
+      (segment, index) =>
+        segment.length > 0 &&
+        segment !== "." &&
+        segment !== ".." &&
+        !(index === 0 && /^[A-Za-z]:/.test(segment))
+    )
+  })
+)
+export type RootRelativePath = typeof RootRelativePath.Type
+
+/** A persisted scan-scope exclusion; `subtree` includes the named directory. */
+export const RootExclusion = Schema.Struct({
+  path: RootRelativePath,
+  scope: Schema.Union([Schema.Literal("exact"), Schema.Literal("subtree")])
+})
+export type RootExclusion = typeof RootExclusion.Type
+
+export const MAX_ROOT_EXCLUSIONS = 256
+export const RootExclusions = Schema.Array(RootExclusion).check(Schema.isMaxLength(MAX_ROOT_EXCLUSIONS))
+export type RootExclusions = typeof RootExclusions.Type
+
+/** The first root-policy command: suppress one exact file or directory subtree. */
+export const RootPolicyCommand = Schema.Struct({
+  type: Schema.Literal("exclude"),
+  exclusion: RootExclusion
+})
+export type RootPolicyCommand = typeof RootPolicyCommand.Type
+
+export const RootCommandRequest = Schema.Struct({
+  operation_id: Uuid,
+  instance_id: Uuid,
+  epoch: Uuid,
+  expected_policy_revision: Revision,
+  command: RootPolicyCommand
+})
+export type RootCommandRequest = typeof RootCommandRequest.Type
+
 /**
  * A bounded read-only sample of a server-local directory. The selected path is
  * returned as display data; it is never turned into a root or an entry.
@@ -119,6 +164,8 @@ export const ServerRoot = Schema.Struct({
   selected_server_path: Schema.String,
   canonical_server_path: Schema.String,
   mapping_revision: Revision,
+  policy_revision: Revision,
+  exclusions: RootExclusions,
   state: Schema.Literal("active")
 })
 export type ServerRoot = typeof ServerRoot.Type

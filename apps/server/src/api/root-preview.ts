@@ -7,9 +7,14 @@ import {
   InvalidRequest,
   InternalError,
   OperationConflict,
+  OperationExpired,
+  StorageFull,
+  MAX_ROOT_EXCLUSIONS,
+  RevisionConflict,
   RequestContext,
   RootVerificationFailed,
   RootPreviewUnavailable,
+  RootNotFound,
   ServerApi,
   type RootPreview,
   type SavedRootPreview
@@ -31,6 +36,8 @@ const rootView = (root: {
   selectedPath: string
   canonicalPath: string
   mappingRevision: string
+  policyRevision: string
+  exclusions: ReadonlyArray<{ readonly path: string; readonly scope: "exact" | "subtree" }>
   libraryId: string
   state: "active"
 }) => ({
@@ -40,6 +47,8 @@ const rootView = (root: {
   selected_server_path: root.selectedPath,
   canonical_server_path: root.canonicalPath,
   mapping_revision: root.mappingRevision,
+  policy_revision: root.policyRevision,
+  exclusions: root.exclusions,
   state: root.state
 })
 
@@ -400,6 +409,92 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
                 request_id: context.request_id,
                 server_time: Date.now(),
                 data: rootView(registered.root)
+              }
+          }
+        })
+      )
+      .handle("command", ({ params, payload }) =>
+        Effect.gen(function*() {
+          const context = yield* RequestContext
+          const errorBase = base(context.request_id)
+          if (payload.instance_id !== server.instanceId) {
+            return yield* new InstanceMismatch({
+              code: "instance_mismatch",
+              message: "instance mismatch",
+              retryable: false,
+              ...errorBase
+            })
+          }
+          if (payload.epoch !== server.epoch) {
+            return yield* new EpochChanged({
+              code: "epoch_changed",
+              message: "authority epoch changed; refresh the root policy",
+              retryable: true,
+              ...errorBase
+            })
+          }
+
+          const result = yield* roots.commitPolicy({
+            rootId: params.id,
+            operationId: payload.operation_id,
+            epoch: payload.epoch,
+            expectedPolicyRevision: payload.expected_policy_revision,
+            command: payload.command
+          }).pipe(
+            Effect.mapError(() => new InternalError({
+              code: "internal_error",
+              message: "internal error",
+              retryable: false,
+              ...errorBase
+            }))
+          )
+
+          switch (result.kind) {
+            case "exclusion_limit":
+              return yield* new InvalidRequest({
+                code: "invalid_request", message: `A collection can have up to ${MAX_ROOT_EXCLUSIONS} exclusions.`,
+                retryable: false, ...errorBase
+              })
+            case "operation_expired":
+              return yield* new OperationExpired({
+                code: "operation_expired", message: "Root policy result expired. Refresh the collection.",
+                retryable: false, ...errorBase
+              })
+            case "storage_full":
+              return yield* new StorageFull({
+                code: "storage_full503", message: "Root policy operation storage is full.",
+                retryable: true, ...errorBase
+              })
+            case "operation_conflict":
+              return yield* new OperationConflict({
+                code: "operation_conflict",
+                message: "operation id reused with a different root-policy command",
+                retryable: false,
+                ...errorBase
+              })
+            case "root_not_found":
+              return yield* new RootNotFound({
+                code: "not_found",
+                message: "root not found",
+                retryable: false,
+                ...errorBase
+              })
+            case "policy_revision_conflict":
+              return yield* new RevisionConflict({
+                code: "revision_conflict",
+                message: "stale root policy revision",
+                retryable: false,
+                details: { current_revision: result.currentPolicyRevision },
+                ...errorBase
+              })
+            case "committed":
+            case "replayed":
+              return {
+                instance_id: server.instanceId,
+                epoch: server.epoch,
+                request_id: context.request_id,
+                server_time: Date.now(),
+                data: rootView(result.root)
               }
           }
         })
