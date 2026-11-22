@@ -12,18 +12,20 @@ import {
 } from "effect/http"
 import type { ServeError } from "effect/http/HttpServerError"
 import { HttpApiBuilder } from "effect/http-api"
-import { LibraryApi, PrototypeApi, ReviewApi, ServerApi, TaskApi } from "@henshin/contracts"
+import { LibraryApi, OpenEventApi, PrototypeApi, ReviewApi, ServerApi, TaskApi } from "@henshin/contracts"
 import { AuthenticationLayer } from "./api/AuthenticationLayer"
 import { PrototypeHandlers } from "./api/handlers"
 import { RootHandlers } from "./api/root-preview"
 import { ReviewHandlers, TaskHandlers } from "./api/scan"
 import { LibraryHandlers } from "./api/library"
+import { OpenEventHandlers } from "./api/open-events"
 import { AuthConfig, ServerState } from "./identity"
 import { DatabaseWorker, type DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { NoteStore } from "./persistence/NoteStore"
 import { RootStore } from "./persistence/RootStore"
 import { ScanStore } from "./persistence/ScanStore"
 import { LibraryStore } from "./persistence/LibraryStore"
+import { OpenEventStore } from "./persistence/OpenEventStore"
 import { ServerOwnershipLayer, type ServerOwnershipError } from "./persistence/ServerOwnership"
 
 const MAX_BODY_BYTES = 1024 * 1024
@@ -196,7 +198,18 @@ export const makeAppLayer = (
     Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer, LibraryStore.layer))
   )
   const LibraryRoutesLayer = HttpApiBuilder.layer(LibraryApi).pipe(Layer.provide(LibraryHandlersLayer))
-  const AllRoutes = Layer.mergeAll(RoutesLayer, RootPreviewRoutesLayer, TaskRoutesLayer, ReviewRoutesLayer, LibraryRoutesLayer)
+  const OpenEventHandlersLayer = OpenEventHandlers.pipe(
+    Layer.provide(Layer.mergeAll(AuthenticationLayer, OpenEventStore.layer))
+  )
+  const OpenEventRoutesLayer = HttpApiBuilder.layer(OpenEventApi).pipe(Layer.provide(OpenEventHandlersLayer))
+  const AllRoutes = Layer.mergeAll(
+    RoutesLayer,
+    RootPreviewRoutesLayer,
+    TaskRoutesLayer,
+    ReviewRoutesLayer,
+    LibraryRoutesLayer,
+    OpenEventRoutesLayer
+  )
 
   const ReadyLayer = Layer.effectDiscard(
     Effect.gen(function*() {
@@ -225,6 +238,7 @@ export const makeAppLayer = (
     Layer.provide(ServerState.layer),
     Layer.provide(ScanStore.layer),
     Layer.provide(LibraryStore.layer),
+    Layer.provide(OpenEventStore.layer),
     Layer.provide(AuthConfig.layer(options.bearerToken)),
     Layer.provide(
       DatabaseWorker.layer(options.dbPath).pipe(Layer.provide(ServerOwnershipLayer(options.dbPath)))
