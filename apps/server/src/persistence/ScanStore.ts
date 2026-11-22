@@ -11,6 +11,7 @@ import {
 import { DatabaseWorker, DatabaseWorkerError } from "./DatabaseWorker"
 import {
   ScanStartOutcome,
+  NormalPublishOutcome,
   ScanTaskRow,
   StagedDiscoveryRow,
   type ScanTaskRow as ScanTaskRowType,
@@ -24,6 +25,7 @@ export interface StartManualScanInput {
   readonly rootId: string
   readonly expectedMappingRevision: string
   readonly expectedPolicyRevision: string
+  readonly holdNewDiscoveries: boolean
 }
 
 export type ScanStartResult =
@@ -43,6 +45,7 @@ export interface StageDiscoveryInput {
   readonly relativePath: string
   readonly kind: "archive" | "image-directory"
   readonly analysisStatus: "ready" | "error"
+  readonly holdState: "held" | "eligible"
   readonly manifest: ScanManifest | null
   readonly analysisError: ScanAnalysisError | null
 }
@@ -149,6 +152,13 @@ export class ScanStore extends Context.Service<
     readonly recordDiscovery: (taskId: string, coverage: typeof RootPreviewCoverage.Type, candidates: number) => Effect.Effect<void, DatabaseWorkerError>
     readonly markRunning: (taskId: string) => Effect.Effect<void, DatabaseWorkerError>
     readonly stage: (input: StageDiscoveryInput) => Effect.Effect<void, DatabaseWorkerError>
+    readonly publishNormal: (input: {
+      readonly taskId: string
+      readonly rootId: string
+      readonly mappingRevision: string
+      readonly expectedPolicyRevision: string
+      readonly observedCandidatePaths: ReadonlyArray<string>
+    }) => Effect.Effect<typeof NormalPublishOutcome.Type, DatabaseWorkerError>
     readonly finish: (input: FinishScanInput) => Effect.Effect<void, DatabaseWorkerError>
     readonly recoverInterrupted: () => Effect.Effect<void, DatabaseWorkerError>
   }
@@ -221,9 +231,25 @@ export class ScanStore extends Context.Service<
         relativePath: input.relativePath,
         kind: input.kind,
         analysisStatus: input.analysisStatus,
+        holdState: input.holdState,
         manifestJson: encoded(input.manifest),
         analysisErrorJson: encoded(input.analysisError)
       }).pipe(Effect.asVoid)
+
+      const publishNormal = (input: {
+        readonly taskId: string
+        readonly rootId: string
+        readonly mappingRevision: string
+        readonly expectedPolicyRevision: string
+        readonly observedCandidatePaths: ReadonlyArray<string>
+      }) => worker.call({ op: "publishNormalScan", ...input }).pipe(
+        Effect.flatMap((value) => {
+          const decoded = Schema.decodeUnknownOption(NormalPublishOutcome)(value)
+          return Option.isNone(decoded)
+            ? Effect.fail(new DatabaseWorkerError({ message: "invalid normal publish result" }))
+            : Effect.succeed(decoded.value)
+        })
+      )
 
       const finish = (input: FinishScanInput) => worker.call({
         op: "finishScan",
@@ -243,7 +269,7 @@ export class ScanStore extends Context.Service<
 
       const recoverInterrupted = () => worker.call({ op: "recoverScans" }).pipe(Effect.asVoid)
 
-      return ScanStore.of({ start, listTasks, readTask, listStaged, recordDiscovery, markRunning, stage, finish, recoverInterrupted })
+      return ScanStore.of({ start, listTasks, readTask, listStaged, recordDiscovery, markRunning, stage, publishNormal, finish, recoverInterrupted })
     })
   )
 }
