@@ -1,6 +1,12 @@
 import { Schema } from "effect"
 import { DraftFormId, NoteId, Revision, Text, Uuid } from "./ids"
-import { RootPolicyCommand, RootPreviewRequest, RootRegistrationRequest } from "./root"
+import {
+  RootPolicyCommand,
+  RootPreviewRequest,
+  RootRegistrationRequest,
+  RootScanCommand,
+  ScanTaskSubmission
+} from "./root"
 import type {
   CommandAttempt,
   CommandReconciliation,
@@ -121,12 +127,31 @@ export const RootListIpcRequest = Schema.Struct({})
 export type RootListIpcRequest = typeof RootListIpcRequest.Type
 export const RootSaveIpcRequest = RootRegistrationRequest
 export type RootSaveIpcRequest = typeof RootSaveIpcRequest.Type
-export const RootCommandIpcRequest = Schema.Struct({
-  root_id: Uuid,
-  operation_id: Uuid,
-  instance_id: Uuid,
-  epoch: Uuid,
-  expected_policy_revision: Revision,
-  command: RootPolicyCommand
-})
+export const RootCommandIpcRequest = Schema.Union([
+  Schema.Struct({
+    root_id: Uuid,
+    operation_id: Uuid,
+    instance_id: Uuid,
+    epoch: Uuid,
+    expected_policy_revision: Revision,
+    command: RootPolicyCommand
+  }),
+  Schema.Struct({
+    root_id: Uuid,
+    operation_id: Uuid,
+    instance_id: Uuid,
+    epoch: Uuid,
+    expected_mapping_revision: Revision,
+    expected_policy_revision: Revision,
+    command: RootScanCommand
+  })
+])
 export type RootCommandIpcRequest = typeof RootCommandIpcRequest.Type
+
+export const TaskListIpcRequest = Schema.Struct({})
+export type TaskListIpcRequest = typeof TaskListIpcRequest.Type
+
+export const ReviewCandidatesIpcRequest = Schema.Struct({})
+export type ReviewCandidatesIpcRequest = typeof ReviewCandidatesIpcRequest.Type
+
+export type HeldScanIpcResult = ScanTaskSubmission
