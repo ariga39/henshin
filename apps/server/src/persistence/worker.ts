@@ -73,6 +73,64 @@ const replacementObservation = (
   diagnostics: manifest.diagnostics
 })
 
+const comparableManifest = (value: string): {
+  readonly value: string
+  readonly beforeToken?: string
+  readonly afterToken?: string
+} | null => {
+  try {
+    const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
+    if (Option.isNone(decoded)) return null
+    const { observation_token: beforeToken, ...before } = decoded.value.before
+    const { observation_token: afterToken, ...after } = decoded.value.after
+    return {
+      value: JSON.stringify({ ...decoded.value, before, after }),
+      beforeToken,
+      afterToken
+    }
+  } catch {
+    return null
+  }
+}
+
+const observationsEquivalent = (left: string | undefined, right: string | undefined): boolean =>
+  left === undefined || left.length === 0 || right === undefined || right.length === 0 || left === right
+
+const manifestsEquivalent = (left: string, right: string): boolean => {
+  const comparableLeft = comparableManifest(left)
+  const comparableRight = comparableManifest(right)
+  return comparableLeft !== null && comparableRight !== null &&
+    comparableLeft.value === comparableRight.value &&
+    observationsEquivalent(comparableLeft.beforeToken, comparableRight.beforeToken) &&
+    observationsEquivalent(comparableLeft.afterToken, comparableRight.afterToken)
+}
+
+const confirmedReplacement = (
+  acceptedKind: unknown,
+  candidateKind: unknown,
+  analysisStatus: unknown,
+  acceptedManifest: unknown,
+  candidateManifest: unknown,
+  analysisError: unknown
+): number => {
+  if (acceptedKind !== candidateKind) return 1
+  if (analysisStatus === "ready" && typeof acceptedManifest === "string" && typeof candidateManifest === "string") {
+    return manifestsEquivalent(acceptedManifest, candidateManifest) ? 0 : 1
+  }
+  if (analysisStatus === "error" && typeof analysisError === "string") {
+    try {
+      const decoded = Schema.decodeUnknownOption(ScanAnalysisError)(JSON.parse(analysisError))
+      if (Option.isNone(decoded)) return 0
+      return ["location-unavailable", "missing-target", "root-changed", "root-unavailable"].includes(decoded.value.code)
+        ? 0
+        : 1
+    } catch {
+      return 0
+    }
+  }
+  return 0
+}
+
 const resolutionParentKey = (relativePath: string): string => {
   const separator = relativePath.lastIndexOf("/")
   const parentPath = separator < 0 ? "" : relativePath.slice(0, separator)
@@ -107,6 +165,11 @@ db.function(
   "henshin_resolution_parent_key",
   { deterministic: true },
   (relativePath) => typeof relativePath === "string" ? resolutionParentKey(relativePath) : null
+)
+db.function(
+  "henshin_confirmed_replacement",
+  { deterministic: true },
+  confirmedReplacement
 )
 
 db.exec("PRAGMA journal_mode = WAL")
@@ -391,6 +454,14 @@ if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("repl
           SELECT 1 FROM staged_discoveries s
           WHERE s.root_id = library_entries.root_id
             AND s.relative_path = library_entries.relative_path
+            AND henshin_confirmed_replacement(
+              library_entries.kind,
+              s.kind,
+              s.analysis_status,
+              library_entries.manifest_json,
+              s.manifest_json,
+              s.analysis_error_json
+            ) = 1
         )
     `).run(migratedAt)
     if (Number(migrated.changes) > 0) {
@@ -475,7 +546,7 @@ selectStagedById.setReadBigInts(true)
 const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
 const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path, state FROM library_entries WHERE root_id = ? AND relative_path = ? AND state IN ('accepted', 'replacement-pending')")
 const selectEntryResolution = db.prepare(
-  "SELECT entry_id, root_id, relative_path, kind, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
+  "SELECT entry_id, root_id, relative_path, kind, state, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
 )
 selectEntryResolution.setReadBigInts(true)
 const selectStagedForResolution = db.prepare(
@@ -1085,6 +1156,15 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
     } | undefined
     const sameAcceptedObservation = request.holdState === "held" && request.analysisStatus === "ready" && request.manifestJson !== null && accepted !== undefined &&
       accepted.state === "accepted" && accepted.kind === request.kind && accepted.manifest_json === request.manifestJson
+    const knownReplacement = accepted !== undefined && accepted.state === "accepted" &&
+      confirmedReplacement(
+        accepted.kind,
+        request.kind,
+        request.analysisStatus,
+        accepted.manifest_json,
+        request.manifestJson,
+        request.analysisErrorJson
+      ) === 1
     if (sameAcceptedObservation) {
       if (existing !== undefined) deleteStaged.run(existing.candidate_id)
     } else {
@@ -1103,10 +1183,7 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
         Date.now()
       )
       if (
-        accepted !== undefined &&
-        accepted.state === "accepted" &&
-        (request.analysisStatus === "error" || accepted.kind !== request.kind ||
-          (request.manifestJson !== null && !manifestsEquivalent(accepted.manifest_json, request.manifestJson)))
+        knownReplacement
       ) {
         if (Number(markEntryPending.run(Date.now(), accepted.entry_id).changes) === 1) bumpLibraryRevision.run()
       } else if (accepted?.state === "replacement-pending" && existing !== undefined) {
@@ -1315,38 +1392,6 @@ const titleForCandidate = (relativePath: string, kind: "archive" | "image-direct
   const name = basename(relativePath)
   if (kind === "archive") return name.replace(/\.(?:cbz|zip)$/iu, "")
   return name
-}
-
-const comparableManifest = (value: string): {
-  readonly value: string
-  readonly beforeToken?: string
-  readonly afterToken?: string
-} | null => {
-  try {
-    const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
-    if (Option.isNone(decoded)) return null
-    const { observation_token: beforeToken, ...before } = decoded.value.before
-    const { observation_token: afterToken, ...after } = decoded.value.after
-    return {
-      value: JSON.stringify({ ...decoded.value, before, after }),
-      beforeToken,
-      afterToken
-    }
-  } catch {
-    return null
-  }
-}
-
-const observationsEquivalent = (left: string | undefined, right: string | undefined): boolean =>
-  left === undefined || left.length === 0 || right === undefined || right.length === 0 || left === right
-
-const manifestsEquivalent = (left: string, right: string): boolean => {
-  const comparableLeft = comparableManifest(left)
-  const comparableRight = comparableManifest(right)
-  return comparableLeft !== null && comparableRight !== null &&
-    comparableLeft.value === comparableRight.value &&
-    observationsEquivalent(comparableLeft.beforeToken, comparableRight.beforeToken) &&
-    observationsEquivalent(comparableLeft.afterToken, comparableRight.afterToken)
 }
 
 const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalScan" }>): import("./worker-protocol").NormalPublishOutcome => {
@@ -1565,6 +1610,7 @@ const entryResolution = (
     root_id: string
     relative_path: string
     kind: "archive" | "image-directory"
+    state: "accepted" | "replacement-pending"
     decision_version: bigint
     location_revision: bigint
     content_version: bigint
@@ -1642,7 +1688,9 @@ const entryResolution = (
     analysis_error_json: string | null
   } | undefined
   let reason: "known-change" | "insufficient-evidence" | null = null
-  if (staged !== undefined) {
+  if (row.state === "replacement-pending") {
+    reason = "known-change"
+  } else if (staged !== undefined) {
     if (staged.analysis_status === "ready" && staged.manifest_json !== null) {
       reason = manifestsEquivalent(row.manifest_json, staged.manifest_json) ? null : "known-change"
     } else {

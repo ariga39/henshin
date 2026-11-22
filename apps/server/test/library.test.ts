@@ -369,12 +369,12 @@ describe("normal library scan", () => {
       })
     }))
 
-    const scan = async () => withServerClient(server, Effect.gen(function*() {
+    const scan = async (activeServer: RunningServer = server) => withServerClient(activeServer, Effect.gen(function*() {
       const client = yield* ServerHttpClient
       return yield* client.command({
         params: { id: root.data.root_id },
         payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          operation_id: randomUUID(), instance_id: activeServer.instanceId, epoch: activeServer.epoch,
           expected_mapping_revision: root.data.mapping_revision,
           expected_policy_revision: root.data.policy_revision,
           command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
@@ -434,7 +434,34 @@ describe("normal library scan", () => {
       first_page: { name: "001.jpg" }
     })
 
-    const staged = await withReviewClient(server, Effect.gen(function*() {
+    await server.stop()
+    const db = new DatabaseSync(server.dbPath)
+    const acceptedRow = db.prepare(
+      "SELECT manifest_json FROM library_entries WHERE entry_id = ?"
+    ).get(accepted.entry_id) as { manifest_json: string } | undefined
+    if (acceptedRow === undefined) throw new Error("expected accepted manifest")
+    db.prepare(
+      "UPDATE staged_discoveries SET analysis_status = 'ready', manifest_json = ?, analysis_error_json = NULL WHERE root_id = ? AND relative_path = ?"
+    ).run(acceptedRow.manifest_json, root.data.root_id, "book")
+    db.close()
+
+    const restarted = await startServer(server.dbPath)
+    servers.push(restarted)
+    const restoredResolution = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+    }))
+    expect(restoredResolution.data).toMatchObject({ status: "unresolved", reason: "known-change" })
+
+    await rm(path.join(fixture, "book", "001.jpg"))
+    const failedRescan = await scan(restarted)
+    if (!("task" in failedRescan.data)) throw new Error("expected failed replacement scan task")
+    expect((await waitForTerminal(restarted, failedRescan.data.task.task_id)).status).toBe("completed_with_errors")
+    const afterReadFailure = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+    }))
+    expect(afterReadFailure.data).toMatchObject({ status: "unresolved", reason: "known-change" })
+
+    const staged = await withReviewClient(restarted, Effect.gen(function*() {
       const client = yield* ReviewHttpClient
       return yield* client.candidates()
     }))
