@@ -126,7 +126,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
   }
 
   const discovered = yield* Effect.tryPromise({
-    try: () => discoverSourceRoot(current.value),
+    try: () => discoverSourceRoot(current.value, { exclusions: root.exclusions }),
     catch: () => undefined
   })
   if (!discovered.ok) {

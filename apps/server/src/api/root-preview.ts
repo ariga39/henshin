@@ -7,14 +7,15 @@ import {
   InvalidRequest,
   InternalError,
   OperationConflict,
+  RevisionConflict,
   RequestContext,
   RootVerificationFailed,
   RootPreviewUnavailable,
   RootNotFound,
-  RevisionConflict,
   ServerApi,
   type RootPreview,
-  type SavedRootPreview
+  type SavedRootPreview,
+  type RootScanCommandRequest
 } from "@henshin/contracts"
 import { HttpApiBuilder } from "effect/http-api"
 import {
@@ -35,6 +36,8 @@ const rootView = (root: {
   selectedPath: string
   canonicalPath: string
   mappingRevision: string
+  policyRevision: string
+  exclusions: ReadonlyArray<{ readonly path: string; readonly scope: "exact" | "subtree" }>
   libraryId: string
   state: "active"
 }) => ({
@@ -44,6 +47,8 @@ const rootView = (root: {
   selected_server_path: root.selectedPath,
   canonical_server_path: root.canonicalPath,
   mapping_revision: root.mappingRevision,
+  policy_revision: root.policyRevision,
+  exclusions: root.exclusions,
   state: root.state
 })
 
@@ -100,12 +105,15 @@ const enumerateSavedRootCandidates = (
   root: SourceRootObservation,
   rootId: string,
   instanceId: string,
-  epoch: string
+  epoch: string,
+  policyRevision: string,
+  exclusions: ReadonlyArray<{ readonly path: string; readonly scope: "exact" | "subtree" }>
 ): Effect.Effect<SavedRootPreview, unknown> =>
   Effect.tryPromise({
     try: async () => {
       const discovered = await discoverSourceRoot(root, {
-        limits: { maxCandidates: ROOT_PREVIEW_SAMPLE_LIMIT }
+        limits: { maxCandidates: ROOT_PREVIEW_SAMPLE_LIMIT },
+        exclusions
       })
       if (!discovered.ok) throw new Error(discovered.code)
       const value = discovered.value
@@ -115,6 +123,7 @@ const enumerateSavedRootCandidates = (
         selected_server_path: root.selectedPath,
         instance_id: instanceId,
         epoch,
+        policy_revision: policyRevision,
         candidates: value.candidates.map((candidate) => ({
           relative_path: candidate.relativePath,
           kind: candidate.kind,
@@ -227,7 +236,9 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
               current.value,
               saved.rootId,
               server.instanceId,
-              server.epoch
+              server.epoch,
+              saved.policyRevision,
+              saved.exclusions
             ).pipe(Effect.mapError(() => unavailable("saved server root is unavailable or inaccessible")))
 
             return {
@@ -364,7 +375,9 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
             Effect.mapError(() => verificationFailed(context.request_id, "selected directory could not be verified"))
           )
           if (!separation.ok) {
-            return yield* verificationFailed(context.request_id, "selected directory overlaps a server output location")
+            return yield* verificationFailed(context.request_id, separation.code === "location-overlap"
+              ? "selected directory overlaps a server output location"
+              : "selected directory could not be verified")
           }
 
           const registered = yield* roots.register({
@@ -419,10 +432,61 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
           if (payload.epoch !== server.epoch) {
             return yield* new EpochChanged({
               code: "epoch_changed",
-              message: "authority epoch changed; refresh the saved root",
+              message: "authority epoch changed; refresh the saved root or policy",
               retryable: true,
               ...errorBase
             })
+          }
+
+          if (payload.command.type === "exclude" || payload.command.type === "remove-exclusion") {
+            const result = yield* roots.commitPolicy({
+              rootId: params.id,
+              operationId: payload.operation_id,
+              epoch: payload.epoch,
+              expectedPolicyRevision: payload.expected_policy_revision,
+              command: payload.command
+            }).pipe(
+              Effect.mapError(() => new InternalError({
+                code: "internal_error",
+                message: "internal error",
+                retryable: false,
+                ...errorBase
+              }))
+            )
+
+            switch (result.kind) {
+              case "operation_conflict":
+                return yield* new OperationConflict({
+                  code: "operation_conflict",
+                  message: "operation id reused with a different root-policy command",
+                  retryable: false,
+                  ...errorBase
+                })
+              case "root_not_found":
+                return yield* new RootNotFound({
+                  code: "not_found",
+                  message: "root not found",
+                  retryable: false,
+                  ...errorBase
+                })
+              case "policy_revision_conflict":
+                return yield* new RevisionConflict({
+                  code: "revision_conflict",
+                  message: "stale root policy revision",
+                  retryable: false,
+                  details: { current_revision: result.currentPolicyRevision },
+                  ...errorBase
+                })
+              case "committed":
+              case "replayed":
+                return {
+                  instance_id: server.instanceId,
+                  epoch: server.epoch,
+                  request_id: context.request_id,
+                  server_time: Date.now(),
+                  data: rootView(result.root)
+                }
+            }
           }
 
           const listed = yield* roots.list().pipe(
@@ -443,12 +507,14 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
             })
           }
 
+          const scanPayload = payload as RootScanCommandRequest
           const started = yield* scans.start({
             taskId: crypto.randomUUID(),
-            operationId: payload.operation_id,
-            epoch: payload.epoch,
+            operationId: scanPayload.operation_id,
+            epoch: scanPayload.epoch,
             rootId: root.rootId,
-            expectedMappingRevision: payload.expected_mapping_revision
+            expectedMappingRevision: scanPayload.expected_mapping_revision,
+            expectedPolicyRevision: scanPayload.expected_policy_revision
           }).pipe(
             Effect.mapError(() => new InternalError({
               code: "internal_error",
@@ -479,6 +545,14 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
                 message: "saved root changed; refresh it before scanning",
                 retryable: false,
                 details: { current_revision: started.currentMappingRevision },
+                ...errorBase
+              })
+            case "policy_revision_conflict":
+              return yield* new RevisionConflict({
+                code: "revision_conflict",
+                message: "saved root policy changed; refresh it before scanning",
+                retryable: false,
+                details: { current_revision: started.currentPolicyRevision },
                 ...errorBase
               })
             case "created":

@@ -70,8 +70,11 @@ describe("durable held manual scan", () => {
     const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-held-scan-"))
     fixturePaths.add(fixture)
     const healthy = path.join(fixture, "healthy-book")
+    const excluded = path.join(fixture, "excluded-sibling")
     await mkdir(healthy)
+    await mkdir(excluded)
     await writeFile(path.join(healthy, "001.jpg"), "source page")
+    await writeFile(path.join(excluded, "001.jpg"), "excluded page")
     await writeFile(path.join(fixture, "broken.cbz"), "not a zip archive")
 
     const preview = await withServerClient(server, Effect.gen(function*() {
@@ -94,6 +97,23 @@ describe("durable held manual scan", () => {
       })
     }))
 
+    const policy = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: preview.instance_id,
+          epoch: preview.epoch,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "exclude", exclusion: { path: "excluded-sibling", scope: "subtree" } }
+        }
+      })
+    }))
+    if ("task" in policy.data) throw new Error("expected persisted root policy")
+    const policyRoot = policy.data
+    expect(policyRoot.exclusions).toEqual([{ path: "excluded-sibling", scope: "subtree" }])
+
     const submitted = await withServerClient(server, Effect.gen(function*() {
       const client = yield* ServerHttpClient
       return yield* client.command({
@@ -103,11 +123,14 @@ describe("durable held manual scan", () => {
           instance_id: preview.instance_id,
           epoch: preview.epoch,
           expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: policyRoot.policy_revision,
           command: { type: "start-scan", mode: "manual", hold_new_discoveries: true }
         }
       })
     }))
-    const terminal = await waitForTerminal(server, submitted.data.task.task_id)
+    if (!("task" in submitted.data)) throw new Error("expected scan task submission")
+    const submittedTask = submitted.data.task
+    const terminal = await waitForTerminal(server, submittedTask.task_id)
     expect(terminal.status).toBe("completed_with_errors")
     expect(terminal.hold_new_discoveries).toBe(true)
     expect(terminal.analysis_error_count).toBe(1)
@@ -115,17 +138,16 @@ describe("durable held manual scan", () => {
 
     const staged = await listCandidates(server)
     expect(staged).toHaveLength(2)
-    expect(staged.map((candidate) => [candidate.relative_path, candidate.hold_state])).toEqual([
-      ["broken.cbz", "held"],
-      ["healthy-book", "held"]
-    ])
+    expect(new Set(staged.map((candidate) => candidate.relative_path))).toEqual(new Set(["broken.cbz", "healthy-book"]))
+    expect(staged.every((candidate) => candidate.hold_state === "held")).toBe(true)
+    expect(staged.some((candidate) => candidate.relative_path === "excluded-sibling")).toBe(false)
     expect(staged.find((candidate) => candidate.relative_path === "healthy-book")?.analysis_status).toBe("ready")
     expect(staged.find((candidate) => candidate.relative_path === "broken.cbz")?.analysis_error?.code).toBe("structural-corruption")
 
     await server.stop()
     const restarted = await startServer(server.dbPath)
     servers.push(restarted)
-    const afterRestart = await waitForTerminal(restarted, submitted.data.task.task_id)
+    const afterRestart = await waitForTerminal(restarted, submittedTask.task_id)
     expect(afterRestart.status).toBe("completed_with_errors")
     expect((await listCandidates(restarted)).every((candidate) => candidate.hold_state === "held")).toBe(true)
   })

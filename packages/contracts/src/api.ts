@@ -12,9 +12,9 @@ import {
   OperationExpired,
   OperationConflict,
   RevisionConflict,
+  RootNotFound,
   RootVerificationFailed,
   RootPreviewUnavailable,
-  RootNotFound,
   TaskNotFound,
   StorageFull
 } from "./errors"
@@ -117,7 +117,7 @@ export const ServerApi = HttpApi.make("henshin-server").add(
       HttpApiEndpoint.post("command", "/roots/:id/commands", {
         params: { id: Uuid },
         payload: RootCommandRequest,
-        success: SuccessEnvelope(ScanTaskSubmission),
+        success: SuccessEnvelope(Schema.Union([ServerRoot, ScanTaskSubmission])),
         error: [
           AuthenticationRequired,
           RootNotFound,

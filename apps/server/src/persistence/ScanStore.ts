@@ -23,6 +23,7 @@ export interface StartManualScanInput {
   readonly epoch: string
   readonly rootId: string
   readonly expectedMappingRevision: string
+  readonly expectedPolicyRevision: string
 }
 
 export type ScanStartResult =
@@ -32,6 +33,7 @@ export type ScanStartResult =
   | { readonly kind: "operation_conflict" }
   | { readonly kind: "root_not_found" }
   | { readonly kind: "mapping_revision_conflict"; readonly currentMappingRevision: string }
+  | { readonly kind: "policy_revision_conflict"; readonly currentPolicyRevision: string }
 
 export interface StageDiscoveryInput {
   readonly candidateId: string
