@@ -110,6 +110,23 @@ export const loadRootWorkspace = Effect.gen(function*() {
   yield* loadRoots
   yield* loadScanResults
   if (viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
+
+export const refreshRootPolicy = Effect.gen(function*() {
+  const initialState = viewStore.getState()
+  const request = initialState.root_preview_request
+  const expectedGeneration = request === null
+    ? initialState.root_preview_generation
+    : initialState.root_preview_generation + 1
+  yield* Effect.sync(() => viewStore.set({ root_policy_status: "loading", root_policy_error: null }))
+  if (request !== null) yield* previewRoot(request)
+  yield* loadRoots
+  const current = viewStore.getState()
+  if (
+    current.root_preview_generation === expectedGeneration &&
+    (current.root_policy_status === "loading" || current.root_policy_status === "error")
+  ) {
+    yield* Effect.sync(() => viewStore.set({ root_policy_status: "idle", root_policy_error: null }))
+  }
 })
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
@@ -119,52 +136,78 @@ const updateRootExclusion = (input: {
   readonly rootId: string
   readonly path: string
   readonly scope: "exact" | "subtree"
+  readonly expectedPolicyRevision: string
 }, type: "exclude" | "remove-exclusion") =>
   Effect.gen(function*() {
     const client = yield* RootPreviewClient
-    const preview = viewStore.getState().root_preview
-    if (!isSavedDiscovery(preview) || preview.root_id !== input.rootId) return
+    const initialState = viewStore.getState()
+    const previewGeneration = initialState.root_preview_generation
+    const currentPreview = initialState.root_preview
+    let preview = isSavedDiscovery(currentPreview) && currentPreview.root_id === input.rootId
+      ? currentPreview
+      : null
 
     yield* Effect.sync(() => viewStore.set({ root_policy_status: "loading", root_policy_error: null }))
+    if (preview === null) {
+      const fresh = yield* client.preview({ kind: "saved-root", root_id: input.rootId })
+      if (!fresh.ok || !isSavedDiscovery(fresh.data) || fresh.data.root_id !== input.rootId) {
+        if (viewStore.getState().root_preview_generation === previewGeneration) {
+          yield* Effect.sync(() => viewStore.set({
+            root_policy_status: "error",
+            root_policy_error: fresh.ok ? "saved root preview was not available" : fresh.error.message
+          }))
+        }
+        return
+      }
+      preview = fresh.data
+    }
+
     const result = yield* client.command({
       root_id: preview.root_id,
       operation_id: newOperationId(),
       instance_id: preview.instance_id,
       epoch: preview.epoch,
-      expected_policy_revision: preview.policy_revision,
+      expected_policy_revision: input.expectedPolicyRevision,
       command: { type, exclusion: { path: input.path, scope: input.scope } }
     })
     if (!result.ok) {
-      yield* Effect.sync(() => viewStore.set({ root_policy_status: "error", root_policy_error: result.error.message }))
+      if (viewStore.getState().root_preview_generation === previewGeneration) {
+        yield* Effect.sync(() => viewStore.set({ root_policy_status: "error", root_policy_error: result.error.message }))
+      }
       return
     }
     if ("task" in result.data) {
       yield* Effect.sync(() => viewStore.set({ root_policy_status: "error", root_policy_error: "server returned a scan task for a policy change" }))
       return
     }
-    const updatedRoot = result.data
 
     yield* Effect.sync(() => {
       const roots = viewStore.getState().root_saved_roots
+      const current = viewStore.getState()
       viewStore.set({
-        root_saved_roots: roots.map((root) => root.root_id === updatedRoot.root_id ? updatedRoot : root),
-        root_policy_status: "idle",
-        root_policy_error: null
+        root_saved_roots: roots.map((root) => root.root_id === result.data.root_id ? result.data : root),
+        ...(current.root_preview_generation === previewGeneration
+          ? { root_policy_status: "idle" as const, root_policy_error: null }
+          : {})
       })
     })
-    yield* previewRoot({ kind: "saved-root", root_id: updatedRoot.root_id })
+    if (viewStore.getState().root_preview_generation === previewGeneration) {
+      yield* previewRoot({ kind: "saved-root", root_id: result.data.root_id })
+    }
   })
 
 export const excludeRootPath = (input: {
   readonly rootId: string
   readonly path: string
   readonly scope: "exact" | "subtree"
+  readonly expectedPolicyRevision: string
 }) => updateRootExclusion(input, "exclude")
 
 export const removeRootExclusion = (input: {
   readonly rootId: string
   readonly path: string
   readonly scope: "exact" | "subtree"
+  readonly expectedPolicyRevision: string
 }) => updateRootExclusion(input, "remove-exclusion")
 
 export const startHeldScan = (rootId: string) =>
@@ -261,9 +304,16 @@ export const saveRoot = Effect.gen(function*() {
       })
     })
   } else {
-    yield* Effect.sync(() =>
-      viewStore.set({ root_save_status: "error", root_save_error: result.error.message })
-    )
+    const listed = yield* client.list()
+    const existing = listed.ok
+      ? listed.data.find((root) => root.canonical_server_path === preview.preview_identity.canonical_server_path)
+      : undefined
+    viewStore.set({
+      ...(listed.ok ? { root_saved_roots: listed.data, root_roots_status: "ready", root_roots_error: null } : {}),
+      root_save_status: existing?.label === confirmedLabel ? "ready" : "error",
+      root_save_error: existing === undefined ? result.error.message
+        : existing.label === confirmedLabel ? null : `Directory is already saved as ${existing.label}.`
+    })
   }
 })
 

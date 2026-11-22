@@ -2,7 +2,7 @@ import { Effect, Layer } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import type { RootCommandIpcRequest, RootPreview, RootPreviewRequest, RootPreviewResult, RootRegistrationRequest, ServerRoot, SavedRootPreview } from "@henshin/contracts"
 import { RootPreviewClient, type Result } from "../../desktop/src/renderer/client"
-import { excludeRootPath, previewRoot, removeRootExclusion, saveRoot } from "../../desktop/src/renderer/workflows"
+import { excludeRootPath, previewRoot, refreshRootPolicy, removeRootExclusion, saveRoot } from "../../desktop/src/renderer/workflows"
 import { viewStore } from "../../desktop/src/renderer/store"
 
 const instanceId = "11111111-1111-4111-8111-111111111111"
@@ -182,6 +182,35 @@ describe("root confirmation workflow", () => {
     expect(viewStore.getState().root_saved_roots).toEqual([savedRoot])
   })
 
+  it.each(["Books", "New label"])("recovers the stored root after a lost reply and fresh confirmation as %s", async (label) => {
+    let listCalls = 0
+    let stored: ServerRoot | undefined
+    const offline = { ok: false, error: { code: "transport", message: "Reply lost", retryable: true } } as const
+    const client = RootPreviewClient.of({
+      preview: () => Effect.succeed({ ok: true, data: preview }),
+      list: () => Effect.succeed(++listCalls === 1 || !stored ? offline : { ok: true, data: [stored] }),
+      save: () => {
+        if (stored) return Effect.succeed({ ok: false, error: { code: "overlap", message: "Root overlaps", retryable: false } })
+        stored = savedRoot
+        return Effect.succeed(offline)
+      },
+      command: () => Effect.succeed({ ok: true, data: savedRoot })
+    })
+    const layer = Layer.succeed(RootPreviewClient, client)
+    const refresh = () => Effect.runPromise(Effect.provide(previewRoot({ path: preview.selected_server_path }), layer))
+    const save = () => Effect.runPromise(Effect.provide(saveRoot, layer))
+    await refresh()
+    viewStore.set({ root_label: savedRoot.label })
+    await save()
+    expect(viewStore.getState().root_save_status).toBe("error")
+    await refresh()
+    viewStore.set({ root_label: label })
+    await save()
+    expect(viewStore.getState().root_saved_roots).toEqual([savedRoot])
+    expect(viewStore.getState().root_save_status).toBe(label === savedRoot.label ? "ready" : "error")
+    if (label !== savedRoot.label) expect(viewStore.getState().root_save_error).toContain("already saved as Books")
+  })
+
   it("keeps an in-flight completion attached to the confirmed path", async () => {
     const pending = deferred<Result<ServerRoot>>()
     let request: RootRegistrationRequest | undefined
@@ -252,7 +281,7 @@ describe("root confirmation workflow", () => {
     })
 
     await Effect.runPromise(Effect.provide(
-      excludeRootPath({ rootId: savedRoot.root_id, path: "book.cbz", scope: "exact" }),
+      excludeRootPath({ rootId: savedRoot.root_id, path: "book.cbz", scope: "exact", expectedPolicyRevision: "0" }),
       Layer.succeed(RootPreviewClient, client)
     ))
 
@@ -297,7 +326,7 @@ describe("root confirmation workflow", () => {
     })
 
     await Effect.runPromise(Effect.provide(
-      removeRootExclusion({ rootId: savedRoot.root_id, path: "book.cbz", scope: "exact" }),
+      removeRootExclusion({ rootId: savedRoot.root_id, path: "book.cbz", scope: "exact", expectedPolicyRevision: "1" }),
       Layer.succeed(RootPreviewClient, client)
     ))
 
@@ -309,6 +338,159 @@ describe("root confirmation workflow", () => {
       root_saved_roots: [savedRoot],
       root_preview: refreshed,
       root_policy_status: "idle"
+    })
+  })
+
+  it("fetches the clicked root context before removing a listed exclusion", async () => {
+    const excludedRoot: ServerRoot = {
+      ...savedRoot,
+      policy_revision: "6",
+      exclusions: [{ path: "book.cbz", scope: "exact" }]
+    }
+    const otherRoot = savedPreview("root-b")
+    const fresh = { ...savedDiscovery, policy_revision: "7" }
+    const previewRequests: RootPreviewRequest[] = []
+    let commandInput: RootCommandIpcRequest | undefined
+    let previewCount = 0
+    const client = RootPreviewClient.of({
+      preview: (input) => {
+        previewRequests.push(input)
+        previewCount += 1
+        return Effect.succeed({ ok: true, data: fresh })
+      },
+      list: () => Effect.succeed({ ok: true, data: [excludedRoot] }),
+      save: () => Effect.succeed({ ok: true, data: savedRoot }),
+      command: (input) => {
+        commandInput = input
+        return Effect.succeed({
+          ok: false,
+          error: { code: "revision_conflict", message: "stale root policy revision", retryable: false, current_revision: "7" }
+        })
+      }
+    })
+    viewStore.set({
+      root_preview_status: "ready",
+      root_preview: otherRoot,
+      root_saved_roots: [excludedRoot]
+    })
+
+    await Effect.runPromise(Effect.provide(
+      removeRootExclusion({ rootId: savedRoot.root_id, path: "book.cbz", scope: "exact", expectedPolicyRevision: excludedRoot.policy_revision }),
+      Layer.succeed(RootPreviewClient, client)
+    ))
+
+    expect(previewRequests).toEqual([
+      { kind: "saved-root", root_id: savedRoot.root_id }
+    ])
+    expect(commandInput).toMatchObject({
+      root_id: savedRoot.root_id,
+      instance_id: fresh.instance_id,
+      epoch: fresh.epoch,
+      expected_policy_revision: "6",
+      command: { type: "remove-exclusion", exclusion: { path: "book.cbz", scope: "exact" } }
+    })
+    expect(viewStore.getState()).toMatchObject({
+      root_preview: otherRoot,
+      root_saved_roots: [excludedRoot],
+      root_policy_status: "error"
+    })
+  })
+
+  it("refreshes the roots list after a policy conflict", async () => {
+    const excludedRoot: ServerRoot = {
+      ...savedRoot,
+      policy_revision: "1",
+      exclusions: [{ path: "book.cbz", scope: "exact" }]
+    }
+    const updatedRoot = { ...savedRoot, policy_revision: "2", exclusions: [] }
+    const refreshed = { ...savedDiscovery, policy_revision: "2" }
+    let listCalls = 0
+    let previewCalls = 0
+    const client = RootPreviewClient.of({
+      preview: () => {
+        previewCalls += 1
+        return Effect.succeed({ ok: true, data: refreshed })
+      },
+      list: () => {
+        listCalls += 1
+        return Effect.succeed({ ok: true, data: [updatedRoot] })
+      },
+      save: () => Effect.succeed({ ok: true, data: savedRoot }),
+      command: () => Effect.succeed({
+        ok: false,
+        error: { code: "revision_conflict", message: "stale root policy revision", retryable: false, current_revision: "2" }
+      })
+    })
+    viewStore.set({
+      root_preview_status: "idle",
+      root_preview: null,
+      root_preview_request: null,
+      root_saved_roots: [excludedRoot]
+    })
+
+    await Effect.runPromise(Effect.provide(
+      removeRootExclusion({ rootId: savedRoot.root_id, path: "book.cbz", scope: "exact", expectedPolicyRevision: "1" }),
+      Layer.succeed(RootPreviewClient, client)
+    ))
+    expect(viewStore.getState().root_policy_status).toBe("error")
+
+    await Effect.runPromise(Effect.provide(refreshRootPolicy, Layer.succeed(RootPreviewClient, client)))
+
+    expect(previewCalls).toBe(1)
+    expect(listCalls).toBe(1)
+    expect(viewStore.getState()).toMatchObject({
+      root_preview: null,
+      root_saved_roots: [updatedRoot],
+      root_policy_status: "idle"
+    })
+  })
+
+  it("does not replace a newer selected preview when policy completion is delayed", async () => {
+    const excludedRoot: ServerRoot = {
+      ...savedRoot,
+      policy_revision: "1",
+      exclusions: [{ path: "book.cbz", scope: "exact" }]
+    }
+    const pending = deferred<Result<ServerRoot>>()
+    const commandStarted = deferred<void>()
+    const rootB = { ...savedRoot, root_id: "55555555-5555-4555-8555-555555555555", selected_server_path: "/collections/b", canonical_server_path: "/collections/b" }
+    const previewRequests: RootPreviewRequest[] = []
+    const client = RootPreviewClient.of({
+      preview: (input) => {
+        previewRequests.push(input)
+        return Effect.succeed({ ok: true, data: savedPreview(rootB.root_id) })
+      },
+      list: () => Effect.succeed({ ok: true, data: [savedRoot, rootB] }),
+      save: () => Effect.succeed({ ok: true, data: savedRoot }),
+      command: () => {
+        commandStarted.resolve()
+        return Effect.promise(() => pending.promise)
+      }
+    })
+    viewStore.set({
+      root_preview_status: "ready",
+      root_preview: { ...savedDiscovery, policy_revision: "1" },
+      root_saved_roots: [excludedRoot, rootB]
+    })
+
+    const removing = Effect.runPromise(Effect.provide(
+      removeRootExclusion({ rootId: savedRoot.root_id, path: "book.cbz", scope: "exact", expectedPolicyRevision: "1" }),
+      Layer.succeed(RootPreviewClient, client)
+    ))
+    await commandStarted.promise
+    const selectingB = Effect.runPromise(Effect.provide(
+      previewRoot({ kind: "saved-root", root_id: rootB.root_id }),
+      Layer.succeed(RootPreviewClient, client)
+    ))
+    await selectingB
+    pending.resolve({ ok: true, data: savedRoot })
+    await removing
+
+    expect(previewRequests).toEqual([{ kind: "saved-root", root_id: rootB.root_id }])
+    expect(viewStore.getState()).toMatchObject({
+      root_preview: savedPreview(rootB.root_id),
+      root_preview_request: { kind: "saved-root", root_id: rootB.root_id },
+      root_saved_roots: [savedRoot, rootB]
     })
   })
 

@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react"
 import type { RootPreviewResult } from "@henshin/contracts"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { canSaveRoot, excludeRootPath, previewRoot, removeRootExclusion, saveRoot } from "./workflows"
+import { canSaveRoot, excludeRootPath, previewRoot, refreshRootPolicy, removeRootExclusion, saveRoot } from "./workflows"
 import { HeldScanControls, HeldScanReview } from "./HeldScanReview"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
@@ -124,7 +124,8 @@ export const RootPreviewScreen = () => {
                 onClick={() => void runtime.runPromise(excludeRootPath({
                   rootId: state.root_preview && "kind" in state.root_preview ? state.root_preview.root_id : "",
                   path: candidate.relative_path,
-                  scope: candidate.kind === "archive" ? "exact" : "subtree"
+                  scope: candidate.kind === "archive" ? "exact" : "subtree",
+                  expectedPolicyRevision: isSavedDiscovery(state.root_preview) ? state.root_preview.policy_revision : ""
                 }))}
               >
                 Exclude {candidate.kind === "archive" ? "file" : "subtree"}
@@ -141,12 +142,12 @@ export const RootPreviewScreen = () => {
           {state.root_preview.unassigned_loose_image_count} unassigned loose images; {state.root_preview.unsupported_loose_image_count} unsupported loose images; {state.root_preview.coverage.unsupported_name_count} unsupported names; {state.root_preview.coverage.unsupported_directory_count} unsupported directories; {state.root_preview.coverage.excluded_link_count} linked locations excluded; {state.root_preview.coverage.entries_observed} entries observed.
         </p>
       )}
-      {state.root_policy_status === "error" && isSavedDiscovery(state.root_preview) && (
+      {state.root_policy_status === "error" && (
         <button
           data-testid="root-policy-refresh"
           disabled={changingPolicy}
           onClick={() => {
-            if (retryRequest !== null) void runtime.runPromise(previewRoot(retryRequest))
+            void runtime.runPromise(refreshRootPolicy)
           }}
         >
           Refresh preview
@@ -173,7 +174,8 @@ export const RootPreviewScreen = () => {
                       onClick={() => void runtime.runPromise(removeRootExclusion({
                         rootId: root.root_id,
                         path: exclusion.path,
-                        scope: exclusion.scope
+                        scope: exclusion.scope,
+                        expectedPolicyRevision: root.policy_revision
                       }))}
                     >
                       Remove exclusion

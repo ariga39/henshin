@@ -196,6 +196,8 @@ export const makeAppLayer = (
     Effect.gen(function*() {
       const httpServer = yield* HttpServer.HttpServer
       const state = yield* ServerState
+      const scans = yield* ScanStore
+      yield* scans.recoverInterrupted()
       const address = httpServer.address
       const port =
         address._tag === "InetAddressV4" || address._tag === "InetAddressV6" ? address.port : 0
