@@ -398,14 +398,21 @@ const commitRootPolicy = (
       return { kind: "policy_revision_conflict", currentPolicyRevision: current.policyRevision }
     }
 
-    const exclusions = current.exclusions.some(
+    const hasExclusion = current.exclusions.some(
       (exclusion) =>
         exclusion.path === request.command.exclusion.path && exclusion.scope === request.command.exclusion.scope
     )
-      ? current.exclusions
-      : [...current.exclusions, request.command.exclusion]
+    const exclusions = request.command.type === "exclude"
+      ? hasExclusion ? current.exclusions : [...current.exclusions, request.command.exclusion]
+      : hasExclusion
+        ? current.exclusions.filter(
+            (exclusion) =>
+              exclusion.path !== request.command.exclusion.path || exclusion.scope !== request.command.exclusion.scope
+          )
+        : current.exclusions
+    const changed = exclusions.length !== current.exclusions.length
     const nextRevision =
-      exclusions === current.exclusions
+      !changed
         ? current.policyRevision
         : (BigInt(current.policyRevision) + 1n).toString()
     const root: ServerRootRow = { ...current, policyRevision: nextRevision, exclusions }
