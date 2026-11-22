@@ -157,6 +157,12 @@ export type LibraryEntryPageRow = typeof LibraryEntryPageRow.Type
 
 export const NormalPublishOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("published") }),
+  Schema.Struct({
+    kind: Schema.Literal("allocation_deferred"),
+    missingPaths: Schema.Array(Schema.String),
+    changedPaths: Schema.Array(Schema.String),
+    excludedPaths: Schema.Array(Schema.String)
+  }),
   Schema.Struct({ kind: Schema.Literal("root_not_found") }),
   Schema.Struct({ kind: Schema.Literal("mapping_revision_conflict") }),
   Schema.Struct({ kind: Schema.Literal("policy_revision_conflict") })

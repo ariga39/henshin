@@ -145,6 +145,8 @@ export interface SourceObservation {
   readonly bytes: number
   readonly mtimeMs: number
   readonly entryCount: number
+  /** Includes direct child stats for directories, not only the parent stat. */
+  readonly observationToken: string
 }
 
 export interface SourceManifest {
@@ -493,6 +495,24 @@ const sameStats = (left: Stats, right: Stats): boolean =>
   sameNumber(left.ino, right.ino) &&
   sameNumber(left.dev, right.dev)
 
+const statToken = (stats: Stats) => ({
+  size: stats.size,
+  mtimeMs: stats.mtimeMs,
+  ctimeMs: stats.ctimeMs,
+  ino: stats.ino,
+  dev: stats.dev
+})
+
+const directObservationToken = (
+  root: Stats,
+  entries: ReadonlyMap<string, DirectObservedEntry>
+): string => JSON.stringify({
+  root: statToken(root),
+  entries: Array.from(entries.entries())
+    .sort(([left], [right]) => compareUtf8(utf8Bytes(left), utf8Bytes(right)))
+    .map(([name, entry]) => ({ name, kind: entry.kind, stats: statToken(entry.stats) }))
+})
+
 const safeStatNumber = (value: number | bigint, limit: number): number => {
   const number = typeof value === "bigint" ? Number(value) : value
   if (!Number.isSafeInteger(number) || number < 0 || number > limit) throw new LimitExceeded()
@@ -700,8 +720,14 @@ const analyzeArchive = async (
       sourceKind: "archive",
       pages,
       diagnostics: diagnosticsOf(diagnostics),
-      before: { kind: "archive", bytes: sourceBytes, mtimeMs: sourceStats.mtimeMs, entryCount },
-      after: { kind: "archive", bytes: sourceBytes, mtimeMs: afterStats.mtimeMs, entryCount }
+      before: {
+        kind: "archive", bytes: sourceBytes, mtimeMs: sourceStats.mtimeMs, entryCount,
+        observationToken: JSON.stringify(statToken(sourceStats))
+      },
+      after: {
+        kind: "archive", bytes: sourceBytes, mtimeMs: afterStats.mtimeMs, entryCount,
+        observationToken: JSON.stringify(statToken(afterStats))
+      }
     }
   } catch (error) {
     if (
@@ -841,8 +867,14 @@ const analyzeDirectory = async (
     sourceKind: "directory",
     pages,
     diagnostics: first.diagnostics,
-    before: { kind: "directory", bytes: 0, mtimeMs: first.root.mtimeMs, entryCount: first.entries.size },
-    after: { kind: "directory", bytes: 0, mtimeMs: second.root.mtimeMs, entryCount: second.entries.size }
+    before: {
+      kind: "directory", bytes: 0, mtimeMs: first.root.mtimeMs, entryCount: first.entries.size,
+      observationToken: directObservationToken(first.root, first.entries)
+    },
+    after: {
+      kind: "directory", bytes: 0, mtimeMs: second.root.mtimeMs, entryCount: second.entries.size,
+      observationToken: directObservationToken(second.root, second.entries)
+    }
   }
 }
 
