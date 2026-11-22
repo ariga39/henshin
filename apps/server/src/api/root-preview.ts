@@ -7,6 +7,9 @@ import {
   InvalidRequest,
   InternalError,
   OperationConflict,
+  OperationExpired,
+  StorageFull,
+  MAX_ROOT_EXCLUSIONS,
   RevisionConflict,
   RequestContext,
   RootVerificationFailed,
@@ -102,15 +105,12 @@ const enumerateSavedRootCandidates = (
   root: SourceRootObservation,
   rootId: string,
   instanceId: string,
-  epoch: string,
-  policyRevision: string,
-  exclusions: ReadonlyArray<{ readonly path: string; readonly scope: "exact" | "subtree" }>
+  epoch: string
 ): Effect.Effect<SavedRootPreview, unknown> =>
   Effect.tryPromise({
     try: async () => {
       const discovered = await discoverSourceRoot(root, {
-        limits: { maxCandidates: ROOT_PREVIEW_SAMPLE_LIMIT },
-        exclusions
+        limits: { maxCandidates: ROOT_PREVIEW_SAMPLE_LIMIT }
       })
       if (!discovered.ok) throw new Error(discovered.code)
       const value = discovered.value
@@ -120,7 +120,6 @@ const enumerateSavedRootCandidates = (
         selected_server_path: root.selectedPath,
         instance_id: instanceId,
         epoch,
-        policy_revision: policyRevision,
         candidates: value.candidates.map((candidate) => ({
           relative_path: candidate.relativePath,
           kind: candidate.kind,
@@ -232,9 +231,7 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
               current.value,
               saved.rootId,
               server.instanceId,
-              server.epoch,
-              saved.policyRevision,
-              saved.exclusions
+              server.epoch
             ).pipe(Effect.mapError(() => unavailable("saved server root is unavailable or inaccessible")))
 
             return {
@@ -450,6 +447,21 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
           )
 
           switch (result.kind) {
+            case "exclusion_limit":
+              return yield* new InvalidRequest({
+                code: "invalid_request", message: `A collection can have up to ${MAX_ROOT_EXCLUSIONS} exclusions.`,
+                retryable: false, ...errorBase
+              })
+            case "operation_expired":
+              return yield* new OperationExpired({
+                code: "operation_expired", message: "Root policy result expired. Refresh the collection.",
+                retryable: false, ...errorBase
+              })
+            case "storage_full":
+              return yield* new StorageFull({
+                code: "storage_full503", message: "Root policy operation storage is full.",
+                retryable: true, ...errorBase
+              })
             case "operation_conflict":
               return yield* new OperationConflict({
                 code: "operation_conflict",

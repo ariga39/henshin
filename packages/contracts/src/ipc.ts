@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 import { DraftFormId, NoteId, Revision, Text, Uuid } from "./ids"
-import { RootPolicyCommand, RootPreviewRequest, RootRegistrationRequest } from "./root"
+import { RootPreviewRequest, RootRegistrationRequest } from "./root"
 import type {
   CommandAttempt,
   CommandReconciliation,
@@ -121,12 +121,3 @@ export const RootListIpcRequest = Schema.Struct({})
 export type RootListIpcRequest = typeof RootListIpcRequest.Type
 export const RootSaveIpcRequest = RootRegistrationRequest
 export type RootSaveIpcRequest = typeof RootSaveIpcRequest.Type
-export const RootCommandIpcRequest = Schema.Struct({
-  root_id: Uuid,
-  operation_id: Uuid,
-  instance_id: Uuid,
-  epoch: Uuid,
-  expected_policy_revision: Revision,
-  command: RootPolicyCommand
-})
-export type RootCommandIpcRequest = typeof RootCommandIpcRequest.Type

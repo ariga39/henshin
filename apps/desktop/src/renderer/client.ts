@@ -10,7 +10,6 @@ import type {
   SavedDraft,
   RootPreviewResult,
   RootPreviewRequest,
-  RootCommandIpcRequest,
   RootRegistrationRequest,
   ServerRoot,
   ServerRootList,
@@ -75,7 +74,6 @@ export interface RootPreviewBridge {
   preview(input: RootPreviewRequest): Promise<Result<RootPreviewResult>>
   list(): Promise<Result<ServerRootList>>
   save(input: RootRegistrationRequest): Promise<Result<ServerRoot>>
-  command(input: RootCommandIpcRequest): Promise<Result<ServerRoot>>
 }
 
 /**
@@ -142,7 +140,6 @@ export class RootPreviewClient extends Context.Service<
     readonly preview: (input: RootPreviewRequest) => Effect.Effect<Result<RootPreviewResult>>
     readonly list: () => Effect.Effect<Result<ServerRootList>>
     readonly save: (input: RootRegistrationRequest) => Effect.Effect<Result<ServerRoot>>
-    readonly command: (input: RootCommandIpcRequest) => Effect.Effect<Result<ServerRoot>>
   }
 >()("henshin/desktop/renderer/RootPreviewClient") {
   static readonly layer = Layer.succeed(
@@ -150,8 +147,7 @@ export class RootPreviewClient extends Context.Service<
     RootPreviewClient.of({
       preview: (input) => callIpc(() => window.henshinRootPreview.preview(input)),
       list: () => callIpc(() => window.henshinRootPreview.list()),
-      save: (input) => callIpc(() => window.henshinRootPreview.save(input)),
-      command: (input) => callIpc(() => window.henshinRootPreview.command(input))
+      save: (input) => callIpc(() => window.henshinRootPreview.save(input))
     })
   )
 }
