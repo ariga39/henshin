@@ -24,11 +24,26 @@ const rootPreviewStatusText = (state: ReturnType<typeof viewStore.getState>): st
   }
   if (state.root_preview === null) return ""
   if (isSavedDiscovery(state.root_preview)) {
-    return state.root_preview.coverage.status === "partial"
+    const { coverage } = state.root_preview
+    const skipped = [
+      coverage.unsupported_name_count > 0 ? `${coverage.unsupported_name_count} unsupported names` : null,
+      coverage.unsupported_directory_count > 0 ? `${coverage.unsupported_directory_count} unsupported directories` : null,
+      state.root_preview.unsupported_loose_image_count > 0
+        ? `${state.root_preview.unsupported_loose_image_count} unsupported loose images`
+        : null,
+      state.root_preview.unassigned_loose_image_count > 0
+        ? `${state.root_preview.unassigned_loose_image_count} unassigned loose images`
+        : null
+    ].filter((value): value is string => value !== null)
+    const coverageText = coverage.status === "partial"
       ? "Preview is partial; some source locations could not be covered."
-      : state.root_preview.coverage.candidate_sample_truncated
-        ? `Showing the first ${state.root_preview.sample_limit} candidates. More are available.`
-        : "Candidate preview is complete."
+      : "Candidate preview is complete."
+    const candidateText = coverage.candidate_sample_truncated
+      ? `Showing the first ${state.root_preview.sample_limit} candidates; more candidates are available.`
+      : null
+    return [candidateText, coverageText, skipped.length > 0 ? `Skipped: ${skipped.join(", ")}.` : null]
+      .filter((value): value is string => value !== null)
+      .join(" ")
   }
   return state.root_preview.outcome === "empty"
     ? "The directory is empty."
@@ -41,6 +56,7 @@ export const RootPreviewScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   const loading = state.root_preview_status === "loading"
   const saving = state.root_save_status === "loading"
+  const retryRequest = state.root_preview_request
   return (
     <main className="collection">
       <h1>Collection setup</h1>
@@ -75,8 +91,8 @@ export const RootPreviewScreen = () => {
           {saving ? "Saving…" : "Save server root"}
         </button>
       )}
-      {state.root_preview_status === "error" && state.root_preview_selected_path === state.root_preview_path && (
-        <button data-testid="root-preview-retry" disabled={saving} onClick={() => void runtime.runPromise(previewRoot({ path: state.root_preview_path }))}>
+      {state.root_preview_status === "error" && retryRequest !== null && (
+        <button data-testid="root-preview-retry" disabled={saving || loading} onClick={() => void runtime.runPromise(previewRoot(retryRequest))}>
           Retry preview
         </button>
       )}
@@ -96,13 +112,16 @@ export const RootPreviewScreen = () => {
               {candidate.kind === "image-directory" && (
                 <small> {candidate.direct_image_count} direct images</small>
               )}
+              {candidate.unsupported_direct_image_count > 0 && (
+                <small> {candidate.unsupported_direct_image_count} unsupported direct images</small>
+              )}
             </li>
           ))}
         </ul>
       )}
       {isSavedDiscovery(state.root_preview) && (
         <p data-testid="root-preview-coverage">
-          {state.root_preview.unassigned_loose_image_count} unassigned loose images; {state.root_preview.coverage.excluded_link_count} linked locations excluded; {state.root_preview.coverage.entries_observed} entries observed.
+          {state.root_preview.unassigned_loose_image_count} unassigned loose images; {state.root_preview.unsupported_loose_image_count} unsupported loose images; {state.root_preview.coverage.unsupported_name_count} unsupported names; {state.root_preview.coverage.unsupported_directory_count} unsupported directories; {state.root_preview.coverage.excluded_link_count} linked locations excluded; {state.root_preview.coverage.entries_observed} entries observed.
         </p>
       )}
       <section aria-labelledby="saved-roots-heading">
@@ -113,7 +132,7 @@ export const RootPreviewScreen = () => {
           {state.root_saved_roots.map((root) => (
             <li key={root.root_id} data-testid="root-saved">
               <strong>{root.label}</strong><span> {root.selected_server_path}</span>
-              <button data-testid="root-saved-preview" onClick={() => void runtime.runPromise(previewRoot({ kind: "saved-root", root_id: root.root_id }))}>
+              <button data-testid="root-saved-preview" disabled={loading || saving} onClick={() => void runtime.runPromise(previewRoot({ kind: "saved-root", root_id: root.root_id }))}>
                 Preview books
               </button>
             </li>
