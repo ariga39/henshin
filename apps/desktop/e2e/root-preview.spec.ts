@@ -149,10 +149,12 @@ test("previews book candidates for an existing saved root after restart", async 
 
     await restarted.app.close()
     const reopened = await launch(dbPath)
-    await expect(reopened.window.getByTestId("root-saved-policy")).toContainText("book.cbz (exact)")
+    await expect(reopened.window.getByTestId("root-saved-policy")).not.toContainText("book.cbz (exact)")
+    await expect(reopened.window.getByTestId("root-saved-policy")).toContainText("book (subtree)")
     await reopened.window.getByTestId("root-saved-preview").click()
-    await expect(reopened.window.getByTestId("root-preview-candidates").locator("li")).toHaveCount(1)
-    await expect(reopened.window.getByTestId("root-preview-candidates").locator("li").first()).toContainText("book-sibling")
+    await expect(reopened.window.getByTestId("root-preview-candidates").locator("li")).toHaveCount(2)
+    await expect(reopened.window.getByTestId("root-preview-candidates")).toContainText("book.cbz")
+    await expect(reopened.window.getByTestId("root-preview-candidates")).toContainText("book-sibling")
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })
