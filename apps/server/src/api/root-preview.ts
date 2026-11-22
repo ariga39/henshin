@@ -10,6 +10,8 @@ import {
   RequestContext,
   RootVerificationFailed,
   RootPreviewUnavailable,
+  RootNotFound,
+  RevisionConflict,
   ServerApi,
   type RootPreview,
   type SavedRootPreview
@@ -24,6 +26,8 @@ import {
 } from "../analysis/NativeSourceBoundary"
 import { ServerState } from "../identity"
 import { RootStore } from "../persistence/RootStore"
+import { ScanStore } from "../persistence/ScanStore"
+import { runManualHeldScan } from "../scan/ManualScanCoordinator"
 
 const rootView = (root: {
   rootId: string
@@ -146,6 +150,7 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
   Effect.gen(function*() {
     const server = yield* ServerState
     const roots = yield* RootStore
+    const scans = yield* ScanStore
 
     const base = (requestId: string) => ({
       request_id: requestId,
@@ -395,6 +400,104 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
                 request_id: context.request_id,
                 server_time: Date.now(),
                 data: rootView(registered.root)
+              }
+          }
+        })
+      )
+      .handle("command", ({ params, payload }) =>
+        Effect.gen(function*() {
+          const context = yield* RequestContext
+          const errorBase = base(context.request_id)
+          if (payload.instance_id !== server.instanceId) {
+            return yield* new InstanceMismatch({
+              code: "instance_mismatch",
+              message: "instance mismatch",
+              retryable: false,
+              ...errorBase
+            })
+          }
+          if (payload.epoch !== server.epoch) {
+            return yield* new EpochChanged({
+              code: "epoch_changed",
+              message: "authority epoch changed; refresh the saved root",
+              retryable: true,
+              ...errorBase
+            })
+          }
+
+          const listed = yield* roots.list().pipe(
+            Effect.mapError(() => new InternalError({
+              code: "internal_error",
+              message: "internal error",
+              retryable: false,
+              ...errorBase
+            }))
+          )
+          const root = listed.find((candidate) => candidate.rootId === params.id)
+          if (root === undefined) {
+            return yield* new RootNotFound({
+              code: "not_found",
+              message: "saved root not found",
+              retryable: false,
+              ...errorBase
+            })
+          }
+
+          const started = yield* scans.start({
+            taskId: crypto.randomUUID(),
+            operationId: payload.operation_id,
+            epoch: payload.epoch,
+            rootId: root.rootId,
+            expectedMappingRevision: payload.expected_mapping_revision
+          }).pipe(
+            Effect.mapError(() => new InternalError({
+              code: "internal_error",
+              message: "internal error",
+              retryable: false,
+              ...errorBase
+            }))
+          )
+
+          switch (started.kind) {
+            case "operation_conflict":
+              return yield* new OperationConflict({
+                code: "operation_conflict",
+                message: "operation id reused with a different scan command",
+                retryable: false,
+                ...errorBase
+              })
+            case "root_not_found":
+              return yield* new RootNotFound({
+                code: "not_found",
+                message: "saved root not found",
+                retryable: false,
+                ...errorBase
+              })
+            case "mapping_revision_conflict":
+              return yield* new RevisionConflict({
+                code: "revision_conflict",
+                message: "saved root changed; refresh it before scanning",
+                retryable: false,
+                details: { current_revision: started.currentMappingRevision },
+                ...errorBase
+              })
+            case "created":
+              yield* runManualHeldScan(started.task, root).pipe(Effect.forkDetach)
+              return {
+                instance_id: server.instanceId,
+                epoch: server.epoch,
+                request_id: context.request_id,
+                server_time: Date.now(),
+                data: { task: started.task }
+              }
+            case "replayed":
+            case "active":
+              return {
+                instance_id: server.instanceId,
+                epoch: server.epoch,
+                request_id: context.request_id,
+                server_time: Date.now(),
+                data: { task: started.task }
               }
           }
         })
