@@ -580,7 +580,7 @@ const discoveryIssue = (
   relativePath?: string
 ): SourceDiscoveryIssue => (relativePath === undefined ? { code } : { code, relativePath })
 
-const discoveryIssueCode = (code: NativeBoundaryErrorCode): SourceDiscoveryIssueCode => {
+export const discoveryIssueCode = (code: NativeBoundaryErrorCode): SourceDiscoveryIssueCode => {
   switch (code) {
     case "directory-limit":
     case "missing-target":
@@ -875,8 +875,10 @@ export const discoverSourceRoot = async (
 
   const finalRoot = await revalidateSourceRoot(root, context)
   if (!finalRoot.ok) {
-    if (finalRoot.code !== "directory-limit") return finalRoot
-    markPartial("directory-limit")
+    // Keep candidates observed before a source disconnect. The caller can
+    // stage them as unavailable while the partial coverage prevents normal
+    // allocation; an explicit retry can re-observe the restored source.
+    markPartial(discoveryIssueCode(finalRoot.code))
   }
 
   candidates.sort((left, right) => utf8Compare(left.relativePath, right.relativePath))
