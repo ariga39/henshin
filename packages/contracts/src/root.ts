@@ -156,11 +156,31 @@ export const LocalMappingSample = Schema.Struct({
     Schema.Literal("found"),
     Schema.Literal("missing"),
     Schema.Literal("unsafe"),
-    Schema.Literal("unsupported")
+    Schema.Literal("unsupported"),
+    Schema.Literal("collision"),
+    Schema.Literal("error")
   ]),
+  collision_kind: Schema.NullOr(Schema.Union([
+    Schema.Literal("name-equivalence"),
+    Schema.Literal("physical-identity")
+  ])),
   local_kind: Schema.NullOr(Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")])),
   local_format_evidence: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
-  local_size_bytes: Schema.NullOr(Schema.Natural)
+  local_size_bytes: Schema.NullOr(Schema.Natural),
+  local_evidence_status: Schema.Union([
+    Schema.Literal("complete"),
+    Schema.Literal("partial"),
+    Schema.Literal("unavailable")
+  ]),
+  local_error: Schema.NullOr(Schema.Union([
+    Schema.Literal("missing"),
+    Schema.Literal("unsafe"),
+    Schema.Literal("unsupported"),
+    Schema.Literal("permission-denied"),
+    Schema.Literal("directory-limit"),
+    Schema.Literal("budget-exceeded"),
+    Schema.Literal("unavailable")
+  ]))
 })
 export type LocalMappingSample = typeof LocalMappingSample.Type
 
@@ -169,7 +189,8 @@ export const LocalMappingPreview = Schema.Struct({
   selected_local_path: Schema.String,
   samples: Schema.Array(LocalMappingSample),
   sample_limit: Schema.Literal(32),
-  sample_truncated: Schema.Boolean
+  sample_truncated: Schema.Boolean,
+  local_budget_exhausted: Schema.Boolean
 })
 export type LocalMappingPreview = typeof LocalMappingPreview.Type
 

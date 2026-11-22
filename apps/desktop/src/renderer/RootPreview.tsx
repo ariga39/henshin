@@ -90,6 +90,33 @@ const localFormatLabel = (kind: "archive" | "image-directory"): string =>
 const localSizeLabel = (kind: "archive" | "image-directory"): string =>
   kind === "archive" ? "Local container bytes" : "Local direct-image bytes"
 
+const localErrorText = (error: NonNullable<ReturnType<typeof viewStore.getState>["local_mapping_preview"]>["samples"][number]["local_error"]): string => {
+  switch (error) {
+    case "missing": return "missing"
+    case "unsafe": return "unsafe target"
+    case "unsupported": return "unsupported"
+    case "permission-denied": return "permission denied"
+    case "directory-limit": return "directory limit"
+    case "budget-exceeded": return "time budget"
+    case "unavailable": return "unavailable"
+    case null: return "unavailable"
+  }
+}
+
+const localSampleStatus = (sample: NonNullable<ReturnType<typeof viewStore.getState>["local_mapping_preview"]>["samples"][number]): string => {
+  switch (sample.status) {
+    case "found": return "Found on this device."
+    case "missing": return "Missing on this device."
+    case "unsafe": return "Rejected as unsafe."
+    case "unsupported": return "Unsupported on this device."
+    case "collision":
+      return sample.collision_kind === "physical-identity"
+        ? "Collision: multiple indexed paths resolve to one physical object."
+        : "Collision: only a case/normalization-equivalent name was found."
+    case "error": return `Could not inspect this sample (${localErrorText(sample.local_error)}).`
+  }
+}
+
 export const RootPreviewScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   const loading = state.root_preview_status === "loading"
@@ -237,13 +264,16 @@ export const RootPreviewScreen = () => {
                   {state.local_mapping_preview.sample_truncated && (
                     <p>Showing the first {state.local_mapping_preview.sample_limit} indexed samples.</p>
                   )}
+                  {state.local_mapping_preview.local_budget_exhausted && (
+                    <p>Local checking reached its finite time budget; remaining evidence is unavailable.</p>
+                  )}
                   <ul data-testid="local-mapping-samples">
                     {state.local_mapping_preview.samples.map((sample) => (
                       <li key={sample.relative_path} data-testid="local-mapping-sample">
                         <strong>{sample.relative_path}</strong>{" "}
-                        <span>{sample.status === "found" ? "Found on this device." : sample.status === "missing" ? "Missing on this device." : sample.status === "unsafe" ? "Rejected as unsafe." : "Unsupported on this device."}</span>{" "}
+                        <span>{localSampleStatus(sample)}</span>{" "}
                         <small>
-                          {indexedFormatLabel(sample.indexed_kind)}: {formats(sample.indexed_format_evidence)}; {indexedSizeLabel(sample.indexed_kind)}: {formatBytes(sample.indexed_size_bytes)}. {localFormatLabel(sample.indexed_kind)}: {formats(sample.local_format_evidence)}; {localSizeLabel(sample.indexed_kind)}: {formatBytes(sample.local_size_bytes)}.
+                          {indexedFormatLabel(sample.indexed_kind)}: {formats(sample.indexed_format_evidence)}; {indexedSizeLabel(sample.indexed_kind)}: {formatBytes(sample.indexed_size_bytes)}. {localFormatLabel(sample.indexed_kind)}: {formats(sample.local_format_evidence)}; {localSizeLabel(sample.indexed_kind)}: {formatBytes(sample.local_size_bytes)}. {sample.local_evidence_status === "partial" ? `Local evidence partial (${localErrorText(sample.local_error)}).` : sample.local_evidence_status === "unavailable" && sample.status === "found" ? `Local evidence unavailable (${localErrorText(sample.local_error)}).` : ""}
                         </small>
                       </li>
                     ))}

@@ -353,14 +353,15 @@ const registerIpc = (): void => {
         Effect.gen(function*() {
           const client = yield* LibraryHttpClient
           const indexed = yield* client.indexedSamples({ params: { id: decoded.value.root_id } })
-          return yield* Effect.promise(() =>
-            inspectLocalMapping(
+          return yield* Effect.tryPromise({
+            try: () => inspectLocalMapping(
               decoded.value.root_id,
               selectedPath,
               indexed.data.samples,
               indexed.data.sample_truncated
-            )
-          )
+            ),
+            catch: (error) => error
+          })
         })
       )
     )
