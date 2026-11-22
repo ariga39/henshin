@@ -499,6 +499,7 @@ describe("normal library scan", () => {
     const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-mapping-samples-"))
     fixturePaths.add(fixture)
     await makeImageBook(fixture, "series-pages")
+    await writeFile(path.join(fixture, "series-pages", "002.png"), "second page")
     await makeZip(path.join(fixture, "archive.cbz"))
 
     const root = await withServerClient(server, Effect.gen(function*() {
@@ -538,8 +539,8 @@ describe("normal library scan", () => {
       sample_limit: 32,
       sample_truncated: false,
       samples: [
-        { relative_path: "archive.cbz", kind: "archive", format_evidence: ["jpg"] },
-        { relative_path: "series-pages", kind: "image-directory", format_evidence: ["jpg", "png"] }
+        { relative_path: "archive.cbz", kind: "archive", format_evidence: ["jpeg"] },
+        { relative_path: "series-pages", kind: "image-directory", format_evidence: ["jpeg", "png"] }
       ]
     })
     expect(samples.data.samples.every((sample) => sample.size_bytes !== null && sample.size_bytes > 0)).toBe(true)
