@@ -4,7 +4,12 @@ import { basename, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contracts/canonical"
-import { INDEXED_ROOT_SAMPLE_LIMIT, ScanManifest } from "@henshin/contracts"
+import {
+  INDEXED_ROOT_SAMPLE_LIMIT,
+  ReplacementCandidateObservation,
+  ReplacementObservation,
+  ScanManifest
+} from "@henshin/contracts"
 import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanAnalysisError } from "@henshin/contracts/root"
 import { caseFold } from "unicode-case-folding"
 import {
@@ -38,7 +43,7 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
-const CURRENT_SCHEMA_VERSION = 7
+const CURRENT_SCHEMA_VERSION = 8
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
@@ -72,6 +77,49 @@ const replacementObservation = (
   entry_count: manifest.after.entry_count,
   diagnostics: manifest.diagnostics
 })
+
+const emptyDiagnostics = {
+  supported_pages: 0,
+  unsupported_pages: 0,
+  ignored_entries: 0,
+  directory_records: 0
+} as const
+
+const replacementCandidateObservation = (
+  kind: "archive" | "image-directory",
+  analysisStatus: "ready" | "error",
+  manifestJson: string | null,
+  analysisErrorJson: string | null
+): import("@henshin/contracts").ReplacementCandidateObservation => {
+  const analysisError = persistedAnalysisError(analysisErrorJson)
+  const observation = manifestJson === null
+    ? {
+        kind,
+        page_count: 0,
+        format_evidence: [],
+        size_bytes: null,
+        entry_count: 0,
+        diagnostics: analysisError?.diagnostics ?? emptyDiagnostics
+      }
+    : replacementObservation(persistedManifest(manifestJson, "candidate manifest"), kind)
+  return {
+    ...observation,
+    analysis_status: analysisStatus,
+    analysis_error: analysisError
+  }
+}
+
+const persistedReplacementObservation = (value: string, field: string): import("@henshin/contracts").ReplacementObservation => {
+  const decoded = Schema.decodeUnknownOption(ReplacementObservation)(JSON.parse(value))
+  if (Option.isNone(decoded)) throw new Error(`invalid persisted ${field}`)
+  return decoded.value
+}
+
+const persistedReplacementCandidateObservation = (value: string, field: string): import("@henshin/contracts").ReplacementCandidateObservation => {
+  const decoded = Schema.decodeUnknownOption(ReplacementCandidateObservation)(JSON.parse(value))
+  if (Option.isNone(decoded)) throw new Error(`invalid persisted ${field}`)
+  return decoded.value
+}
 
 const comparableManifest = (value: string): {
   readonly value: string
@@ -260,6 +308,7 @@ db.exec(`
     manifest_json TEXT,
     analysis_error_json TEXT,
     updated_at_ms INTEGER NOT NULL,
+    candidate_observation_json TEXT,
     UNIQUE (root_id, relative_path)
   );
   CREATE TABLE IF NOT EXISTS root_policy_operations (
@@ -296,6 +345,7 @@ db.exec(`
     manifest_json TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
+    accepted_observation_json TEXT,
     UNIQUE (root_id, relative_path)
   );
   CREATE TABLE IF NOT EXISTS open_events (
@@ -337,6 +387,14 @@ if (!serverLibraryColumns.some((column) => column.name === "change_revision")) {
 const libraryEntryColumns = db.prepare("PRAGMA table_info(library_entries)").all() as unknown as ReadonlyArray<{ name: string }>
 if (!libraryEntryColumns.some((column) => column.name === "decision_version")) {
   db.exec("ALTER TABLE library_entries ADD COLUMN decision_version INTEGER NOT NULL DEFAULT 1")
+}
+if (!libraryEntryColumns.some((column) => column.name === "accepted_observation_json")) {
+  db.exec("ALTER TABLE library_entries ADD COLUMN accepted_observation_json TEXT")
+}
+
+const stagedDiscoveryColumns = db.prepare("PRAGMA table_info(staged_discoveries)").all() as unknown as ReadonlyArray<{ name: string }>
+if (!stagedDiscoveryColumns.some((column) => column.name === "candidate_observation_json")) {
+  db.exec("ALTER TABLE staged_discoveries ADD COLUMN candidate_observation_json TEXT")
 }
 
 const scanTaskTable = db.prepare(
@@ -389,6 +447,7 @@ if (needsScanSchemaMigration) {
         manifest_json TEXT,
         analysis_error_json TEXT,
         updated_at_ms INTEGER NOT NULL,
+        candidate_observation_json TEXT,
         UNIQUE (root_id, relative_path)
       );
       INSERT INTO scan_tasks_v4 SELECT * FROM scan_tasks;
@@ -436,11 +495,13 @@ if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("repl
         manifest_json TEXT NOT NULL,
         created_at_ms INTEGER NOT NULL,
         updated_at_ms INTEGER NOT NULL,
+        accepted_observation_json TEXT,
         UNIQUE (root_id, relative_path)
       );
       INSERT INTO library_entries_v7
         SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count,
-          state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms
+          state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms,
+          accepted_observation_json
         FROM library_entries;
       DROP TABLE library_entries;
       ALTER TABLE library_entries_v7 RENAME TO library_entries;
@@ -474,6 +535,49 @@ if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("repl
   } finally {
     db.exec("PRAGMA foreign_keys = ON")
   }
+}
+
+db.exec("BEGIN IMMEDIATE")
+try {
+  const acceptedWithoutSummary = db.prepare(
+    "SELECT entry_id, kind, manifest_json FROM library_entries WHERE accepted_observation_json IS NULL"
+  ).iterate() as unknown as Iterable<{
+    entry_id: string
+    kind: "archive" | "image-directory"
+    manifest_json: string
+  }>
+  const updateAcceptedSummary = db.prepare(
+    "UPDATE library_entries SET accepted_observation_json = ? WHERE entry_id = ?"
+  )
+  for (const row of acceptedWithoutSummary) {
+    updateAcceptedSummary.run(
+      JSON.stringify(replacementObservation(persistedManifest(row.manifest_json, "accepted manifest"), row.kind)),
+      row.entry_id
+    )
+  }
+
+  const candidatesWithoutSummary = db.prepare(
+    "SELECT candidate_id, kind, analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE candidate_observation_json IS NULL"
+  ).iterate() as unknown as Iterable<{
+    candidate_id: string
+    kind: "archive" | "image-directory"
+    analysis_status: "ready" | "error"
+    manifest_json: string | null
+    analysis_error_json: string | null
+  }>
+  const updateCandidateSummary = db.prepare(
+    "UPDATE staged_discoveries SET candidate_observation_json = ? WHERE candidate_id = ?"
+  )
+  for (const row of candidatesWithoutSummary) {
+    updateCandidateSummary.run(
+      JSON.stringify(replacementCandidateObservation(row.kind, row.analysis_status, row.manifest_json, row.analysis_error_json)),
+      row.candidate_id
+    )
+  }
+  db.exec("COMMIT")
+} catch (error) {
+  db.exec("ROLLBACK")
+  throw error
 }
 
 const selectNote = db.prepare("SELECT note_id, text, revision FROM prototype_note WHERE note_id = ?")
@@ -577,7 +681,7 @@ const updateEntryStatistics = db.prepare(
   "UPDATE entry_statistics SET open_count = open_count + 1, last_opened_at_ms = CASE WHEN last_opened_at_ms IS NULL OR last_opened_at_ms < ? THEN ? ELSE last_opened_at_ms END WHERE entry_id = ?"
 )
 const insertEntry = db.prepare(
-  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?)"
+  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms, accepted_observation_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?, ?)"
 )
 const markEntryPending = db.prepare(
   "UPDATE library_entries SET state = 'replacement-pending', updated_at_ms = ? WHERE entry_id = ? AND state = 'accepted'"
@@ -589,18 +693,18 @@ const selectLibraryEntries = (cursor: string | null, limit: number) => {
   const statement = db.prepare(cursor === null
     ? `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
          e.page_count, e.state, e.content_version, e.location_revision,
-         CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.manifest_json ELSE NULL END AS manifest_json,
+         CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
          s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
-         s.manifest_json AS candidate_manifest_json, s.analysis_error_json AS candidate_analysis_error_json
+         s.candidate_observation_json
        FROM library_entries e
        LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
        WHERE e.state IN ('accepted', 'replacement-pending')
        ORDER BY e.entry_id ASC LIMIT ?`
     : `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
          e.page_count, e.state, e.content_version, e.location_revision,
-         CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.manifest_json ELSE NULL END AS manifest_json,
+         CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
          s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
-         s.manifest_json AS candidate_manifest_json, s.analysis_error_json AS candidate_analysis_error_json
+         s.candidate_observation_json
        FROM library_entries e
        LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
        WHERE e.entry_id > ? AND e.state IN ('accepted', 'replacement-pending')
@@ -629,7 +733,7 @@ const selectScanFence = db.prepare(`
 `)
 selectScanFence.setReadBigInts(true)
 const upsertStagedDiscovery = db.prepare(
-  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = excluded.hold_state, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
+  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms, candidate_observation_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = excluded.hold_state, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms, candidate_observation_json = excluded.candidate_observation_json"
 )
 const recoverScanTasks = db.prepare(
   "UPDATE scan_tasks SET status = CASE WHEN status = 'queued' THEN 'failed' ELSE 'interrupted' END, error_code = 'server_restart', error_message = CASE WHEN status = 'queued' THEN 'scan did not start before server restart' ELSE 'scan interrupted by server restart' END, updated_at_ms = ? WHERE status IN ('queued', 'running')"
@@ -1165,6 +1269,12 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
         request.manifestJson,
         request.analysisErrorJson
       ) === 1
+    const candidateObservationJson = JSON.stringify(replacementCandidateObservation(
+      request.kind,
+      request.analysisStatus,
+      request.manifestJson,
+      request.analysisErrorJson
+    ))
     if (sameAcceptedObservation) {
       if (existing !== undefined) deleteStaged.run(existing.candidate_id)
     } else {
@@ -1180,7 +1290,8 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
         request.analysisStatus,
         request.manifestJson,
         request.analysisErrorJson,
-        Date.now()
+        Date.now(),
+        candidateObservationJson
       )
       if (
         knownReplacement
@@ -1317,13 +1428,12 @@ const entryRow = (row: {
   state: "accepted" | "replacement-pending"
   content_version: bigint
   location_revision: bigint
-  manifest_json: string | null
+  accepted_observation_json: string | null
   candidate_id: string | null
   candidate_version: bigint | null
   candidate_kind: "archive" | "image-directory" | null
   candidate_analysis_status: "ready" | "error" | null
-  candidate_manifest_json: string | null
-  candidate_analysis_error_json: string | null
+  candidate_observation_json: string | null
 }): import("./worker-protocol").LibraryEntryRow => ({
   entry_id: row.entry_id,
   library_id: row.library_id,
@@ -1336,33 +1446,13 @@ const entryRow = (row: {
   state: row.state,
   content_version: row.content_version.toString(),
   location_revision: row.location_revision.toString(),
-  replacement: row.candidate_id === null || row.candidate_version === null || row.candidate_kind === null || row.candidate_analysis_status === null || row.manifest_json === null
+  replacement: row.candidate_id === null || row.candidate_version === null || row.candidate_kind === null || row.candidate_analysis_status === null || row.accepted_observation_json === null || row.candidate_observation_json === null
     ? null
     : {
         candidate_id: row.candidate_id,
         candidate_version: Number(row.candidate_version),
-        old_observation: replacementObservation(persistedManifest(row.manifest_json, "accepted manifest"), row.kind),
-        candidate_observation: row.candidate_manifest_json === null
-          ? {
-              kind: row.candidate_kind,
-              page_count: 0,
-              format_evidence: [],
-              size_bytes: null,
-              entry_count: 0,
-              diagnostics: persistedAnalysisError(row.candidate_analysis_error_json)?.diagnostics ?? {
-                supported_pages: 0,
-                unsupported_pages: 0,
-                ignored_entries: 0,
-                directory_records: 0
-              },
-              analysis_status: row.candidate_analysis_status,
-              analysis_error: persistedAnalysisError(row.candidate_analysis_error_json)
-            }
-          : {
-              ...replacementObservation(persistedManifest(row.candidate_manifest_json, "candidate manifest"), row.candidate_kind),
-              analysis_status: row.candidate_analysis_status,
-              analysis_error: persistedAnalysisError(row.candidate_analysis_error_json)
-            }
+        old_observation: persistedReplacementObservation(row.accepted_observation_json, "accepted observation summary"),
+        candidate_observation: persistedReplacementCandidateObservation(row.candidate_observation_json, "candidate observation summary")
       },
   cover: {
     key: `default-v1.${row.entry_id}.${row.content_version.toString()}`,
@@ -1487,6 +1577,10 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
               Date.now(),
               existing.entry_id
             )
+            db.prepare("UPDATE library_entries SET accepted_observation_json = ? WHERE entry_id = ?").run(
+              JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind)),
+              existing.entry_id
+            )
             changed = true
           }
           if (existing.state === "accepted") deleteStaged.run(candidate.candidate_id)
@@ -1506,7 +1600,8 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
         BigInt(pageCount),
         candidate.manifest_json,
         Date.now(),
-        Date.now()
+        Date.now(),
+        JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind))
       )
       deleteStaged.run(candidate.candidate_id)
       changed = true
@@ -1555,13 +1650,12 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
     state: "accepted" | "replacement-pending"
     content_version: bigint
     location_revision: bigint
-    manifest_json: string | null
+    accepted_observation_json: string | null
     candidate_id: string | null
     candidate_version: bigint | null
     candidate_kind: "archive" | "image-directory" | null
     candidate_analysis_status: "ready" | "error" | null
-    candidate_manifest_json: string | null
-    candidate_analysis_error_json: string | null
+    candidate_observation_json: string | null
   }>
   const page = rows.slice(0, request.pageSize)
   const hasMore = rows.length > request.pageSize

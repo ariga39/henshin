@@ -127,6 +127,27 @@ const downgradeLibraryEntriesToPreReplacementSchema = (dbPath: string): void => 
         FROM library_entries;
       DROP TABLE library_entries;
       ALTER TABLE library_entries_pre_replacement RENAME TO library_entries;
+
+      CREATE TABLE staged_discoveries_pre_summary (
+        candidate_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES scan_tasks(task_id),
+        root_id TEXT NOT NULL REFERENCES server_roots(root_id),
+        relative_path TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
+        candidate_version INTEGER NOT NULL,
+        hold_state TEXT NOT NULL CHECK (hold_state IN ('held', 'eligible')),
+        analysis_status TEXT NOT NULL CHECK (analysis_status IN ('ready', 'error')),
+        manifest_json TEXT,
+        analysis_error_json TEXT,
+        updated_at_ms INTEGER NOT NULL,
+        UNIQUE (root_id, relative_path)
+      );
+      INSERT INTO staged_discoveries_pre_summary
+        SELECT candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state,
+          analysis_status, manifest_json, analysis_error_json, updated_at_ms
+        FROM staged_discoveries;
+      DROP TABLE staged_discoveries;
+      ALTER TABLE staged_discoveries_pre_summary RENAME TO staged_discoveries;
     `)
     db.prepare("UPDATE server_state SET schema_version = 6 WHERE id = 1").run()
     db.exec("COMMIT")
@@ -226,6 +247,45 @@ describe("replacement comparison read model", () => {
     })
 
     await migrated.stop()
+    const compact = new DatabaseSync(dbPath)
+    const compactRows = compact.prepare(`
+      SELECT e.accepted_observation_json, s.candidate_observation_json
+      FROM library_entries e
+      JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
+      WHERE e.relative_path = 'book-a'
+    `).all() as unknown as ReadonlyArray<{
+      accepted_observation_json: string | null
+      candidate_observation_json: string | null
+    }>
+    expect(compactRows).toHaveLength(1)
+    expect(compactRows[0]?.accepted_observation_json).toEqual(expect.any(String))
+    expect(compactRows[0]?.candidate_observation_json).toEqual(expect.any(String))
+    const originalManifests = compact.prepare(`
+      SELECT e.entry_id, e.manifest_json, s.candidate_id, s.manifest_json AS candidate_manifest_json
+      FROM library_entries e
+      JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
+      WHERE e.relative_path = 'book-a'
+    `).get() as {
+      entry_id: string
+      manifest_json: string
+      candidate_id: string
+      candidate_manifest_json: string
+    }
+    compact.prepare("UPDATE library_entries SET manifest_json = ? WHERE entry_id = ?").run("not-json", originalManifests.entry_id)
+    compact.prepare("UPDATE staged_discoveries SET manifest_json = ? WHERE candidate_id = ?").run("not-json", originalManifests.candidate_id)
+    compact.close()
+
+    const bounded = await startServer(dbPath)
+    servers.push(bounded)
+    const afterBoundedRead = await listLibrary(bounded)
+    expect(afterBoundedRead.entries.find((entry) => entry.relative_path === "book-a")?.replacement).toEqual(migratedEntry?.replacement)
+    await bounded.stop()
+
+    const restored = new DatabaseSync(dbPath)
+    restored.prepare("UPDATE library_entries SET manifest_json = ? WHERE entry_id = ?").run(originalManifests.manifest_json, originalManifests.entry_id)
+    restored.prepare("UPDATE staged_discoveries SET manifest_json = ? WHERE candidate_id = ?").run(originalManifests.candidate_manifest_json, originalManifests.candidate_id)
+    restored.close()
+
     const restarted = await startServer(dbPath)
     servers.push(restarted)
     const afterRestart = await listLibrary(restarted)
