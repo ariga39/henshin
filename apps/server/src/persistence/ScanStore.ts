@@ -48,7 +48,7 @@ export interface StageDiscoveryInput {
 
 export interface FinishScanInput {
   readonly taskId: string
-  readonly status: "succeeded" | "completed_with_errors" | "failed" | "interrupted"
+  readonly status: "succeeded" | "completed_with_errors" | "failed"
   readonly directoriesVisited: number
   readonly candidatesDiscovered: number
   readonly candidatesAnalyzed: number
@@ -91,7 +91,7 @@ const taskView = (row: ScanTaskRowType): ScanTask => decodeOrThrow(
     root_id: row.root_id,
     kind: "manual-scan",
     mode: "manual",
-    hold_new_discoveries: true,
+    hold_new_discoveries: row.hold_new_discoveries,
     mapping_revision: row.mapping_revision,
     status: row.status,
     directories_visited: row.directories_visited,
@@ -145,6 +145,7 @@ export class ScanStore extends Context.Service<
     readonly listTasks: () => Effect.Effect<ReadonlyArray<ScanTask>, DatabaseWorkerError>
     readonly readTask: (taskId: string) => Effect.Effect<ScanTask | null, DatabaseWorkerError>
     readonly listStaged: () => Effect.Effect<ReadonlyArray<StagedDiscovery>, DatabaseWorkerError>
+    readonly recordDiscovery: (taskId: string, coverage: typeof RootPreviewCoverage.Type, candidates: number) => Effect.Effect<void, DatabaseWorkerError>
     readonly markRunning: (taskId: string) => Effect.Effect<void, DatabaseWorkerError>
     readonly stage: (input: StageDiscoveryInput) => Effect.Effect<void, DatabaseWorkerError>
     readonly finish: (input: FinishScanInput) => Effect.Effect<void, DatabaseWorkerError>
@@ -205,6 +206,10 @@ export class ScanStore extends Context.Service<
         })
       )
 
+      const recordDiscovery = (taskId: string, coverage: typeof RootPreviewCoverage.Type, candidates: number) =>
+        worker.call({ op: "recordDiscovery", taskId, directories: coverage.directories_visited,
+          candidates, coverageJson: JSON.stringify(coverage) }).pipe(Effect.asVoid)
+
       const markRunning = (taskId: string) => worker.call({ op: "markScanRunning", taskId }).pipe(Effect.asVoid)
 
       const stage = (input: StageDiscoveryInput) => worker.call({
@@ -237,7 +242,7 @@ export class ScanStore extends Context.Service<
 
       const recoverInterrupted = () => worker.call({ op: "recoverScans" }).pipe(Effect.asVoid)
 
-      return ScanStore.of({ start, listTasks, readTask, listStaged, markRunning, stage, finish, recoverInterrupted })
+      return ScanStore.of({ start, listTasks, readTask, listStaged, recordDiscovery, markRunning, stage, finish, recoverInterrupted })
     })
   )
 }

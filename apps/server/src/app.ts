@@ -12,16 +12,14 @@ import {
 } from "effect/http"
 import type { ServeError } from "effect/http/HttpServerError"
 import { HttpApiBuilder } from "effect/http-api"
-import { PrototypeApi, ReviewApi, ServerApi, TaskApi } from "@henshin/contracts"
+import { PrototypeApi, ServerApi } from "@henshin/contracts"
 import { AuthenticationLayer } from "./api/AuthenticationLayer"
 import { PrototypeHandlers } from "./api/handlers"
 import { RootHandlers } from "./api/root-preview"
-import { ReviewHandlers, TaskHandlers } from "./api/scan"
 import { AuthConfig, ServerState } from "./identity"
 import { DatabaseWorker, type DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { NoteStore } from "./persistence/NoteStore"
 import { RootStore } from "./persistence/RootStore"
-import { ScanStore } from "./persistence/ScanStore"
 import { ServerOwnershipLayer, type ServerOwnershipError } from "./persistence/ServerOwnership"
 
 const MAX_BODY_BYTES = 1024 * 1024
@@ -179,23 +177,17 @@ export const makeAppLayer = (
   )
   const RoutesLayer = HttpApiBuilder.layer(PrototypeApi).pipe(Layer.provide(HandlersLayer))
   const RootPreviewHandlersLayer = RootHandlers(path.dirname(options.dbPath)).pipe(
-    Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer, ScanStore.layer))
+    Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer))
   )
   const RootPreviewRoutesLayer = HttpApiBuilder.layer(ServerApi).pipe(
     // The product API has its own route namespace but shares the authenticated
     // server state and HTTP server with the synthetic prototype.
     Layer.provide(RootPreviewHandlersLayer)
   )
-  const TaskHandlersLayer = TaskHandlers.pipe(Layer.provide(Layer.mergeAll(AuthenticationLayer, ScanStore.layer)))
-  const TaskRoutesLayer = HttpApiBuilder.layer(TaskApi).pipe(Layer.provide(TaskHandlersLayer))
-  const ReviewHandlersLayer = ReviewHandlers.pipe(Layer.provide(Layer.mergeAll(AuthenticationLayer, ScanStore.layer)))
-  const ReviewRoutesLayer = HttpApiBuilder.layer(ReviewApi).pipe(Layer.provide(ReviewHandlersLayer))
-  const AllRoutes = Layer.mergeAll(RoutesLayer, RootPreviewRoutesLayer, TaskRoutesLayer, ReviewRoutesLayer)
+  const AllRoutes = Layer.mergeAll(RoutesLayer, RootPreviewRoutesLayer)
 
   const ReadyLayer = Layer.effectDiscard(
     Effect.gen(function*() {
-      const scans = yield* ScanStore
-      yield* scans.recoverInterrupted()
       const httpServer = yield* HttpServer.HttpServer
       const state = yield* ServerState
       const address = httpServer.address
@@ -217,7 +209,6 @@ export const makeAppLayer = (
     // Second line of defense for any body read that bypasses the middleware.
     Layer.provide(Layer.succeed(HttpIncomingMessage.MaxBodySize, ByteSize.mebibytes(1))),
     Layer.provide(ServerState.layer),
-    Layer.provide(ScanStore.layer),
     Layer.provide(AuthConfig.layer(options.bearerToken)),
     Layer.provide(
       DatabaseWorker.layer(options.dbPath).pipe(Layer.provide(ServerOwnershipLayer(options.dbPath)))
