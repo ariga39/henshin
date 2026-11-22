@@ -5,7 +5,7 @@ import type {
   RootPreviewResult,
   ScanTask
 } from "@henshin/contracts"
-import { LibraryClient, LocalMappingClient, PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
+import { LibraryClient, PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
 import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
@@ -62,38 +62,6 @@ export const previewRoot = (selection: RootPreviewRequest | string) =>
     }
   })
 
-export const previewLocalMapping = (rootId: string) =>
-  Effect.gen(function*() {
-    const client = yield* LocalMappingClient
-    yield* Effect.sync(() => viewStore.set({
-      local_mapping_root_id: rootId,
-      local_mapping_status: "loading",
-      local_mapping_error: null
-    }))
-    const result = yield* client.preview(rootId)
-    if (!result.ok) {
-      yield* Effect.sync(() => viewStore.set({
-        local_mapping_status: "error",
-        local_mapping_error: result.error.message
-      }))
-      return
-    }
-    if (result.data === null) {
-      const retainedPreview = viewStore.getState().local_mapping_preview
-      yield* Effect.sync(() => viewStore.set({
-        local_mapping_status: retainedPreview === null ? "idle" : "ready",
-        local_mapping_error: null
-      }))
-      return
-    }
-    yield* Effect.sync(() => viewStore.set({
-      local_mapping_root_id: rootId,
-      local_mapping_status: "ready",
-      local_mapping_preview: result.data,
-      local_mapping_error: null
-    }))
-  })
-
 export const loadRoots = Effect.gen(function*() {
   const client = yield* RootPreviewClient
   yield* Effect.sync(() => viewStore.set({ root_roots_status: "loading", root_roots_error: null }))
@@ -109,6 +77,11 @@ export const loadRoots = Effect.gen(function*() {
 
 const scanIsActive = (task: ScanTask): boolean => task.status === "queued" || task.status === "running"
 
+const releaseErrorMessage = (error: { readonly code: string; readonly message: string }): string =>
+  error.code === "epoch_changed" || error.code === "instance_mismatch"
+    ? `${error.message}${error.message.endsWith(".") ? "" : "."} Reconnect before retrying the release.`
+    : error.message
+
 const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
   yield* Effect.sync(() => viewStore.set({ scan_status: "loading", scan_error: null }))
   const tasks = yield* client.listTasks()
@@ -123,10 +96,29 @@ const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(f
     yield* Effect.sync(() => viewStore.set({ scan_status: "error", scan_error: candidates.error.message }))
     return false
   }
+  const current = viewStore.getState()
+  const releaseTarget = current.scan_release_candidate_id === null
+    ? undefined
+    : candidates.data.find((candidate) =>
+        candidate.candidate_id === current.scan_release_candidate_id &&
+        candidate.root_id === current.scan_release_root_id)
+  const releaseResolved = releaseTarget !== undefined && releaseTarget.hold_state !== "held"
   yield* Effect.sync(() => viewStore.set({
     staged_discoveries: candidates.data,
     scan_status: "ready",
-    scan_error: null
+    scan_error: null,
+    ...(releaseResolved
+      ? {
+          scan_release_status: "idle" as const,
+          scan_release_candidate_id: null,
+          scan_release_root_id: null,
+          scan_release_operation_id: null,
+          scan_release_candidate_version: null,
+          scan_release_mapping_revision: null,
+          scan_release_policy_revision: null,
+          scan_release_error: null
+        }
+      : {})
   }))
   return true
 })
@@ -136,6 +128,88 @@ export const loadScanResults = Effect.gen(function*() {
   return yield* loadScanResultsFor(client)
 })
 
+export const releaseHeldDiscovery = (candidateId: string) =>
+  Effect.gen(function*() {
+    const client = yield* ScanReviewClient
+    const state = viewStore.getState()
+    const candidate = state.staged_discoveries.find((item) => item.candidate_id === candidateId)
+    const root = candidate === undefined
+      ? undefined
+      : state.root_saved_roots.find((item) => item.root_id === candidate.root_id)
+    if (candidate === undefined || root === undefined || candidate.hold_state !== "held") return
+
+    const sameCommand = state.scan_release_candidate_id === candidate.candidate_id &&
+      state.scan_release_root_id === candidate.root_id &&
+      state.scan_release_operation_id !== null &&
+      state.scan_release_candidate_version === candidate.candidate_version &&
+      state.scan_release_mapping_revision === root.mapping_revision &&
+      state.scan_release_policy_revision === root.policy_revision
+    const operationId = sameCommand ? state.scan_release_operation_id : newOperationId()
+    yield* Effect.sync(() => viewStore.set({
+      scan_release_status: "loading",
+      scan_release_candidate_id: candidate.candidate_id,
+      scan_release_root_id: candidate.root_id,
+      scan_release_operation_id: operationId,
+      scan_release_candidate_version: candidate.candidate_version,
+      scan_release_mapping_revision: root.mapping_revision,
+      scan_release_policy_revision: root.policy_revision,
+      scan_release_error: null
+    }))
+
+    const result = yield* client.release({
+      candidate_id: candidate.candidate_id,
+      root_id: candidate.root_id,
+      operation_id: operationId,
+      expected_candidate_version: candidate.candidate_version,
+      expected_mapping_revision: root.mapping_revision,
+      expected_policy_revision: root.policy_revision,
+      command: { type: "release-hold" }
+    })
+    if (!result.ok) {
+      if (result.error.code === "revision_conflict" || result.error.code === "not_found") {
+        yield* loadRoots
+        yield* loadScanResults
+      }
+      const definiteFailure = result.error.code === "invalid_request" ||
+        result.error.code === "not_found" ||
+        result.error.code === "revision_conflict" ||
+        result.error.code === "operation_conflict" ||
+        result.error.code === "operation_expired" ||
+        result.error.code === "epoch_changed" ||
+        result.error.code === "instance_mismatch"
+      yield* Effect.sync(() => viewStore.set({
+        scan_release_status: "error",
+        ...(definiteFailure
+          ? {
+              scan_release_root_id: candidate.root_id,
+              scan_release_operation_id: null,
+              scan_release_candidate_version: null,
+              scan_release_mapping_revision: null,
+              scan_release_policy_revision: null
+            }
+          : {}),
+        scan_release_error: releaseErrorMessage(result.error)
+      }))
+      return
+    }
+
+    yield* Effect.sync(() => {
+      const current = viewStore.getState()
+      viewStore.set({
+        staged_discoveries: current.staged_discoveries.map((item) =>
+          item.candidate_id === result.data.candidate.candidate_id ? result.data.candidate : item
+        ),
+        scan_release_status: "idle",
+        scan_release_candidate_id: null,
+        scan_release_root_id: null,
+        scan_release_operation_id: null,
+        scan_release_candidate_version: null,
+        scan_release_mapping_revision: null,
+        scan_release_policy_revision: null,
+        scan_release_error: null
+      })
+    })
+  })
 type ScanWaitResult =
   | { readonly ok: true; readonly task: ScanTask }
   | { readonly ok: false; readonly message: string }
@@ -503,8 +577,7 @@ export const loadLibrary = (append = false) =>
       return
     }
     yield* Effect.sync(() => {
-      const state = viewStore.getState()
-      const existing = append ? state.library_entries : []
+      const existing = append ? viewStore.getState().library_entries : []
       const ids = new Set(existing.map((entry) => entry.entry_id))
       const entries = [...existing]
       for (const entry of result.data.entries) {
@@ -515,10 +588,7 @@ export const loadLibrary = (append = false) =>
         library_cursor: result.data.next_cursor,
         library_has_more: result.data.has_more,
         library_status: "ready",
-        library_error: null,
-        library_cover_generation: append
-          ? state.library_cover_generation
-          : state.library_cover_generation + 1
+        library_error: null
       })
     })
   })

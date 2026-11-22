@@ -1,7 +1,6 @@
 import { Schema } from "effect"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
-import { RootExclusions, RootPolicyCommand, RootRelativePath } from "@henshin/contracts/root"
-import { ThumbnailReference } from "@henshin/contracts/thumbnail"
+import { RootExclusions, RootPolicyCommand, ScanManifestObservation, ScanManifestPage } from "@henshin/contracts/root"
 
 /** A persisted prototype note row, always with a canonical decimal revision. */
 export const NoteRow = Schema.Struct({
@@ -138,20 +137,30 @@ export const LibraryEntryRow = Schema.Struct({
   page_count: Schema.Natural,
   state: Schema.Literal("accepted"),
   content_version: Revision,
-  location_revision: Revision,
-  cover: Schema.NullOr(ThumbnailReference)
+  location_revision: Revision
 })
 export type LibraryEntryRow = typeof LibraryEntryRow.Type
 
-export const AcceptedThumbnailEntryRow = Schema.Struct({
+const LibraryEntryResolution = Schema.Struct({
   entry_id: Uuid,
   root_id: Uuid,
   relative_path: Schema.String,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  decision_version: Revision,
+  location_revision: Revision,
   content_version: Revision,
-  manifest_json: Schema.String
+  status: Schema.Union([Schema.Literal("usable"), Schema.Literal("unresolved")]),
+  reason: Schema.NullOr(Schema.Union([
+    Schema.Literal("known-change"),
+    Schema.Literal("insufficient-evidence")
+  ])),
+  accepted_observation: ScanManifestObservation,
+  first_page: Schema.NullOr(ScanManifestPage),
+  sibling_claims: Schema.Array(Schema.Struct({ entry_id: Uuid, relative_path: Schema.String })),
+  sibling_claims_truncated: Schema.Boolean
 })
-export type AcceptedThumbnailEntryRow = typeof AcceptedThumbnailEntryRow.Type
+export const LibraryEntryResolutionRow = Schema.NullOr(LibraryEntryResolution)
+export type LibraryEntryResolutionRow = typeof LibraryEntryResolutionRow.Type
 
 export const LibrarySummaryRow = Schema.Struct({
   library_id: Uuid,
@@ -166,21 +175,6 @@ export const LibraryEntryPageRow = Schema.Struct({
   library_change_revision: Revision
 })
 export type LibraryEntryPageRow = typeof LibraryEntryPageRow.Type
-
-export const IndexedRootSampleRow = Schema.Struct({
-  relative_path: RootRelativePath,
-  kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
-  format_evidence: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
-  size_bytes: Schema.NullOr(Schema.Natural)
-})
-export type IndexedRootSampleRow = typeof IndexedRootSampleRow.Type
-
-export const IndexedRootSamplePageRow = Schema.Struct({
-  samples: Schema.Array(IndexedRootSampleRow),
-  sample_truncated: Schema.Boolean,
-  library_change_revision: Revision
-})
-export type IndexedRootSamplePageRow = typeof IndexedRootSamplePageRow.Type
 
 export const NormalPublishOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("published") }),
@@ -316,8 +310,7 @@ export const WorkerRequest = Schema.Union([
   }),
   Schema.Struct({ op: Schema.Literal("readLibrary") }),
   Schema.Struct({ op: Schema.Literal("listLibraryEntries"), pageSize: Schema.Natural, cursor: Schema.NullOr(Uuid) }),
-  Schema.Struct({ op: Schema.Literal("listIndexedRootSamples"), rootId: Uuid, sampleLimit: Schema.Literal(33) }),
-  Schema.Struct({ op: Schema.Literal("readAcceptedThumbnailEntry"), entryId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("readEntryResolution"), entryId: Uuid }),
   Schema.Struct({
     op: Schema.Literal("finishScan"),
     taskId: Uuid,

@@ -177,6 +177,33 @@ describe("normal library scan", () => {
       kind: "image-directory",
       page_count: 2
     })
+    for (const entry of firstEntries) {
+      const resolution = await withLibraryClient(server, Effect.gen(function*() {
+        return yield* (yield* LibraryHttpClient).resolution({ params: { id: entry.entry_id } })
+      }))
+      expect(resolution.data).toMatchObject({
+        entry_id: entry.entry_id,
+        root_id: entry.root_id,
+        relative_path: entry.relative_path,
+        kind: entry.kind,
+        decision_version: "1",
+        location_revision: "1",
+        content_version: "1",
+        status: "usable",
+        reason: null,
+        first_page: expect.objectContaining({ name: "001.jpg" }),
+        sibling_claims_truncated: false
+      })
+      expect(resolution.data.accepted_observation.observation_token).toEqual(expect.any(String))
+      expect(resolution.data.sibling_claims.map((claim) => claim.relative_path)).toEqual(
+        expect.arrayContaining(firstEntries.filter((other) => other.entry_id !== entry.entry_id).map((other) => other.relative_path))
+      )
+      expect("source_path" in resolution.data).toBe(false)
+    }
+    const unknownResolution = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: randomUUID() } }).pipe(Effect.flip)
+    }))
+    expect(unknownResolution._tag).toBe("EntryNotFound")
     const firstIds = new Map(firstEntries.map((entry) => [entry.relative_path, entry.entry_id]))
 
     await server.stop()
@@ -375,6 +402,20 @@ describe("normal library scan", () => {
       location_revision: "1"
     })
 
+    const changedResolution = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id } })
+    }))
+    expect(changedResolution.data).toMatchObject({
+      entry_id: accepted.entry_id,
+      relative_path: "book",
+      status: "unresolved",
+      reason: "known-change",
+      decision_version: "1",
+      location_revision: "1",
+      content_version: "1",
+      first_page: { name: "001.jpg" }
+    })
+
     const staged = await withReviewClient(server, Effect.gen(function*() {
       const client = yield* ReviewHttpClient
       return yield* client.candidates()
@@ -382,6 +423,65 @@ describe("normal library scan", () => {
     expect(staged.data).toHaveLength(1)
     expect(staged.data[0]).toMatchObject({ relative_path: "book", analysis_status: "ready" })
     expect(staged.data[0]?.manifest?.pages).toHaveLength(2)
+  })
+
+  it("keeps accepted resolution usable when the server root is unavailable", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-unavailable-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "book")
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+          label: "Unavailable resolution", path: fixture, preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+
+    const scan = await withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in scan.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, scan.data.task.task_id)).status).toBe("succeeded")
+    const entries = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
+    }))
+    const accepted = entries.data.entries[0]
+    if (accepted === undefined) throw new Error("expected accepted entry")
+
+    await rm(fixture, { recursive: true, force: true })
+    const unavailableScan = await withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in unavailableScan.data)) throw new Error("expected unavailable scan task")
+    expect((await waitForTerminal(server, unavailableScan.data.task.task_id)).status).toBe("failed")
+
+    const resolution = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id } })
+    }))
+    expect(resolution.data.status).toBe("usable")
+    expect(resolution.data.reason).toBeNull()
   })
 
   it("defers new allocation when an accepted path is missing", async () => {
@@ -519,57 +619,5 @@ describe("normal library scan", () => {
       return yield* client.search({ payload: { page_size: 200 } })
     }))
     expect(entries.data.entries.map((entry) => entry.relative_path).sort()).toEqual(["excluded-book", "new-book"])
-  })
-
-  it("returns bounded root-scoped indexed format and size evidence", async () => {
-    const server = await start()
-    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-mapping-samples-"))
-    fixturePaths.add(fixture)
-    await makeImageBook(fixture, "series-pages")
-    await writeFile(path.join(fixture, "series-pages", "002.png"), "second page")
-    await makeZip(path.join(fixture, "archive.cbz"))
-
-    const root = await withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      const preview = yield* client.preview({ payload: { path: fixture } })
-      if (!("children" in preview.data)) throw new Error("expected setup preview")
-      return yield* client.save({
-        payload: {
-          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
-          label: "Mapping samples", path: fixture, preview_identity: preview.data.preview_identity
-        }
-      })
-    }))
-
-    const submitted = await withServerClient(server, Effect.gen(function*() {
-      const client = yield* ServerHttpClient
-      return yield* client.command({
-        params: { id: root.data.root_id },
-        payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-          expected_mapping_revision: root.data.mapping_revision,
-          expected_policy_revision: root.data.policy_revision,
-          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
-        }
-      })
-    }))
-    if (!("task" in submitted.data)) throw new Error("expected scan task")
-    expect((await waitForTerminal(server, submitted.data.task.task_id)).status).toBe("succeeded")
-
-    const samples = await withLibraryClient(server, Effect.gen(function*() {
-      const client = yield* LibraryHttpClient
-      return yield* client.indexedSamples({ params: { id: root.data.root_id } })
-    }))
-
-    expect(samples.data).toMatchObject({
-      root_id: root.data.root_id,
-      sample_limit: 32,
-      sample_truncated: false,
-      samples: [
-        { relative_path: "archive.cbz", kind: "archive", format_evidence: ["jpeg"] },
-        { relative_path: "series-pages", kind: "image-directory", format_evidence: ["jpeg", "png"] }
-      ]
-    })
-    expect(samples.data.samples.every((sample) => sample.size_bytes !== null && sample.size_bytes > 0)).toBe(true)
   })
 })

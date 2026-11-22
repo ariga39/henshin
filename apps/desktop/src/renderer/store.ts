@@ -2,7 +2,6 @@ import type {
   CommandAttempt,
   CommandReconciliation,
   ConnectionStatusView,
-  LocalMappingPreview,
   LibraryEntry,
   NoteView,
   RootPreviewRequest,
@@ -56,16 +55,20 @@ export interface ViewState {
   readonly root_save_target_path: string | null
   readonly root_policy_status: "idle" | "loading" | "error"
   readonly root_policy_error: string | null
-  readonly local_mapping_root_id: string | null
-  readonly local_mapping_status: "idle" | "loading" | "ready" | "error"
-  readonly local_mapping_preview: LocalMappingPreview | null
-  readonly local_mapping_error: string | null
   readonly scan_tasks: ReadonlyArray<ScanTask>
   readonly staged_discoveries: ReadonlyArray<StagedDiscovery>
   readonly scan_status: "idle" | "loading" | "ready" | "error"
   readonly scan_error: string | null
   readonly scan_start_status: "idle" | "loading" | "error"
   readonly scan_start_error: string | null
+  readonly scan_release_status: "idle" | "loading" | "error"
+  readonly scan_release_candidate_id: string | null
+  readonly scan_release_root_id: string | null
+  readonly scan_release_operation_id: string | null
+  readonly scan_release_candidate_version: number | null
+  readonly scan_release_mapping_revision: string | null
+  readonly scan_release_policy_revision: string | null
+  readonly scan_release_error: string | null
   readonly scan_hold_new_discoveries: boolean
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
@@ -74,7 +77,6 @@ export interface ViewState {
   readonly library_has_more: boolean
   readonly library_status: "idle" | "loading" | "ready" | "error"
   readonly library_error: string | null
-  readonly library_cover_generation: number
   readonly library_scan_status: "idle" | "starting" | "started" | "error"
   readonly library_scan_error: string | null
   readonly library_scan_task: ScanTask | null
@@ -113,16 +115,20 @@ const initialState: ViewState = {
   root_save_target_path: null,
   root_policy_status: "idle",
   root_policy_error: null,
-  local_mapping_root_id: null,
-  local_mapping_status: "idle",
-  local_mapping_preview: null,
-  local_mapping_error: null,
   scan_tasks: [],
   staged_discoveries: [],
   scan_status: "idle",
   scan_error: null,
   scan_start_status: "idle",
   scan_start_error: null,
+  scan_release_status: "idle",
+  scan_release_candidate_id: null,
+  scan_release_root_id: null,
+  scan_release_operation_id: null,
+  scan_release_candidate_version: null,
+  scan_release_mapping_revision: null,
+  scan_release_policy_revision: null,
+  scan_release_error: null,
   scan_hold_new_discoveries: false,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
   connection_generation: 0,
@@ -131,7 +137,6 @@ const initialState: ViewState = {
   library_has_more: false,
   library_status: "idle",
   library_error: null,
-  library_cover_generation: 0,
   library_scan_status: "idle",
   library_scan_error: null,
   library_scan_task: null

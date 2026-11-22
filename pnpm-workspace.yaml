@@ -7,6 +7,3 @@ packages:
 allowBuilds:
   electron: true
   esbuild: true
-  # sharp@0.34.5 selects the pinned @img/sharp-* prebuild for supported
-  # platforms; its install hook is not required for this workspace.
-  sharp: false

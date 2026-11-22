@@ -1,5 +1,5 @@
 import { Schema } from "effect"
-import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiSchema } from "effect/http-api"
+import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/http-api"
 import { Authentication } from "./auth"
 import { SuccessEnvelope } from "./envelope"
 import {
@@ -17,10 +17,9 @@ import {
   RootPreviewUnavailable,
   ActiveScanConflict,
   CandidateNotFound,
+  EntryNotFound,
   TaskNotFound,
-  StorageFull,
-  ThumbnailMissing,
-  ThumbnailUpdating
+  StorageFull
 } from "./errors"
 import { NoteId, Uuid } from "./ids"
 import { EditNotePayload, HandshakeData, Note, OperationResult } from "./note"
@@ -37,14 +36,8 @@ import {
   ServerRoot,
   ServerRootList
 } from "./root"
-import {
-  IndexedRootSamplePage,
-  LibraryEntryPage,
-  LibrarySearchRequest,
-  LibraryView
-} from "./library"
 import { ReviewCandidateCommandRequest, ReviewCommandResult } from "./review"
-import { ThumbnailKey } from "./thumbnail"
+import { EntryResolution, LibraryEntryPage, LibrarySearchRequest, LibraryView } from "./library"
 
 /**
  * Isolated synthetic prototype API. The `/prototype/v1` prefix and the
@@ -207,27 +200,10 @@ export const LibraryApi = HttpApi.make("henshin-library").add(
         success: SuccessEnvelope(LibraryEntryPage),
         error: [AuthenticationRequired, InvalidRequest, InternalError]
       }),
-      HttpApiEndpoint.get("indexedSamples", "/roots/:id/indexed-samples", {
+      HttpApiEndpoint.get("resolution", "/entries/:id/resolution", {
         params: { id: Uuid },
-        success: SuccessEnvelope(IndexedRootSamplePage),
-        error: [AuthenticationRequired, RootNotFound, InternalError]
-      })
-    )
-    .prefix("/api/v1")
-    .middleware(Authentication)
-)
-
-const ThumbnailBytes = Schema.Uint8Array.pipe(
-  HttpApiSchema.asUint8Array({ contentType: "image/webp" })
-)
-
-export const ThumbnailApi = HttpApi.make("henshin-thumbnail").add(
-  HttpApiGroup.make("thumbnails", { topLevel: true })
-    .add(
-      HttpApiEndpoint.get("get", "/thumbnails/:key", {
-        params: { key: ThumbnailKey },
-        success: ThumbnailBytes,
-        error: [AuthenticationRequired, ThumbnailMissing, ThumbnailUpdating, InternalError]
+        success: SuccessEnvelope(EntryResolution),
+        error: [AuthenticationRequired, EntryNotFound, InternalError]
       })
     )
     .prefix("/api/v1")

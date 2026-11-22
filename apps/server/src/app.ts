@@ -12,13 +12,12 @@ import {
 } from "effect/http"
 import type { ServeError } from "effect/http/HttpServerError"
 import { HttpApiBuilder } from "effect/http-api"
-import { LibraryApi, PrototypeApi, ReviewApi, ServerApi, TaskApi, ThumbnailApi } from "@henshin/contracts"
+import { LibraryApi, PrototypeApi, ReviewApi, ServerApi, TaskApi } from "@henshin/contracts"
 import { AuthenticationLayer } from "./api/AuthenticationLayer"
 import { PrototypeHandlers } from "./api/handlers"
 import { RootHandlers } from "./api/root-preview"
 import { ReviewHandlers, TaskHandlers } from "./api/scan"
 import { LibraryHandlers } from "./api/library"
-import { ThumbnailHandlers } from "./api/thumbnails"
 import { AuthConfig, ServerState } from "./identity"
 import { DatabaseWorker, type DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { NoteStore } from "./persistence/NoteStore"
@@ -26,8 +25,6 @@ import { RootStore } from "./persistence/RootStore"
 import { ScanStore } from "./persistence/ScanStore"
 import { LibraryStore } from "./persistence/LibraryStore"
 import { ServerOwnershipLayer, type ServerOwnershipError } from "./persistence/ServerOwnership"
-import { ThumbnailCache } from "./thumbnails/ThumbnailCache"
-import { ThumbnailProducer } from "./thumbnails/ThumbnailProducer"
 
 const MAX_BODY_BYTES = 1024 * 1024
 const BODIED_METHODS = new Set<string>(["PUT", "POST", "PATCH"])
@@ -199,26 +196,7 @@ export const makeAppLayer = (
     Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer, LibraryStore.layer))
   )
   const LibraryRoutesLayer = HttpApiBuilder.layer(LibraryApi).pipe(Layer.provide(LibraryHandlersLayer))
-  const ThumbnailHandlersLayer = ThumbnailHandlers.pipe(
-    Layer.provide(ThumbnailProducer.layer),
-    Layer.provide(
-      Layer.mergeAll(
-        AuthenticationLayer,
-        LibraryStore.layer,
-        RootStore.layer,
-        ThumbnailCache.layer(path.join(path.dirname(options.dbPath), "thumbnail-cache"))
-      )
-    )
-  )
-  const ThumbnailRoutesLayer = HttpApiBuilder.layer(ThumbnailApi).pipe(Layer.provide(ThumbnailHandlersLayer))
-  const AllRoutes = Layer.mergeAll(
-    RoutesLayer,
-    RootPreviewRoutesLayer,
-    TaskRoutesLayer,
-    ReviewRoutesLayer,
-    LibraryRoutesLayer,
-    ThumbnailRoutesLayer
-  )
+  const AllRoutes = Layer.mergeAll(RoutesLayer, RootPreviewRoutesLayer, TaskRoutesLayer, ReviewRoutesLayer, LibraryRoutesLayer)
 
   const ReadyLayer = Layer.effectDiscard(
     Effect.gen(function*() {
