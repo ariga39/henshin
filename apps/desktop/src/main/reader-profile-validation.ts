@@ -1,6 +1,6 @@
 import { access, constants as fsConstants, lstat, open, readdir } from "node:fs/promises"
 import { extname, isAbsolute, join } from "node:path"
-import type { ReaderProfileSaveIpcRequest } from "@henshin/contracts"
+import { compareNaturalPageNames, type ReaderProfileSaveIpcRequest } from "@henshin/contracts"
 
 export class ReaderProfileValidationError extends Error {
   readonly code = "reader_profile_invalid"
@@ -41,8 +41,8 @@ export class ReaderTestTargetError extends Error {
 export class ReaderTestTargetSelectionError extends Error {
   readonly code = "reader_test_target_selection_expired"
 
-  constructor() {
-    super("choose a test target again before launching the reader")
+  constructor(message = "choose a test target again before launching the reader") {
+    super(message)
     this.name = "ReaderTestTargetSelectionError"
   }
 }
@@ -79,7 +79,8 @@ const SHELL_OR_SCRIPT_EXTENSIONS = new Set([
   ".zsh"
 ])
 const ARCHIVE_EXTENSIONS = new Set([".cbz", ".zip"])
-const IMAGE_EXTENSIONS = new Set([".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"])
+const IMAGE_EXTENSIONS = new Set([".jpeg", ".jpg", ".png", ".webp"])
+const UNSUPPORTED_IMAGE_EXTENSIONS = new Set([".avif", ".bmp", ".gif", ".heic", ".heif", ".jxl", ".tif", ".tiff"])
 
 const hasBytes = (header: Uint8Array, offset: number, bytes: ReadonlyArray<number>): boolean =>
   offset + bytes.length <= header.length && bytes.every((byte, index) => header[offset + index] === byte)
@@ -259,10 +260,14 @@ export const resolveReaderTestTarget = async (
   } catch {
     throw new ReaderTestTargetError("the selected image directory could not be read")
   }
-  const firstImage = entries
-    .filter((entry) => entry.isFile() && IMAGE_EXTENSIONS.has(extname(entry.name).toLowerCase()))
+  const directFiles = entries.filter((entry) => entry.isFile())
+  if (directFiles.some((entry) => UNSUPPORTED_IMAGE_EXTENSIONS.has(extname(entry.name).toLowerCase()))) {
+    throw new ReaderTestTargetError("the selected image directory contains unsupported image formats")
+  }
+  const firstImage = directFiles
+    .filter((entry) => IMAGE_EXTENSIONS.has(extname(entry.name).toLowerCase()))
     .map((entry) => entry.name)
-    .sort((left, right) => left < right ? -1 : left > right ? 1 : 0)[0]
+    .sort(compareNaturalPageNames)[0]
   if (firstImage === undefined) {
     throw new ReaderTestTargetError("the selected image directory has no supported image")
   }

@@ -118,6 +118,7 @@ export const selectReaderTestTarget = (input: ReaderProfileTestTargetSelectIpcRe
     }))
     const result = yield* client.selectTestTarget(input)
     if (!result.ok) {
+      if (result.error.code === "reader_profile_conflict") yield* refreshReaderProfilesAfterConflict()
       yield* Effect.sync(() => viewStore.set({
         reader_profile_test_status: "error",
         reader_profile_test_error: result.error.message,
@@ -147,6 +148,15 @@ export const clearReaderTestTarget = (): void => {
   })
 }
 
+const refreshReaderProfilesAfterConflict = () =>
+  Effect.gen(function*() {
+    yield* Effect.sync(() => {
+      clearReaderExecutableSelection()
+      clearReaderTestTarget()
+    })
+    yield* loadReaderProfiles
+  })
+
 export const testReaderProfile = (input: ReaderProfileTestIpcRequest) =>
   Effect.gen(function*() {
     const client = yield* ReaderProfileClient
@@ -157,6 +167,10 @@ export const testReaderProfile = (input: ReaderProfileTestIpcRequest) =>
     }))
     const result = yield* client.test(input)
     if (!result.ok) {
+      if (result.error.code === "reader_profile_conflict") yield* refreshReaderProfilesAfterConflict()
+      if (result.error.code === "reader_test_target_selection_expired") {
+        yield* Effect.sync(clearReaderTestTarget)
+      }
       yield* Effect.sync(() => viewStore.set({
         reader_profile_test_status: "error",
         reader_profile_test_error: result.error.message
@@ -177,6 +191,7 @@ export const saveReaderProfile = (input: ReaderProfileSaveIpcRequest) =>
     yield* Effect.sync(() => viewStore.set({ reader_profile_save_status: "loading", reader_profile_save_error: null }))
     const result = yield* client.save(input)
     if (!result.ok) {
+      if (result.error.code === "reader_profile_conflict") yield* refreshReaderProfilesAfterConflict()
       yield* Effect.sync(() => viewStore.set({
         reader_profile_save_status: "error",
         reader_profile_save_error: result.error.message
