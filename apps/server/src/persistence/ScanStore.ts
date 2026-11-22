@@ -29,6 +29,7 @@ export interface StartManualScanInput {
 }
 
 export type ScanStartResult =
+  | { readonly kind: "active_scan_conflict"; readonly taskId: string; readonly policyRevision: string }
   | { readonly kind: "created"; readonly task: ScanTask }
   | { readonly kind: "replayed"; readonly task: ScanTask }
   | { readonly kind: "active"; readonly task: ScanTask }

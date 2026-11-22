@@ -2,7 +2,7 @@ import type { RootPreviewResult, ScanTask, StagedDiscovery } from "@henshin/cont
 import { useSyncExternalStore } from "react"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { startHeldScan } from "./workflows"
+import { retryScanResults, startManualScan } from "./workflows"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -39,7 +39,7 @@ export const HeldScanControls = ({ preview }: { readonly preview: RootPreviewRes
   if (!isSavedDiscovery(preview)) return null
 
   const task = latestTaskForRoot(state.scan_tasks, preview.root_id)
-  const disabled = !state.scan_hold_new_discoveries || state.scan_start_status === "loading" || (task !== null && isActive(task))
+  const disabled = state.scan_start_status === "loading" || (task !== null && isActive(task))
   return (
     <section aria-labelledby="held-scan-heading" data-testid="held-scan-controls">
       <h2 id="held-scan-heading">Manual scan</h2>
@@ -53,11 +53,13 @@ export const HeldScanControls = ({ preview }: { readonly preview: RootPreviewRes
         />
         Hold new discoveries for review
       </label>
-      <p>Held mode only: discovered books remain staged and no book is accepted into Library.</p>
+      <p>{state.scan_hold_new_discoveries
+        ? "Held mode: discovered books remain staged and no book is accepted into Library."
+        : "Normal mode: complete, current discoveries are accepted into Library."}</p>
       <button
         data-testid="start-held-scan"
         disabled={disabled}
-        onClick={() => void runtime.runPromise(startHeldScan(preview.root_id))}
+        onClick={() => void runtime.runPromise(startManualScan(preview.root_id))}
       >
         {state.scan_start_status === "loading" ? "Starting manual scan…" : "Start manual scan"}
       </button>
@@ -66,6 +68,7 @@ export const HeldScanControls = ({ preview }: { readonly preview: RootPreviewRes
       )}
       {task !== null && (
         <div data-testid={`scan-task-${task.task_id}`}>
+          <p data-testid="held-scan-task">Task: {task.task_id}</p>
           <p data-testid="scan-task-status">Status: {taskStatusText(task.status)}</p>
           <p data-testid="scan-task-progress">
             {task.candidates_analyzed} of {task.candidates_discovered} discoveries analyzed; {task.directories_visited} directories visited.
@@ -86,7 +89,14 @@ export const HeldScanReview = () => {
     <section aria-labelledby="held-review-heading" data-testid="held-scan-review">
       <h2 id="held-review-heading">Review staged discoveries</h2>
       {state.scan_status === "loading" && <p>Refreshing scan results…</p>}
-      {state.scan_status === "error" && <p role="alert">Could not load scan results: {state.scan_error}</p>}
+      {state.scan_status === "error" && (
+        <>
+          <p role="alert">Could not load scan results: {state.scan_error}</p>
+          <button data-testid="scan-results-retry" onClick={() => void runtime.runPromise(retryScanResults)}>
+            Retry
+          </button>
+        </>
+      )}
       {state.scan_status !== "error" && state.scan_tasks.length === 0 && state.staged_discoveries.length === 0 && (
         <p>No held scan results yet.</p>
       )}

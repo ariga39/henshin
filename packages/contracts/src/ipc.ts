@@ -4,9 +4,9 @@ import {
   RootPolicyCommand,
   RootPreviewRequest,
   RootRegistrationRequest,
-  RootScanCommand,
-  ScanTaskSubmission
+  RootScanCommand
 } from "./root"
+import { LibrarySearchRequest } from "./library"
 import type {
   CommandAttempt,
   CommandReconciliation,
@@ -148,10 +148,11 @@ export const RootCommandIpcRequest = Schema.Union([
 ])
 export type RootCommandIpcRequest = typeof RootCommandIpcRequest.Type
 
+export const LibrarySearchIpcRequest = LibrarySearchRequest
+export type LibrarySearchIpcRequest = typeof LibrarySearchIpcRequest.Type
+
 export const TaskListIpcRequest = Schema.Struct({})
 export type TaskListIpcRequest = typeof TaskListIpcRequest.Type
 
 export const ReviewCandidatesIpcRequest = Schema.Struct({})
 export type ReviewCandidatesIpcRequest = typeof ReviewCandidatesIpcRequest.Type
-
-export type HeldScanIpcResult = ScanTaskSubmission
