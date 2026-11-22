@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { Effect, Layer, Schema, Context } from "effect"
 
@@ -81,7 +81,10 @@ export class ThumbnailCache extends Context.Service<ThumbnailCache, {
               await unlink(path).catch(() => undefined)
               return null
             }
-            return new Uint8Array(await readFile(path))
+            const bytes = new Uint8Array(await readFile(path))
+            const now = new Date()
+            await utimes(path, now, now)
+            return bytes
           } catch {
             return null
           }
