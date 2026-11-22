@@ -2,8 +2,9 @@ import { useSyncExternalStore } from "react"
 import type { RootPreviewResult } from "@henshin/contracts"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { canSaveRoot, excludeRootPath, previewRoot, refreshRootPolicy, removeRootExclusion, saveRoot } from "./workflows"
+import { canSaveRoot, excludeRootPath, previewRoot, refreshRootPolicy, removeRootExclusion, saveRoot, showLibrary } from "./workflows"
 import { HeldScanControls, HeldScanReview } from "./HeldScanReview"
+import { ReaderProfiles } from "./ReaderProfiles"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -69,6 +70,7 @@ export const RootPreviewScreen = () => {
   return (
     <main className="collection">
       <h1>Collection setup</h1>
+      <button data-testid="open-library" onClick={() => void runtime.runPromise(showLibrary)}>Library</button>
       <p>Enter the full path to your collection as it appears on the server.</p>
       <form onSubmit={(event) => {
         event.preventDefault()
@@ -193,6 +195,7 @@ export const RootPreviewScreen = () => {
           ))}
         </ul>
       </section>
+      <ReaderProfiles />
     </main>
   )
 }

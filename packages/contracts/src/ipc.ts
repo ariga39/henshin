@@ -6,6 +6,7 @@ import {
   RootRegistrationRequest,
   RootScanCommand
 } from "./root"
+import { LibrarySearchRequest } from "./library"
 import { ReleaseHoldCommand } from "./review"
 import type {
   CommandAttempt,
@@ -14,6 +15,12 @@ import type {
   SavedDraft,
   SavedDraftAbsent
 } from "./note"
+export {
+  ReaderExecutableSelectIpcRequest,
+  ReaderExecutableSelectionIpcResult,
+  ReaderProfileListIpcRequest,
+  ReaderProfileSaveIpcRequest
+} from "./reader"
 
 export const ConnectionState = Schema.Union([
   Schema.Literal("connecting"),
@@ -147,6 +154,9 @@ export const RootCommandIpcRequest = Schema.Union([
   })
 ])
 export type RootCommandIpcRequest = typeof RootCommandIpcRequest.Type
+
+export const LibrarySearchIpcRequest = LibrarySearchRequest
+export type LibrarySearchIpcRequest = typeof LibrarySearchIpcRequest.Type
 
 export const TaskListIpcRequest = Schema.Struct({})
 export type TaskListIpcRequest = typeof TaskListIpcRequest.Type

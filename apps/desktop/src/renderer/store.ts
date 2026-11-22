@@ -2,13 +2,15 @@ import type {
   CommandAttempt,
   CommandReconciliation,
   ConnectionStatusView,
+  LibraryEntry,
   NoteView,
   RootPreviewRequest,
   RootPreviewResult,
   ScanTask,
   StagedDiscovery,
   ServerRoot,
-  SavedDraft
+  SavedDraft,
+  ReaderProfile
 } from "@henshin/contracts"
 
 export type Outcome =
@@ -22,6 +24,7 @@ export type Outcome =
   | { readonly kind: "error"; readonly message: string }
 
 export interface ViewState {
+  readonly screen: "setup" | "library"
   readonly status: "idle" | "loading" | "ready" | "error"
   readonly instance_id: string | null
   readonly epoch: string | null
@@ -70,9 +73,26 @@ export interface ViewState {
   readonly scan_hold_new_discoveries: boolean
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
+  readonly reader_profiles: ReadonlyArray<ReaderProfile>
+  readonly reader_profiles_status: "idle" | "loading" | "ready" | "error"
+  readonly reader_profiles_error: string | null
+  readonly reader_profile_save_status: "idle" | "loading" | "ready" | "error"
+  readonly reader_profile_save_error: string | null
+  readonly reader_profile_selection_handle: string | null
+  readonly reader_profile_selection_name: string | null
+  readonly reader_profile_selection_error: string | null
+  readonly library_entries: ReadonlyArray<LibraryEntry>
+  readonly library_cursor: string | null
+  readonly library_has_more: boolean
+  readonly library_status: "idle" | "loading" | "ready" | "error"
+  readonly library_error: string | null
+  readonly library_scan_status: "idle" | "starting" | "started" | "error"
+  readonly library_scan_error: string | null
+  readonly library_scan_task: ScanTask | null
 }
 
 const initialState: ViewState = {
+  screen: "setup",
   status: "idle",
   instance_id: null,
   epoch: null,
@@ -120,7 +140,23 @@ const initialState: ViewState = {
   scan_release_error: null,
   scan_hold_new_discoveries: false,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
-  connection_generation: 0
+  connection_generation: 0,
+  reader_profiles: [],
+  reader_profiles_status: "idle",
+  reader_profiles_error: null,
+  reader_profile_save_status: "idle",
+  reader_profile_save_error: null,
+  reader_profile_selection_handle: null,
+  reader_profile_selection_name: null,
+  reader_profile_selection_error: null,
+  library_entries: [],
+  library_cursor: null,
+  library_has_more: false,
+  library_status: "idle",
+  library_error: null,
+  library_scan_status: "idle",
+  library_scan_error: null,
+  library_scan_task: null
 }
 
 const sameConnection = (left: ConnectionStatusView, right: ConnectionStatusView): boolean =>

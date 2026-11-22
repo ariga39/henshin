@@ -5,6 +5,7 @@ import type {
   ConnectionStatusView,
   DiscardedDraft,
   HandshakeView,
+  LibraryEntryPage,
   NoteView,
   PublicError,
   SavedDraft,
@@ -19,7 +20,10 @@ import type {
   StagedDiscovery,
   ServerRoot,
   ServerRootList,
-  SavedDraftAbsent
+  SavedDraftAbsent,
+  ReaderExecutableSelectionIpcResult,
+  ReaderProfile,
+  ReaderProfileSaveIpcRequest
 } from "@henshin/contracts"
 
 export type Result<A> =
@@ -73,8 +77,16 @@ declare global {
   interface Window {
     readonly henshinPrototype: PrototypeBridge
     readonly henshinRootPreview: RootPreviewBridge
-  readonly henshinScanReview: ScanReviewBridge
+    readonly henshinScanReview: ScanReviewBridge
+    readonly henshinReaderProfiles: ReaderProfileBridge
+    readonly henshinLibrary: LibraryBridge
   }
+}
+
+export interface ReaderProfileBridge {
+  list(): Promise<Result<ReadonlyArray<ReaderProfile>>>
+  selectExecutable(): Promise<Result<ReaderExecutableSelectionIpcResult>>
+  save(input: ReaderProfileSaveIpcRequest): Promise<Result<ReaderProfile>>
 }
 
 export interface RootPreviewBridge {
@@ -88,6 +100,10 @@ export interface ScanReviewBridge {
   listTasks(): Promise<Result<ReadonlyArray<ScanTask>>>
   candidates(): Promise<Result<ReadonlyArray<StagedDiscovery>>>
   command(input: ReleaseHeldDiscoveryIpcRequest): Promise<Result<ReviewCommandResult>>
+}
+
+export interface LibraryBridge {
+  search(input: { readonly page_size?: number; readonly cursor?: string }): Promise<Result<LibraryEntryPage>>
 }
 
 /**
@@ -182,6 +198,38 @@ export class ScanReviewClient extends Context.Service<
       listTasks: () => callIpc(() => window.henshinScanReview.listTasks()),
       candidates: () => callIpc(() => window.henshinScanReview.candidates()),
       release: (input) => callIpc(() => window.henshinScanReview.command(input))
+    })
+  )
+}
+
+export class ReaderProfileClient extends Context.Service<
+  ReaderProfileClient,
+  {
+    readonly list: () => Effect.Effect<Result<ReadonlyArray<ReaderProfile>>>
+    readonly selectExecutable: () => Effect.Effect<Result<ReaderExecutableSelectionIpcResult>>
+    readonly save: (input: ReaderProfileSaveIpcRequest) => Effect.Effect<Result<ReaderProfile>>
+  }
+>()("henshin/desktop/renderer/ReaderProfileClient") {
+  static readonly layer = Layer.succeed(
+    ReaderProfileClient,
+    ReaderProfileClient.of({
+      list: () => callIpc(() => window.henshinReaderProfiles.list()),
+      selectExecutable: () => callIpc(() => window.henshinReaderProfiles.selectExecutable()),
+      save: (input) => callIpc(() => window.henshinReaderProfiles.save(input))
+    })
+  )
+}
+
+export class LibraryClient extends Context.Service<
+  LibraryClient,
+  {
+    readonly search: (input: { readonly page_size?: number; readonly cursor?: string }) => Effect.Effect<Result<LibraryEntryPage>>
+  }
+>()("henshin/desktop/renderer/LibraryClient") {
+  static readonly layer = Layer.succeed(
+    LibraryClient,
+    LibraryClient.of({
+      search: (input) => callIpc(() => window.henshinLibrary.search(input))
     })
   )
 }
