@@ -125,3 +125,123 @@ export type ServerRoot = typeof ServerRoot.Type
 
 export const ServerRootList = Schema.Array(ServerRoot)
 export type ServerRootList = typeof ServerRootList.Type
+
+export const RootScanCommand = Schema.Struct({
+  type: Schema.Literal("start-scan"),
+  mode: Schema.Literal("manual"),
+  hold_new_discoveries: Schema.Literal(true)
+})
+export type RootScanCommand = typeof RootScanCommand.Type
+
+/** The explicit, non-accepting manual scan command for a saved root. */
+export const RootCommandRequest = Schema.Struct({
+  operation_id: Uuid,
+  instance_id: Uuid,
+  epoch: Uuid,
+  expected_mapping_revision: Revision,
+  command: RootScanCommand
+})
+export type RootCommandRequest = typeof RootCommandRequest.Type
+
+export const ScanTaskError = Schema.Struct({
+  code: Schema.String,
+  message: Schema.String
+})
+export type ScanTaskError = typeof ScanTaskError.Type
+
+export const ScanTaskStatus = Schema.Literals([
+  "queued",
+  "running",
+  "succeeded",
+  "completed_with_errors",
+  "failed",
+  "interrupted"
+])
+export type ScanTaskStatus = typeof ScanTaskStatus.Type
+
+export const ScanTask = Schema.Struct({
+  task_id: Uuid,
+  root_id: Uuid,
+  kind: Schema.Literal("manual-scan"),
+  mode: Schema.Literal("manual"),
+  hold_new_discoveries: Schema.Literal(true),
+  mapping_revision: Revision,
+  status: ScanTaskStatus,
+  directories_visited: Schema.Natural,
+  candidates_discovered: Schema.Natural,
+  candidates_analyzed: Schema.Natural,
+  analysis_error_count: Schema.Natural,
+  review_needed_count: Schema.Natural,
+  coverage: Schema.NullOr(RootPreviewCoverage),
+  readiness_error: Schema.NullOr(ScanTaskError),
+  error: Schema.NullOr(ScanTaskError),
+  created_at_ms: Schema.Int,
+  updated_at_ms: Schema.Int
+})
+export type ScanTask = typeof ScanTask.Type
+
+export const ScanTaskList = Schema.Array(ScanTask)
+export type ScanTaskList = typeof ScanTaskList.Type
+
+export const ScanTaskSubmission = Schema.Struct({
+  task: ScanTask
+})
+export type ScanTaskSubmission = typeof ScanTaskSubmission.Type
+
+export const ScanManifestPage = Schema.Struct({
+  name: Schema.String,
+  format: Schema.String,
+  declared_bytes: Schema.Natural
+})
+export type ScanManifestPage = typeof ScanManifestPage.Type
+
+export const ScanManifestDiagnostics = Schema.Struct({
+  supported_pages: Schema.Natural,
+  unsupported_pages: Schema.Natural,
+  ignored_entries: Schema.Natural,
+  directory_records: Schema.Natural
+})
+export type ScanManifestDiagnostics = typeof ScanManifestDiagnostics.Type
+
+export const ScanManifestObservation = Schema.Struct({
+  kind: Schema.Union([Schema.Literal("directory"), Schema.Literal("archive")]),
+  bytes: Schema.Natural,
+  mtime_ms: Schema.Number,
+  entry_count: Schema.Natural
+})
+export type ScanManifestObservation = typeof ScanManifestObservation.Type
+
+export const ScanManifest = Schema.Struct({
+  source_kind: Schema.Union([Schema.Literal("directory"), Schema.Literal("archive")]),
+  pages: Schema.Array(ScanManifestPage),
+  diagnostics: ScanManifestDiagnostics,
+  before: ScanManifestObservation,
+  after: ScanManifestObservation
+})
+export type ScanManifest = typeof ScanManifest.Type
+
+export const ScanAnalysisError = Schema.Struct({
+  code: Schema.String,
+  message: Schema.String,
+  diagnostics: ScanManifestDiagnostics
+})
+export type ScanAnalysisError = typeof ScanAnalysisError.Type
+
+/** A durable discovery awaiting explicit review; it is never an accepted entry. */
+export const StagedDiscovery = Schema.Struct({
+  candidate_id: Uuid,
+  task_id: Uuid,
+  root_id: Uuid,
+  relative_path: Schema.String,
+  kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  candidate_version: Schema.Natural,
+  hold_state: Schema.Literal("held"),
+  analysis_status: Schema.Union([Schema.Literal("ready"), Schema.Literal("error")]),
+  manifest: Schema.NullOr(ScanManifest),
+  analysis_error: Schema.NullOr(ScanAnalysisError),
+  updated_at_ms: Schema.Int
+})
+export type StagedDiscovery = typeof StagedDiscovery.Type
+
+export const StagedDiscoveryList = Schema.Array(StagedDiscovery)
+export type StagedDiscoveryList = typeof StagedDiscoveryList.Type
