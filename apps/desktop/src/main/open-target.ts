@@ -93,12 +93,35 @@ const readBigintStat = async (
   }
 }
 
-const readSiblingEvidence = async (
+const readSiblingEvidenceWithinRoot = async (
+  root: string,
   target: string
-): Promise<{ readonly realPath: string; readonly identity: string } | null> => {
-  let realPath: string
+): Promise<{ readonly identity: string } | null> => {
+  if (!isWithin(root, target)) return null
+
+  const suffix = relative(root, target)
+  const segments = suffix.length === 0 ? [] : suffix.split(sep)
+  let current = root
+  for (const [index, segment] of segments.entries()) {
+    current = join(current, segment)
+    let metadata: Stats
+    try {
+      metadata = await lstat(current) as Stats
+    } catch (error) {
+      if (isMissingError(error) || isUnrepresentablePathError(error)) return null
+      return throwFilesystemError(
+        error,
+        "sibling identity evidence is unavailable on this device; refresh before opening",
+        "sibling identity evidence is unavailable on this device; refresh before opening"
+      )
+    }
+    if (metadata.isSymbolicLink()) return null
+    if (index < segments.length - 1 && !metadata.isDirectory()) return null
+  }
+
+  let canonicalPath: string
   try {
-    realPath = await realpath(target)
+    canonicalPath = await realpath(target)
   } catch (error) {
     if (isMissingError(error) || isUnrepresentablePathError(error)) return null
     return throwFilesystemError(
@@ -107,10 +130,11 @@ const readSiblingEvidence = async (
       "sibling identity evidence is unavailable on this device; refresh before opening"
     )
   }
+  if (!isWithin(root, canonicalPath)) return null
 
   let metadata: BigIntStats
   try {
-    metadata = await stat(target, { bigint: true }) as BigIntStats
+    metadata = await stat(canonicalPath, { bigint: true }) as BigIntStats
   } catch (error) {
     if (isMissingError(error) || isUnrepresentablePathError(error)) return null
     return throwFilesystemError(
@@ -123,7 +147,7 @@ const readSiblingEvidence = async (
   if (identity === null) {
     throw new OpenTargetError("sibling identity evidence is unavailable; refresh before opening")
   }
-  return { realPath, identity }
+  return { identity }
 }
 
 export const isWindowsInvalidComponent = (component: string): boolean =>
@@ -149,6 +173,15 @@ const safeSegments = (value: string): ReadonlyArray<string> => {
   const segments = portableSegments(value)
   for (const segment of segments) validateNativeComponent(segment)
   return segments
+}
+
+const normalizedWindowsSiblingSegments = (
+  segments: ReadonlyArray<string>
+): ReadonlyArray<string> | null => {
+  const normalized = segments.map((segment) => segment.replace(/[. ]+$/gu, ""))
+  if (normalized.some(isWindowsInvalidComponent)) return null
+  const decoded = Schema.decodeUnknownOption(RootRelativePath)(normalized.join("/"))
+  return Option.isNone(decoded) ? null : normalized
 }
 
 const rejectLinksAlongPath = async (root: string, target: string): Promise<void> => {
@@ -250,11 +283,16 @@ const ensureSiblingClaimsAreUnambiguous = async (
     throw new OpenTargetError("the accepted target identity is unavailable; verify the mapping before opening")
   }
   for (const sibling of resolution.sibling_claims) {
-    const siblingSegments = portableSegments(sibling.relative_path)
+    const claimedSegments = portableSegments(sibling.relative_path)
+    const siblingSegments = process.platform === "win32" && claimedSegments.some(isWindowsInvalidComponent)
+      ? normalizedWindowsSiblingSegments(claimedSegments)
+      : claimedSegments
+    if (siblingSegments === null) continue
     const siblingPath = resolve(root, ...siblingSegments)
     // The server's sibling set uses its NFC/case-folded parent key. Resolve every
-    // candidate here and let the device's native path and file identities decide.
-    const siblingEvidence = await readSiblingEvidence(siblingPath)
+    // candidate here and let the device's native path and file identities decide,
+    // but never follow a link or read identity outside the admitted root.
+    const siblingEvidence = await readSiblingEvidenceWithinRoot(root, siblingPath)
     if (siblingEvidence === null) continue
     if (targetIdentity === siblingEvidence.identity) {
       throw new OpenTargetError("the accepted target is ambiguous with another entry on this device")

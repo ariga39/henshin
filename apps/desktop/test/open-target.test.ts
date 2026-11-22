@@ -244,6 +244,28 @@ describe("accepted local target evidence", () => {
     }
   })
 
+  it("does not read identity through a sibling symlink outside the admitted root", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-open-sibling-boundary-"))
+    const outside = await mkdtemp(path.join(os.tmpdir(), "henshin-open-sibling-outside-"))
+    try {
+      const targetPath = path.join(root, "Book.cbz")
+      await writeFile(targetPath, "fixture")
+      await link(targetPath, path.join(outside, "alias.cbz"))
+      await symlink(outside, path.join(root, "outside-link"), "dir")
+      const resolution = await archiveResolution(root, "Book.cbz", [{
+        entry_id: randomUUID(),
+        relative_path: "outside-link/alias.cbz"
+      }])
+
+      await expect(resolveAcceptedTarget(await mapping(root), resolution, archiveProfile)).resolves.toBe(
+        path.join(await realpath(root), "Book.cbz")
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
   it.runIf(process.platform !== "win32")("allows distinct native identities under equivalent parent spellings", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "henshin-open-distinct-native-"))
     try {

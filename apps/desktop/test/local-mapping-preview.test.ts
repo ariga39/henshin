@@ -241,7 +241,9 @@ describe("local mapping preview boundary", () => {
 
   it("recognizes Windows-invalid segments without depending on the host volume", () => {
     expect(isWindowsInvalidSegment("AUX.zip", "win32")).toBe(true)
+    expect(isWindowsInvalidSegment("COM¹", "win32")).toBe(true)
     expect(isWindowsInvalidSegment("book:stream.cbz", "win32")).toBe(true)
+    expect(isWindowsInvalidSegment("book. ", "win32")).toBe(true)
     expect(isWindowsInvalidSegment("page\n1.zip", "win32")).toBe(true)
     expect(isWindowsInvalidSegment("book.cbz", "win32")).toBe(false)
     expect(isWindowsInvalidSegment("AUX.zip", "darwin")).toBe(false)
