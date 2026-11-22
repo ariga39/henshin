@@ -1,8 +1,8 @@
 import { Effect, Layer } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
-import type { RootPreview, RootRegistrationRequest, ServerRoot } from "@henshin/contracts"
+import type { RootPreview, RootPreviewRequest, RootPreviewResult, RootRegistrationRequest, ServerRoot, SavedRootPreview } from "@henshin/contracts"
 import { RootPreviewClient, type Result } from "../../desktop/src/renderer/client"
-import { saveRoot } from "../../desktop/src/renderer/workflows"
+import { previewRoot, saveRoot } from "../../desktop/src/renderer/workflows"
 import { viewStore } from "../../desktop/src/renderer/store"
 
 const instanceId = "11111111-1111-4111-8111-111111111111"
@@ -32,6 +32,35 @@ const savedRoot: ServerRoot = {
   state: "active"
 }
 
+const savedPreview = (rootId: string): SavedRootPreview => ({
+  kind: "saved-root-discovery",
+  root_id: rootId,
+  selected_server_path: `/collections/${rootId}`,
+  instance_id: instanceId,
+  epoch,
+  candidates: [],
+  sample_limit: 32,
+  unassigned_loose_images: [],
+  unassigned_loose_image_count: 0,
+  unsupported_loose_images: [],
+  unsupported_loose_image_count: 0,
+  coverage: {
+    status: "complete",
+    directories_visited: 1,
+    entries_observed: 0,
+    candidate_count: 0,
+    candidate_sample_truncated: false,
+    excluded_links: [],
+    excluded_link_count: 0,
+    unsupported_names: [],
+    unsupported_name_count: 0,
+    unsupported_directories: [],
+    unsupported_directory_count: 0,
+    issues: [],
+    issue_count: 0
+  }
+})
+
 const deferred = <A>() => {
   let resolve!: (value: A) => void
   const promise = new Promise<A>((complete) => {
@@ -46,6 +75,7 @@ const resetView = () => {
     root_preview_selected_path: null,
     root_preview_status: "idle",
     root_preview: null,
+    root_preview_request: null,
     root_preview_error: null,
     root_label: "",
     root_saved_roots: [],
@@ -147,5 +177,56 @@ describe("root confirmation workflow", () => {
       root_save_target_path: "/collections/a",
       root_saved_roots: [savedRoot]
     })
+  })
+
+  it("publishes only the latest saved-root preview response", async () => {
+    const first = deferred<Result<RootPreviewResult>>()
+    const second = deferred<Result<RootPreviewResult>>()
+    const client = RootPreviewClient.of({
+      preview: (input) => Effect.promise(() => "kind" in input && input.root_id === "root-a"
+        ? first.promise
+        : second.promise),
+      list: () => Effect.succeed({ ok: true, data: [] }),
+      save: () => Effect.succeed({ ok: true, data: savedRoot })
+    })
+    const run = (input: RootPreviewRequest) =>
+      Effect.runPromise(Effect.provide(previewRoot(input), Layer.succeed(RootPreviewClient, client)))
+    const firstRun = run({ kind: "saved-root", root_id: "root-a" })
+    await Promise.resolve()
+    const secondRun = run({ kind: "saved-root", root_id: "root-b" })
+    second.resolve({ ok: true, data: savedPreview("root-b") })
+    await secondRun
+    first.resolve({ ok: true, data: savedPreview("root-a") })
+    await firstRun
+
+    expect(viewStore.getState().root_preview).toEqual(savedPreview("root-b"))
+    expect(viewStore.getState().root_preview_request).toEqual({ kind: "saved-root", root_id: "root-b" })
+  })
+
+  it("retries the full failed saved-root preview request", async () => {
+    const requests: Array<{ kind: "saved-root"; root_id: string }> = []
+    const request = { kind: "saved-root" as const, root_id: "root-a" }
+    const client = RootPreviewClient.of({
+      preview: (input) => {
+        requests.push(input as typeof request)
+        return requests.length === 1
+          ? Effect.succeed({ ok: false, error: { code: "transport", message: "Reply lost", retryable: true } })
+          : Effect.succeed({ ok: true, data: savedPreview(request.root_id) })
+      },
+      list: () => Effect.succeed({ ok: true, data: [] }),
+      save: () => Effect.succeed({ ok: true, data: savedRoot })
+    })
+    const run = (input: RootPreviewRequest) =>
+      Effect.runPromise(Effect.provide(previewRoot(input), Layer.succeed(RootPreviewClient, client)))
+
+    await run(request)
+    expect(viewStore.getState().root_preview_status).toBe("error")
+    const retry = viewStore.getState().root_preview_request
+    expect(retry).toEqual(request)
+    if (retry === null) throw new Error("expected a retained preview request")
+    await run(retry)
+
+    expect(requests).toEqual([request, request])
+    expect(viewStore.getState().root_preview).toEqual(savedPreview(request.root_id))
   })
 })

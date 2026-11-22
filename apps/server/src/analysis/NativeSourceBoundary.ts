@@ -635,9 +635,6 @@ export const discoverSourceRoot = async (
     appendSample(issues, discoveryIssue(code, relativePath))
   }
 
-  const remainingNativeLimits = (): NativeBoundaryLimits =>
-    discoveryNativeLimits(limits, Math.max(1, context.deadlineAt - Date.now()))
-
   while (directories.length > 0 && !stopped) {
     const next = directories.shift() as {
       readonly relativePath: string
@@ -770,35 +767,22 @@ export const discoverSourceRoot = async (
         }
 
         if (stats.isDirectory()) {
-          const resolved = await resolveSourceCandidate(
-            initialRoot.value,
-            relativePath,
-            { limits: remainingNativeLimits() }
-          )
-          if (!resolved.ok) {
-            if (resolved.code === "source-link") {
-              excludedLinkCount += 1
-              appendSample(excludedLinks, relativePath)
-            }
-            else markPartial(discoveryIssueCode(resolved.code), relativePath)
-            continue
-          }
-          directories.push({ relativePath, nativePath: resolved.value.nativePath, identity: identityOf(stats) })
+          directories.push({ relativePath, nativePath: join(next.nativePath, name), identity: identityOf(stats) })
           continue
         }
 
         if (stats.isFile() && isArchiveName(name)) {
-          const resolved = await resolveSourceCandidate(
-            initialRoot.value,
-            relativePath,
-            { limits: remainingNativeLimits() }
-          )
-          if (!resolved.ok) {
-            if (resolved.code === "source-link") {
+          const verified = await verifyFinalCandidate(initialRoot.value, {
+            name,
+            path: join(next.nativePath, name),
+            stats
+          }, context)
+          if (!verified.ok) {
+            if (verified.code === "source-link") {
               excludedLinkCount += 1
               appendSample(excludedLinks, relativePath)
             }
-            else markPartial(discoveryIssueCode(resolved.code), relativePath)
+            else markPartial(discoveryIssueCode(verified.code), relativePath)
             continue
           }
           candidateCount += 1
@@ -867,6 +851,10 @@ export const discoverSourceRoot = async (
   }
 
   candidates.sort((left, right) => utf8Compare(left.relativePath, right.relativePath))
+  const hasUnsupportedContent = unsupportedLooseImageCount > 0 ||
+    unsupportedNameCount > 0 ||
+    unsupportedDirectoryCount > 0 ||
+    candidates.some((candidate) => candidate.unsupportedDirectImageCount > 0)
   const discovery: SourceRootDiscovery = {
     root: initialRoot.value,
     candidates,
@@ -875,7 +863,7 @@ export const discoverSourceRoot = async (
     unsupportedLooseImages: sorted(unsupportedLooseImages),
     unsupportedLooseImageCount,
     coverage: {
-      status: partial || directories.length > 0 ? "partial" : "complete",
+      status: partial || directories.length > 0 || hasUnsupportedContent ? "partial" : "complete",
       directoriesVisited,
       entriesObserved,
       candidateCount,
