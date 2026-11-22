@@ -127,6 +127,7 @@ export const StagedDiscoveryRow = Schema.Struct({
 export type StagedDiscoveryRow = typeof StagedDiscoveryRow.Type
 
 export const ScanStartOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("active_scan_conflict"), taskId: Uuid, policyRevision: Revision }),
   Schema.Struct({ kind: Schema.Literal("created"), task: ScanTaskRow }),
   Schema.Struct({ kind: Schema.Literal("replayed"), task: ScanTaskRow }),
   Schema.Struct({ kind: Schema.Literal("active"), task: ScanTaskRow }),
