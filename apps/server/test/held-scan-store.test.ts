@@ -26,7 +26,8 @@ it("restores an interrupted task with its staged discovery still held", async ()
       const scans = yield* ScanStore
       const rootId = registered.root.rootId
       const request = { taskId, rootId, operationId: randomUUID(), epoch,
-        expectedMappingRevision: registered.root.mappingRevision, expectedPolicyRevision: registered.root.policyRevision }
+        expectedMappingRevision: registered.root.mappingRevision, expectedPolicyRevision: registered.root.policyRevision,
+        holdNewDiscoveries: true }
       expect((yield* scans.start(request)).kind).toBe("created")
       expect((yield* scans.start(request)).kind).toBe("replayed")
       expect((yield* scans.start({ ...request, operationId: aliasOperation })).kind).toBe("active")
@@ -38,14 +39,14 @@ it("restores an interrupted task with its staged discovery still held", async ()
         unsupported_directory_count: 0, issues: [], issue_count: 0
       }, 1)
       yield* scans.stage({ candidateId, rootId, taskId, relativePath: "unavailable.cbz", kind: "archive",
-        analysisStatus: "error", manifest: null, analysisError: { code: "source-unavailable", message: "Book unavailable",
+        holdState: "held", analysisStatus: "error", manifest: null, analysisError: { code: "source-unavailable", message: "Book unavailable",
           diagnostics: { supported_pages: 0, unsupported_pages: 0, ignored_entries: 0, directory_records: 0 } } })
       yield* roots.commitPolicy({ rootId, epoch, operationId: randomUUID(), expectedPolicyRevision: "0",
         command: { type: "exclude", exclusion: { path: "skip.zip", scope: "exact" } } })
       expect(yield* scans.start({ ...request, operationId: randomUUID(), expectedPolicyRevision: "1" }))
         .toEqual({ kind: "active_scan_conflict", taskId, policyRevision: "0" })
       expect((yield* Effect.result(scans.stage({ taskId, rootId, candidateId: randomUUID(),
-        relativePath: "late.cbz", kind: "archive", analysisStatus: "error", manifest: null, analysisError: null })))._tag)
+        relativePath: "late.cbz", kind: "archive", holdState: "held", analysisStatus: "error", manifest: null, analysisError: null })))._tag)
         .toBe("Failure")
       expect((yield* Effect.result(scans.finish({ taskId, status: "succeeded", directoriesVisited: 1,
         candidatesDiscovered: 1, candidatesAnalyzed: 1, analysisErrorCount: 1, reviewNeededCount: 1,
@@ -57,7 +58,7 @@ it("restores an interrupted task with its staged discovery still held", async ()
       const prior = yield* scans.readTask(taskId)
       if (!prior) throw new Error("expected the original scan")
       const nextEpoch = yield* scans.start({ taskId: randomUUID(), operationId: randomUUID(), epoch: randomUUID(),
-        rootId: prior.root_id, expectedMappingRevision: prior.mapping_revision, expectedPolicyRevision: "1" })
+        rootId: prior.root_id, expectedMappingRevision: prior.mapping_revision, expectedPolicyRevision: "1", holdNewDiscoveries: true })
       expect(nextEpoch.kind).toBe("created")
       if (nextEpoch.kind === "created") {
         expect((yield* Effect.result(scans.finish({ taskId: nextEpoch.task.task_id, status: "succeeded",
@@ -65,6 +66,10 @@ it("restores an interrupted task with its staged discovery still held", async ()
           reviewNeededCount: 0, coverage: null, error: null, readinessError: null })))._tag).toBe("Failure")
       }
       yield* scans.recoverInterrupted()
+      expect((yield* Effect.result(scans.markRunning(taskId)))._tag).toBe("Failure")
+      expect((yield* Effect.result(scans.stage({ taskId, rootId: prior.root_id, candidateId: randomUUID(),
+        relativePath: "late.cbz", kind: "archive", holdState: "held", analysisStatus: "error", manifest: null, analysisError: null })))._tag)
+        .toBe("Failure")
       expect(yield* scans.readTask(nextEpoch.kind === "created" ? nextEpoch.task.task_id : taskId))
         .toMatchObject({ status: "failed", error: { code: "server_restart" } })
       const task = yield* scans.readTask(taskId)
@@ -75,7 +80,7 @@ it("restores an interrupted task with its staged discovery still held", async ()
         candidatesDiscovered: 1, candidatesAnalyzed: 1, analysisErrorCount: 1, reviewNeededCount: 1,
         coverage: null, error: { code: "late", message: "late" }, readinessError: null })))._tag).toBe("Failure")
       expect(yield* scans.start({ taskId: randomUUID(), rootId: task.root_id, epoch, operationId: aliasOperation,
-        expectedMappingRevision: task.mapping_revision, expectedPolicyRevision: "0" }))
+        expectedMappingRevision: task.mapping_revision, expectedPolicyRevision: "0", holdNewDiscoveries: true }))
         .toMatchObject({ kind: "replayed", task: { task_id: taskId, status: "interrupted" } })
       expect(yield* scans.listStaged()).toMatchObject([{ candidate_id: candidateId, hold_state: "held",
         relative_path: "unavailable.cbz", analysis_error: { code: "source-unavailable" } }])
@@ -101,7 +106,7 @@ it("fences publication against a concurrent policy edit while preserving stale f
       const scans = yield* ScanStore
       const taskId = randomUUID()
       yield* scans.start({ taskId, operationId: randomUUID(), epoch: randomUUID(), rootId: registered.root.rootId,
-        expectedMappingRevision: registered.root.mappingRevision, expectedPolicyRevision: "0" })
+        expectedMappingRevision: registered.root.mappingRevision, expectedPolicyRevision: "0", holdNewDiscoveries: true })
       yield* scans.markRunning(taskId)
 
       const [policy, staged] = yield* Effect.promise(() => Promise.all([
@@ -109,7 +114,7 @@ it("fences publication against a concurrent policy edit while preserving stale f
           operationId: randomUUID(), expectedPolicyRevision: "0",
           command: { type: "exclude", exclusion: { path: "skip.cbz", scope: "exact" } } })),
         Effect.runPromise(Effect.result(scans.stage({ taskId, rootId: registered.root.rootId, candidateId: randomUUID(),
-          relativePath: "book.cbz", kind: "archive", analysisStatus: "ready", manifest: null, analysisError: null })))
+          relativePath: "book.cbz", kind: "archive", holdState: "held", analysisStatus: "ready", manifest: null, analysisError: null })))
       ]))
       expect(policy.kind).toBe("committed")
       expect(staged._tag).toBe("Failure")
@@ -123,7 +128,7 @@ it("fences publication against a concurrent policy edit while preserving stale f
 
       const interruptedTask = yield* scans.start({ taskId: randomUUID(), operationId: randomUUID(), epoch: randomUUID(),
         rootId: registered.root.rootId, expectedMappingRevision: registered.root.mappingRevision,
-        expectedPolicyRevision: "1" })
+        expectedPolicyRevision: "1", holdNewDiscoveries: true })
       if (interruptedTask.kind !== "created") throw new Error("expected a fresh scan task")
       yield* scans.markRunning(interruptedTask.task.task_id)
       yield* roots.commitPolicy({ rootId: registered.root.rootId, epoch: randomUUID(), operationId: randomUUID(),

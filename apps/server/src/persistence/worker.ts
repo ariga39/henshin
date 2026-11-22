@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { DatabaseSync } from "node:sqlite"
-import { isAbsolute, relative, sep } from "node:path"
+import { basename, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalEditPayload } from "@henshin/contracts/canonical"
@@ -36,12 +36,13 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
-const CURRENT_SCHEMA_VERSION = 3
+const CURRENT_SCHEMA_VERSION = 5
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
 const MAX_POLICY_OPERATION_RESULTS = 1024
 const COMPACTION_BATCH = 64
+const MAX_REPORTED_DEFERRED_PATHS = 32
 
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const db = new DatabaseSync(dbPath)
@@ -57,7 +58,8 @@ db.exec(`
   );
   CREATE TABLE IF NOT EXISTS server_library (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    library_id TEXT NOT NULL UNIQUE
+    library_id TEXT NOT NULL UNIQUE,
+    change_revision INTEGER NOT NULL DEFAULT 0
   );
   CREATE UNIQUE INDEX IF NOT EXISTS server_library_library_id_unique
     ON server_library(library_id);
@@ -99,7 +101,7 @@ db.exec(`
     root_id TEXT NOT NULL REFERENCES server_roots(root_id),
     mapping_revision INTEGER NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'completed_with_errors', 'failed', 'interrupted')),
-    hold_new_discoveries INTEGER NOT NULL CHECK (hold_new_discoveries = 1),
+    hold_new_discoveries INTEGER NOT NULL CHECK (hold_new_discoveries IN (0, 1)),
     directories_visited INTEGER NOT NULL,
     candidates_discovered INTEGER NOT NULL,
     candidates_analyzed INTEGER NOT NULL,
@@ -128,7 +130,7 @@ db.exec(`
     relative_path TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
     candidate_version INTEGER NOT NULL,
-    hold_state TEXT NOT NULL CHECK (hold_state = 'held'),
+    hold_state TEXT NOT NULL CHECK (hold_state IN ('held', 'eligible')),
     analysis_status TEXT NOT NULL CHECK (analysis_status IN ('ready', 'error')),
     manifest_json TEXT,
     analysis_error_json TEXT,
@@ -144,6 +146,32 @@ db.exec(`
     created_at_ms INTEGER NOT NULL,
     PRIMARY KEY (epoch, operation_id)
   );
+  CREATE TABLE IF NOT EXISTS review_operations (
+    epoch TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    result TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (epoch, operation_id)
+  );
+  CREATE TABLE IF NOT EXISTS library_entries (
+    entry_id TEXT PRIMARY KEY,
+    library_id TEXT NOT NULL REFERENCES server_library(library_id),
+    root_id TEXT NOT NULL REFERENCES server_roots(root_id),
+    relative_path TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
+    title TEXT NOT NULL,
+    page_count INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state = 'accepted'),
+    content_version INTEGER NOT NULL,
+    location_revision INTEGER NOT NULL,
+    manifest_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE (root_id, relative_path)
+  );
 `)
 
 const rootColumns = new Set(
@@ -156,6 +184,79 @@ if (!rootColumns.has("policy_revision")) {
 }
 if (!rootColumns.has("exclusions")) {
   db.exec("ALTER TABLE server_roots ADD COLUMN exclusions TEXT NOT NULL DEFAULT '[]'")
+}
+
+const serverLibraryColumns = db.prepare("PRAGMA table_info(server_library)").all() as unknown as ReadonlyArray<{ name: string }>
+if (!serverLibraryColumns.some((column) => column.name === "change_revision")) {
+  db.exec("ALTER TABLE server_library ADD COLUMN change_revision INTEGER NOT NULL DEFAULT 0")
+}
+
+const scanTaskTable = db.prepare(
+  "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scan_tasks'"
+).get() as { sql: string } | undefined
+const stagedDiscoveryTable = db.prepare(
+  "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'staged_discoveries'"
+).get() as { sql: string } | undefined
+const needsScanSchemaMigration =
+  scanTaskTable?.sql.includes("hold_new_discoveries IN (0, 1)") !== true ||
+  stagedDiscoveryTable?.sql.includes("hold_state IN ('held', 'eligible')") !== true
+
+if (needsScanSchemaMigration) {
+  db.exec("PRAGMA foreign_keys = OFF")
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    db.exec(`
+      CREATE TABLE scan_tasks_v4 (
+        task_id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL,
+        epoch TEXT NOT NULL,
+        root_id TEXT NOT NULL REFERENCES server_roots(root_id),
+        mapping_revision INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'completed_with_errors', 'failed', 'interrupted')),
+        hold_new_discoveries INTEGER NOT NULL CHECK (hold_new_discoveries IN (0, 1)),
+        directories_visited INTEGER NOT NULL,
+        candidates_discovered INTEGER NOT NULL,
+        candidates_analyzed INTEGER NOT NULL,
+        analysis_error_count INTEGER NOT NULL,
+        review_needed_count INTEGER NOT NULL,
+        coverage_json TEXT,
+        readiness_error_code TEXT,
+        readiness_error_message TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        command_payload TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        UNIQUE (epoch, operation_id)
+      );
+      CREATE TABLE staged_discoveries_v4 (
+        candidate_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES scan_tasks(task_id),
+        root_id TEXT NOT NULL REFERENCES server_roots(root_id),
+        relative_path TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
+        candidate_version INTEGER NOT NULL,
+        hold_state TEXT NOT NULL CHECK (hold_state IN ('held', 'eligible')),
+        analysis_status TEXT NOT NULL CHECK (analysis_status IN ('ready', 'error')),
+        manifest_json TEXT,
+        analysis_error_json TEXT,
+        updated_at_ms INTEGER NOT NULL,
+        UNIQUE (root_id, relative_path)
+      );
+      INSERT INTO scan_tasks_v4 SELECT * FROM scan_tasks;
+      INSERT INTO staged_discoveries_v4 SELECT * FROM staged_discoveries;
+      DROP TABLE staged_discoveries;
+      DROP TABLE scan_tasks;
+      ALTER TABLE scan_tasks_v4 RENAME TO scan_tasks;
+      ALTER TABLE staged_discoveries_v4 RENAME TO staged_discoveries;
+    `)
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON")
+  }
 }
 
 if (!db.prepare("SELECT 1 FROM pragma_table_info('root_policy_operations') WHERE name = 'created_at_ms'").get()) {
@@ -192,6 +293,7 @@ const selectRoot = db.prepare(
 )
 selectRoot.setReadBigInts(true)
 const selectLibrary = db.prepare("SELECT library_id FROM server_library WHERE id = 1")
+const selectLibraryState = db.prepare("SELECT library_id, change_revision FROM server_library WHERE id = 1")
 const selectRootOperation = db.prepare("SELECT payload, result FROM root_operations WHERE operation_id = ?")
 const insertRoot = db.prepare(
   "INSERT INTO server_roots(library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')"
@@ -218,11 +320,26 @@ const selectStagedDiscoveries = db.prepare(
 )
 selectStagedDiscoveries.setReadBigInts(true)
 const selectStaged = db.prepare(
-  "SELECT candidate_id, candidate_version, task_id, analysis_status FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
+  "SELECT candidate_id, candidate_version, task_id, analysis_status, hold_state FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
 selectStaged.setReadBigInts(true)
+const selectStagedById = db.prepare(
+  "SELECT candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms FROM staged_discoveries WHERE candidate_id = ? AND root_id = ?"
+)
+selectStagedById.setReadBigInts(true)
+const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC")
+const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ? AND state = 'accepted'")
+const insertEntry = db.prepare(
+  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, ?, ?, ?)"
+)
+const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
+const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
+const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
+const selectLibraryEntries = (cursor: string | null, limit: number) => cursor === null
+  ? db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision FROM library_entries ORDER BY entry_id ASC LIMIT ?").all(limit)
+  : db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision FROM library_entries WHERE entry_id > ? ORDER BY entry_id ASC LIMIT ?").all(cursor, limit)
 const insertScanTask = db.prepare(
-  "INSERT INTO scan_tasks(task_id, operation_id, epoch, root_id, mapping_revision, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, command_payload, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, 'queued', 1, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)"
+  "INSERT INTO scan_tasks(task_id, operation_id, epoch, root_id, mapping_revision, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, command_payload, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)"
 )
 const updateScanRunning = db.prepare("UPDATE scan_tasks SET status = 'running', updated_at_ms = ? WHERE task_id = ? AND status = 'queued'")
 const updateScanTask = db.prepare(
@@ -239,7 +356,7 @@ const selectScanFence = db.prepare(`
 `)
 selectScanFence.setReadBigInts(true)
 const upsertStagedDiscovery = db.prepare(
-  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, 'held', ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = 'held', analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
+  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = excluded.hold_state, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
 )
 const recoverScanTasks = db.prepare(
   "UPDATE scan_tasks SET status = CASE WHEN status = 'queued' THEN 'failed' ELSE 'interrupted' END, error_code = 'server_restart', error_message = CASE WHEN status = 'queued' THEN 'scan did not start before server restart' ELSE 'scan interrupted by server restart' END, updated_at_ms = ? WHERE status IN ('queued', 'running')"
@@ -255,6 +372,19 @@ const compactRootPolicyOperations = db.prepare(`
 const countRootPolicyOperations = db.prepare("SELECT COUNT(*) AS count FROM root_policy_operations")
 const insertRootPolicyOperation = db.prepare(
   "INSERT INTO root_policy_operations(epoch, operation_id, root_id, payload, result, created_at_ms) VALUES(?, ?, ?, ?, ?, ?)"
+)
+const selectReviewOperation = db.prepare(
+  "SELECT payload, result, created_at_ms FROM review_operations WHERE epoch = ? AND operation_id = ?"
+)
+const compactReviewOperations = db.prepare(
+  "DELETE FROM review_operations WHERE rowid IN (SELECT rowid FROM review_operations WHERE epoch <> ? OR created_at_ms <= ? ORDER BY created_at_ms ASC, rowid ASC LIMIT ?)"
+)
+const countReviewOperations = db.prepare("SELECT COUNT(*) AS count FROM review_operations")
+const insertReviewOperation = db.prepare(
+  "INSERT INTO review_operations(epoch, operation_id, candidate_id, payload, result, created_at_ms) VALUES(?, ?, ?, ?, ?, ?)"
+)
+const updateStagedHold = db.prepare(
+  "UPDATE staged_discoveries SET candidate_version = ?, hold_state = 'eligible', updated_at_ms = ? WHERE candidate_id = ? AND root_id = ? AND candidate_version = ? AND hold_state = 'held'"
 )
 const updateRootPolicy = db.prepare(
   "UPDATE server_roots SET policy_revision = ?, exclusions = ? WHERE root_id = ?"
@@ -511,7 +641,7 @@ const stagedDiscoveryRow = (row: {
   relative_path: string
   kind: "archive" | "image-directory"
   candidate_version: bigint
-  hold_state: "held"
+  hold_state: "held" | "eligible"
   analysis_status: "ready" | "error"
   manifest_json: string | null
   analysis_error_json: string | null
@@ -536,7 +666,8 @@ const startManualScan = (
   const commandPayload = JSON.stringify({
     root_id: request.rootId,
     expected_mapping_revision: request.expectedMappingRevision,
-    expected_policy_revision: request.expectedPolicyRevision
+    expected_policy_revision: request.expectedPolicyRevision,
+    hold_new_discoveries: request.holdNewDiscoveries
   })
   db.exec("BEGIN IMMEDIATE")
   try {
@@ -596,6 +727,7 @@ const startManualScan = (
       request.epoch,
       request.rootId,
       BigInt(request.expectedMappingRevision),
+      request.holdNewDiscoveries ? 1 : 0,
       commandPayload,
       now,
       now
@@ -730,32 +862,335 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
   try {
     requireCurrentScanFence(request.taskId, request.rootId)
     const existing = selectStaged.get(request.rootId, request.relativePath) as
-      | { candidate_id: string; candidate_version: bigint; task_id: string; analysis_status: string }
+      | { candidate_id: string; candidate_version: bigint; task_id: string; analysis_status: string; hold_state: string }
       | undefined
-    upsertStagedDiscovery.run(
-      existing?.candidate_id ?? request.candidateId,
-      request.taskId,
-      request.rootId,
-      request.relativePath,
-      request.kind,
-      existing === undefined ? 1n : existing.candidate_version + 1n,
-      request.analysisStatus,
-      request.manifestJson,
-      request.analysisErrorJson,
-      Date.now()
-    )
+    const accepted = selectEntry.get(request.rootId, request.relativePath)
+    const unchangedHeldScan = request.holdState === "held" && request.analysisStatus === "ready"
+      && accepted !== undefined && accepted.kind === request.kind && accepted.manifest_json === request.manifestJson
+    if (unchangedHeldScan) {
+      if (existing !== undefined) deleteStaged.run(existing.candidate_id)
+    } else {
+      const held = accepted === undefined && (request.holdState === "held" || existing?.hold_state === "held")
+      upsertStagedDiscovery.run(
+        existing?.candidate_id ?? request.candidateId,
+        request.taskId,
+        request.rootId,
+        request.relativePath,
+        request.kind,
+        existing === undefined ? 1n : existing.candidate_version + 1n,
+        held ? "held" : "eligible",
+        request.analysisStatus,
+        request.manifestJson,
+        request.analysisErrorJson,
+        Date.now()
+      )
+    }
     const priorStatus = existing?.task_id === request.taskId ? existing.analysis_status : undefined
     requireScanTransition(db.prepare(`UPDATE scan_tasks SET
       candidates_analyzed = candidates_analyzed + ?, analysis_error_count = analysis_error_count + ?,
       review_needed_count = review_needed_count + ?, updated_at_ms = ? WHERE task_id = ? AND root_id = ? AND status = 'running'`).run(
       Number(request.analysisStatus === "ready") - Number(priorStatus === "ready"),
       Number(request.analysisStatus === "error") - Number(priorStatus === "error"),
-      Number(priorStatus === undefined), Date.now(), request.taskId, request.rootId
+      Number(!unchangedHeldScan && priorStatus === undefined), Date.now(), request.taskId, request.rootId
     ))
     db.exec("COMMIT")
   } catch (error) {
     db.exec("ROLLBACK")
     throw error
+  }
+}
+
+const reviewReleasePayload = (request: Extract<WorkerRequest, { op: "releaseHeldDiscovery" }>): string => JSON.stringify({
+  command: { type: "release-hold" },
+  expected_candidate_version: request.expectedCandidateVersion,
+  expected_mapping_revision: request.expectedMappingRevision,
+  expected_policy_revision: request.expectedPolicyRevision,
+  root_id: request.rootId,
+  candidate_id: request.candidateId
+})
+
+const releaseHeldDiscovery = (
+  request: Extract<WorkerRequest, { op: "releaseHeldDiscovery" }>
+): import("./worker-protocol").ReleaseHeldDiscoveryOutcome => {
+  const payload = reviewReleasePayload(request)
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const now = Date.now()
+    const existing = selectReviewOperation.get(request.epoch, request.operationId) as
+      | { payload: string; result: string; created_at_ms: number }
+      | undefined
+    if (existing !== undefined) {
+      if (existing.payload !== payload) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_conflict" }
+      }
+      if (existing.created_at_ms <= now - RESULT_RETENTION_MS) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_expired" }
+      }
+      const candidate = JSON.parse(existing.result) as import("./worker-protocol").StagedDiscoveryRow
+      db.exec("COMMIT")
+      return { kind: "replayed", candidate }
+    }
+
+    const root = rootById(request.rootId)
+    if (root === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "root_not_found" }
+    }
+    if (root.mappingRevision !== request.expectedMappingRevision) {
+      db.exec("ROLLBACK")
+      return { kind: "mapping_revision_conflict", currentMappingRevision: root.mappingRevision }
+    }
+    if (root.policyRevision !== request.expectedPolicyRevision) {
+      db.exec("ROLLBACK")
+      return { kind: "policy_revision_conflict", currentPolicyRevision: root.policyRevision }
+    }
+
+    const current = selectStagedById.get(request.candidateId, request.rootId) as
+      | Parameters<typeof stagedDiscoveryRow>[0]
+      | undefined
+    if (current === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "candidate_not_found" }
+    }
+    const currentCandidateVersion = Number(current.candidate_version)
+    if (currentCandidateVersion !== request.expectedCandidateVersion) {
+      db.exec("ROLLBACK")
+      return { kind: "candidate_version_conflict", currentCandidateVersion }
+    }
+    if (current.hold_state !== "held") {
+      db.exec("ROLLBACK")
+      return { kind: "candidate_not_held", currentCandidateVersion }
+    }
+
+    compactReviewOperations.run(request.epoch, now - RESULT_RETENTION_MS, COMPACTION_BATCH)
+    if (Number(countReviewOperations.get()?.count) >= MAX_POLICY_OPERATION_RESULTS) {
+      db.exec("COMMIT")
+      return { kind: "storage_full" }
+    }
+
+    const nextCandidateVersion = BigInt(currentCandidateVersion + 1)
+    const updated = updateStagedHold.run(
+      nextCandidateVersion,
+      now,
+      request.candidateId,
+      request.rootId,
+      BigInt(request.expectedCandidateVersion)
+    )
+    if (Number(updated.changes) !== 1) throw new Error("staged discovery is no longer held")
+    const candidateRow = selectStagedById.get(request.candidateId, request.rootId) as
+      | Parameters<typeof stagedDiscoveryRow>[0]
+      | undefined
+    if (candidateRow === undefined) throw new Error("released staged discovery is missing")
+    const candidate = stagedDiscoveryRow(candidateRow)
+    insertReviewOperation.run(
+      request.epoch,
+      request.operationId,
+      request.candidateId,
+      payload,
+      JSON.stringify(candidate),
+      now
+    )
+    db.exec("COMMIT")
+    return { kind: "committed", candidate }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const entryRow = (row: {
+  entry_id: string
+  library_id: string
+  root_id: string
+  relative_path: string
+  source_path: string
+  kind: "archive" | "image-directory"
+  title: string
+  page_count: bigint
+  state: "accepted"
+  content_version: bigint
+  location_revision: bigint
+}): import("./worker-protocol").LibraryEntryRow => ({
+  entry_id: row.entry_id,
+  library_id: row.library_id,
+  root_id: row.root_id,
+  relative_path: row.relative_path,
+  source_path: row.source_path,
+  kind: row.kind,
+  title: row.title,
+  page_count: Number(row.page_count),
+  state: row.state,
+  content_version: row.content_version.toString(),
+  location_revision: row.location_revision.toString()
+})
+
+const titleForCandidate = (relativePath: string, kind: "archive" | "image-directory"): string => {
+  const name = basename(relativePath)
+  if (kind === "archive") return name.replace(/\.(?:cbz|zip)$/iu, "")
+  return name
+}
+
+const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalScan" }>): import("./worker-protocol").NormalPublishOutcome => {
+  const observed = new Set(request.observedCandidatePaths)
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const root = rootById(request.rootId)
+    if (root === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "root_not_found" }
+    }
+    if (root.mappingRevision !== request.mappingRevision) {
+      db.exec("ROLLBACK")
+      return { kind: "mapping_revision_conflict" }
+    }
+    if (root.policyRevision !== request.expectedPolicyRevision) {
+      db.exec("ROLLBACK")
+      return { kind: "policy_revision_conflict" }
+    }
+
+    const isExcluded = (relativePath: string): boolean => root.exclusions.some(
+      (exclusion) => exclusion.scope === "exact"
+        ? exclusion.path === relativePath
+        : relativePath === exclusion.path || relativePath.startsWith(`${exclusion.path}/`)
+    )
+    const existingPaths = (selectEntriesForRoot.all(request.rootId) as unknown as ReadonlyArray<{ relative_path: string }>)
+      .map((row) => row.relative_path)
+    const missingPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && !isExcluded(relativePath))
+    const excludedPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && isExcluded(relativePath))
+    const staged = db.prepare(
+      "SELECT candidate_id, relative_path, kind, manifest_json FROM staged_discoveries WHERE task_id = ? AND root_id = ? AND hold_state = 'eligible' AND analysis_status = 'ready' ORDER BY relative_path ASC"
+    ).all(request.taskId, request.rootId) as unknown as ReadonlyArray<{
+      candidate_id: string
+      relative_path: string
+      kind: "archive" | "image-directory"
+      manifest_json: string | null
+    }>
+    const sourcePathFor = (relativePath: string): string => join(root.selectedPath, ...relativePath.split("/"))
+    const changedPaths: Array<string> = []
+    const existingForCandidate = new Map<string, {
+      entry_id: string
+      manifest_json: string
+      kind: "archive" | "image-directory"
+      title: string
+      source_path: string
+    }>()
+    for (const candidate of staged) {
+      if (!observed.has(candidate.relative_path) || candidate.manifest_json === null) continue
+      const manifest = JSON.parse(candidate.manifest_json) as { pages?: ReadonlyArray<unknown> }
+      const pageCount = Array.isArray(manifest.pages) ? manifest.pages.length : 0
+      if (pageCount === 0) continue
+      const sourcePath = sourcePathFor(candidate.relative_path)
+      const title = titleForCandidate(candidate.relative_path, candidate.kind)
+      const existing = selectEntry.get(request.rootId, candidate.relative_path) as {
+        entry_id: string
+        manifest_json: string
+        kind: "archive" | "image-directory"
+        title: string
+        source_path: string
+      } | undefined
+      if (existing !== undefined) {
+        existingForCandidate.set(candidate.relative_path, existing)
+        if (
+          existing.manifest_json !== candidate.manifest_json ||
+          existing.kind !== candidate.kind ||
+          existing.title !== title ||
+          existing.source_path !== sourcePath
+        ) {
+          changedPaths.push(candidate.relative_path)
+        }
+      }
+    }
+    let changed = false
+    for (const candidate of staged) {
+      if (!observed.has(candidate.relative_path) || candidate.manifest_json === null) continue
+      const manifest = JSON.parse(candidate.manifest_json) as { pages?: ReadonlyArray<unknown> }
+      const pageCount = Array.isArray(manifest.pages) ? manifest.pages.length : 0
+      if (pageCount === 0) continue
+      const existing = existingForCandidate.get(candidate.relative_path)
+      if (existing !== undefined) {
+        const title = titleForCandidate(candidate.relative_path, candidate.kind)
+        if (
+          existing.manifest_json === candidate.manifest_json &&
+          existing.kind === candidate.kind &&
+          existing.title === title &&
+          existing.source_path === sourcePathFor(candidate.relative_path)
+        ) {
+          deleteStaged.run(candidate.candidate_id)
+        }
+        continue
+      }
+      if (missingPaths.length > 0 || changedPaths.length > 0) continue
+      const title = titleForCandidate(candidate.relative_path, candidate.kind)
+      insertEntry.run(
+        randomUUID(),
+        root.libraryId,
+        request.rootId,
+        candidate.relative_path,
+        sourcePathFor(candidate.relative_path),
+        candidate.kind,
+        title,
+        BigInt(pageCount),
+        candidate.manifest_json,
+        Date.now(),
+        Date.now()
+      )
+      deleteStaged.run(candidate.candidate_id)
+      changed = true
+    }
+    if (changed) bumpLibraryRevision.run()
+    if (missingPaths.length > 0 || changedPaths.length > 0) {
+      const stagedPaths = (selectStagedPathsForRoot.all(request.rootId) as unknown as ReadonlyArray<{ relative_path: string }>)
+        .map((row) => row.relative_path)
+      const reviewPaths = new Set([...stagedPaths, ...missingPaths, ...changedPaths])
+      db.exec("COMMIT")
+      return {
+        kind: "allocation_deferred",
+        missingPaths: missingPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
+        changedPaths: changedPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
+        excludedPaths: excludedPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
+        missingPathCount: missingPaths.length,
+        changedPathCount: changedPaths.length,
+        excludedPathCount: excludedPaths.length,
+        reviewNeededCount: reviewPaths.size
+      }
+    }
+    db.exec("COMMIT")
+    return { kind: "published" }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const librarySummary = (): import("./worker-protocol").LibrarySummaryRow => {
+  const row = selectLibraryState.get() as { library_id: string; change_revision: bigint } | undefined
+  if (row === undefined) throw new Error("server library is not initialized")
+  return { library_id: row.library_id, change_revision: row.change_revision.toString() }
+}
+
+const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntries" }>): import("./worker-protocol").LibraryEntryPageRow => {
+  const rows = selectLibraryEntries(request.cursor, request.pageSize + 1) as unknown as ReadonlyArray<{
+    entry_id: string
+    library_id: string
+    root_id: string
+    relative_path: string
+    source_path: string
+    kind: "archive" | "image-directory"
+    title: string
+    page_count: bigint
+    state: "accepted"
+    content_version: bigint
+    location_revision: bigint
+  }>
+  const page = rows.slice(0, request.pageSize)
+  const hasMore = rows.length > request.pageSize
+  return {
+    entries: page.map(entryRow),
+    has_more: hasMore,
+    next_cursor: hasMore ? page[page.length - 1]?.entry_id ?? null : null,
+    library_change_revision: librarySummary().change_revision
   }
 }
 
@@ -946,6 +1381,14 @@ const handle = (request: WorkerRequest): unknown => {
       return scanTaskById(request.taskId) ?? null
     case "listStagedDiscoveries":
       return (selectStagedDiscoveries.all() as unknown as ReadonlyArray<Parameters<typeof stagedDiscoveryRow>[0]>).map(stagedDiscoveryRow)
+    case "publishNormalScan":
+      return publishNormalScan(request)
+    case "releaseHeldDiscovery":
+      return releaseHeldDiscovery(request)
+    case "readLibrary":
+      return librarySummary()
+    case "listLibraryEntries":
+      return libraryEntries(request)
     case "recordDiscovery":
       requireScanTransition(db.prepare(`UPDATE scan_tasks SET directories_visited = ?, candidates_discovered = ?, coverage_json = ?,
         updated_at_ms = ? WHERE task_id = ? AND status = 'running'`).run(
