@@ -21,6 +21,7 @@ import {
   type NoteCommandClient,
   type VerifiedSession
 } from "../../desktop/src/main/CommandCoordinator"
+import { ConnectionLifecycle } from "../../desktop/src/main/ConnectionLifecycle"
 import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
 
 const localWorkerUrl = new URL("../../desktop/dist/draft-worker.mjs", import.meta.url)
@@ -85,12 +86,56 @@ const startDroppingProxy = async (targetBaseUrl: string): Promise<string> => {
   return `http://127.0.0.1:${address.port}`
 }
 
+const startCountingDroppingProxy = async (
+  targetBaseUrl: string
+): Promise<{ readonly baseUrl: string; readonly putCount: () => number }> => {
+  const target = new URL(targetBaseUrl)
+  let dropped = false
+  let putCount = 0
+  const proxy = http.createServer((request, response) => {
+    if (request.method === "PUT") putCount += 1
+    const upstream = http.request(
+      {
+        hostname: target.hostname,
+        port: Number(target.port),
+        method: request.method,
+        path: request.url,
+        headers: request.headers
+      },
+      (upstreamResponse) => {
+        response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers)
+        if (!dropped && request.method === "PUT" && upstreamResponse.statusCode === 200) {
+          dropped = true
+          upstreamResponse.resume()
+          response.destroy()
+          return
+        }
+        upstreamResponse.pipe(response)
+      }
+    )
+    upstream.on("error", () => response.destroy())
+    request.pipe(upstream)
+  })
+  await new Promise<void>((resolve, reject) => {
+    proxy.once("error", reject)
+    proxy.listen(0, "127.0.0.1", () => resolve())
+  })
+  const address = proxy.address()
+  if (address === null || typeof address === "string") throw new Error("proxy did not bind")
+  proxies.push({ close: () => new Promise((resolve) => proxy.close(() => resolve())) })
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    putCount: () => putCount
+  }
+}
+
 const startGatedPutProxy = async (
   targetBaseUrl: string
 ): Promise<{
   readonly baseUrl: string
   readonly putReceived: Promise<void>
   readonly releasePut: () => void
+  readonly putCount: () => number
 }> => {
   const target = new URL(targetBaseUrl)
   let putReceivedResolve!: () => void
@@ -101,12 +146,14 @@ const startGatedPutProxy = async (
   const putReleased = new Promise<void>((resolve) => {
     releasePutResolve = resolve
   })
+  let putCount = 0
 
   const proxy = http.createServer((request, response) => {
     void (async () => {
       const chunks: Buffer[] = []
       for await (const chunk of request) chunks.push(Buffer.from(chunk))
       if (request.method === "PUT") {
+        putCount += 1
         putReceivedResolve()
         await putReleased
       }
@@ -138,7 +185,8 @@ const startGatedPutProxy = async (
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     putReceived,
-    releasePut: releasePutResolve
+    releasePut: releasePutResolve,
+    putCount: () => putCount
   }
 }
 
@@ -168,6 +216,173 @@ afterEach(async () => {
 })
 
 describe("main command-attempt coordinator", () => {
+  it("retains a committed-but-unacknowledged attempt across lifecycle reconnect without replay", async () => {
+    const server = await startOwnedServer()
+    const localDbPath = await makeLocalDbPath()
+    const operationId = randomUUID()
+    const proxy = await startCountingDroppingProxy(server.baseUrl)
+    const lifecycle = new ConnectionLifecycle({ baseUrl: proxy.baseUrl, bearerToken: server.bearerToken })
+
+    try {
+      await lifecycle.connect()
+      const handshake = lifecycle.handshakeView()
+      const session = { instanceId: handshake.instance_id, epoch: handshake.epoch }
+      const result = await withServices(
+        server,
+        localDbPath,
+        Effect.gen(function*() {
+          const store = yield* CommandAttemptStore
+          const dispatch = yield* Effect.promise(() => lifecycle.run(
+            Effect.gen(function*() {
+              const client = yield* PrototypeHttpClient
+              return yield* executeNoteEdit(
+                client,
+                store,
+                session,
+                { noteId: "note-1", text: "lifecycle-recovery", expectedRevision: "0", operationId }
+              )
+            }).pipe(Effect.result)
+          ))
+          const before = yield* store.get({ instanceId: session.instanceId, operationId })
+          yield* Effect.promise(() => lifecycle.disconnect())
+          yield* Effect.promise(() => lifecycle.connect())
+          const reconnectedHandshake = lifecycle.handshakeView()
+          const reconnected = {
+            instanceId: reconnectedHandshake.instance_id,
+            epoch: reconnectedHandshake.epoch
+          }
+          const recovered = yield* Effect.promise(() => lifecycle.run(
+            Effect.gen(function*() {
+              const client = yield* PrototypeHttpClient
+              return yield* reconcileNoteCommand(client, store, reconnected, operationId)
+            })
+          ))
+          const after = yield* store.get({ instanceId: session.instanceId, operationId })
+          return { dispatch, before, recovered, after }
+        }),
+        proxy.baseUrl
+      )
+
+      expect(Result.isFailure(result.dispatch)).toBe(true)
+      expect(result.before?.status).toBe("unresolved")
+      expect(result.recovered.requires_reconciliation).toBe(false)
+      expect(result.recovered.server_result?.note).toEqual({
+        note_id: "note-1",
+        text: "lifecycle-recovery",
+        revision: "1"
+      })
+      expect(result.after?.status).toBe("succeeded")
+      expect(proxy.putCount()).toBe(1)
+    } finally {
+      await lifecycle.close()
+    }
+  })
+
+  it("fences a held local admission after disconnect before sending a PUT", async () => {
+    const server = await startOwnedServer()
+    const localDbPath = await makeLocalDbPath()
+    const operationId = randomUUID()
+    const proxy = await startCountingDroppingProxy(server.baseUrl)
+    const lifecycle = new ConnectionLifecycle({ baseUrl: proxy.baseUrl, bearerToken: server.bearerToken })
+
+    try {
+      await lifecycle.connect()
+      const handshake = lifecycle.handshakeView()
+      const session = { instanceId: handshake.instance_id, epoch: handshake.epoch }
+      const result = await withServices(
+        server,
+        localDbPath,
+        Effect.gen(function*() {
+          const store = yield* CommandAttemptStore
+          let admissionStartedResolve!: () => void
+          const admissionStarted = new Promise<void>((resolve) => {
+            admissionStartedResolve = resolve
+          })
+          let releaseAdmission!: () => void
+          const admissionGate = new Promise<void>((resolve) => {
+            releaseAdmission = resolve
+          })
+          const heldStore: CommandAttemptStore["Service"] = {
+            ...store,
+            markSubmitted: (key) =>
+              Effect.uninterruptible(
+                Effect.promise(() => {
+                  admissionStartedResolve()
+                  return admissionGate
+                }).pipe(Effect.andThen(store.markSubmitted(key)))
+              )
+          }
+          const generation = lifecycle.currentGeneration()
+          if (generation === null) return yield* Effect.die("missing lifecycle generation")
+          let beforeDispatchCalled = false
+          const dispatch = lifecycle.run(
+            Effect.gen(function*() {
+              const client = yield* PrototypeHttpClient
+              return yield* executeNoteEdit(
+                client,
+                heldStore,
+                session,
+                { noteId: "note-1", text: "must-not-send", expectedRevision: "0", operationId },
+                () => {
+                  beforeDispatchCalled = true
+                  lifecycle.assertGeneration(generation)
+                }
+              )
+            }).pipe(Effect.result)
+          ).then(
+            (value) => value,
+            (error) => error
+          )
+          yield* Effect.promise(() => admissionStarted)
+          const disconnecting = lifecycle.disconnect()
+          releaseAdmission()
+          const dispatchOutcome = yield* Effect.promise(() => dispatch)
+          yield* Effect.promise(() => disconnecting)
+          const attempt = yield* store.get({ instanceId: session.instanceId, operationId })
+          return { dispatchOutcome, attempt, beforeDispatchCalled }
+        }),
+        proxy.baseUrl
+      )
+
+      expect(result.dispatchOutcome).toBeInstanceOf(Error)
+      expect(result.beforeDispatchCalled).toBe(false)
+      expect(result.attempt?.status).toBe("rejected")
+      expect(result.attempt?.error_code).toBe("not_dispatched")
+      expect(proxy.putCount()).toBe(0)
+    } finally {
+      await lifecycle.close()
+    }
+  })
+
+  it("records a synchronous before-dispatch guard failure as a terminal local rejection", async () => {
+    const server = await startOwnedServer()
+    const localDbPath = await makeLocalDbPath()
+    const operationId = randomUUID()
+    const result = await withServices(
+      server,
+      localDbPath,
+      Effect.gen(function*() {
+        const client = yield* PrototypeHttpClient
+        const store = yield* CommandAttemptStore
+        const outcome = yield* executeNoteEdit(
+          client,
+          store,
+          sessionFor(server),
+          { noteId: "note-1", text: "guarded-local", expectedRevision: "0", operationId },
+          () => {
+            throw new Error("connection generation changed")
+          }
+        ).pipe(Effect.result)
+        return { outcome, attempt: yield* store.get({ instanceId: server.instanceId, operationId }) }
+      })
+    )
+
+    expect(Result.isFailure(result.outcome)).toBe(true)
+    expect(result.attempt?.status).toBe("rejected")
+    expect(result.attempt?.error_code).toBe("not_dispatched")
+    expect(result.attempt?.error_message).toBe("command was not dispatched")
+  })
+
   it("keeps a real SQLite attempt after a loopback response stream is dropped after commit", async () => {
     const server = await startOwnedServer()
     const localDbPath = await makeLocalDbPath()
@@ -641,6 +856,154 @@ describe("main command-attempt coordinator", () => {
     expect(result.statusRecovery.requires_reconciliation).toBe(true)
     expect(result.statusRecovery.reconciliation_reason).toBe("query_unavailable")
     expect(result.note.data).toEqual({ note_id: "note-1", text: "hello", revision: "0" })
+  })
+
+  it("persists unresolved when the lifecycle deadline interrupts an in-flight PUT", async () => {
+    const server = await startOwnedServer()
+    const localDbPath = await makeLocalDbPath()
+    const operationId = randomUUID()
+    const gatedProxy = await startGatedPutProxy(server.baseUrl)
+    const lifecycle = new ConnectionLifecycle({ baseUrl: gatedProxy.baseUrl, bearerToken: server.bearerToken })
+
+    try {
+      await lifecycle.connect()
+      const handshake = lifecycle.handshakeView()
+      const session = { instanceId: handshake.instance_id, epoch: handshake.epoch }
+      const result = await withServices(
+        server,
+        localDbPath,
+        Effect.gen(function*() {
+          const store = yield* CommandAttemptStore
+          const dispatch = lifecycle.run(
+            Effect.gen(function*() {
+              const client = yield* PrototypeHttpClient
+              return yield* executeNoteEdit(
+                client,
+                store,
+                session,
+                { noteId: "note-1", text: "deadline-intent", expectedRevision: "0", operationId }
+              )
+            })
+          ).then(
+            (value) => ({ kind: "value" as const, value }),
+            (error) => ({ kind: "error" as const, error })
+          )
+
+          yield* Effect.promise(() => gatedProxy.putReceived)
+          const timedOut = yield* Effect.promise(() => dispatch)
+          gatedProxy.releasePut()
+          const attempt = yield* store.get({ instanceId: session.instanceId, operationId })
+
+          const repeated = yield* Effect.promise(() => lifecycle.run(
+            Effect.gen(function*() {
+              const client = yield* PrototypeHttpClient
+              return yield* executeNoteEdit(
+                client,
+                store,
+                session,
+                { noteId: "note-1", text: "deadline-intent", expectedRevision: "0", operationId }
+              )
+            })
+          ).then(
+            (value) => ({ kind: "value" as const, value }),
+            (error) => ({ kind: "error" as const, error })
+          ))
+          return { timedOut, attempt, repeated }
+        }),
+        gatedProxy.baseUrl
+      )
+
+      expect(result.timedOut.kind).toBe("error")
+      expect(result.attempt?.status).toBe("unresolved")
+      expect(result.repeated.kind).toBe("error")
+      expect(gatedProxy.putCount()).toBe(1)
+    } finally {
+      gatedProxy.releasePut()
+      await lifecycle.close()
+    }
+  })
+
+  it("persists unresolved when lifecycle cancellation interrupts terminal persistence", async () => {
+    const server = await startOwnedServer()
+    const localDbPath = await makeLocalDbPath()
+    const operationId = randomUUID()
+    const gatedProxy = await startGatedPutProxy(server.baseUrl)
+    const lifecycle = new ConnectionLifecycle({ baseUrl: gatedProxy.baseUrl, bearerToken: server.bearerToken })
+
+    try {
+      await lifecycle.connect()
+      const handshake = lifecycle.handshakeView()
+      const session = { instanceId: handshake.instance_id, epoch: handshake.epoch }
+      const result = await withServices(
+        server,
+        localDbPath,
+        Effect.gen(function*() {
+          const store = yield* CommandAttemptStore
+          let terminalPersistenceStartedResolve!: () => void
+          const terminalPersistenceStarted = new Promise<void>((resolve) => {
+            terminalPersistenceStartedResolve = resolve
+          })
+          let releaseTerminalPersistence!: () => void
+          const terminalPersistenceGate = new Promise<void>((resolve) => {
+            releaseTerminalPersistence = resolve
+          })
+          const heldStore: CommandAttemptStore["Service"] = {
+            ...store,
+            markSucceeded: (key) =>
+              Effect.promise(() => {
+                terminalPersistenceStartedResolve()
+                return terminalPersistenceGate
+              }).pipe(Effect.flatMap(() => store.markSucceeded(key)))
+          }
+          const dispatch = lifecycle.run(
+            Effect.gen(function*() {
+              const client = yield* PrototypeHttpClient
+              return yield* executeNoteEdit(
+                client,
+                heldStore,
+                session,
+                { noteId: "note-1", text: "terminal-deadline", expectedRevision: "0", operationId }
+              )
+            })
+          ).then(
+            (value) => ({ kind: "value" as const, value }),
+            (error) => ({ kind: "error" as const, error })
+          )
+
+          yield* Effect.promise(() => gatedProxy.putReceived)
+          gatedProxy.releasePut()
+          yield* Effect.promise(() => terminalPersistenceStarted)
+          const timedOut = yield* Effect.promise(() => dispatch)
+          releaseTerminalPersistence()
+          const attempt = yield* store.get({ instanceId: session.instanceId, operationId })
+
+          const repeated = yield* Effect.promise(() => lifecycle.run(
+            Effect.gen(function*() {
+              const client = yield* PrototypeHttpClient
+              return yield* executeNoteEdit(
+                client,
+                heldStore,
+                session,
+                { noteId: "note-1", text: "terminal-deadline", expectedRevision: "0", operationId }
+              )
+            })
+          ).then(
+            (value) => ({ kind: "value" as const, value }),
+            (error) => ({ kind: "error" as const, error })
+          ))
+          return { timedOut, attempt, repeated }
+        }),
+        gatedProxy.baseUrl
+      )
+
+      expect(result.timedOut.kind).toBe("error")
+      expect(result.attempt?.status).toBe("unresolved")
+      expect(result.repeated.kind).toBe("error")
+      expect(gatedProxy.putCount()).toBe(1)
+    } finally {
+      gatedProxy.releasePut()
+      await lifecycle.close()
+    }
   })
 
   it("does not dispatch when local attempt admission is full", async () => {

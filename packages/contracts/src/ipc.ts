@@ -8,12 +8,37 @@ import type {
   SavedDraftAbsent
 } from "./note"
 
+export const ConnectionState = Schema.Union([
+  Schema.Literal("connecting"),
+  Schema.Literal("connected"),
+  Schema.Literal("disconnected"),
+  Schema.Literal("blocked")
+])
+export type ConnectionState = typeof ConnectionState.Type
+
+export const ConnectionStatusView = Schema.Struct({
+  state: ConnectionState,
+  instance_id: Schema.NullOr(Uuid),
+  epoch: Schema.NullOr(Uuid),
+  reason: Schema.NullOr(Schema.String)
+})
+export type ConnectionStatusView = typeof ConnectionStatusView.Type
+
 /**
  * IPC request schemas. The renderer never supplies instance/epoch/auth: main
  * adds namespace and epoch from its own authenticated session before dispatch.
  */
 export const HandshakeIpcRequest = Schema.Struct({})
 export type HandshakeIpcRequest = typeof HandshakeIpcRequest.Type
+
+export const ConnectIpcRequest = Schema.Struct({})
+export type ConnectIpcRequest = typeof ConnectIpcRequest.Type
+
+export const DisconnectIpcRequest = Schema.Struct({})
+export type DisconnectIpcRequest = typeof DisconnectIpcRequest.Type
+
+export const ConnectionStatusIpcRequest = Schema.Struct({})
+export type ConnectionStatusIpcRequest = typeof ConnectionStatusIpcRequest.Type
 
 export const GetNoteIpcRequest = Schema.Struct({
   note_id: NoteId
@@ -24,6 +49,7 @@ export const EditNoteIpcRequest = Schema.Struct({
   note_id: NoteId,
   text: Text,
   expected_revision: Revision,
+  base_epoch: Uuid,
   operation_id: Uuid
 })
 export type EditNoteIpcRequest = typeof EditNoteIpcRequest.Type

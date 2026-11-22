@@ -4,6 +4,9 @@ import path from "node:path"
 import { pathToFileURL } from "node:url"
 import {
   DiscardDraftIpcRequest,
+  ConnectIpcRequest,
+  ConnectionStatusIpcRequest,
+  DisconnectIpcRequest,
   DismissCommandIpcRequest,
   EditNoteIpcRequest,
   GetNoteIpcRequest,
@@ -15,6 +18,7 @@ import {
   PublicApiError,
   SaveDraftIpcRequest,
   ReconcileCommandIpcRequest,
+  ConnectionStatusView,
   type PublicError
 } from "@henshin/contracts"
 import { startServerChild, type ServerChild } from "./server-child"
@@ -31,6 +35,11 @@ import {
   reconcileNoteCommand
 } from "./CommandCoordinator"
 import { LocalDatabaseWorker } from "./persistence/LocalDatabaseWorker"
+import {
+  ConnectionInstanceMismatchError,
+  ConnectionLifecycle,
+  ConnectionPausedError
+} from "./ConnectionLifecycle"
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
 
@@ -50,9 +59,9 @@ interface IpcErr {
 
 let mainWindow: BrowserWindow | null = null
 let serverChild: ServerChild | null = null
-type MainServices = PrototypeHttpClient | DraftStore | CommandAttemptStore
+type MainServices = DraftStore | CommandAttemptStore
 let runtime: ManagedRuntime.ManagedRuntime<MainServices, never> | null = null
-let session: Session | null = null
+let connection: ConnectionLifecycle | null = null
 let rendererUrl = ""
 let shutdownPromise: Promise<void> | null = null
 let readyToQuit = false
@@ -78,6 +87,20 @@ const toPublicError = (error: unknown): PublicError => {
     return {
       code: "operation_conflict",
       message: "operation id reused with a different local intent",
+      retryable: false
+    }
+  }
+  if (error instanceof ConnectionPausedError) {
+    return {
+      code: "connection_paused",
+      message: "server network work is paused; reconnect deliberately",
+      retryable: true
+    }
+  }
+  if (error instanceof ConnectionInstanceMismatchError) {
+    return {
+      code: "instance_mismatch",
+      message: "managed endpoint identity changed; reconnect requires endpoint recovery",
       retryable: false
     }
   }
@@ -163,9 +186,35 @@ const requireRuntime = (): ManagedRuntime.ManagedRuntime<MainServices, never> =>
 }
 
 const requireSession = (): Session => {
-  if (session === null) throw new Error("no authenticated server session")
-  return session
+  if (connection === null) throw new Error("connection lifecycle is not ready")
+  const session = connection.getSession()
+  if (session === null) throw new ConnectionPausedError({ state: connection.getStatus().state })
+  return { instanceId: session.instanceId, epoch: session.epoch }
 }
+
+const requireNamespace = (): string => {
+  if (connection === null) throw new Error("connection lifecycle is not ready")
+  const instanceId = connection.getNamespace()
+  if (instanceId === null) throw new ConnectionPausedError({ state: connection.getStatus().state })
+  return instanceId
+}
+
+const requireConnection = (): ConnectionLifecycle => {
+  if (connection === null) throw new Error("connection lifecycle is not ready")
+  return connection
+}
+
+const runNetworkResult = <A>(
+  effect: Effect.Effect<IpcOk<A> | IpcErr, never, PrototypeHttpClient>
+): Promise<IpcOk<A> | IpcErr> =>
+  requireConnection()
+    .run(effect)
+    .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+
+const connectionStatusResult = (status: ConnectionStatusView): IpcOk<ConnectionStatusView> => ({
+  ok: true,
+  data: status
+})
 
 const registerIpc = (): void => {
   ipcMain.handle(IpcChannels.handshake, (event, raw: unknown) => {
@@ -173,23 +222,41 @@ const registerIpc = (): void => {
     const decoded = Schema.decodeUnknownOption(HandshakeIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
 
-    return requireRuntime().runPromise(
-      Effect.gen(function*() {
-        const client = yield* PrototypeHttpClient
-        const envelope = yield* client.handshake()
-        // Return the explicit handshake view the renderer expects, not the raw
-        // endpoint payload.
-        return {
-          ok: true as const,
-          data: { instance_id: envelope.instance_id, epoch: envelope.epoch }
-        }
-      }).pipe(
-        Effect.match({
-          onFailure: (error) => ({ ok: false as const, error: toPublicError(error) }),
-          onSuccess: (result) => result
-        })
-      )
-    )
+    try {
+      const view = requireConnection().handshakeView()
+      return connectionStatusResult({
+        state: "connected",
+        instance_id: view.instance_id,
+        epoch: view.epoch,
+        reason: null
+      })
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
+  })
+
+  ipcMain.handle(IpcChannels.connect, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ConnectIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return requireConnection()
+      .connect()
+      .then(connectionStatusResult)
+      .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+  })
+
+  ipcMain.handle(IpcChannels.disconnect, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(DisconnectIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return requireConnection().disconnect().then(connectionStatusResult)
+  })
+
+  ipcMain.handle(IpcChannels.connectionStatus, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ConnectionStatusIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return connectionStatusResult(requireConnection().getStatus())
   })
 
   ipcMain.handle(IpcChannels.getNote, (event, raw: unknown) => {
@@ -198,7 +265,7 @@ const registerIpc = (): void => {
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     const request = decoded.value
 
-    return requireRuntime().runPromise(
+    return runNetworkResult(
       toResult(
         Effect.gen(function*() {
           const client = yield* PrototypeHttpClient
@@ -214,78 +281,127 @@ const registerIpc = (): void => {
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     const request = decoded.value
 
-    // Namespace and epoch come from main's authenticated session, never from
-    // the renderer.
-    const activeSession = requireSession()
-    return requireRuntime().runPromise(
-      toResult(
-        Effect.gen(function*() {
-          const client = yield* PrototypeHttpClient
-          const attempts = yield* CommandAttemptStore
-          return {
-            data: yield* executeNoteEdit(client, attempts, activeSession, {
-              noteId: request.note_id,
-              text: request.text,
-              expectedRevision: request.expected_revision,
-              operationId: request.operation_id
-            })
+    try {
+      const activeSession = requireSession()
+      const activeConnection = requireConnection()
+      if (request.base_epoch !== activeSession.epoch) {
+        return {
+          ok: false as const,
+          error: {
+            code: "epoch_changed",
+            message: "authority epoch changed; reload the current note before saving",
+            retryable: true
           }
-        })
-      )
-    )
+        }
+      }
+      const generation = activeConnection.currentGeneration()
+      if (generation === null) throw new ConnectionPausedError({ state: activeConnection.getStatus().state })
+      return requireRuntime()
+        .runPromise(Effect.gen(function*() {
+          return yield* CommandAttemptStore
+        }))
+        .then((attempts) =>
+          runNetworkResult(
+            toResult(
+              Effect.gen(function*() {
+                const client = yield* PrototypeHttpClient
+                return {
+                  data: yield* executeNoteEdit(
+                    client,
+                    attempts,
+                    activeSession,
+                    {
+                      noteId: request.note_id,
+                      text: request.text,
+                      expectedRevision: request.expected_revision,
+                      operationId: request.operation_id
+                    },
+                    () => activeConnection.assertGeneration(generation)
+                  )
+                }
+              })
+            )
+          )
+        )
+        .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
   })
 
   ipcMain.handle(IpcChannels.listCommandAttempts, (event, raw: unknown) => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(ListCommandAttemptsIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    const activeSession = requireSession()
-    return requireRuntime().runPromise(
-      toResult(
-        Effect.gen(function*() {
-          const attempts = yield* CommandAttemptStore
-          return { data: yield* attempts.list(activeSession.instanceId) }
-        })
+    try {
+      const instanceId = requireNamespace()
+      return requireRuntime().runPromise(
+        toResult(
+          Effect.gen(function*() {
+            const attempts = yield* CommandAttemptStore
+            return { data: yield* attempts.list(instanceId) }
+          })
+        )
       )
-    )
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
   })
 
   ipcMain.handle(IpcChannels.reconcileCommand, (event, raw: unknown) => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(ReconcileCommandIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    const activeSession = requireSession()
-    return requireRuntime().runPromise(
-      toResult(
-        Effect.gen(function*() {
-          const client = yield* PrototypeHttpClient
-          const attempts = yield* CommandAttemptStore
-          return {
-            data: yield* reconcileNoteCommand(client, attempts, activeSession, decoded.value.operation_id)
-          }
-        })
-      )
-    )
+    try {
+      const activeSession = requireSession()
+      const activeConnection = requireConnection()
+      const generation = activeConnection.currentGeneration()
+      if (generation === null) throw new ConnectionPausedError({ state: activeConnection.getStatus().state })
+      return requireRuntime()
+        .runPromise(Effect.gen(function*() {
+          return yield* CommandAttemptStore
+        }))
+        .then((attempts) =>
+          runNetworkResult(
+            toResult(
+              Effect.gen(function*() {
+                const client = yield* PrototypeHttpClient
+                activeConnection.assertGeneration(generation)
+                return {
+                  data: yield* reconcileNoteCommand(client, attempts, activeSession, decoded.value.operation_id)
+                }
+              })
+            )
+          )
+        )
+        .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
   })
 
   ipcMain.handle(IpcChannels.dismissCommand, (event, raw: unknown) => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(DismissCommandIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    const activeSession = requireSession()
-    return requireRuntime().runPromise(
-      toResult(
-        Effect.gen(function*() {
-          const attempts = yield* CommandAttemptStore
-          return {
-            data: yield* attempts.dismiss({
-              instanceId: activeSession.instanceId,
-              operationId: decoded.value.operation_id
-            })
-          }
-        })
+    try {
+      const instanceId = requireNamespace()
+      return requireRuntime().runPromise(
+        toResult(
+          Effect.gen(function*() {
+            const attempts = yield* CommandAttemptStore
+            return {
+              data: yield* attempts.dismiss({
+                instanceId,
+                operationId: decoded.value.operation_id
+              })
+            }
+          })
+        )
       )
-    )
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
   })
 
   ipcMain.handle(IpcChannels.saveDraft, (event, raw: unknown) => {
@@ -293,24 +409,28 @@ const registerIpc = (): void => {
     const decoded = Schema.decodeUnknownOption(SaveDraftIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     const request = decoded.value
-    const activeSession = requireSession()
-    return requireRuntime().runPromise(
-      toResult(
-        Effect.gen(function*() {
-          const store = yield* DraftStore
-          const draft = yield* store.save({
-            instanceId: activeSession.instanceId,
-            noteId: request.note_id,
-            formId: request.form_id,
-            text: request.text,
-            expectedLocalRevision: request.expected_local_revision,
-            baseServerRevision: request.base_server_revision,
-            baseEpoch: request.base_epoch
+    try {
+      const instanceId = requireNamespace()
+      return requireRuntime().runPromise(
+        toResult(
+          Effect.gen(function*() {
+            const store = yield* DraftStore
+            const draft = yield* store.save({
+              instanceId,
+              noteId: request.note_id,
+              formId: request.form_id,
+              text: request.text,
+              expectedLocalRevision: request.expected_local_revision,
+              baseServerRevision: request.base_server_revision,
+              baseEpoch: request.base_epoch
+            })
+            return { data: draft }
           })
-          return { data: draft }
-        })
+        )
       )
-    )
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
   })
 
   ipcMain.handle(IpcChannels.loadDraft, (event, raw: unknown) => {
@@ -318,20 +438,24 @@ const registerIpc = (): void => {
     const decoded = Schema.decodeUnknownOption(LoadDraftIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     const request = decoded.value
-    const activeSession = requireSession()
-    return requireRuntime().runPromise(
-      toResult(
-        Effect.gen(function*() {
-          const store = yield* DraftStore
-          const draft = yield* store.load({
-            instanceId: activeSession.instanceId,
-            noteId: request.note_id,
-            formId: request.form_id
+    try {
+      const instanceId = requireNamespace()
+      return requireRuntime().runPromise(
+        toResult(
+          Effect.gen(function*() {
+            const store = yield* DraftStore
+            const draft = yield* store.load({
+              instanceId,
+              noteId: request.note_id,
+              formId: request.form_id
+            })
+            return { data: draft ?? null }
           })
-          return { data: draft ?? null }
-        })
+        )
       )
-    )
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
   })
 
   ipcMain.handle(IpcChannels.discardDraft, (event, raw: unknown) => {
@@ -339,21 +463,25 @@ const registerIpc = (): void => {
     const decoded = Schema.decodeUnknownOption(DiscardDraftIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     const request = decoded.value
-    const activeSession = requireSession()
-    return requireRuntime().runPromise(
-      toResult(
-        Effect.gen(function*() {
-          const store = yield* DraftStore
-          const discarded = yield* store.discard({
-            instanceId: activeSession.instanceId,
-            noteId: request.note_id,
-            formId: request.form_id,
-            expectedLocalRevision: request.expected_local_revision
+    try {
+      const instanceId = requireNamespace()
+      return requireRuntime().runPromise(
+        toResult(
+          Effect.gen(function*() {
+            const store = yield* DraftStore
+            const discarded = yield* store.discard({
+              instanceId,
+              noteId: request.note_id,
+              formId: request.form_id,
+              expectedLocalRevision: request.expected_local_revision
+            })
+            return { data: discarded }
           })
-          return { data: discarded }
-        })
+        )
       )
-    )
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
   })
 }
 
@@ -391,6 +519,9 @@ const shutdown = (): Promise<void> => {
   shutdownPromise = (async () => {
     const activeRuntime = runtime
     runtime = null
+    const activeConnection = connection
+    connection = null
+    if (activeConnection !== null) await activeConnection.close()
     if (activeRuntime !== null) {
       await Promise.race([activeRuntime.dispose(), delay(SHUTDOWN_TIMEOUT_MS)])
     }
@@ -411,24 +542,18 @@ const bootstrap = async (): Promise<void> => {
   const localWorker = LocalDatabaseWorker.layer(clientDbPath, { workerUrl: draftWorkerUrl })
   runtime = ManagedRuntime.make(
     Layer.mergeAll(
-      PrototypeHttpClient.layer({
-        baseUrl: serverChild.baseUrl,
-        bearerToken: serverChild.bearerToken
-      }),
       DraftStore.layerFromWorker,
       CommandAttemptStore.layerFromWorker
     ).pipe(Layer.provide(localWorker))
   )
 
-  // Establish the authenticated session through the typed client, so the
-  // namespace/epoch used for mutations is server-verified rather than assumed.
-  const handshake = await runtime.runPromise(
-    Effect.gen(function*() {
-      const client = yield* PrototypeHttpClient
-      return yield* client.handshake()
-    })
-  )
-  session = { instanceId: handshake.instance_id, epoch: handshake.epoch }
+  // The owned child remains supervised independently; disconnect only pauses
+  // the authenticated HTTP scope for this managed endpoint.
+  connection = new ConnectionLifecycle({
+    baseUrl: serverChild.baseUrl,
+    bearerToken: serverChild.bearerToken
+  })
+  await connection.connect()
 
   registerIpc()
   createWindow()
