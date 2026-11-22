@@ -1,7 +1,7 @@
 import { Effect } from "effect"
 import type { ConnectionStatusView } from "@henshin/contracts"
 import { PrototypeClient, RootPreviewClient } from "./client"
-import { viewStore } from "./store"
+import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
 export const FORM_ID = "synthetic-note"
@@ -17,7 +17,10 @@ export const previewRoot = (path: string) =>
         root_preview_selected_path: path,
         root_preview_status: "loading",
         root_preview: null,
-        root_preview_error: null
+        root_preview_error: null,
+        root_save_operation_id: null,
+        root_save_status: "idle",
+        root_save_error: null
       })
     )
 
@@ -42,6 +45,82 @@ export const previewRoot = (path: string) =>
       )
     }
   })
+
+export const loadRoots = Effect.gen(function*() {
+  const client = yield* RootPreviewClient
+  yield* Effect.sync(() => viewStore.set({ root_roots_status: "loading", root_roots_error: null }))
+  const result = yield* client.list()
+  if (result.ok) {
+    yield* Effect.sync(() => viewStore.set({ root_saved_roots: result.data, root_roots_status: "ready" }))
+  } else {
+    yield* Effect.sync(() =>
+      viewStore.set({ root_roots_status: "error", root_roots_error: result.error.message })
+    )
+  }
+})
+
+export const canSaveRoot = (state: ViewState): boolean => {
+  const preview = state.root_preview
+  return preview !== null &&
+    state.root_preview_status === "ready" &&
+    state.root_save_status !== "loading" &&
+    state.root_preview_path === preview.selected_server_path &&
+    state.root_label.length > 0 &&
+    !state.root_saved_roots.some((root) => root.canonical_server_path === preview.preview_identity.canonical_server_path)
+}
+
+export const saveRoot = Effect.gen(function*() {
+  const client = yield* RootPreviewClient
+  const state = viewStore.getState()
+  const preview = state.root_preview
+  if (!preview || !canSaveRoot(state)) return
+
+  const confirmedPath = preview.selected_server_path
+  const confirmedLabel = state.root_label
+  const operationId = state.root_save_target_label === confirmedLabel && state.root_save_target_path === confirmedPath
+    ? state.root_save_operation_id ?? newOperationId()
+    : newOperationId()
+  yield* Effect.sync(() => viewStore.set({
+    root_save_operation_id: operationId,
+    root_save_status: "loading",
+    root_save_error: null,
+    root_save_target_label: confirmedLabel,
+    root_save_target_path: confirmedPath
+  }))
+  const result = yield* client.save({
+    operation_id: operationId,
+    instance_id: preview.instance_id,
+    epoch: preview.epoch,
+    label: state.root_label,
+    path: preview.selected_server_path,
+    preview_identity: preview.preview_identity
+  })
+  if (result.ok) {
+    yield* Effect.sync(() => {
+      const roots = viewStore.getState().root_saved_roots
+      viewStore.set({
+        root_saved_roots: roots.some((root) => root.root_id === result.data.root_id)
+          ? roots.map((root) => root.root_id === result.data.root_id ? result.data : root)
+          : [...roots, result.data],
+        root_save_status: "ready",
+        root_save_error: null,
+        root_save_target_label: confirmedLabel,
+        root_save_target_path: confirmedPath
+      })
+    })
+  } else {
+    const listed = yield* client.list()
+    const existing = listed.ok
+      ? listed.data.find((root) => root.canonical_server_path === preview.preview_identity.canonical_server_path)
+      : undefined
+    viewStore.set({
+      ...(listed.ok ? { root_saved_roots: listed.data, root_roots_status: "ready", root_roots_error: null } : {}),
+      root_save_status: existing?.label === confirmedLabel ? "ready" : "error",
+      root_save_error: existing === undefined ? result.error.message
+        : existing.label === confirmedLabel ? null : `Directory is already saved as ${existing.label}.`
+    })
+  }
+})
 
 const isCurrent = (generation: number): boolean =>
   viewStore.getState().connection_generation === generation

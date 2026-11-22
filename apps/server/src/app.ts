@@ -1,4 +1,5 @@
 import { createServer } from "node:http"
+import path from "node:path"
 import { NodeHttpServerRequest, NodeStream, NodeHttpServer } from "@effect/platform-node"
 import { ByteSize, Data, Effect, Layer, Schema, Stream } from "effect"
 import {
@@ -14,10 +15,11 @@ import { HttpApiBuilder } from "effect/http-api"
 import { PrototypeApi, ServerApi } from "@henshin/contracts"
 import { AuthenticationLayer } from "./api/AuthenticationLayer"
 import { PrototypeHandlers } from "./api/handlers"
-import { RootPreviewHandlers } from "./api/root-preview"
+import { RootHandlers } from "./api/root-preview"
 import { AuthConfig, ServerState } from "./identity"
 import { DatabaseWorker, type DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { NoteStore } from "./persistence/NoteStore"
+import { RootStore } from "./persistence/RootStore"
 import { ServerOwnershipLayer, type ServerOwnershipError } from "./persistence/ServerOwnership"
 
 const MAX_BODY_BYTES = 1024 * 1024
@@ -174,7 +176,9 @@ export const makeAppLayer = (
     Layer.provide(Layer.mergeAll(NoteStore.layer, AuthenticationLayer))
   )
   const RoutesLayer = HttpApiBuilder.layer(PrototypeApi).pipe(Layer.provide(HandlersLayer))
-  const RootPreviewHandlersLayer = RootPreviewHandlers.pipe(Layer.provide(AuthenticationLayer))
+  const RootPreviewHandlersLayer = RootHandlers(path.dirname(options.dbPath)).pipe(
+    Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer))
+  )
   const RootPreviewRoutesLayer = HttpApiBuilder.layer(ServerApi).pipe(
     // The product API has its own route namespace but shares the authenticated
     // server state and HTTP server with the synthetic prototype.
@@ -206,6 +210,8 @@ export const makeAppLayer = (
     Layer.provide(Layer.succeed(HttpIncomingMessage.MaxBodySize, ByteSize.mebibytes(1))),
     Layer.provide(ServerState.layer),
     Layer.provide(AuthConfig.layer(options.bearerToken)),
-    Layer.provide(DatabaseWorker.layer(options.dbPath).pipe(Layer.provide(ServerOwnershipLayer(options.dbPath))))
+    Layer.provide(
+      DatabaseWorker.layer(options.dbPath).pipe(Layer.provide(ServerOwnershipLayer(options.dbPath)))
+    )
   )
 }

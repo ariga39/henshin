@@ -172,7 +172,7 @@ export const selectSourceRoot = async (
   selectedPath: string
 ): Promise<NativeBoundaryResult<SourceRootObservation>> => observeCanonicalRoot(selectedPath)
 
-const revalidateRoot = async (
+export const revalidateSourceRoot = async (
   root: SourceRootObservation,
   context?: OperationContext
 ): Promise<NativeBoundaryResult<SourceRootObservation>> => {
@@ -367,7 +367,7 @@ export const resolveSourceCandidate = async (
     portable.value.length > limits.maxLogicalSegments
   ) return failure("directory-limit")
 
-  const currentRoot = await revalidateRoot(root, context)
+  const currentRoot = await revalidateSourceRoot(root, context)
   if (!currentRoot.ok) return currentRoot
 
   let parentPath = root.canonicalPath
@@ -390,7 +390,7 @@ export const resolveSourceCandidate = async (
     if (entry.value.stats.isDirectory()) {
       const verified = await verifyFinalCandidate(root, entry.value, context)
       if (!verified.ok) return verified
-      const rootAfterCandidate = await revalidateRoot(root, context)
+      const rootAfterCandidate = await revalidateSourceRoot(root, context)
       if (!rootAfterCandidate.ok) return rootAfterCandidate
       const completed = checkOperationDeadline(context)
       if (!completed.ok) return completed
@@ -405,7 +405,7 @@ export const resolveSourceCandidate = async (
     if (entry.value.stats.isFile() && archiveExtension(entry.value.name)) {
       const verified = await verifyFinalCandidate(root, entry.value, context)
       if (!verified.ok) return verified
-      const rootAfterCandidate = await revalidateRoot(root, context)
+      const rootAfterCandidate = await revalidateSourceRoot(root, context)
       if (!rootAfterCandidate.ok) return rootAfterCandidate
       const completed = checkOperationDeadline(context)
       if (!completed.ok) return completed
@@ -487,7 +487,7 @@ const locationPath = async (
       ? success({ canonicalPath: root.value.canonicalPath, kind: "source", identity: root.value.identity })
       : root
   }
-  const root = await revalidateRoot(location)
+  const root = await revalidateSourceRoot(location)
   return root.ok
     ? success({ canonicalPath: root.value.canonicalPath, kind: "source", identity: root.value.identity })
     : root
