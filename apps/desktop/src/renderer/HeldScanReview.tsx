@@ -159,6 +159,8 @@ export const HeldScanReview = () => {
                       <dd>{candidate.kind}</dd>
                       <dt>Pages</dt>
                       <dd data-testid="replacement-candidate-pages">{pageCount === null ? "not available" : pageCount}</dd>
+                      <dt>Decision version</dt>
+                      <dd data-testid="replacement-decision-version">{entry.replacement?.decision_version ?? "not available"}</dd>
                       <dt>Analysis</dt>
                       <dd>{candidate.analysis_status === "ready" ? "complete" : candidate.analysis_error?.message ?? "not ready"}</dd>
                     </dl>

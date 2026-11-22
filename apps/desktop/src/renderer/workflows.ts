@@ -524,11 +524,32 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
       entry.state !== "replacement-pending" || candidate.analysis_status !== "ready" || candidate.manifest === null
     ) return
 
+    const comparison = entry.replacement
+    if (
+      comparison === null ||
+      comparison.candidate_id !== candidate.candidate_id ||
+      comparison.candidate_version !== candidate.candidate_version
+    ) {
+      yield* Effect.sync(() => viewStore.set({
+        scan_resolution_status: "error",
+        scan_resolution_entry_id: entry.entry_id,
+        scan_resolution_operation_id: null,
+        scan_resolution_candidate_version: null,
+        scan_resolution_decision_version: null,
+        scan_resolution_mapping_revision: null,
+        scan_resolution_policy_revision: null,
+        scan_resolution_decision: decision,
+        scan_resolution_error: "replacement comparison is stale; refresh Review before deciding"
+      }))
+      return
+    }
+    const decisionVersion = comparison.decision_version
+
     const sameCommand = state.scan_resolution_candidate_id === candidate.candidate_id &&
       state.scan_resolution_entry_id === entry.entry_id &&
       state.scan_resolution_operation_id !== null &&
       state.scan_resolution_candidate_version === candidate.candidate_version &&
-      state.scan_resolution_decision_revision === entry.decision_revision &&
+      state.scan_resolution_decision_version === decisionVersion &&
       state.scan_resolution_location_revision === entry.location_revision &&
       state.scan_resolution_mapping_revision === root.mapping_revision &&
       state.scan_resolution_policy_revision === root.policy_revision &&
@@ -540,7 +561,7 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
       scan_resolution_entry_id: entry.entry_id,
       scan_resolution_operation_id: operationId,
       scan_resolution_candidate_version: candidate.candidate_version,
-      scan_resolution_decision_revision: entry.decision_revision,
+      scan_resolution_decision_version: decisionVersion,
       scan_resolution_location_revision: entry.location_revision,
       scan_resolution_mapping_revision: root.mapping_revision,
       scan_resolution_policy_revision: root.policy_revision,
@@ -555,7 +576,7 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
       expected_candidate_version: candidate.candidate_version,
       expected_mapping_revision: root.mapping_revision,
       expected_policy_revision: root.policy_revision,
-      expected_decision_revision: entry.decision_revision,
+      expected_decision_version: decisionVersion,
       expected_location_revision: entry.location_revision,
       command: { type: "resolve-replacement", entry_id: entry.entry_id, decision }
     })
@@ -579,7 +600,7 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
               scan_resolution_entry_id: entry.entry_id,
               scan_resolution_operation_id: null,
               scan_resolution_candidate_version: null,
-              scan_resolution_decision_revision: null,
+              scan_resolution_decision_version: null,
               scan_resolution_location_revision: null,
               scan_resolution_mapping_revision: null,
               scan_resolution_policy_revision: null,
@@ -599,7 +620,7 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
       scan_resolution_entry_id: null,
       scan_resolution_operation_id: null,
       scan_resolution_candidate_version: null,
-      scan_resolution_decision_revision: null,
+      scan_resolution_decision_version: null,
       scan_resolution_location_revision: null,
       scan_resolution_mapping_revision: null,
       scan_resolution_policy_revision: null,

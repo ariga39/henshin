@@ -1728,6 +1728,7 @@ const entryRow = (row: {
     : {
         candidate_id: row.candidate_id,
         candidate_version: Number(row.candidate_version),
+        decision_version: row.decision_version.toString(),
         old_observation: persistedReplacementObservation(row.accepted_observation_json, "accepted observation summary"),
         candidate_observation: persistedReplacementCandidateObservation(row.candidate_observation_json, "candidate observation summary")
       },

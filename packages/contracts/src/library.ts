@@ -25,6 +25,7 @@ export type ReplacementCandidateObservation = typeof ReplacementCandidateObserva
 export const ReplacementComparison = Schema.Struct({
   candidate_id: Uuid,
   candidate_version: Schema.Natural,
+  decision_version: Revision,
   old_observation: ReplacementObservation,
   candidate_observation: ReplacementCandidateObservation
 })

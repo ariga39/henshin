@@ -221,7 +221,7 @@ export const ResolveReplacementIpcRequest = Schema.Struct({
   expected_candidate_version: Schema.Natural,
   expected_mapping_revision: Revision,
   expected_policy_revision: Revision,
-  expected_decision_revision: Revision,
+  expected_decision_version: Revision,
   expected_location_revision: Revision,
   command: ReplacementResolutionCommand
 })

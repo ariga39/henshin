@@ -1102,9 +1102,9 @@ const registerIpc = (): void => {
               expected_candidate_version: input.expected_candidate_version,
               expected_mapping_revision: input.expected_mapping_revision,
               expected_policy_revision: input.expected_policy_revision,
-              ...("expected_decision_revision" in input
+              ...("expected_decision_version" in input
                 ? {
-                    expected_decision_revision: input.expected_decision_revision,
+                    expected_decision_version: input.expected_decision_version,
                     expected_location_revision: input.expected_location_revision
                   }
                 : {}),

@@ -92,7 +92,7 @@ export interface ViewState {
   readonly scan_resolution_entry_id: string | null
   readonly scan_resolution_operation_id: string | null
   readonly scan_resolution_candidate_version: number | null
-  readonly scan_resolution_decision_revision: string | null
+  readonly scan_resolution_decision_version: string | null
   readonly scan_resolution_location_revision: string | null
   readonly scan_resolution_mapping_revision: string | null
   readonly scan_resolution_policy_revision: string | null
@@ -188,7 +188,7 @@ const initialState: ViewState = {
   scan_resolution_entry_id: null,
   scan_resolution_operation_id: null,
   scan_resolution_candidate_version: null,
-  scan_resolution_decision_revision: null,
+  scan_resolution_decision_version: null,
   scan_resolution_location_revision: null,
   scan_resolution_mapping_revision: null,
   scan_resolution_policy_revision: null,
