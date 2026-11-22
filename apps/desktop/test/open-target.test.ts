@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto"
 import { describe, expect, it } from "vitest"
 import type { EntryResolution } from "@henshin/contracts"
 import type { StoredReaderProfile } from "../src/main/persistence/ReaderProfileStore"
-import { resolveAcceptedTarget } from "../src/main/open-target"
+import { isWindowsInvalidComponent, resolveAcceptedTarget } from "../src/main/open-target"
 
 const archiveProfile: StoredReaderProfile = {
   profile_id: randomUUID(),
@@ -225,6 +225,50 @@ describe("accepted local target evidence", () => {
     }
   })
 
+  it("skips an unrepresentable sibling without blocking a valid target", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-open-unrepresentable-sibling-"))
+    try {
+      const targetPath = path.join(root, "Books", "Book.zip")
+      await mkdir(path.dirname(targetPath), { recursive: true })
+      await writeFile(targetPath, "fixture")
+      const resolution = await archiveResolution(root, "Books/Book.zip", [{
+        entry_id: randomUUID(),
+        relative_path: "Books/CON"
+      }])
+
+      await expect(resolveAcceptedTarget(await mapping(root), resolution, archiveProfile)).resolves.toBe(
+        path.join(await realpath(root), "Books", "Book.zip")
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it.runIf(process.platform !== "win32")("allows distinct native identities under equivalent parent spellings", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-open-distinct-native-"))
+    try {
+      const targetPath = path.join(root, "Books", "Book.zip")
+      const siblingPath = path.join(root, "Books.", "book.zip")
+      await mkdir(path.dirname(targetPath), { recursive: true })
+      await mkdir(path.dirname(siblingPath), { recursive: true })
+      await writeFile(targetPath, "target")
+      await writeFile(siblingPath, "distinct sibling")
+      const targetMetadata = await stat(targetPath, { bigint: true })
+      const siblingMetadata = await stat(siblingPath, { bigint: true })
+      expect(`${targetMetadata.dev}:${targetMetadata.ino}`).not.toBe(`${siblingMetadata.dev}:${siblingMetadata.ino}`)
+      const resolution = await archiveResolution(root, "Books/Book.zip", [{
+        entry_id: randomUUID(),
+        relative_path: "Books./book.zip"
+      }])
+
+      await expect(resolveAcceptedTarget(await mapping(root), resolution, archiveProfile)).resolves.toBe(
+        path.join(await realpath(root), "Books", "Book.zip")
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("reports an unavailable root instead of a root change for an inaccessible path", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "henshin-open-unavailable-root-"))
     try {
@@ -242,6 +286,15 @@ describe("accepted local target evidence", () => {
       )
     } finally {
       await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("classifies Windows components independently of the host platform", () => {
+    for (const component of ["", "book. ", "book.", "book<1", "book:stream", "CON", "con.txt", "COM1", "COM¹", "LPT9", "LPT³"]) {
+      expect(isWindowsInvalidComponent(component), component).toBe(true)
+    }
+    for (const component of ["book", "book.txt", "COM0", "COM10", "CONSOLE", "café"]) {
+      expect(isWindowsInvalidComponent(component), component).toBe(false)
     }
   })
 

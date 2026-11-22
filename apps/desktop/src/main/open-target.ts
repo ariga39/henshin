@@ -26,15 +26,6 @@ const isWithin = (root: string, candidate: string): boolean => {
   return remainder === "" || (remainder !== ".." && !remainder.startsWith(`..${sep}`) && !isAbsolute(remainder))
 }
 
-const sameNativePath = (left: string, right: string): boolean => {
-  const normalize = (value: string): string => resolve(value)
-  const normalizedLeft = normalize(left)
-  const normalizedRight = normalize(right)
-  return process.platform === "win32"
-    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
-    : normalizedLeft === normalizedRight
-}
-
 const nativeIdentity = (metadata: { readonly dev: number | bigint; readonly ino: number | bigint }): string | null => {
   const device = metadata.dev.toString()
   const inode = metadata.ino.toString()
@@ -51,6 +42,11 @@ const errorCode = (error: unknown): string | undefined =>
 const isMissingError = (error: unknown): boolean => {
   const code = errorCode(error)
   return code === "ENOENT" || code === "ENOTDIR"
+}
+
+const isUnrepresentablePathError = (error: unknown): boolean => {
+  const code = errorCode(error)
+  return code === "EINVAL" || code === "ENAMETOOLONG"
 }
 
 const throwFilesystemError = (
@@ -104,7 +100,7 @@ const readSiblingEvidence = async (
   try {
     realPath = await realpath(target)
   } catch (error) {
-    if (isMissingError(error)) return null
+    if (isMissingError(error) || isUnrepresentablePathError(error)) return null
     return throwFilesystemError(
       error,
       "sibling identity evidence is unavailable on this device; refresh before opening",
@@ -116,7 +112,7 @@ const readSiblingEvidence = async (
   try {
     metadata = await stat(target, { bigint: true }) as BigIntStats
   } catch (error) {
-    if (isMissingError(error)) return null
+    if (isMissingError(error) || isUnrepresentablePathError(error)) return null
     return throwFilesystemError(
       error,
       "sibling identity evidence is unavailable on this device; refresh before opening",
@@ -130,23 +126,27 @@ const readSiblingEvidence = async (
   return { realPath, identity }
 }
 
-const validateNativeComponent = (component: string): void => {
-  if (process.platform !== "win32") return
-  if (
-    component.length === 0 ||
-    component.endsWith(" ") ||
-    component.endsWith(".") ||
-    /[<>:"|?*\u0000-\u001f]/u.test(component) ||
-    /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\..*)?$/iu.test(component)
-  ) {
+export const isWindowsInvalidComponent = (component: string): boolean =>
+  component.length === 0 ||
+  component.endsWith(" ") ||
+  component.endsWith(".") ||
+  /[<>:"|?*\u0000-\u001f]/u.test(component) ||
+  /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\..*)?$/iu.test(component)
+
+const validateNativeComponent = (component: string, platform: NodeJS.Platform = process.platform): void => {
+  if (platform === "win32" && isWindowsInvalidComponent(component)) {
     throw new OpenTargetError("the accepted location contains a native-invalid Windows name")
   }
 }
 
-const safeSegments = (value: string): ReadonlyArray<string> => {
+const portableSegments = (value: string): ReadonlyArray<string> => {
   const decoded = Schema.decodeUnknownOption(RootRelativePath)(value)
   if (Option.isNone(decoded)) throw new OpenTargetError("the accepted entry location is not a safe relative path")
-  const segments = value.split("/")
+  return value.split("/")
+}
+
+const safeSegments = (value: string): ReadonlyArray<string> => {
+  const segments = portableSegments(value)
   for (const segment of segments) validateNativeComponent(segment)
   return segments
 }
@@ -188,13 +188,17 @@ const resolveConfiguredRoot = async (mapping: AcceptedTargetMapping): Promise<st
   if (mapping.admittedRootIdentity === null || !isNativeIdentityToken(mapping.admittedRootIdentity)) {
     throw new OpenTargetError("the configured local mapping root identity is unavailable; verify the mapping before opening")
   }
-  const selected = await readRealpath(
+  const selectedMetadata = await readBigintStat(
     mapping.selectedPath,
     "the configured local mapping root is unavailable on this device",
     "the configured local mapping root is unavailable on this device; verify the mount or permissions"
   )
-  if (!sameNativePath(selected, mapping.canonicalPath)) {
+  if (!selectedMetadata.isDirectory()) {
     throw new OpenTargetError("the configured local mapping root changed")
+  }
+  const selectedIdentity = nativeIdentity(selectedMetadata)
+  if (selectedIdentity === null) {
+    throw new OpenTargetError("the configured local mapping root identity is unavailable; verify the mapping before opening")
   }
   let metadata
   try {
@@ -216,6 +220,9 @@ const resolveConfiguredRoot = async (mapping: AcceptedTargetMapping): Promise<st
   if (currentIdentity !== mapping.admittedRootIdentity) {
     throw new OpenTargetError("the configured local mapping root changed")
   }
+  if (selectedIdentity !== currentIdentity) {
+    throw new OpenTargetError("the configured local mapping root changed")
+  }
   return mapping.canonicalPath
 }
 
@@ -228,7 +235,7 @@ const ensureSiblingClaimsAreUnambiguous = async (
   }
   const targetSegments = safeSegments(resolution.relative_path)
   const target = resolve(root, ...targetSegments)
-  const targetRealPath = await readRealpath(
+  await readRealpath(
     target,
     "the accepted target is missing on this device",
     "the accepted target is unavailable on this device; verify the mount or permissions"
@@ -243,16 +250,13 @@ const ensureSiblingClaimsAreUnambiguous = async (
     throw new OpenTargetError("the accepted target identity is unavailable; verify the mapping before opening")
   }
   for (const sibling of resolution.sibling_claims) {
-    const siblingSegments = safeSegments(sibling.relative_path)
+    const siblingSegments = portableSegments(sibling.relative_path)
     const siblingPath = resolve(root, ...siblingSegments)
     // The server's sibling set uses its NFC/case-folded parent key. Resolve every
     // candidate here and let the device's native path and file identities decide.
     const siblingEvidence = await readSiblingEvidence(siblingPath)
     if (siblingEvidence === null) continue
-    if (
-      sameNativePath(targetRealPath, siblingEvidence.realPath) ||
-      targetIdentity === siblingEvidence.identity
-    ) {
+    if (targetIdentity === siblingEvidence.identity) {
       throw new OpenTargetError("the accepted target is ambiguous with another entry on this device")
     }
   }
