@@ -15,7 +15,8 @@ English is the working language for repository documentation.
 
 Henshin is in early development. On startup, the desktop connects to its
 managed local server. Enter a collection directory to see a read-only sample
-of its contents. Root registration and indexing are upcoming features.
+of its contents, confirm it with a label, and see saved server roots restored
+on the next launch. Scanning and indexing are separate actions.
 
 The separately isolated source-manifest precursor has current executed evidence
 in [docs/validation/source-manifests-prototype.md](docs/validation/source-manifests-prototype.md).
@@ -63,7 +64,9 @@ The normal launch opens the server collection preview. Enter an absolute
 directory path on the managed server to see an empty, complete, or bounded
 partial sample. An unavailable path is reported with a retry action. The
 submitted path remains attached to displayed results while a new path is being
-edited.
+edited. Saving is enabled only after the current path has its own successful
+preview; the server rechecks the preview identity and source/output separation
+before durable registration. Saved labels and paths are listed on startup.
 
 ### Run the synthetic prototype explicitly
 

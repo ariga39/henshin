@@ -35,6 +35,7 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
+const CURRENT_SCHEMA_VERSION = 2
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
@@ -54,8 +55,10 @@ db.exec(`
   );
   CREATE TABLE IF NOT EXISTS server_library (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    library_id TEXT NOT NULL
+    library_id TEXT NOT NULL UNIQUE
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS server_library_library_id_unique
+    ON server_library(library_id);
   CREATE TABLE IF NOT EXISTS prototype_note (
     note_id TEXT PRIMARY KEY,
     text TEXT NOT NULL,
@@ -381,20 +384,27 @@ const commitNote = (request: Extract<WorkerRequest, { op: "commitNote" }>): Comm
 const handle = (request: WorkerRequest): unknown => {
   switch (request.op) {
     case "init": {
-      const existing = db.prepare("SELECT instance_id FROM server_state WHERE id = 1").get() as
-        | { instance_id: string }
+      const existing = db.prepare("SELECT instance_id, schema_version FROM server_state WHERE id = 1").get() as
+        | { instance_id: string; schema_version: number }
         | undefined
+      const schemaVersion = existing?.schema_version
+      if (schemaVersion !== undefined && schemaVersion > CURRENT_SCHEMA_VERSION) {
+        throw new Error("unsupported server database schema version")
+      }
       const instanceId = existing?.instance_id ?? randomUUID()
       if (existing === undefined) {
-        db.prepare("INSERT INTO server_state(id, instance_id, schema_version) VALUES(1, ?, 1)").run(
-          instanceId
+        db.prepare("INSERT INTO server_state(id, instance_id, schema_version) VALUES(1, ?, ?)").run(
+          instanceId,
+          CURRENT_SCHEMA_VERSION
         )
       }
       const library = selectLibrary.get() as { library_id: string } | undefined
       if (library === undefined) {
         db.prepare("INSERT INTO server_library(id, library_id) VALUES(1, ?)").run(randomUUID())
       }
-      db.prepare("UPDATE server_state SET schema_version = 2 WHERE id = 1").run()
+      if (schemaVersion !== undefined && schemaVersion < CURRENT_SCHEMA_VERSION) {
+        db.prepare("UPDATE server_state SET schema_version = ? WHERE id = 1").run(CURRENT_SCHEMA_VERSION)
+      }
       db.prepare("INSERT OR IGNORE INTO prototype_note(note_id, text, revision) VALUES(?, ?, 0)").run(
         SEED_NOTE_ID,
         SEED_NOTE_TEXT

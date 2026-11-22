@@ -5,8 +5,12 @@ import { previewRoot, saveRoot } from "./workflows"
 
 const rootPreviewStatusText = (state: ReturnType<typeof viewStore.getState>): string => {
   if (state.root_save_status === "loading") return "Saving server root…"
-  if (state.root_save_status === "error") return `Save failed: ${state.root_save_error}`
-  if (state.root_save_status === "ready") return "Server root saved."
+  if (state.root_save_status === "error") {
+    return `Save failed for ${state.root_save_target_label ?? "the confirmed root"} (${state.root_save_target_path ?? "unknown path"}): ${state.root_save_error}`
+  }
+  if (state.root_save_status === "ready") {
+    return `Server root saved: ${state.root_save_target_label} (${state.root_save_target_path}).`
+  }
   if (state.root_preview_status === "loading") return "Previewing directory…"
   if (state.root_preview_status === "error") {
     return `Preview failed: ${state.root_preview_error}. Check the server path and try again.`
@@ -23,20 +27,28 @@ export const RootPreviewScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   const loading = state.root_preview_status === "loading"
   const saving = state.root_save_status === "loading"
-  const canSave = state.root_preview !== null && state.root_preview_status === "ready" && state.root_label.length > 0
+  const canSave = state.root_preview !== null &&
+    state.root_preview_status === "ready" &&
+    state.root_preview_path === state.root_preview.selected_server_path &&
+    state.root_label.length > 0
   return (
     <main className="collection">
       <h1>Collection setup</h1>
       <p>Enter the full path to your collection as it appears on the server.</p>
       <form onSubmit={(event) => {
         event.preventDefault()
-        if (!loading && state.root_preview_path) void runtime.runPromise(previewRoot(state.root_preview_path))
+        if (!loading && !saving && state.root_preview_path) void runtime.runPromise(previewRoot(state.root_preview_path))
       }}>
         <label htmlFor="server-path">Server directory</label>
         <input id="server-path" data-testid="root-preview-path" value={state.root_preview_path}
           disabled={loading} required spellCheck={false}
-          onChange={(event) => viewStore.set({ root_preview_path: event.target.value })} />
-        <button data-testid="root-preview-submit" disabled={loading || !state.root_preview_path}>
+          onChange={(event) => viewStore.set({
+            root_preview_path: event.target.value,
+            ...(state.root_save_status === "loading"
+              ? {}
+              : { root_save_status: "idle" as const, root_save_error: null })
+          })} />
+        <button data-testid="root-preview-submit" disabled={loading || saving || !state.root_preview_path}>
           {loading ? "Previewing…" : "Preview directory"}
         </button>
       </form>
@@ -52,7 +64,7 @@ export const RootPreviewScreen = () => {
         {saving ? "Saving…" : "Save server root"}
       </button>
       {state.root_preview_status === "error" && state.root_preview_selected_path === state.root_preview_path && (
-        <button data-testid="root-preview-retry" onClick={() => void runtime.runPromise(previewRoot(state.root_preview_path))}>
+        <button data-testid="root-preview-retry" disabled={saving} onClick={() => void runtime.runPromise(previewRoot(state.root_preview_path))}>
           Retry preview
         </button>
       )}
