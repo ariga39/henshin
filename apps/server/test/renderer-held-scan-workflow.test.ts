@@ -7,7 +7,7 @@ import type {
   StagedDiscovery
 } from "@henshin/contracts"
 import { afterEach, describe, expect, it } from "vitest"
-import { LibraryClient, RootPreviewClient, ScanReviewClient, type Result } from "../../desktop/src/renderer/client"
+import { LibraryClient, LocalMappingClient, RootPreviewClient, ScanReviewClient, type Result } from "../../desktop/src/renderer/client"
 import {
   loadRootWorkspace,
   loadLibrary,
@@ -131,16 +131,18 @@ const resetView = () => {
 afterEach(resetView)
 
 const run = <A>(
-  effect: Effect.Effect<A, unknown, RootPreviewClient | ScanReviewClient | LibraryClient>,
+  effect: Effect.Effect<A, unknown, RootPreviewClient | ScanReviewClient | LibraryClient | LocalMappingClient>,
   rootClient: RootPreviewClient["Service"],
   scanClient: ScanReviewClient["Service"],
-  libraryClient: LibraryClient["Service"] = libraryClientWith()
+  libraryClient: LibraryClient["Service"] = libraryClientWith(),
+  localMappingClient: LocalMappingClient["Service"] = localMappingClientWith()
 ) => Effect.runPromise(Effect.provide(
   effect,
   Layer.mergeAll(
     Layer.succeed(RootPreviewClient, rootClient),
     Layer.succeed(ScanReviewClient, scanClient),
-    Layer.succeed(LibraryClient, libraryClient)
+    Layer.succeed(LibraryClient, libraryClient),
+    Layer.succeed(LocalMappingClient, localMappingClient)
   )
 ))
 
@@ -165,6 +167,14 @@ function libraryClientWith(overrides: Partial<LibraryClient["Service"]> = {}): L
     ...overrides
   })
 }
+
+const localMappingClientWith = (overrides: Partial<LocalMappingClient["Service"]> = {}): LocalMappingClient["Service"] =>
+  LocalMappingClient.of({
+    preview: () => Effect.succeed({ ok: true as const, data: null }),
+    list: () => Effect.succeed({ ok: true as const, data: [] }),
+    activate: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+    ...overrides
+  })
 
 describe("held scan renderer workflows", () => {
   it("starts from the policy revision observed by the saved-root preview", async () => {

@@ -4,7 +4,9 @@ import {
   RootPolicyCommand,
   RootPreviewRequest,
   RootRegistrationRequest,
-  RootScanCommand
+  RootScanCommand,
+  DeviceRootMapping,
+  LocalMappingPreview
 } from "./root"
 import { LibrarySearchRequest } from "./library"
 import { ThumbnailKey } from "./thumbnail"
@@ -126,6 +128,21 @@ export type HandshakeView = typeof HandshakeView.Type
 export const RootPreviewIpcRequest = RootPreviewRequest
 export const LocalMappingPreviewIpcRequest = Schema.Struct({ root_id: Uuid })
 export type LocalMappingPreviewIpcRequest = typeof LocalMappingPreviewIpcRequest.Type
+export const LocalMappingListIpcRequest = Schema.Struct({})
+export type LocalMappingListIpcRequest = typeof LocalMappingListIpcRequest.Type
+export const LocalMappingActivateIpcRequest = Schema.Struct({
+  root_id: Uuid,
+  expected_mapping_revision: Revision,
+  preview_token: Uuid
+})
+export type LocalMappingActivateIpcRequest = typeof LocalMappingActivateIpcRequest.Type
+export const LocalMappingActivateIpcResult = DeviceRootMapping
+export type LocalMappingActivateIpcResult = typeof LocalMappingActivateIpcResult.Type
+export const LocalMappingPreviewIpcResult = Schema.NullOr(Schema.Struct({
+  preview: LocalMappingPreview,
+  preview_token: Uuid
+}))
+export type LocalMappingPreviewIpcResult = typeof LocalMappingPreviewIpcResult.Type
 export const RootListIpcRequest = Schema.Struct({})
 export type RootListIpcRequest = typeof RootListIpcRequest.Type
 export const RootSaveIpcRequest = RootRegistrationRequest
@@ -150,7 +167,6 @@ export const RootCommandIpcRequest = Schema.Union([
   })
 ])
 export type RootCommandIpcRequest = typeof RootCommandIpcRequest.Type
-export type LocalMappingPreviewIpcResult = import("./root").LocalMappingPreview | null
 
 export const LibrarySearchIpcRequest = LibrarySearchRequest
 export type LibrarySearchIpcRequest = typeof LibrarySearchIpcRequest.Type

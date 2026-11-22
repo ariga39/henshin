@@ -1,10 +1,12 @@
 import { useSyncExternalStore } from "react"
-import type { RootPreviewResult } from "@henshin/contracts"
+import { localMappingPreviewCanActivate, type RootPreviewResult } from "@henshin/contracts"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
 import {
+  activateLocalMapping,
   canSaveRoot,
   excludeRootPath,
+  loadLocalMappings,
   previewLocalMapping,
   previewRoot,
   refreshRootPolicy,
@@ -117,6 +119,17 @@ const localSampleStatus = (sample: NonNullable<ReturnType<typeof viewStore.getSt
   }
 }
 
+const mappingFor = (state: ReturnType<typeof viewStore.getState>, rootId: string) =>
+  state.local_mappings.find((mapping) => mapping.root_id === rootId)
+
+const localMappingCanActivate = (state: ReturnType<typeof viewStore.getState>, rootId: string): boolean =>
+  state.local_mapping_status === "ready" &&
+  state.local_mapping_list_status === "ready" &&
+  state.local_mapping_preview_token !== null &&
+  state.local_mapping_preview !== null &&
+  state.local_mapping_preview.root_id === rootId &&
+  localMappingPreviewCanActivate(state.local_mapping_preview)
+
 export const RootPreviewScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   const loading = state.root_preview_status === "loading"
@@ -220,10 +233,26 @@ export const RootPreviewScreen = () => {
         <h2 id="saved-roots-heading">Saved server roots</h2>
         {state.root_roots_status === "loading" && <p>Loading saved roots…</p>}
         {state.root_roots_status === "error" && <p>Could not load saved roots: {state.root_roots_error}</p>}
+        {state.local_mapping_list_status === "loading" && (
+          <p data-testid="local-mapping-list-loading">Loading saved device mappings…</p>
+        )}
+        {state.local_mapping_list_status === "error" && (
+          <p role="alert" data-testid="local-mapping-list-error">
+            Could not load saved device mappings: {state.local_mapping_list_error}{" "}
+            <button data-testid="local-mapping-list-retry" onClick={() => void runtime.runPromise(loadLocalMappings)}>
+              Retry device mappings
+            </button>
+          </p>
+        )}
         <ul data-testid="root-saved-roots">
           {state.root_saved_roots.map((root) => (
             <li key={root.root_id} data-testid="root-saved">
               <strong>{root.label}</strong><span> {root.selected_server_path}</span>
+              {mappingFor(state, root.root_id) && (
+                <p data-testid="local-mapping-effective">
+                  Effective device mapping: {mappingFor(state, root.root_id)?.selected_local_path} (revision {mappingFor(state, root.root_id)?.mapping_revision}).
+                </p>
+              )}
               <small data-testid="root-saved-policy">
                 {root.exclusions.length === 0 ? " No exclusions" : " Excluded: "}
                 {root.exclusions.map((exclusion) => (
@@ -266,6 +295,33 @@ export const RootPreviewScreen = () => {
                   )}
                   {state.local_mapping_preview.local_budget_exhausted && (
                     <p>Local checking reached its finite time budget; remaining evidence is unavailable.</p>
+                  )}
+                  {state.local_mapping_preview.samples.some((sample) => sample.status === "missing") && (
+                    <p data-testid="local-mapping-missing-explanation">
+                      Missing samples may reflect file moves. Confirming this directory does not silently rebind missing entries.
+                    </p>
+                  )}
+                  {state.local_mapping_preview.samples.length === 0 && (
+                    <p data-testid="local-mapping-unverified-explanation">
+                      No indexed samples were available; this confirmation is unverified by sample evidence.
+                    </p>
+                  )}
+                  {!localMappingCanActivate(state, root.root_id) && (
+                    <p role="alert" data-testid="local-mapping-blocked">
+                      Resolve unsafe, unsupported, collision, or conflicting sample evidence before activation.
+                    </p>
+                  )}
+                  <button
+                    data-testid="local-mapping-activate"
+                    disabled={state.local_mapping_activation_status === "loading" || !localMappingCanActivate(state, root.root_id)}
+                    onClick={() => void runtime.runPromise(activateLocalMapping(root.root_id))}
+                  >
+                    {state.local_mapping_activation_status === "loading" ? "Activating…" : "Confirm and activate device mapping"}
+                  </button>
+                  {state.local_mapping_activation_status === "error" && (
+                    <p role="alert" data-testid="local-mapping-activation-error">
+                      Mapping was not activated: {state.local_mapping_activation_error}
+                    </p>
                   )}
                   <ul data-testid="local-mapping-samples">
                     {state.local_mapping_preview.samples.map((sample) => (
