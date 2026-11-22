@@ -8,7 +8,7 @@ import { RootRelativePath } from "@henshin/contracts/root"
 const MAX_DIRECTORY_ENTRIES = 4_096
 const MAX_DIRECTORY_NAME_BYTES = 1_048_576
 const MAX_FORMATS = 8
-const LOCAL_MAPPING_BUDGET_MS = 5_000
+export const LOCAL_MAPPING_BUDGET_MS = 5_000
 const supportedImageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp"])
 
 type LocalError = NonNullable<LocalMappingSample["local_error"]>
@@ -375,6 +375,7 @@ export const inspectLocalMapping = async (
   return {
     root_id: rootId,
     selected_local_path: selectedPath,
+    canonical_local_path: canonicalRoot,
     samples: inspected.map((result) => result.sample),
     sample_limit: 32,
     sample_truncated: sampleTruncated,

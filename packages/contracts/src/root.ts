@@ -187,12 +187,23 @@ export type LocalMappingSample = typeof LocalMappingSample.Type
 export const LocalMappingPreview = Schema.Struct({
   root_id: Uuid,
   selected_local_path: Schema.String,
+  canonical_local_path: Schema.String,
   samples: Schema.Array(LocalMappingSample),
   sample_limit: Schema.Literal(32),
   sample_truncated: Schema.Boolean,
   local_budget_exhausted: Schema.Boolean
 })
 export type LocalMappingPreview = typeof LocalMappingPreview.Type
+
+/** The effective client-local mapping for one verified server root. */
+export const DeviceRootMapping = Schema.Struct({
+  root_id: Uuid,
+  selected_local_path: Schema.String,
+  canonical_local_path: Schema.String,
+  mapping_revision: Revision,
+  state: Schema.Literal("active")
+})
+export type DeviceRootMapping = typeof DeviceRootMapping.Type
 
 export const RootPreviewResult = Schema.Union([RootPreview, SavedRootPreview])
 export type RootPreviewResult = typeof RootPreviewResult.Type
