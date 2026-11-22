@@ -1,5 +1,4 @@
 import { Schema } from "effect"
-import { isAbsolute } from "node:path"
 import { DraftFormId, NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import { CommandAttemptStatus } from "@henshin/contracts/note"
 
@@ -71,38 +70,6 @@ export type CommandAttemptMutation = typeof CommandAttemptMutation.Type
 export const CommandAttemptRows = Schema.Array(CommandAttemptRow)
 export type CommandAttemptRows = typeof CommandAttemptRows.Type
 
-export const LocalMappingRow = Schema.Struct({
-  instanceId: Uuid,
-  rootId: Uuid,
-  selectedPath: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-  canonicalPath: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-  mappingRevision: Revision
-})
-export type LocalMappingRow = typeof LocalMappingRow.Type
-
-export const LocalMappingReadResult = Schema.NullOr(LocalMappingRow)
-export type LocalMappingReadResult = typeof LocalMappingReadResult.Type
-
-export const LocalMappingRows = Schema.Array(LocalMappingRow)
-export type LocalMappingRows = typeof LocalMappingRows.Type
-
-export const LocalMappingActivationOutcome = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("activated"), mapping: LocalMappingRow }),
-  Schema.Struct({
-    kind: Schema.Literal("revision_conflict"),
-    currentMapping: Schema.NullOr(LocalMappingRow)
-  }),
-  Schema.Struct({ kind: Schema.Literal("root_conflict") }),
-  Schema.Struct({ kind: Schema.Literal("writable_overlap") })
-])
-export type LocalMappingActivationOutcome = typeof LocalMappingActivationOutcome.Type
-
-const AbsoluteLocalPath = Schema.String.check(
-  Schema.isMinLength(1),
-  Schema.isMaxLength(4096),
-  Schema.makeFilter(isAbsolute)
-)
-
 export const CommandAttemptNote = Schema.Struct({
   note_id: NoteId,
   text: Text,
@@ -158,17 +125,6 @@ export const DraftWorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("listCommandAttempts"), instanceId: Uuid }),
   Schema.Struct({ op: Schema.Literal("getCommandAttempt"), instanceId: Uuid, operationId: Uuid }),
   Schema.Struct({ op: Schema.Literal("dismissCommand"), instanceId: Uuid, operationId: Uuid }),
-  Schema.Struct({ op: Schema.Literal("loadLocalMapping"), instanceId: Uuid, rootId: Uuid }),
-  Schema.Struct({ op: Schema.Literal("listLocalMappings"), instanceId: Uuid }),
-  Schema.Struct({
-    op: Schema.Literal("activateLocalMapping"),
-    instanceId: Uuid,
-    rootId: Uuid,
-    selectedPath: AbsoluteLocalPath,
-    canonicalPath: AbsoluteLocalPath,
-    expectedMappingRevision: Revision,
-    protectedWritablePaths: Schema.Array(AbsoluteLocalPath)
-  }),
   Schema.Struct({ op: Schema.Literal("close") })
 ])
 export type DraftWorkerRequest = typeof DraftWorkerRequest.Type

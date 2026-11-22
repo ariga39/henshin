@@ -1,12 +1,11 @@
 import { Deferred, Effect, Fiber } from "effect"
-import { localMappingPreviewCanActivate } from "@henshin/contracts"
 import type {
   ConnectionStatusView,
   RootPreviewRequest,
   RootPreviewResult,
   ScanTask
 } from "@henshin/contracts"
-import { LibraryClient, LocalMappingClient, PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
+import { LibraryClient, PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
 import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
@@ -61,127 +60,6 @@ export const previewRoot = (selection: RootPreviewRequest | string) =>
         })
       )
     }
-  })
-
-export const previewLocalMapping = (rootId: string) =>
-  Effect.gen(function*() {
-    const client = yield* LocalMappingClient
-    yield* Effect.sync(() => viewStore.set({
-      local_mapping_root_id: rootId,
-      local_mapping_status: "loading",
-      local_mapping_error: null,
-      local_mapping_activation_status: "idle",
-      local_mapping_activation_error: null
-    }))
-    const result = yield* client.preview(rootId)
-    if (!result.ok) {
-      yield* Effect.sync(() => viewStore.set({
-        local_mapping_status: "error",
-        local_mapping_preview: null,
-        local_mapping_preview_token: null,
-        local_mapping_error: result.error.message
-      }))
-      return
-    }
-    if (result.data === null) {
-      const retainedPreview = viewStore.getState().local_mapping_preview
-      yield* Effect.sync(() => viewStore.set({
-        local_mapping_status: retainedPreview === null ? "idle" : "ready",
-        local_mapping_error: null,
-        local_mapping_activation_status: "idle",
-        local_mapping_activation_error: null
-      }))
-      return
-    }
-    const previewResult = result.data
-    yield* Effect.sync(() => viewStore.set({
-      local_mapping_root_id: rootId,
-      local_mapping_status: "ready",
-      local_mapping_preview: previewResult.preview,
-      local_mapping_preview_token: previewResult.preview_token,
-      local_mapping_error: null,
-      local_mapping_activation_status: "idle",
-      local_mapping_activation_error: null
-    }))
-  })
-
-export const loadLocalMappings = Effect.gen(function*() {
-  const client = yield* LocalMappingClient
-  yield* Effect.sync(() => viewStore.set({
-    local_mapping_list_status: "loading",
-    local_mapping_list_error: null
-  }))
-  const result = yield* client.list()
-  if (result.ok) {
-    yield* Effect.sync(() => viewStore.set({
-      local_mappings: result.data,
-      local_mapping_list_status: "ready",
-      local_mapping_list_error: null
-    }))
-    return true
-  }
-  yield* Effect.sync(() => viewStore.set({
-    local_mapping_list_status: "error",
-    local_mapping_list_error: result.error.message
-  }))
-  return false
-})
-
-const localMappingEvidenceCanActivate = (rootId: string): boolean => {
-  const state = viewStore.getState()
-  const preview = state.local_mapping_preview
-  return state.local_mapping_status === "ready" &&
-    state.local_mapping_list_status === "ready" &&
-    state.local_mapping_preview_token !== null &&
-    preview !== null &&
-    preview.root_id === rootId &&
-    localMappingPreviewCanActivate(preview)
-}
-
-export const activateLocalMapping = (rootId: string) =>
-  Effect.gen(function*() {
-    const client = yield* LocalMappingClient
-    if (viewStore.getState().local_mapping_list_status !== "ready") {
-      const loaded = yield* loadLocalMappings
-      if (!loaded) {
-        yield* Effect.sync(() => viewStore.set({
-          local_mapping_activation_status: "error",
-          local_mapping_activation_error: "Current device mappings could not be loaded; retry before activating."
-        }))
-        return
-      }
-    }
-    const state = viewStore.getState()
-    const preview = state.local_mapping_preview
-    if (!localMappingEvidenceCanActivate(rootId) || preview === null || state.local_mapping_preview_token === null) return
-    const current = state.local_mappings.find((mapping) => mapping.root_id === rootId)
-    yield* Effect.sync(() => viewStore.set({
-      local_mapping_activation_status: "loading",
-      local_mapping_activation_error: null
-    }))
-    const result = yield* client.activate({
-      root_id: rootId,
-      expected_mapping_revision: current?.mapping_revision ?? "0",
-      preview_token: state.local_mapping_preview_token
-    })
-    if (result.ok) {
-      yield* Effect.sync(() => {
-        const mappings = viewStore.getState().local_mappings
-        viewStore.set({
-          local_mappings: mappings.some((mapping) => mapping.root_id === rootId)
-            ? mappings.map((mapping) => mapping.root_id === rootId ? result.data : mapping)
-            : [...mappings, result.data],
-          local_mapping_activation_status: "idle",
-          local_mapping_activation_error: null
-        })
-      })
-      return
-    }
-    yield* Effect.sync(() => viewStore.set({
-      local_mapping_activation_status: "error",
-      local_mapping_activation_error: result.error.message
-    }))
-    if (result.error.code === "local_mapping_revision_conflict") yield* loadLocalMappings
   })
 
 export const loadRoots = Effect.gen(function*() {
@@ -333,7 +211,6 @@ export const retryScanResults = Effect.gen(function*() {
 
 export const loadRootWorkspace = Effect.gen(function*() {
   yield* loadRoots
-  yield* loadLocalMappings
   const loaded = yield* loadScanResults
   if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
 })
@@ -586,7 +463,10 @@ export const loadLibrary = (append = false) =>
     const cursor = append ? current.library_cursor : null
     yield* Effect.sync(() => viewStore.set({
       library_status: "loading",
-      library_error: null
+      library_error: null,
+      library_cover_generation: append
+        ? current.library_cover_generation
+        : current.library_cover_generation + 1
     }))
     const result = yield* client.search(cursor === null ? { page_size: 50 } : { page_size: 50, cursor })
     if (!result.ok) {

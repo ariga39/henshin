@@ -27,17 +27,18 @@ describe("desktop library thumbnail loading", () => {
   it("recovers after a delayed server update", async () => {
     vi.useFakeTimers()
     const load = vi.fn<() => Promise<Result<Uint8Array>>>()
-      .mockResolvedValueOnce(updating)
-      .mockResolvedValueOnce(ready(7))
+    for (const _delay of THUMBNAIL_RETRY_DELAYS_MS) load.mockResolvedValueOnce(updating)
+    load.mockResolvedValueOnce(ready(7))
 
     const request = createThumbnailLoadRequest(load)
     await Promise.resolve()
     await Promise.resolve()
     expect(load).toHaveBeenCalledTimes(1)
 
-    await vi.advanceTimersByTimeAsync(THUMBNAIL_RETRY_DELAYS_MS[0])
+    for (const delay of THUMBNAIL_RETRY_DELAYS_MS) await vi.advanceTimersByTimeAsync(delay)
     await expect(request.promise).resolves.toEqual(ready(7))
-    expect(load).toHaveBeenCalledTimes(2)
+    expect(load).toHaveBeenCalledTimes(THUMBNAIL_RETRY_DELAYS_MS.length + 1)
+    expect(THUMBNAIL_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0)).toBeGreaterThanOrEqual(30_000)
   })
 
   it("clears a retry timer when an obsolete cover is cancelled", async () => {

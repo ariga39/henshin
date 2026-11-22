@@ -3,11 +3,12 @@ import type { Result } from "./client"
 export const MAX_ACTIVE_THUMBNAIL_LOADS = 4
 
 /**
- * The server may keep a render in flight for up to ten seconds. These bounded
- * delays give a request that observed the server's 503 enough opportunity to
- * retry after one of those renders completes without leaving a timer behind.
+ * The server may keep one producer request in flight for up to thirty seconds.
+ * These bounded delays give a request that observed the server's 503 enough
+ * opportunity to retry after one of those renders completes without leaving a
+ * timer behind.
  */
-export const THUMBNAIL_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000, 4_000] as const
+export const THUMBNAIL_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000, 8_000, 8_000, 8_000] as const
 
 type Load = () => Promise<Result<Uint8Array>>
 type QueueTask = () => void

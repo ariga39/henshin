@@ -16,23 +16,44 @@ const coverPlaceholder = (entry: LibraryEntry, loading: boolean) => (
     className="library-cover-placeholder"
     data-testid="library-cover-placeholder"
     data-cover-state={loading ? "loading" : "unavailable"}
-    role="img"
-    aria-label={`${loading ? "Loading" : "Cover unavailable"} for ${entry.title}`}
+    aria-hidden="true"
   >
     <span>{loading ? "Loading cover…" : "Cover unavailable"}</span>
     <strong>{entry.title}</strong>
   </div>
 )
 
-const LibraryCover = ({ entry }: { readonly entry: LibraryEntry }) => {
+const LibraryCover = ({
+  entry,
+  refreshGeneration
+}: {
+  readonly entry: LibraryEntry
+  readonly refreshGeneration: number
+}) => {
   const key = entry.cover?.key ?? null
   const requestRef = useRef(0)
+  const frameRef = useRef<HTMLDivElement>(null)
+  const [inViewport, setInViewport] = useState(false)
   const [cover, setCover] = useState<CoverState>({
     key,
     request: 0,
     status: key === null ? "unavailable" : "loading",
     src: null
   })
+
+  useEffect(() => {
+    const frame = frameRef.current
+    if (frame === null) return
+    if (typeof IntersectionObserver === "undefined") {
+      setInViewport(true)
+      return
+    }
+    const observer = new IntersectionObserver(([entry]) => {
+      setInViewport(entry?.isIntersecting ?? false)
+    }, { rootMargin: "200px 0px" })
+    observer.observe(frame)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     const request = requestRef.current + 1
@@ -42,6 +63,13 @@ const LibraryCover = ({ entry }: { readonly entry: LibraryEntry }) => {
 
     if (key === null) {
       setCover({ key: null, request, status: "unavailable", src: null })
+      return () => {
+        cancelled = true
+      }
+    }
+
+    if (!inViewport) {
+      setCover({ key, request, status: "loading", src: null })
       return () => {
         cancelled = true
       }
@@ -80,25 +108,39 @@ const LibraryCover = ({ entry }: { readonly entry: LibraryEntry }) => {
       loadRequest.cancel()
       if (objectUrl !== null) URL.revokeObjectURL(objectUrl)
     }
-  }, [key])
+  }, [inViewport, key, refreshGeneration])
 
   const isCurrent = cover.key === key && cover.request === requestRef.current
-  if (!isCurrent || cover.status === "loading") return coverPlaceholder(entry, true)
-  if (cover.status !== "ready") return coverPlaceholder(entry, false)
+  if (!inViewport || !isCurrent || cover.status === "loading") {
+    return (
+      <div ref={frameRef} className="library-cover-frame">
+        {coverPlaceholder(entry, true)}
+      </div>
+    )
+  }
+  if (cover.status !== "ready") {
+    return (
+      <div ref={frameRef} className="library-cover-frame">
+        {coverPlaceholder(entry, false)}
+      </div>
+    )
+  }
   const readyCover = cover
 
   return (
-    <img
-      className="library-cover-image"
-      data-testid="library-cover-image"
-      alt={`Cover of ${entry.title}`}
-      src={readyCover.src}
-      onError={(event) => {
-        if (requestRef.current !== readyCover.request || event.currentTarget.src !== readyCover.src) return
-        URL.revokeObjectURL(readyCover.src)
-        setCover({ key: readyCover.key, request: readyCover.request, status: "unavailable", src: null })
-      }}
-    />
+    <div ref={frameRef} className="library-cover-frame">
+      <img
+        className="library-cover-image"
+        data-testid="library-cover-image"
+        alt=""
+        src={readyCover.src}
+        onError={(event) => {
+          if (requestRef.current !== readyCover.request || event.currentTarget.src !== readyCover.src) return
+          URL.revokeObjectURL(readyCover.src)
+          setCover({ key: readyCover.key, request: readyCover.request, status: "unavailable", src: null })
+        }}
+      />
+    </div>
   )
 }
 
@@ -151,7 +193,7 @@ export const LibraryScreen = () => {
         <ul data-testid="library-entries">
           {state.library_entries.map((entry) => (
             <li key={entry.entry_id} data-testid="library-entry">
-              <LibraryCover entry={entry} />
+              <LibraryCover entry={entry} refreshGeneration={state.library_cover_generation} />
               <div className="library-entry-details">
                 <strong>{entry.title}</strong>
                 <span>{entry.source_path}</span>

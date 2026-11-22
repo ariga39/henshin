@@ -907,6 +907,7 @@ export const readArchivePages = async (
   options?: {
     readonly limits?: Partial<ManifestLimits>
     readonly maxPageBytes?: number
+    readonly signal?: AbortSignal
   }
 ): Promise<ArchivePageReadResult> => {
   const combined = combineLimits(options?.limits)
@@ -914,7 +915,8 @@ export const readArchivePages = async (
   if (!Number.isSafeInteger(maxPageBytes) || maxPageBytes <= 0) throw new LimitExceeded()
   const context: AnalysisContext = {
     limits: combined,
-    deadlineAt: Date.now() + combined.deadlineMs
+    deadlineAt: Date.now() + combined.deadlineMs,
+    signal: options?.signal
   }
   const sourceStats = await observePath(sourcePath, context)
   if (!sourceStats.isFile()) throw new UnsupportedSource()
@@ -953,22 +955,31 @@ export const readArchivePages = async (
 
       const bytes = new Uint8Array(declared)
       let offset = 0
-      await entry.getData(new WritableStream<Uint8Array>({
-        write(chunk) {
-          checkBudget(context)
-          if (chunk.length > bytes.length - offset) throw new LimitExceeded()
-          bytes.set(chunk, offset)
-          offset += chunk.length
+      try {
+        await entry.getData(new WritableStream<Uint8Array>({
+          write(chunk) {
+            checkBudget(context)
+            if (chunk.length > bytes.length - offset) throw new LimitExceeded()
+            bytes.set(chunk, offset)
+            offset += chunk.length
+          }
+        }), {
+          signal: context.signal,
+          checkSignature: true,
+          useWebWorkers: false,
+          checkOverlappingEntryOnly: false,
+          checkOverlappingEntry: true
+        })
+        if (offset !== bytes.length) throw new SourceChanged()
+        pages.set(entry.filename, bytes)
+      } catch (error) {
+        if (context.signal?.aborted) throw new ProbeInterruption("cancelled")
+        if (error instanceof ProbeInterruption || error instanceof LimitExceeded || error instanceof SourceChanged) {
+          throw error
         }
-      }), {
-        signal: context.signal,
-        checkSignature: true,
-        useWebWorkers: false,
-        checkOverlappingEntryOnly: false,
-        checkOverlappingEntry: true
-      })
-      if (offset !== bytes.length) throw new SourceChanged()
-      pages.set(entry.filename, bytes)
+        // A corrupt or unsupported selected member is a per-page fallback,
+        // not a reason to discard later decodable members.
+      }
     }
     const afterStats = await observePath(sourcePath, context)
     if (!afterStats.isFile() || !sameStats(sourceStats, afterStats)) throw new SourceChanged()
@@ -993,12 +1004,16 @@ export const recheckSourceObservation = async (
   sourcePath: string,
   sourceKind: "directory" | "archive",
   expectedEntryCount: number,
-  limits?: Partial<ManifestLimits>
+  options?: {
+    readonly limits?: Partial<ManifestLimits>
+    readonly signal?: AbortSignal
+  }
 ): Promise<SourceObservation> => {
-  const combined = combineLimits(limits)
+  const combined = combineLimits(options?.limits)
   const context: AnalysisContext = {
     limits: combined,
-    deadlineAt: Date.now() + combined.deadlineMs
+    deadlineAt: Date.now() + combined.deadlineMs,
+    signal: options?.signal
   }
   const stats = await observePath(sourcePath, context)
   if (sourceKind === "archive") {

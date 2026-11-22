@@ -1,6 +1,5 @@
 import { Schema } from "effect"
 import { Revision, Uuid } from "./ids"
-import { RootRelativePath } from "./root"
 import { ServerRootList } from "./root"
 import { ThumbnailReference } from "./thumbnail"
 
@@ -42,22 +41,3 @@ export const LibrarySearchRequest = Schema.Struct({
   cursor: Schema.optional(Uuid)
 })
 export type LibrarySearchRequest = typeof LibrarySearchRequest.Type
-
-export const INDEXED_ROOT_SAMPLE_LIMIT = 32 as const
-
-export const IndexedRootSample = Schema.Struct({
-  relative_path: RootRelativePath,
-  kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
-  format_evidence: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
-  size_bytes: Schema.NullOr(Schema.Natural)
-})
-export type IndexedRootSample = typeof IndexedRootSample.Type
-
-export const IndexedRootSamplePage = Schema.Struct({
-  root_id: Uuid,
-  samples: Schema.Array(IndexedRootSample),
-  sample_limit: Schema.Literal(INDEXED_ROOT_SAMPLE_LIMIT),
-  sample_truncated: Schema.Boolean,
-  library_change_revision: Revision
-})
-export type IndexedRootSamplePage = typeof IndexedRootSamplePage.Type
