@@ -30,8 +30,8 @@ export const LibraryScreen = () => {
       {state.library_scan_status === "starting" && (
         <p role="status">Scanning saved root; accepted results will appear when the scan completes.</p>
       )}
-      {state.library_scan_status === "error" && state.library_error !== null && (
-        <p role="alert" data-testid="library-scan-error">Normal scan failed: {state.library_error}</p>
+      {state.library_scan_status === "error" && state.library_scan_error !== null && (
+        <p role="alert" data-testid="library-scan-error">Normal scan failed: {state.library_scan_error}</p>
       )}
 
       <section aria-labelledby="library-entries-heading">
