@@ -133,6 +133,18 @@ describe("local mapping store", () => {
       }).pipe(Effect.provide(LocalMappingStore.layer(databasePath, workerUrl)))
 
       await Effect.runPromise(Effect.scoped(program))
+
+      const reopened = await Effect.runPromise(
+        Effect.gen(function*() {
+          const store = yield* LocalMappingStore
+          return yield* store.load({ instanceId: instanceA, rootId: rootA })
+        }).pipe(Effect.provide(LocalMappingStore.layer(databasePath, workerUrl)), Effect.scoped)
+      )
+      expect(reopened).toMatchObject({
+        selectedPath: "/library/renamed-books",
+        canonicalPath: "/mnt/renamed-books",
+        mappingRevision: "2"
+      })
     } finally {
       await rm(databaseDirectory, { recursive: true, force: true })
     }
