@@ -1,6 +1,6 @@
 import { discoveryCoverageView } from "../analysis/discovery-coverage"
 import { randomUUID } from "node:crypto"
-import { Effect, Result } from "effect"
+import { Cause, Effect, Result } from "effect"
 import {
   analyzeSourceManifest,
   ManifestCandidateError,
@@ -83,118 +83,191 @@ type ScanStoreService = ScanStore["Service"]
 
 const finish = (store: ScanStoreService, input: FinishScanInput) => store.finish(input)
 
+interface ScanProgress {
+  readonly directoriesVisited: number
+  readonly candidatesDiscovered: number
+  readonly candidatesAnalyzed: number
+  readonly analysisErrorCount: number
+  readonly reviewNeededCount: number
+  readonly coverage: FinishScanInput["coverage"]
+}
+
+const progressOf = (task: ScanTask): ScanProgress => ({
+  directoriesVisited: task.directories_visited,
+  candidatesDiscovered: task.candidates_discovered,
+  candidatesAnalyzed: task.candidates_analyzed,
+  analysisErrorCount: task.analysis_error_count,
+  reviewNeededCount: task.review_needed_count,
+  coverage: task.coverage
+})
+
+const unexpectedMessage = (cause: Cause.Cause<unknown>): string => {
+  const message = Cause.prettyErrors(cause)
+    .map((error) => error.message.trim())
+    .filter((value) => value.length > 0)
+    .join("; ")
+  return message.length > 0 ? message : "unknown scan failure"
+}
+
+const finishUnexpected = (
+  store: ScanStoreService,
+  task: ScanTask,
+  progress: ScanProgress,
+  cause: Cause.Cause<unknown>
+) => {
+  const interrupted = Cause.hasInterruptsOnly(cause)
+  const error = interrupted
+    ? {
+        code: "scan_interrupted",
+        message: "scan interrupted; staged discoveries and progress were preserved. Retry the scan after confirming the source is available."
+      }
+    : {
+        code: "scan_failed",
+        message: `scan failed unexpectedly: ${unexpectedMessage(cause)}. Staged discoveries and progress were preserved; retry the scan after resolving the underlying error.`
+      }
+
+  return Effect.uninterruptible(
+    finish(store, {
+      taskId: task.task_id,
+      status: interrupted ? "interrupted" : "failed",
+      directoriesVisited: progress.directoriesVisited,
+      candidatesDiscovered: progress.candidatesDiscovered,
+      candidatesAnalyzed: progress.candidatesAnalyzed,
+      analysisErrorCount: progress.analysisErrorCount,
+      reviewNeededCount: progress.reviewNeededCount,
+      coverage: progress.coverage,
+      error,
+      readinessError: null
+    }).pipe(
+      Effect.catchCause((finishCause) =>
+        Effect.logError(`could not persist terminal scan status: ${unexpectedMessage(finishCause)}`)
+      )
+    )
+  )
+}
+
 /** Runs one explicit held manual scan; it never performs reconciliation or allocation. */
 export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: ScanTask, root: ServerRootRow) {
   const store = yield* ScanStore
-  yield* store.markRunning(task.task_id)
+  let progress = progressOf(task)
 
-  const observed = rootObservation(root)
-  const current = yield* Effect.tryPromise({
-    try: () => revalidateSourceRoot(observed),
-    catch: () => undefined
-  })
-  if (!current.ok) {
-    yield* finish(store, {
-      taskId: task.task_id,
-      status: "failed",
-      directoriesVisited: 0,
-      candidatesDiscovered: 0,
-      candidatesAnalyzed: 0,
-      analysisErrorCount: 0,
-      reviewNeededCount: 0,
-      coverage: null,
-      error: null,
-      readinessError: { code: "readiness_error", message: "saved root is unavailable or changed" }
-    })
-    return
-  }
+  yield* Effect.gen(function*() {
+    yield* store.markRunning(task.task_id)
 
-  const discovered = yield* Effect.tryPromise({
-    try: () => discoverSourceRoot(current.value, { exclusions: root.exclusions }),
-    catch: () => undefined
-  })
-  if (!discovered.ok) {
-    yield* finish(store, {
-      taskId: task.task_id,
-      status: "failed",
-      directoriesVisited: 0,
-      candidatesDiscovered: 0,
-      candidatesAnalyzed: 0,
-      analysisErrorCount: 0,
-      reviewNeededCount: 0,
-      coverage: null,
-      error: null,
-      readinessError: { code: discovered.code, message: "saved root could not be discovered" }
-    })
-    return
-  }
-
-  let analyzedCount = 0
-  let analysisErrorCount = 0
-  for (const candidate of discovered.value.candidates) {
-    const resolved = yield* Effect.tryPromise({
-      try: () => resolveSourceCandidate(current.value, candidate.relativePath),
+    const observed = rootObservation(root)
+    const current = yield* Effect.tryPromise({
+      try: () => revalidateSourceRoot(observed),
       catch: () => undefined
     })
-
-    if (!resolved.ok) {
-      analysisErrorCount += 1
-      yield* store.stage({
-        candidateId: randomUUID(),
+    if (!current.ok) {
+      yield* finish(store, {
         taskId: task.task_id,
-        rootId: task.root_id,
-        relativePath: candidate.relativePath,
-        kind: candidate.kind,
-        analysisStatus: "error",
-        manifest: null,
-        analysisError: sourceError(resolved.code)
+        status: "failed",
+        directoriesVisited: progress.directoriesVisited,
+        candidatesDiscovered: progress.candidatesDiscovered,
+        candidatesAnalyzed: progress.candidatesAnalyzed,
+        analysisErrorCount: progress.analysisErrorCount,
+        reviewNeededCount: progress.reviewNeededCount,
+        coverage: progress.coverage,
+        error: null,
+        readinessError: { code: "readiness_error", message: "saved root is unavailable or changed" }
       })
-      continue
+      return
     }
 
-    const result = yield* Effect.result(analyzeSourceManifest({ sourcePath: resolved.value.nativePath }))
-    if (Result.isSuccess(result)) {
-      const manifest = result.success
-      analyzedCount += 1
-      yield* store.stage({
-        candidateId: randomUUID(),
+    const discovered = yield* Effect.tryPromise({
+      try: () => discoverSourceRoot(current.value, { exclusions: root.exclusions }),
+      catch: () => undefined
+    })
+    if (!discovered.ok) {
+      yield* finish(store, {
         taskId: task.task_id,
-        rootId: task.root_id,
-        relativePath: candidate.relativePath,
-        kind: candidate.kind,
-        analysisStatus: "ready",
-        manifest: manifestView(manifest),
-        analysisError: null
+        status: "failed",
+        directoriesVisited: progress.directoriesVisited,
+        candidatesDiscovered: progress.candidatesDiscovered,
+        candidatesAnalyzed: progress.candidatesAnalyzed,
+        analysisErrorCount: progress.analysisErrorCount,
+        reviewNeededCount: progress.reviewNeededCount,
+        coverage: progress.coverage,
+        error: null,
+        readinessError: { code: discovered.code, message: "saved root could not be discovered" }
       })
-    } else {
-      analysisErrorCount += 1
-      yield* store.stage({
-        candidateId: randomUUID(),
-        taskId: task.task_id,
-        rootId: task.root_id,
-        relativePath: candidate.relativePath,
-        kind: candidate.kind,
-        analysisStatus: "error",
-        manifest: null,
-        analysisError: analysisError(result.failure)
-      })
+      return
     }
-  }
 
-  const coverage = discoveryCoverageView(discovered.value.coverage)
-  const hasErrors = analysisErrorCount > 0 || coverage.status === "partial"
-  yield* finish(store, {
-    taskId: task.task_id,
-    status: hasErrors ? "completed_with_errors" : "succeeded",
-    directoriesVisited: coverage.directories_visited,
-    candidatesDiscovered: discovered.value.candidates.length,
-    candidatesAnalyzed: analyzedCount,
-    analysisErrorCount,
-    reviewNeededCount: discovered.value.candidates.length,
-    coverage,
-    error: hasErrors
-      ? { code: analysisErrorCount > 0 ? "analysis_error" : "partial_coverage", message: analysisErrorCount > 0 ? "one or more discoveries could not be analyzed" : "scan coverage is partial" }
-      : null,
-    readinessError: null
-  })
+    const coverage = discoveryCoverageView(discovered.value.coverage)
+    progress = {
+      ...progress,
+      directoriesVisited: coverage.directories_visited,
+      candidatesDiscovered: discovered.value.candidates.length,
+      reviewNeededCount: discovered.value.candidates.length,
+      coverage
+    }
+
+    for (const candidate of discovered.value.candidates) {
+      const resolved = yield* Effect.tryPromise({
+        try: () => resolveSourceCandidate(current.value, candidate.relativePath),
+        catch: () => undefined
+      })
+
+      if (!resolved.ok) {
+        yield* store.stage({
+          candidateId: randomUUID(),
+          taskId: task.task_id,
+          rootId: task.root_id,
+          relativePath: candidate.relativePath,
+          kind: candidate.kind,
+          analysisStatus: "error",
+          manifest: null,
+          analysisError: sourceError(resolved.code)
+        })
+        progress = { ...progress, analysisErrorCount: progress.analysisErrorCount + 1 }
+        continue
+      }
+
+      const result = yield* Effect.result(analyzeSourceManifest({ sourcePath: resolved.value.nativePath }))
+      if (Result.isSuccess(result)) {
+        const manifest = result.success
+        yield* store.stage({
+          candidateId: randomUUID(),
+          taskId: task.task_id,
+          rootId: task.root_id,
+          relativePath: candidate.relativePath,
+          kind: candidate.kind,
+          analysisStatus: "ready",
+          manifest: manifestView(manifest),
+          analysisError: null
+        })
+        progress = { ...progress, candidatesAnalyzed: progress.candidatesAnalyzed + 1 }
+      } else {
+        yield* store.stage({
+          candidateId: randomUUID(),
+          taskId: task.task_id,
+          rootId: task.root_id,
+          relativePath: candidate.relativePath,
+          kind: candidate.kind,
+          analysisStatus: "error",
+          manifest: null,
+          analysisError: analysisError(result.failure)
+        })
+        progress = { ...progress, analysisErrorCount: progress.analysisErrorCount + 1 }
+      }
+    }
+
+    const hasErrors = progress.analysisErrorCount > 0 || coverage.status === "partial"
+    yield* finish(store, {
+      taskId: task.task_id,
+      status: hasErrors ? "completed_with_errors" : "succeeded",
+      directoriesVisited: progress.directoriesVisited,
+      candidatesDiscovered: progress.candidatesDiscovered,
+      candidatesAnalyzed: progress.candidatesAnalyzed,
+      analysisErrorCount: progress.analysisErrorCount,
+      reviewNeededCount: progress.reviewNeededCount,
+      coverage: progress.coverage,
+      error: hasErrors
+        ? { code: progress.analysisErrorCount > 0 ? "analysis_error" : "partial_coverage", message: progress.analysisErrorCount > 0 ? "one or more discoveries could not be analyzed" : "scan coverage is partial" }
+        : null,
+      readinessError: null
+    })
+  }).pipe(Effect.catchCause((cause) => finishUnexpected(store, task, progress, cause)))
 })

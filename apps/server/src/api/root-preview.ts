@@ -8,6 +8,9 @@ import {
   InvalidRequest,
   InternalError,
   OperationConflict,
+  OperationExpired,
+  StorageFull,
+  MAX_ROOT_EXCLUSIONS,
   RevisionConflict,
   RequestContext,
   RootVerificationFailed,
@@ -442,6 +445,21 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
             )
 
             switch (result.kind) {
+              case "exclusion_limit":
+                return yield* new InvalidRequest({
+                  code: "invalid_request", message: `A collection can have up to ${MAX_ROOT_EXCLUSIONS} exclusions.`,
+                  retryable: false, ...errorBase
+                })
+              case "operation_expired":
+                return yield* new OperationExpired({
+                  code: "operation_expired", message: "Root policy result expired. Refresh the collection.",
+                  retryable: false, ...errorBase
+                })
+              case "storage_full":
+                return yield* new StorageFull({
+                  code: "storage_full503", message: "Root policy operation storage is full.",
+                  retryable: true, ...errorBase
+                })
               case "operation_conflict":
                 return yield* new OperationConflict({
                   code: "operation_conflict",

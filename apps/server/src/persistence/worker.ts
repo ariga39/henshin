@@ -4,7 +4,7 @@ import { isAbsolute, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalEditPayload } from "@henshin/contracts/canonical"
-import { RootExclusions } from "@henshin/contracts/root"
+import { MAX_ROOT_EXCLUSIONS, RootExclusions } from "@henshin/contracts/root"
 import {
   WorkerMessage,
   WorkerResponse,
@@ -40,6 +40,7 @@ const CURRENT_SCHEMA_VERSION = 3
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
+const MAX_POLICY_OPERATION_RESULTS = 1024
 const COMPACTION_BATCH = 64
 
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
@@ -134,6 +135,7 @@ db.exec(`
     root_id TEXT NOT NULL REFERENCES server_roots(root_id),
     payload TEXT NOT NULL,
     result TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
     PRIMARY KEY (epoch, operation_id)
   );
 `)
@@ -148,6 +150,11 @@ if (!rootColumns.has("policy_revision")) {
 }
 if (!rootColumns.has("exclusions")) {
   db.exec("ALTER TABLE server_roots ADD COLUMN exclusions TEXT NOT NULL DEFAULT '[]'")
+}
+
+if (!db.prepare("SELECT 1 FROM pragma_table_info('root_policy_operations') WHERE name = 'created_at_ms'").get()) {
+  db.exec("ALTER TABLE root_policy_operations ADD COLUMN created_at_ms INTEGER NOT NULL DEFAULT 0")
+  db.prepare("UPDATE root_policy_operations SET created_at_ms = ?").run(Date.now())
 }
 
 const selectNote = db.prepare("SELECT note_id, text, revision FROM prototype_note WHERE note_id = ?")
@@ -219,10 +226,16 @@ const recoverScanTasks = db.prepare(
   "UPDATE scan_tasks SET status = 'interrupted', error_code = 'server_restart', error_message = 'scan interrupted by server restart', updated_at_ms = ? WHERE status IN ('queued', 'running')"
 )
 const selectRootPolicyOperation = db.prepare(
-  "SELECT payload, result FROM root_policy_operations WHERE epoch = ? AND operation_id = ?"
+  "SELECT payload, result, created_at_ms FROM root_policy_operations WHERE epoch = ? AND operation_id = ?"
 )
+const compactRootPolicyOperations = db.prepare(`
+  DELETE FROM root_policy_operations WHERE rowid IN (
+    SELECT rowid FROM root_policy_operations WHERE epoch <> ? OR created_at_ms <= ? LIMIT ?
+  )
+`)
+const countRootPolicyOperations = db.prepare("SELECT COUNT(*) AS count FROM root_policy_operations")
 const insertRootPolicyOperation = db.prepare(
-  "INSERT INTO root_policy_operations(epoch, operation_id, root_id, payload, result) VALUES(?, ?, ?, ?, ?)"
+  "INSERT INTO root_policy_operations(epoch, operation_id, root_id, payload, result, created_at_ms) VALUES(?, ?, ?, ?, ?, ?)"
 )
 const updateRootPolicy = db.prepare(
   "UPDATE server_roots SET policy_revision = ?, exclusions = ? WHERE root_id = ?"
@@ -592,13 +605,18 @@ const commitRootPolicy = (
 
   db.exec("BEGIN IMMEDIATE")
   try {
+    const now = Date.now()
     const existing = selectRootPolicyOperation.get(request.epoch, request.operationId) as
-      | { payload: string; result: string }
+      | { payload: string; result: string; created_at_ms: number }
       | undefined
     if (existing !== undefined) {
       if (existing.payload !== payload) {
         db.exec("ROLLBACK")
         return { kind: "operation_conflict" }
+      }
+      if (existing.created_at_ms <= now - RESULT_RETENTION_MS) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_expired" }
       }
       const root = JSON.parse(existing.result) as ServerRootRow
       db.exec("COMMIT")
@@ -628,6 +646,15 @@ const commitRootPolicy = (
           )
         : current.exclusions
     const changed = exclusions.length !== current.exclusions.length
+    if (exclusions.length > MAX_ROOT_EXCLUSIONS) {
+      db.exec("ROLLBACK")
+      return { kind: "exclusion_limit" }
+    }
+    compactRootPolicyOperations.run(request.epoch, now - RESULT_RETENTION_MS, COMPACTION_BATCH)
+    if (Number(countRootPolicyOperations.get()?.count) >= MAX_POLICY_OPERATION_RESULTS) {
+      db.exec("COMMIT")
+      return { kind: "storage_full" }
+    }
     const nextRevision =
       !changed
         ? current.policyRevision
@@ -639,7 +666,8 @@ const commitRootPolicy = (
       request.operationId,
       root.rootId,
       payload,
-      JSON.stringify(root)
+      JSON.stringify(root),
+      now
     )
     db.exec("COMMIT")
     return { kind: "committed", root }

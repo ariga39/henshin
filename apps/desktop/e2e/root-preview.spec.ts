@@ -1,5 +1,6 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test"
 import electronPath from "electron"
+import { DatabaseSync } from "node:sqlite"
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -151,10 +152,26 @@ test("previews book candidates for an existing saved root after restart", async 
     const reopened = await launch(dbPath)
     await expect(reopened.window.getByTestId("root-saved-policy")).not.toContainText("book.cbz (exact)")
     await expect(reopened.window.getByTestId("root-saved-policy")).toContainText("book (subtree)")
-    await reopened.window.getByTestId("root-saved-preview").click()
-    await expect(reopened.window.getByTestId("root-preview-candidates").locator("li")).toHaveCount(2)
-    await expect(reopened.window.getByTestId("root-preview-candidates")).toContainText("book.cbz")
-    await expect(reopened.window.getByTestId("root-preview-candidates")).toContainText("book-sibling")
+    const database = new DatabaseSync(dbPath)
+    try {
+      const root = database.prepare("SELECT root_id, policy_revision FROM server_roots WHERE label = ?").get("Books") as
+        | { root_id: string; policy_revision: number }
+        | undefined
+      if (root === undefined) throw new Error("saved root missing")
+      database.prepare("UPDATE server_roots SET policy_revision = ?, exclusions = ? WHERE root_id = ?").run(
+        root.policy_revision + 1,
+        "[]",
+        root.root_id
+      )
+    } finally {
+      database.close()
+    }
+    await reopened.window.getByTestId("root-saved-policy").getByRole("button", { name: "Remove exclusion" }).click()
+    await expect(reopened.window.getByTestId("root-saved-policy")).toContainText("book (subtree)")
+    await expect(reopened.window.getByTestId("root-policy-refresh")).toBeVisible()
+    await reopened.window.getByTestId("root-policy-refresh").click()
+    await expect(reopened.window.getByTestId("root-saved-policy")).toContainText("No exclusions")
+    await expect(reopened.window.getByTestId("root-policy-refresh")).toHaveCount(0)
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })

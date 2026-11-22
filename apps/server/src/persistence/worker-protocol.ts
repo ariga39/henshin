@@ -44,6 +44,9 @@ export const RootReplayLookup = Schema.Union([
 export type RootReplayLookup = typeof RootReplayLookup.Type
 
 export const RootPolicyCommandOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("exclusion_limit") }),
+  Schema.Struct({ kind: Schema.Literal("operation_expired") }),
+  Schema.Struct({ kind: Schema.Literal("storage_full") }),
   Schema.Struct({ kind: Schema.Literal("committed"), root: ServerRootRow }),
   Schema.Struct({ kind: Schema.Literal("replayed"), root: ServerRootRow }),
   Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
@@ -200,7 +203,12 @@ export const WorkerRequest = Schema.Union([
   Schema.Struct({
     op: Schema.Literal("finishScan"),
     taskId: Uuid,
-    status: Schema.Union([Schema.Literal("succeeded"), Schema.Literal("completed_with_errors"), Schema.Literal("failed")]),
+    status: Schema.Union([
+      Schema.Literal("succeeded"),
+      Schema.Literal("completed_with_errors"),
+      Schema.Literal("failed"),
+      Schema.Literal("interrupted")
+    ]),
     directoriesVisited: Schema.Natural,
     candidatesDiscovered: Schema.Natural,
     candidatesAnalyzed: Schema.Natural,
