@@ -68,7 +68,9 @@ export const previewLocalMapping = (rootId: string) =>
     yield* Effect.sync(() => viewStore.set({
       local_mapping_root_id: rootId,
       local_mapping_status: "loading",
-      local_mapping_error: null
+      local_mapping_error: null,
+      local_mapping_activation_status: "idle",
+      local_mapping_activation_error: null
     }))
     const result = yield* client.preview(rootId)
     if (!result.ok) {
@@ -82,7 +84,9 @@ export const previewLocalMapping = (rootId: string) =>
       const retainedPreview = viewStore.getState().local_mapping_preview
       yield* Effect.sync(() => viewStore.set({
         local_mapping_status: retainedPreview === null ? "idle" : "ready",
-        local_mapping_error: null
+        local_mapping_error: null,
+        local_mapping_activation_status: "idle",
+        local_mapping_activation_error: null
       }))
       return
     }
@@ -90,8 +94,60 @@ export const previewLocalMapping = (rootId: string) =>
       local_mapping_root_id: rootId,
       local_mapping_status: "ready",
       local_mapping_preview: result.data,
-      local_mapping_error: null
+      local_mapping_error: null,
+      local_mapping_activation_status: "idle",
+      local_mapping_activation_error: null
     }))
+  })
+
+export const loadLocalMappings = Effect.gen(function*() {
+  const client = yield* LocalMappingClient
+  const result = yield* client.list()
+  if (result.ok) {
+    yield* Effect.sync(() => viewStore.set({ local_mappings: result.data }))
+  }
+})
+
+const localMappingEvidenceCanActivate = (rootId: string): boolean => {
+  const preview = viewStore.getState().local_mapping_preview
+  return preview !== null && preview.root_id === rootId && preview.samples.every((sample) =>
+    sample.status === "found" || sample.status === "missing"
+  )
+}
+
+export const activateLocalMapping = (rootId: string) =>
+  Effect.gen(function*() {
+    const client = yield* LocalMappingClient
+    const state = viewStore.getState()
+    const preview = state.local_mapping_preview
+    if (!localMappingEvidenceCanActivate(rootId) || preview === null) return
+    const current = state.local_mappings.find((mapping) => mapping.root_id === rootId)
+    yield* Effect.sync(() => viewStore.set({
+      local_mapping_activation_status: "loading",
+      local_mapping_activation_error: null
+    }))
+    const result = yield* client.activate({
+      root_id: rootId,
+      expected_mapping_revision: current?.mapping_revision ?? "0"
+    })
+    if (result.ok) {
+      yield* Effect.sync(() => {
+        const mappings = viewStore.getState().local_mappings
+        viewStore.set({
+          local_mappings: mappings.some((mapping) => mapping.root_id === rootId)
+            ? mappings.map((mapping) => mapping.root_id === rootId ? result.data : mapping)
+            : [...mappings, result.data],
+          local_mapping_activation_status: "idle",
+          local_mapping_activation_error: null
+        })
+      })
+      return
+    }
+    yield* Effect.sync(() => viewStore.set({
+      local_mapping_activation_status: "error",
+      local_mapping_activation_error: result.error.message
+    }))
+    if (result.error.code === "local_mapping_revision_conflict") yield* loadLocalMappings
   })
 
 export const loadRoots = Effect.gen(function*() {
@@ -243,6 +299,7 @@ export const retryScanResults = Effect.gen(function*() {
 
 export const loadRootWorkspace = Effect.gen(function*() {
   yield* loadRoots
+  yield* loadLocalMappings
   const loaded = yield* loadScanResults
   if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
 })

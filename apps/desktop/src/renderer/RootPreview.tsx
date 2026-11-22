@@ -3,6 +3,7 @@ import type { RootPreviewResult } from "@henshin/contracts"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
 import {
+  activateLocalMapping,
   canSaveRoot,
   excludeRootPath,
   previewLocalMapping,
@@ -117,6 +118,20 @@ const localSampleStatus = (sample: NonNullable<ReturnType<typeof viewStore.getSt
   }
 }
 
+const mappingFor = (state: ReturnType<typeof viewStore.getState>, rootId: string) =>
+  state.local_mappings.find((mapping) => mapping.root_id === rootId)
+
+const localMappingCanActivate = (state: ReturnType<typeof viewStore.getState>, rootId: string): boolean =>
+  state.local_mapping_preview?.root_id === rootId &&
+  state.local_mapping_preview.samples.every((sample) =>
+    (sample.status === "found" || sample.status === "missing") &&
+    !(sample.status === "found" &&
+      sample.local_evidence_status === "complete" &&
+      sample.indexed_size_bytes !== null &&
+      sample.local_size_bytes !== null &&
+      sample.indexed_size_bytes !== sample.local_size_bytes)
+  )
+
 export const RootPreviewScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   const loading = state.root_preview_status === "loading"
@@ -224,6 +239,11 @@ export const RootPreviewScreen = () => {
           {state.root_saved_roots.map((root) => (
             <li key={root.root_id} data-testid="root-saved">
               <strong>{root.label}</strong><span> {root.selected_server_path}</span>
+              {mappingFor(state, root.root_id) && (
+                <p data-testid="local-mapping-effective">
+                  Effective device mapping: {mappingFor(state, root.root_id)?.selected_local_path} (revision {mappingFor(state, root.root_id)?.mapping_revision}).
+                </p>
+              )}
               <small data-testid="root-saved-policy">
                 {root.exclusions.length === 0 ? " No exclusions" : " Excluded: "}
                 {root.exclusions.map((exclusion) => (
@@ -266,6 +286,33 @@ export const RootPreviewScreen = () => {
                   )}
                   {state.local_mapping_preview.local_budget_exhausted && (
                     <p>Local checking reached its finite time budget; remaining evidence is unavailable.</p>
+                  )}
+                  {state.local_mapping_preview.samples.some((sample) => sample.status === "missing") && (
+                    <p data-testid="local-mapping-missing-explanation">
+                      Missing samples may reflect file moves. Confirming this directory does not silently rebind missing entries.
+                    </p>
+                  )}
+                  {state.local_mapping_preview.samples.length === 0 && (
+                    <p data-testid="local-mapping-unverified-explanation">
+                      No indexed samples were available; this confirmation is unverified by sample evidence.
+                    </p>
+                  )}
+                  {!localMappingCanActivate(state, root.root_id) && (
+                    <p role="alert" data-testid="local-mapping-blocked">
+                      Resolve unsafe, unsupported, collision, or conflicting sample evidence before activation.
+                    </p>
+                  )}
+                  <button
+                    data-testid="local-mapping-activate"
+                    disabled={state.local_mapping_activation_status === "loading" || !localMappingCanActivate(state, root.root_id)}
+                    onClick={() => void runtime.runPromise(activateLocalMapping(root.root_id))}
+                  >
+                    {state.local_mapping_activation_status === "loading" ? "Activating…" : "Confirm and activate device mapping"}
+                  </button>
+                  {state.local_mapping_activation_status === "error" && (
+                    <p role="alert" data-testid="local-mapping-activation-error">
+                      Mapping was not activated: {state.local_mapping_activation_error}
+                    </p>
                   )}
                   <ul data-testid="local-mapping-samples">
                     {state.local_mapping_preview.samples.map((sample) => (
