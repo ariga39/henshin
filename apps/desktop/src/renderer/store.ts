@@ -42,6 +42,7 @@ export interface ViewState {
   readonly root_roots_status: "idle" | "loading" | "ready" | "error"
   readonly root_roots_error: string | null
   readonly root_save_status: "idle" | "loading" | "ready" | "error"
+  readonly root_save_operation_id: string | null
   readonly root_save_error: string | null
   readonly root_save_target_label: string | null
   readonly root_save_target_path: string | null
@@ -73,6 +74,7 @@ const initialState: ViewState = {
   root_roots_status: "idle",
   root_roots_error: null,
   root_save_status: "idle",
+  root_save_operation_id: null,
   root_save_error: null,
   root_save_target_label: null,
   root_save_target_path: null,

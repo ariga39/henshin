@@ -290,7 +290,9 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
             Effect.mapError(() => verificationFailed(context.request_id, "selected directory could not be verified"))
           )
           if (!separation.ok) {
-            return yield* verificationFailed(context.request_id, "selected directory overlaps a server output location")
+            return yield* verificationFailed(context.request_id, separation.code === "location-overlap"
+              ? "selected directory overlaps a server output location"
+              : "selected directory could not be verified")
           }
 
           const registered = yield* roots.register({
