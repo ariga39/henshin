@@ -134,7 +134,8 @@ const enumerateSavedRootCandidates = (
           unsupported_name_count: value.coverage.unsupportedNameCount,
           unsupported_directories: value.coverage.unsupportedDirectories,
           unsupported_directory_count: value.coverage.unsupportedDirectoryCount,
-          issues: value.coverage.issues,
+          issues: value.coverage.issues.map(({ code, relativePath }) =>
+            relativePath === undefined ? { code } : { code, relative_path: relativePath }),
           issue_count: value.coverage.issueCount
         }
       }
@@ -216,7 +217,9 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
               try: () => revalidateSourceRoot(observed),
               catch: () => undefined
             }).pipe(Effect.mapError(() => unavailable("saved server root changed or is unavailable")))
-            if (!current.ok) return yield* unavailable("saved server root changed or is unavailable")
+            if (!current.ok) return yield* unavailable(current.code === "root-changed"
+              ? "saved server path now identifies a different directory"
+              : "saved server path is unavailable")
 
             const preview = yield* enumerateSavedRootCandidates(
               current.value,
