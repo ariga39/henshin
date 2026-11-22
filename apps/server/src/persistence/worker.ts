@@ -320,7 +320,7 @@ const selectStagedDiscoveries = db.prepare(
 )
 selectStagedDiscoveries.setReadBigInts(true)
 const selectStaged = db.prepare(
-  "SELECT candidate_id, candidate_version, task_id, analysis_status FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
+  "SELECT candidate_id, candidate_version, task_id, analysis_status, hold_state FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
 selectStaged.setReadBigInts(true)
 const selectStagedById = db.prepare(
@@ -356,7 +356,7 @@ const selectScanFence = db.prepare(`
 `)
 selectScanFence.setReadBigInts(true)
 const upsertStagedDiscovery = db.prepare(
-  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = CASE WHEN staged_discoveries.hold_state = 'held' THEN 'held' ELSE excluded.hold_state END, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
+  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = excluded.hold_state, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
 )
 const recoverScanTasks = db.prepare(
   "UPDATE scan_tasks SET status = CASE WHEN status = 'queued' THEN 'failed' ELSE 'interrupted' END, error_code = 'server_restart', error_message = CASE WHEN status = 'queued' THEN 'scan did not start before server restart' ELSE 'scan interrupted by server restart' END, updated_at_ms = ? WHERE status IN ('queued', 'running')"
@@ -862,28 +862,36 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
   try {
     requireCurrentScanFence(request.taskId, request.rootId)
     const existing = selectStaged.get(request.rootId, request.relativePath) as
-      | { candidate_id: string; candidate_version: bigint; task_id: string; analysis_status: string }
+      | { candidate_id: string; candidate_version: bigint; task_id: string; analysis_status: string; hold_state: string }
       | undefined
-    upsertStagedDiscovery.run(
-      existing?.candidate_id ?? request.candidateId,
-      request.taskId,
-      request.rootId,
-      request.relativePath,
-      request.kind,
-      existing === undefined ? 1n : existing.candidate_version + 1n,
-      request.holdState,
-      request.analysisStatus,
-      request.manifestJson,
-      request.analysisErrorJson,
-      Date.now()
-    )
+    const accepted = selectEntry.get(request.rootId, request.relativePath)
+    const unchangedHeldScan = request.holdState === "held" && request.analysisStatus === "ready"
+      && accepted !== undefined && accepted.kind === request.kind && accepted.manifest_json === request.manifestJson
+    if (unchangedHeldScan) {
+      if (existing !== undefined) deleteStaged.run(existing.candidate_id)
+    } else {
+      const held = accepted === undefined && (request.holdState === "held" || existing?.hold_state === "held")
+      upsertStagedDiscovery.run(
+        existing?.candidate_id ?? request.candidateId,
+        request.taskId,
+        request.rootId,
+        request.relativePath,
+        request.kind,
+        existing === undefined ? 1n : existing.candidate_version + 1n,
+        held ? "held" : "eligible",
+        request.analysisStatus,
+        request.manifestJson,
+        request.analysisErrorJson,
+        Date.now()
+      )
+    }
     const priorStatus = existing?.task_id === request.taskId ? existing.analysis_status : undefined
     requireScanTransition(db.prepare(`UPDATE scan_tasks SET
       candidates_analyzed = candidates_analyzed + ?, analysis_error_count = analysis_error_count + ?,
       review_needed_count = review_needed_count + ?, updated_at_ms = ? WHERE task_id = ? AND root_id = ? AND status = 'running'`).run(
       Number(request.analysisStatus === "ready") - Number(priorStatus === "ready"),
       Number(request.analysisStatus === "error") - Number(priorStatus === "error"),
-      Number(priorStatus === undefined), Date.now(), request.taskId, request.rootId
+      Number(!unchangedHeldScan && priorStatus === undefined), Date.now(), request.taskId, request.rootId
     ))
     db.exec("COMMIT")
   } catch (error) {
