@@ -88,6 +88,7 @@ test("previews, confirms a labeled root, survives restart, and recovers from sta
     await expect(window.getByTestId("root-preview-outcome")).toHaveText("The directory is empty.")
     await window.getByTestId("root-save").click()
     await expect(window.getByTestId("root-preview-outcome")).toHaveText(`Server root saved: Books (${savedFixture}).`)
+    await expect(window.getByTestId("root-save")).toBeDisabled()
     await expect(window.getByTestId("root-saved")).toContainText("Books")
     await expect(window.getByTestId("root-saved")).toContainText(savedFixture)
 

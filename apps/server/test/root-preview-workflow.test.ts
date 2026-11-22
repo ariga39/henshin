@@ -53,6 +53,7 @@ const resetView = () => {
     root_roots_error: null,
     root_save_status: "idle",
     root_save_error: null,
+    root_save_operation_id: null,
     root_save_target_label: null,
     root_save_target_path: null
   })
@@ -83,6 +84,33 @@ describe("root confirmation workflow", () => {
 
     expect(calls).toBe(0)
     expect(viewStore.getState().root_saved_roots).toEqual([])
+  })
+
+  it("replays a confirmation when its reply is lost and stops sending after success", async () => {
+    const operations: string[] = []
+    const client = RootPreviewClient.of({
+      preview: () => Effect.succeed({ ok: true, data: preview }),
+      list: () => Effect.succeed({ ok: true, data: [] }),
+      save: (input) => {
+        operations.push(input.operation_id)
+        return operations.length === 1
+          ? Effect.succeed({ ok: false, error: { code: "transport", message: "Reply lost", retryable: true } })
+          : Effect.succeed({ ok: true, data: savedRoot })
+      }
+    })
+    viewStore.set({
+      root_preview: preview,
+      root_preview_status: "ready",
+      root_preview_path: preview.selected_server_path,
+      root_label: savedRoot.label
+    })
+    const confirm = () => Effect.runPromise(Effect.provide(saveRoot, Layer.succeed(RootPreviewClient, client)))
+    await confirm()
+    expect(viewStore.getState().root_save_status).toBe("error")
+    await confirm()
+    await confirm()
+    expect(operations).toEqual([expect.any(String), operations[0]])
+    expect(viewStore.getState().root_saved_roots).toEqual([savedRoot])
   })
 
   it("keeps an in-flight completion attached to the confirmed path", async () => {
