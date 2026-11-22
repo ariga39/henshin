@@ -17,6 +17,7 @@ import {
   RootPreviewUnavailable,
   ActiveScanConflict,
   CandidateNotFound,
+  EntryNotFound,
   TaskNotFound,
   StorageFull,
   ThumbnailMissing,
@@ -37,8 +38,15 @@ import {
   ServerRoot,
   ServerRootList
 } from "./root"
+import {
+  IndexedRootSamplePage,
+  EntryResolution,
+  EntryResolutionQuery,
+  LibraryEntryPage,
+  LibrarySearchRequest,
+  LibraryView
+} from "./library"
 import { ReviewCandidateCommandRequest, ReviewCommandResult } from "./review"
-import { LibraryEntryPage, LibrarySearchRequest, LibraryView } from "./library"
 import { ThumbnailKey } from "./thumbnail"
 
 /**
@@ -201,6 +209,17 @@ export const LibraryApi = HttpApi.make("henshin-library").add(
         payload: LibrarySearchRequest,
         success: SuccessEnvelope(LibraryEntryPage),
         error: [AuthenticationRequired, InvalidRequest, InternalError]
+      }),
+      HttpApiEndpoint.get("indexedSamples", "/roots/:id/indexed-samples", {
+        params: { id: Uuid },
+        success: SuccessEnvelope(IndexedRootSamplePage),
+        error: [AuthenticationRequired, RootNotFound, InternalError]
+      }),
+      HttpApiEndpoint.get("resolution", "/entries/:id/resolution", {
+        params: { id: Uuid },
+        query: EntryResolutionQuery,
+        success: SuccessEnvelope(EntryResolution),
+        error: [AuthenticationRequired, EntryNotFound, InvalidRequest, InternalError]
       })
     )
     .prefix("/api/v1")
