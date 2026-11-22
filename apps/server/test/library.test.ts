@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto"
 import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import { BlobWriter, Uint8ArrayReader, ZipWriter } from "@zip.js/zip.js"
-import { LibraryHttpClient, ServerHttpClient, TaskHttpClient, type ScanTask } from "@henshin/contracts"
+import { LibraryHttpClient, ReviewHttpClient, ServerHttpClient, TaskHttpClient, type ScanTask } from "@henshin/contracts"
 import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
 
 const servers: RunningServer[] = []
@@ -29,6 +29,9 @@ const withLibraryClient = <A, E>(server: RunningServer, program: Effect.Effect<A
 const withTaskClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, TaskHttpClient>): Promise<A> =>
   Effect.runPromise(Effect.provide(program, TaskHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
 
+const withReviewClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, ReviewHttpClient>): Promise<A> =>
+  Effect.runPromise(Effect.provide(program, ReviewHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
+
 const waitForTerminal = async (server: RunningServer, taskId: string): Promise<ScanTask> => {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const task = await withTaskClient(server, Effect.gen(function*() {
@@ -46,6 +49,12 @@ const makeZip = async (archivePath: string): Promise<void> => {
   await writer.add("001.jpg", new Uint8ArrayReader(new Uint8Array([0, 1, 2])))
   const blob = await writer.close()
   await writeFile(archivePath, Buffer.from(await blob.arrayBuffer()))
+}
+
+const makeImageBook = async (rootPath: string, name: string): Promise<void> => {
+  const book = path.join(rootPath, name)
+  await mkdir(book)
+  await writeFile(path.join(book, "001.jpg"), "page")
 }
 
 afterEach(async () => {
@@ -203,5 +212,85 @@ describe("normal library scan", () => {
     }))
     expect(afterRepeat.data.entries).toHaveLength(2)
     expect(new Map(afterRepeat.data.entries.map((entry) => [entry.relative_path, entry.entry_id]))).toEqual(firstIds)
+  })
+
+  it("does not accept held discoveries when a later normal scan sees the same paths", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-held-normal-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "held-book-a")
+    await makeImageBook(fixture, "held-book-b")
+    await makeImageBook(fixture, "held-book-c")
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: preview.data.instance_id,
+          epoch: preview.data.epoch,
+          label: "Held then normal",
+          path: fixture,
+          preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+
+    const held = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: server.instanceId,
+          epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: true }
+        }
+      })
+    }))
+    if (!("task" in held.data)) throw new Error("expected held scan task submission")
+    expect((await waitForTerminal(server, held.data.task.task_id)).status).toBe("succeeded")
+
+    await makeImageBook(fixture, "new-book-a")
+    await makeImageBook(fixture, "new-book-b")
+
+    const normal = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      return yield* client.command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: server.instanceId,
+          epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in normal.data)) throw new Error("expected normal scan task submission")
+    expect((await waitForTerminal(server, normal.data.task.task_id)).status).toBe("succeeded")
+
+    const entries = await withLibraryClient(server, Effect.gen(function*() {
+      const client = yield* LibraryHttpClient
+      return yield* client.search({ payload: { page_size: 200 } })
+    }))
+    expect(entries.data.entries.map((entry) => entry.relative_path).sort()).toEqual(["new-book-a", "new-book-b"])
+
+    const staged = await withReviewClient(server, Effect.gen(function*() {
+      const client = yield* ReviewHttpClient
+      return yield* client.candidates()
+    }))
+    expect(staged.data).toHaveLength(3)
+    expect(staged.data.map((candidate) => candidate.relative_path).sort()).toEqual([
+      "held-book-a",
+      "held-book-b",
+      "held-book-c"
+    ])
+    expect(staged.data.every((candidate) => candidate.hold_state === "held")).toBe(true)
   })
 })
