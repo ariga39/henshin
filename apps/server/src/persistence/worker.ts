@@ -474,6 +474,13 @@ const selectStagedById = db.prepare(
 selectStagedById.setReadBigInts(true)
 const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
 const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path, state FROM library_entries WHERE root_id = ? AND relative_path = ? AND state IN ('accepted', 'replacement-pending')")
+const selectEntryResolution = db.prepare(
+  "SELECT entry_id, root_id, relative_path, kind, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
+)
+selectEntryResolution.setReadBigInts(true)
+const selectStagedForResolution = db.prepare(
+  "SELECT analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
+)
 const selectResolutionSiblingClaims = db.prepare(
   "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
 )
@@ -1075,9 +1082,8 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
       title: string
       source_path: string
       state: "accepted" | "replacement-pending"
-      state: "accepted" | "replacement-pending"
     } | undefined
-    const sameAcceptedObservation = request.analysisStatus === "ready" && request.manifestJson !== null && accepted !== undefined &&
+    const sameAcceptedObservation = request.holdState === "held" && request.analysisStatus === "ready" && request.manifestJson !== null && accepted !== undefined &&
       accepted.state === "accepted" && accepted.kind === request.kind && accepted.manifest_json === request.manifestJson
     if (sameAcceptedObservation) {
       if (existing !== undefined) deleteStaged.run(existing.candidate_id)
@@ -1099,7 +1105,8 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
       if (
         accepted !== undefined &&
         accepted.state === "accepted" &&
-        (request.analysisStatus === "error" || accepted.kind !== request.kind || accepted.manifest_json !== request.manifestJson)
+        (request.analysisStatus === "error" || accepted.kind !== request.kind ||
+          (request.manifestJson !== null && !manifestsEquivalent(accepted.manifest_json, request.manifestJson)))
       ) {
         if (Number(markEntryPending.run(Date.now(), accepted.entry_id).changes) === 1) bumpLibraryRevision.run()
       } else if (accepted?.state === "replacement-pending" && existing !== undefined) {
@@ -1385,6 +1392,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       kind: "archive" | "image-directory"
       title: string
       source_path: string
+      state: "accepted" | "replacement-pending"
     }>()
     for (const candidate of staged) {
       if (!observed.has(candidate.relative_path) || candidate.manifest_json === null) continue
