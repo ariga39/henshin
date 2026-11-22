@@ -27,7 +27,7 @@ test.afterEach(async () => {
   for (const app of launched.splice(0)) await app.close().catch(() => undefined)
 })
 
-test("previews a real managed-server directory, bounds samples, and retries an unavailable path", async () => {
+test("previews, confirms a labeled root, survives restart, and recovers from stale verification", async () => {
   const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-root-preview-db-"))
   const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-root-preview-fixture-"))
   const dbPath = path.join(dbDirectory, "prototype.db")
@@ -38,7 +38,8 @@ test("previews a real managed-server directory, bounds samples, and retries an u
       await writeFile(path.join(fixtureDirectory, `child-${index.toString().padStart(2, "0")}.txt`), "sample")
     }
 
-    const { window } = await launch(dbPath)
+    const firstLaunch = await launch(dbPath)
+    const { window } = firstLaunch
     await expect(window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
     expect(await window.evaluate(() => "henshinPrototype" in window)).toBe(false)
     await window.getByTestId("root-preview-path").fill(fixtureDirectory)
@@ -49,10 +50,13 @@ test("previews a real managed-server directory, bounds samples, and retries an u
     )
     await expect(window.getByTestId("root-preview-children").locator("li")).toHaveCount(32)
     await expect(window.getByTestId("root-preview-children").locator("li").first()).toContainText(/child-\d+\.txt/)
+    await window.getByTestId("root-label").fill("Books")
+    await expect(window.getByTestId("root-save")).toBeEnabled()
 
     // Editing a new proposal does not relabel the displayed result from the
     // last submitted path.
     await window.getByTestId("root-preview-path").fill(path.join(dbDirectory, "not-submitted"))
+    await expect(window.getByTestId("root-save")).toBeDisabled()
     await expect(window.getByTestId("root-preview-selected-path")).toHaveText(fixtureDirectory)
     await expect(window.getByTestId("root-preview-children").locator("li")).toHaveCount(32)
 
@@ -64,6 +68,34 @@ test("previews a real managed-server directory, bounds samples, and retries an u
     await mkdir(missingDirectory, { recursive: true })
     await window.getByTestId("root-preview-retry").click()
     await expect(window.getByTestId("root-preview-outcome")).toHaveText("The directory is empty.")
+
+    const savedFixture = path.join(fixtureDirectory, "saved-collection")
+    await mkdir(savedFixture)
+    await window.getByTestId("root-preview-path").fill(savedFixture)
+    await window.getByTestId("root-preview-submit").click()
+    await expect(window.getByTestId("root-preview-selected-path")).toHaveText(savedFixture)
+    await expect(window.getByTestId("root-save")).toBeEnabled()
+
+    // A new directory at the same path has a different native identity. The
+    // stale preview must fail without creating an active root.
+    await rm(savedFixture, { recursive: true, force: true })
+    await mkdir(savedFixture)
+    await window.getByTestId("root-save").click()
+    await expect(window.getByTestId("root-preview-outcome")).toContainText("Save failed")
+    await expect(window.getByTestId("root-saved-roots").locator("li")).toHaveCount(0)
+
+    await window.getByTestId("root-preview-submit").click()
+    await expect(window.getByTestId("root-preview-outcome")).toHaveText("The directory is empty.")
+    await window.getByTestId("root-save").click()
+    await expect(window.getByTestId("root-preview-outcome")).toHaveText(`Server root saved: Books (${savedFixture}).`)
+    await expect(window.getByTestId("root-saved")).toContainText("Books")
+    await expect(window.getByTestId("root-saved")).toContainText(savedFixture)
+
+    await firstLaunch.app.close()
+    const restarted = await launch(dbPath)
+    await expect(restarted.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await expect(restarted.window.getByTestId("root-saved")).toContainText("Books")
+    await expect(restarted.window.getByTestId("root-saved")).toContainText(savedFixture)
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })

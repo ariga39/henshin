@@ -62,9 +62,21 @@ export const saveRoot = Effect.gen(function*() {
   const client = yield* RootPreviewClient
   const state = viewStore.getState()
   const preview = state.root_preview
-  if (preview === null || state.root_preview_status !== "ready" || state.root_label.length === 0) return
+  if (
+    preview === null ||
+    state.root_preview_status !== "ready" ||
+    state.root_preview_path !== preview.selected_server_path ||
+    state.root_label.length === 0
+  ) return
 
-  yield* Effect.sync(() => viewStore.set({ root_save_status: "loading", root_save_error: null }))
+  const confirmedPath = preview.selected_server_path
+  const confirmedLabel = state.root_label
+  yield* Effect.sync(() => viewStore.set({
+    root_save_status: "loading",
+    root_save_error: null,
+    root_save_target_label: confirmedLabel,
+    root_save_target_path: confirmedPath
+  }))
   const result = yield* client.save({
     operation_id: newOperationId(),
     instance_id: preview.instance_id,
@@ -81,7 +93,9 @@ export const saveRoot = Effect.gen(function*() {
           ? roots.map((root) => root.root_id === result.data.root_id ? result.data : root)
           : [...roots, result.data],
         root_save_status: "ready",
-        root_save_error: null
+        root_save_error: null,
+        root_save_target_label: confirmedLabel,
+        root_save_target_path: confirmedPath
       })
     })
   } else {
