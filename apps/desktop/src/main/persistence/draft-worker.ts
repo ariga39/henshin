@@ -150,7 +150,6 @@ if (!clientMappingColumns.has("selected_resolution")) {
 if (!clientMappingColumns.has("canonical_resolution")) {
   db.exec("ALTER TABLE client_mappings ADD COLUMN canonical_resolution TEXT")
 }
-
 // A prepared intent has no reliable dispatch outcome after this worker has
 // been closed and reopened. Preserve it as diagnostic unknown rather than
 // allowing any caller to turn it back into a launch.
@@ -594,11 +593,20 @@ type PersistedLocalMapping = {
   readonly canonical_resolution: string | null
 }
 
+const usableIdentity = (identity: string | null | undefined): string | null => {
+  if (identity === null || identity === undefined) return null
+  const separator = identity.indexOf(":")
+  return separator <= 0 || identity.slice(0, separator) === "0" || identity.slice(separator + 1) === "0"
+    ? null
+    : identity
+}
+
 const readLocalMappingRow = (row: PersistedLocalMapping): LocalMappingRow => ({
   instanceId: row.instance_id,
   rootId: row.root_id,
   selectedPath: row.selected_path,
   canonicalPath: row.canonical_path,
+  admittedRootIdentity: usableIdentity(row.canonical_identity),
   mappingRevision: row.mapping_revision.toString()
 })
 
@@ -632,7 +640,9 @@ const LocalPathResolution = Schema.Struct({
 })
 
 const localPhysicalIdentity = (stats: { readonly dev: number | bigint; readonly ino: number | bigint }): string | undefined =>
-  stats.ino.toString() === "0" ? undefined : `${stats.dev.toString()}:${stats.ino.toString()}`
+  stats.dev.toString() === "0" || stats.ino.toString() === "0"
+    ? undefined
+    : `${stats.dev.toString()}:${stats.ino.toString()}`
 
 const identityOf = (path: string): string | undefined => {
   const stats = statSync(path, { bigint: true })
@@ -701,9 +711,6 @@ const resolveLocalPath = (input: string): ResolvedLocalPath => {
     }
   }
 }
-
-const usableIdentity = (identity: string | null | undefined): string | null =>
-  identity === null || identity === undefined || identity.endsWith(":0") ? null : identity
 
 const persistedPath = (path: string, identity: string | null): ResolvedLocalPath => {
   const normalizedIdentity = usableIdentity(identity)
@@ -1230,6 +1237,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
           rootId: request.rootId,
           selectedPath: request.selectedPath,
           canonicalPath: canonicalPath.comparisonPath,
+          admittedRootIdentity: canonicalPath.endpointIdentity,
           mappingRevision: (BigInt(request.expectedMappingRevision) + 1n).toString()
         }
         ensureBeforeDeadline()

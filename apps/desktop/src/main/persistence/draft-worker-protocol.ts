@@ -108,6 +108,7 @@ export const LocalMappingRow = Schema.Struct({
   rootId: Uuid,
   selectedPath: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   canonicalPath: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  admittedRootIdentity: Schema.NullOr(Schema.String),
   mappingRevision: Revision
 })
 export type LocalMappingRow = typeof LocalMappingRow.Type

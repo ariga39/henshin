@@ -1,5 +1,6 @@
 import { build } from "esbuild"
-import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises"
+import { DatabaseSync } from "node:sqlite"
+import { mkdir, mkdtemp, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -45,6 +46,11 @@ const activate = (
   protectedWritablePaths,
   ...(activationDeadlineMs === undefined ? {} : { activationDeadlineMs })
 })
+
+const admittedIdentity = async (directory: string): Promise<string | null> => {
+  const stats = await stat(directory, { bigint: true })
+  return stats.dev === 0n || stats.ino === 0n ? null : `${stats.dev.toString()}:${stats.ino.toString()}`
+}
 
 describe("local mapping store", () => {
   let workerDirectory: string
@@ -101,6 +107,8 @@ describe("local mapping store", () => {
       await symlink(linkedTargetA, linkedAlias, "dir")
       await mkdir(renamedRoot)
       await writeFile(notDirectory, "not a directory")
+      const renamedCollectionIdentity = await admittedIdentity(renamedCollection)
+      const linkedTargetAIdentity = await admittedIdentity(linkedTargetA)
       const upperCaseSibling = path.join(fixtureDirectory, "Books")
       const lowerCaseSibling = path.join(fixtureDirectory, "books")
       if (process.platform === "linux") {
@@ -123,6 +131,7 @@ describe("local mapping store", () => {
             rootId: rootA,
             selectedPath: collectionAlias,
             canonicalPath: renamedCollection,
+            admittedRootIdentity: renamedCollectionIdentity,
             mappingRevision: "1"
           }
         })
@@ -143,6 +152,7 @@ describe("local mapping store", () => {
             rootId: rootA,
             selectedPath: renamedCollection,
             canonicalPath: renamedCollection,
+            admittedRootIdentity: renamedCollectionIdentity,
             mappingRevision: "2"
           }
         })
@@ -287,6 +297,7 @@ describe("local mapping store", () => {
             rootId: rootG,
             selectedPath: linkedAlias,
             canonicalPath: linkedTargetA,
+            admittedRootIdentity: linkedTargetAIdentity,
             mappingRevision: "1"
           }
         })
@@ -314,6 +325,12 @@ describe("local mapping store", () => {
 
       await Effect.runPromise(Effect.scoped(program))
 
+      const replacedRenamedCollection = path.join(fixtureDirectory, "renamed-collection-replaced")
+      await rename(renamedCollection, replacedRenamedCollection)
+      await mkdir(renamedCollection)
+      const replacementIdentity = await admittedIdentity(renamedCollection)
+      expect(replacementIdentity).not.toBe(renamedCollectionIdentity)
+
       await rm(linkedAlias, { force: true })
       await symlink(linkedTargetB, linkedAlias, "dir")
       await rename(renamedRoot, movedRoot)
@@ -328,6 +345,7 @@ describe("local mapping store", () => {
             rootId: rootG,
             selectedPath: linkedAlias,
             canonicalPath: linkedTargetA,
+            admittedRootIdentity: linkedTargetAIdentity,
             mappingRevision: "1"
           })
           const retargetedRoot = yield* store.activate(
@@ -338,18 +356,75 @@ describe("local mapping store", () => {
             activate(instanceF, rootK, movedRootAlias, movedRoot)
           )
           expect(renamedAliasRoot).toEqual({ kind: "root_conflict" })
+          expect(yield* store.load({ instanceId: instanceA, rootId: rootA })).toMatchObject({
+            admittedRootIdentity: renamedCollectionIdentity,
+            mappingRevision: "2"
+          })
+          const replaced = yield* store.activate(
+            activate(instanceA, rootA, renamedCollection, renamedCollection, "2")
+          )
+          expect(replaced).toMatchObject({
+            kind: "activated",
+            mapping: {
+              admittedRootIdentity: replacementIdentity,
+              mappingRevision: "3"
+            }
+          })
           return yield* store.load({ instanceId: instanceA, rootId: rootA })
         }).pipe(Effect.provide(LocalMappingStore.layer(databasePath, workerUrl)), Effect.scoped)
       )
       expect(reopened).toMatchObject({
         selectedPath: renamedCollection,
         canonicalPath: renamedCollection,
-        mappingRevision: "2"
+        admittedRootIdentity: replacementIdentity,
+        mappingRevision: "3"
       })
     } finally {
       await rm(databaseDirectory, { recursive: true, force: true })
       await rm(fixtureDirectory, { recursive: true, force: true })
       await rm(linkedTargetParent, { recursive: true, force: true })
+    }
+  })
+
+  it("returns null admitted identity for legacy mapping rows", async () => {
+    const databaseDirectory = await realpath(await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-legacy-db-")))
+    const databasePath = path.join(databaseDirectory, "client.db")
+    const database = new DatabaseSync(databasePath)
+    database.exec(`
+      CREATE TABLE client_mappings (
+        instance_id TEXT NOT NULL,
+        root_id TEXT NOT NULL,
+        selected_path TEXT NOT NULL,
+        canonical_path TEXT NOT NULL,
+        mapping_revision INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state = 'active'),
+        PRIMARY KEY (instance_id, root_id)
+      )
+    `)
+    database.prepare(`
+      INSERT INTO client_mappings(
+        instance_id, root_id, selected_path, canonical_path, mapping_revision, state
+      ) VALUES(?, ?, ?, ?, ?, 'active')
+    `).run(instanceA, rootA, "/legacy/selected", "/legacy/canonical", 4n)
+    database.close()
+
+    try {
+      const legacy = await Effect.runPromise(
+        Effect.gen(function*() {
+          const store = yield* LocalMappingStore
+          return yield* store.load({ instanceId: instanceA, rootId: rootA })
+        }).pipe(Effect.provide(LocalMappingStore.layer(databasePath, workerUrl)), Effect.scoped)
+      )
+      expect(legacy).toEqual({
+        instanceId: instanceA,
+        rootId: rootA,
+        selectedPath: "/legacy/selected",
+        canonicalPath: "/legacy/canonical",
+        admittedRootIdentity: null,
+        mappingRevision: "4"
+      })
+    } finally {
+      await rm(databaseDirectory, { recursive: true, force: true })
     }
   })
 })
