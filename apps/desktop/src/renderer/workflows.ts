@@ -5,7 +5,7 @@ import type {
   RootPreviewResult,
   ScanTask
 } from "@henshin/contracts"
-import { PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
+import { LibraryClient, PrototypeClient, RootPreviewClient, ScanReviewClient } from "./client"
 import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
@@ -139,6 +139,16 @@ export const loadRootWorkspace = Effect.gen(function*() {
   if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
 })
 
+const watchScanTask = (taskId: string) =>
+  Effect.gen(function*() {
+    while (true) {
+      yield* loadScanResults
+      const task = viewStore.getState().scan_tasks.find((candidate) => candidate.task_id === taskId)
+      if (task !== undefined && !scanIsActive(task)) return
+      yield* Effect.sleep("250 millis")
+    }
+  })
+
 export const refreshRootPolicy = Effect.gen(function*() {
   const initialState = viewStore.getState()
   const request = initialState.root_preview_request
@@ -238,16 +248,24 @@ export const removeRootExclusion = (input: {
   readonly expectedPolicyRevision: string
 }) => updateRootExclusion(input, "remove-exclusion")
 
-export const startHeldScan = (rootId: string) =>
+const taskError = (task: ScanTask): string | null =>
+  task.readiness_error?.message ?? task.error?.message ?? null
+
+const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
   Effect.gen(function*() {
     const client = yield* RootPreviewClient
     const state = viewStore.getState()
     const root = state.root_saved_roots.find((candidate) => candidate.root_id === rootId)
     const preview = state.root_preview
     if (root === undefined || !isSavedDiscovery(preview) || preview.root_id !== rootId) return
-    if (!state.scan_hold_new_discoveries) return
 
-    yield* Effect.sync(() => viewStore.set({ scan_start_status: "loading", scan_start_error: null }))
+    yield* Effect.sync(() => viewStore.set({
+      scan_start_status: "loading",
+      scan_start_error: null,
+      library_scan_status: holdNewDiscoveries ? viewStore.getState().library_scan_status : "starting",
+      library_scan_task: null,
+      ...(!holdNewDiscoveries ? { screen: "library" as const, library_status: "loading" as const, library_error: null } : {})
+    }))
     const result = yield* client.command({
       root_id: rootId,
       operation_id: newOperationId(),
@@ -255,17 +273,22 @@ export const startHeldScan = (rootId: string) =>
       epoch: preview.epoch,
       expected_mapping_revision: root.mapping_revision,
       expected_policy_revision: preview.policy_revision,
-      command: { type: "start-scan", mode: "manual", hold_new_discoveries: true }
+      command: { type: "start-scan", mode: "manual", hold_new_discoveries: holdNewDiscoveries }
     })
     if (!result.ok) {
       if (result.error.code === "revision_conflict") yield* loadRoots
-      yield* Effect.sync(() => viewStore.set({ scan_start_status: "error", scan_start_error: result.error.message }))
+      yield* Effect.sync(() => viewStore.set({
+        scan_start_status: "error",
+        scan_start_error: result.error.message,
+        ...(!holdNewDiscoveries ? { library_scan_status: "error" as const, library_error: result.error.message } : {})
+      }))
       return
     }
     if (!("task" in result.data)) {
       yield* Effect.sync(() => viewStore.set({
         scan_start_status: "error",
-        scan_start_error: "server returned a root policy result instead of a scan task"
+        scan_start_error: "server returned a root policy result instead of a scan task",
+        ...(!holdNewDiscoveries ? { library_scan_status: "error" as const, library_error: "server returned an invalid scan result" } : {})
       }))
       return
     }
@@ -276,12 +299,36 @@ export const startHeldScan = (rootId: string) =>
         scan_tasks: tasks.some((task) => task.task_id === submittedTask.task_id)
           ? tasks.map((task) => task.task_id === submittedTask.task_id ? submittedTask : task)
           : [...tasks, submittedTask],
-        scan_start_status: "idle",
-        scan_start_error: null
+        scan_start_error: null,
+        ...(holdNewDiscoveries ? {} : { library_scan_task: submittedTask })
       })
     })
-    yield* watchHeldScans
+    yield* watchScanTask(submittedTask.task_id)
+
+    const terminal = viewStore.getState().scan_tasks.find((task) => task.task_id === submittedTask.task_id) ?? submittedTask
+    if (holdNewDiscoveries) {
+      yield* Effect.sync(() => viewStore.set({ scan_start_status: "idle" }))
+      return
+    }
+
+    yield* loadLibrary()
+    const error = taskError(terminal)
+    yield* Effect.sync(() => viewStore.set({
+      scan_start_status: error === null ? "idle" : "error",
+      scan_start_error: error,
+      library_scan_status: error === null ? "started" : "error",
+      library_error: error
+    }))
   })
+
+export const startHeldScan = (rootId: string) =>
+  Effect.gen(function*() {
+    if (!viewStore.getState().scan_hold_new_discoveries) return
+    yield* startManualScanFor(rootId, true)
+  })
+
+export const startManualScan = (rootId: string) =>
+  startManualScanFor(rootId, viewStore.getState().scan_hold_new_discoveries)
 
 export const canSaveRoot = (state: ViewState): boolean => {
   const preview = state.root_preview
@@ -292,6 +339,42 @@ export const canSaveRoot = (state: ViewState): boolean => {
     state.root_label.length > 0 &&
     !state.root_saved_roots.some((root) => root.canonical_server_path === preview.preview_identity.canonical_server_path)
 }
+
+export const showLibrary = Effect.sync(() => viewStore.set({ screen: "library" }))
+export const showSetup = Effect.sync(() => viewStore.set({ screen: "setup" }))
+
+export const loadLibrary = (append = false) =>
+  Effect.gen(function*() {
+    const client = yield* LibraryClient
+    const current = viewStore.getState()
+    const cursor = append ? current.library_cursor : null
+    yield* Effect.sync(() => viewStore.set({
+      screen: "library",
+      library_status: "loading",
+      library_error: null,
+      ...(append ? {} : { library_entries: [], library_cursor: null, library_has_more: false })
+    }))
+    const result = yield* client.search(cursor === null ? { page_size: 50 } : { page_size: 50, cursor })
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({ library_status: "error", library_error: result.error.message }))
+      return
+    }
+    yield* Effect.sync(() => {
+      const existing = append ? viewStore.getState().library_entries : []
+      const ids = new Set(existing.map((entry) => entry.entry_id))
+      const entries = [...existing]
+      for (const entry of result.data.entries) {
+        if (!ids.has(entry.entry_id)) entries.push(entry)
+      }
+      viewStore.set({
+        library_entries: entries,
+        library_cursor: result.data.next_cursor,
+        library_has_more: result.data.has_more,
+        library_status: "ready",
+        library_error: null
+      })
+    })
+  })
 
 export const saveRoot = Effect.gen(function*() {
   const client = yield* RootPreviewClient

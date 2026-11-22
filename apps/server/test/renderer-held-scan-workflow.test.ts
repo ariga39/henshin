@@ -7,7 +7,7 @@ import type {
   StagedDiscovery
 } from "@henshin/contracts"
 import { afterEach, describe, expect, it } from "vitest"
-import { RootPreviewClient, ScanReviewClient, type Result } from "../../desktop/src/renderer/client"
+import { LibraryClient, RootPreviewClient, ScanReviewClient, type Result } from "../../desktop/src/renderer/client"
 import {
   loadRootWorkspace,
   retryScanResults,
@@ -120,14 +120,18 @@ const resetView = () => {
 afterEach(resetView)
 
 const run = <A>(
-  effect: Effect.Effect<A, unknown, RootPreviewClient | ScanReviewClient>,
+  effect: Effect.Effect<A, unknown, RootPreviewClient | ScanReviewClient | LibraryClient>,
   rootClient: RootPreviewClient["Service"],
   scanClient: ScanReviewClient["Service"]
 ) => Effect.runPromise(Effect.provide(
   effect,
   Layer.mergeAll(
     Layer.succeed(RootPreviewClient, rootClient),
-    Layer.succeed(ScanReviewClient, scanClient)
+    Layer.succeed(ScanReviewClient, scanClient),
+    Layer.succeed(LibraryClient, LibraryClient.of({
+      get: () => Effect.succeed({ ok: true as const, data: { library_id: root.library_id, change_revision: "0", roots: [] } }),
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "0" } })
+    }))
   )
 ))
 
