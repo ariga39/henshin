@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type {
+  LocalMappingActivateIpcRequest,
+  LocalMappingListIpcRequest,
   LocalMappingPreviewIpcRequest,
   ReaderProfileSaveIpcRequest,
   ReaderProfileTestIpcRequest,
@@ -21,7 +23,11 @@ contextBridge.exposeInMainWorld("henshinRootPreview", {
 
 contextBridge.exposeInMainWorld("henshinLocalMapping", {
   preview: (input: LocalMappingPreviewIpcRequest) =>
-    ipcRenderer.invoke(IpcChannels.localMappingPreview, input)
+    ipcRenderer.invoke(IpcChannels.localMappingPreview, input),
+  list: (input: LocalMappingListIpcRequest) =>
+    ipcRenderer.invoke(IpcChannels.localMappingList, input),
+  activate: (input: LocalMappingActivateIpcRequest) =>
+    ipcRenderer.invoke(IpcChannels.localMappingActivate, input)
 })
 
 contextBridge.exposeInMainWorld("henshinScanReview", {
