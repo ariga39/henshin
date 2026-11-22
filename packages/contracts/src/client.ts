@@ -1,7 +1,7 @@
 import { Context, Layer } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
 import { HttpApiClient, HttpApiMiddleware } from "effect/http-api"
-import { PrototypeApi, ReviewApi, ServerApi, TaskApi } from "./api"
+import { LibraryApi, PrototypeApi, ReviewApi, ServerApi, TaskApi } from "./api"
 import { Authentication } from "./auth"
 
 /**
@@ -97,6 +97,27 @@ export class ReviewHttpClient extends Context.Service<
     return Layer.effect(
       ReviewHttpClient,
       HttpApiClient.make(ReviewApi, {
+        transformClient: (client) => client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
+      })
+    ).pipe(Layer.provide(AuthenticationClient), Layer.provide(options.transportLayer ?? FetchHttpClient.layer))
+  }
+}
+
+export class LibraryHttpClient extends Context.Service<
+  LibraryHttpClient,
+  HttpApiClient.ForApi<typeof LibraryApi>
+>()("henshin/http/LibraryHttpClient") {
+  static readonly layer = (options: {
+    readonly baseUrl: string
+    readonly bearerToken: string
+    readonly transportLayer?: Layer.Layer<HttpClient.HttpClient>
+  }): Layer.Layer<LibraryHttpClient> => {
+    const AuthenticationClient = HttpApiMiddleware.layerClient(Authentication, ({ next, request }) =>
+      next(HttpClientRequest.bearerToken(request, options.bearerToken))
+    )
+    return Layer.effect(
+      LibraryHttpClient,
+      HttpApiClient.make(LibraryApi, {
         transformClient: (client) => client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
       })
     ).pipe(Layer.provide(AuthenticationClient), Layer.provide(options.transportLayer ?? FetchHttpClient.layer))

@@ -197,7 +197,8 @@ describe("durable held manual scan", () => {
         epoch: randomUUID(),
         rootId: saved.data.root_id,
         expectedMappingRevision: saved.data.mapping_revision,
-        expectedPolicyRevision: saved.data.policy_revision
+        expectedPolicyRevision: saved.data.policy_revision,
+        holdNewDiscoveries: true
       })
       if (started.kind !== "created") throw new Error("expected a persisted running task")
       yield* scans.markRunning(oldTaskId)
@@ -222,6 +223,7 @@ describe("durable held manual scan", () => {
         rootId: saved.data.root_id,
         relativePath: "book",
         kind: "image-directory",
+        holdState: "held",
         analysisStatus: "error",
         manifest: null,
         analysisError: {

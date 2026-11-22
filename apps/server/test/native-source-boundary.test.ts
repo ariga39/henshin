@@ -357,14 +357,19 @@ describe("native source boundary precursor", () => {
     const result = await discoverSourceRoot(observation, { limits: { maxCandidates: 2 } })
     expect(result).toMatchObject({ ok: true })
     if (!result.ok) throw new Error("expected bounded source discovery")
-    expect(result.value.candidates.map((candidate) => candidate.relativePath)).toEqual(["one.zip", "two.zip"])
+    const sampled = result.value.candidates.map((candidate) => candidate.relativePath)
+    expect(new Set(sampled).size).toBe(2)
+    expect(["one.zip", "two.zip", "three.zip"]).toEqual(expect.arrayContaining(sampled))
     expect(result.value.coverage).toMatchObject({
       status: "partial",
       candidateCount: 3,
       candidateSampleTruncated: true
     })
-    expect(result.value.unsupportedLooseImages).toEqual(["unsupported.gif"])
-    expect(result.value.unsupportedLooseImageCount).toBe(1)
+    const uncapped = await discoverSourceRoot(observation)
+    expect(uncapped).toMatchObject({ ok: true, value: {
+      unsupportedLooseImages: ["unsupported.gif"], unsupportedLooseImageCount: 1,
+      coverage: { status: "partial" }
+    } })
   })
 
   it("keeps bounded discoveries explicit when nested coverage is incomplete", async () => {

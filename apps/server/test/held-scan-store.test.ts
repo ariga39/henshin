@@ -26,7 +26,8 @@ it("restores an interrupted task with its staged discovery still held", async ()
       const scans = yield* ScanStore
       const rootId = registered.root.rootId
       const request = { taskId, rootId, operationId: randomUUID(), epoch,
-        expectedMappingRevision: registered.root.mappingRevision, expectedPolicyRevision: registered.root.policyRevision }
+        expectedMappingRevision: registered.root.mappingRevision, expectedPolicyRevision: registered.root.policyRevision,
+        holdNewDiscoveries: true }
       expect((yield* scans.start(request)).kind).toBe("created")
       expect((yield* scans.start(request)).kind).toBe("replayed")
       expect((yield* scans.start({ ...request, operationId: aliasOperation })).kind).toBe("active")
@@ -42,7 +43,7 @@ it("restores an interrupted task with its staged discovery still held", async ()
         unsupported_directory_count: 0, issues: [], issue_count: 0
       }, 1)
       yield* scans.stage({ candidateId, rootId, taskId, relativePath: "unavailable.cbz", kind: "archive",
-        analysisStatus: "error", manifest: null, analysisError: { code: "source-unavailable", message: "Book unavailable",
+        holdState: "held", analysisStatus: "error", manifest: null, analysisError: { code: "source-unavailable", message: "Book unavailable",
           diagnostics: { supported_pages: 0, unsupported_pages: 0, ignored_entries: 0, directory_records: 0 } } })
     }).pipe(Effect.provide(storage)))
 
@@ -54,7 +55,7 @@ it("restores an interrupted task with its staged discovery still held", async ()
         candidates_discovered: 1, analysis_error_count: 1, review_needed_count: 1, coverage: { status: "complete" } })
       if (!task) throw new Error("expected the original scan")
       expect(yield* scans.start({ taskId: randomUUID(), rootId: task.root_id, epoch, operationId: aliasOperation,
-        expectedMappingRevision: task.mapping_revision, expectedPolicyRevision: "0" }))
+        expectedMappingRevision: task.mapping_revision, expectedPolicyRevision: "0", holdNewDiscoveries: true }))
         .toMatchObject({ kind: "replayed", task: { task_id: taskId, status: "interrupted" } })
       expect(yield* scans.listStaged()).toMatchObject([{ candidate_id: candidateId, hold_state: "held",
         relative_path: "unavailable.cbz", analysis_error: { code: "source-unavailable" } }])

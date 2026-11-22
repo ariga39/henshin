@@ -215,6 +215,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
           rootId: task.root_id,
           relativePath: candidate.relativePath,
           kind: candidate.kind,
+          holdState: task.hold_new_discoveries ? "held" : "eligible",
           analysisStatus: "error",
           manifest: null,
           analysisError: sourceError(resolved.code)
@@ -236,6 +237,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
           rootId: task.root_id,
           relativePath: candidate.relativePath,
           kind: candidate.kind,
+          holdState: task.hold_new_discoveries ? "held" : "eligible",
           analysisStatus: "ready",
           manifest: manifestView(manifest),
           analysisError: null
@@ -252,6 +254,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
           rootId: task.root_id,
           relativePath: candidate.relativePath,
           kind: candidate.kind,
+          holdState: task.hold_new_discoveries ? "held" : "eligible",
           analysisStatus: "error",
           manifest: null,
           analysisError: analysisError(result.failure)
@@ -264,20 +267,110 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
       }
     }
 
+    let readinessError: { readonly code: string; readonly message: string } | null = null
+    if (!task.hold_new_discoveries && coverage.status === "complete") {
+      let verifiedAnalyzed = 0
+      let verifiedErrors = 0
+      const verifiedCandidatePaths: Array<string> = []
+      for (const candidate of discovered.value.candidates) {
+        const resolved = yield* Effect.tryPromise({
+          try: () => resolveSourceCandidate(current.value, candidate.relativePath),
+          catch: () => undefined
+        })
+        if (!resolved.ok) {
+          verifiedErrors += 1
+          yield* store.stage({
+            candidateId: randomUUID(),
+            taskId: task.task_id,
+            rootId: task.root_id,
+            relativePath: candidate.relativePath,
+            kind: candidate.kind,
+            holdState: "eligible",
+            analysisStatus: "error",
+            manifest: null,
+            analysisError: sourceError(resolved.code)
+          })
+          continue
+        }
+        const result = yield* Effect.result(analyzeSourceManifest({ sourcePath: resolved.value.nativePath }))
+        if (Result.isSuccess(result)) {
+          verifiedAnalyzed += 1
+          verifiedCandidatePaths.push(candidate.relativePath)
+          yield* store.stage({
+            candidateId: randomUUID(),
+            taskId: task.task_id,
+            rootId: task.root_id,
+            relativePath: candidate.relativePath,
+            kind: candidate.kind,
+            holdState: "eligible",
+            analysisStatus: "ready",
+            manifest: manifestView(result.success),
+            analysisError: null
+          })
+        } else {
+          verifiedErrors += 1
+          yield* store.stage({
+            candidateId: randomUUID(),
+            taskId: task.task_id,
+            rootId: task.root_id,
+            relativePath: candidate.relativePath,
+            kind: candidate.kind,
+            holdState: "eligible",
+            analysisStatus: "error",
+            manifest: null,
+            analysisError: analysisError(result.failure)
+          })
+        }
+      }
+      progress = {
+        ...progress,
+        candidatesAnalyzed: verifiedAnalyzed,
+        analysisErrorCount: verifiedErrors,
+        reviewNeededCount: 0
+      }
+      const rootStillCurrent = yield* Effect.tryPromise({
+        try: () => revalidateSourceRoot(observed),
+        catch: () => undefined
+      })
+      if (!rootStillCurrent.ok) {
+        readinessError = { code: "root_changed", message: "saved root changed or became unavailable during scan" }
+      } else {
+        const published = yield* store.publishNormal({
+          taskId: task.task_id,
+          rootId: task.root_id,
+          mappingRevision: task.mapping_revision,
+          expectedPolicyRevision: root.policyRevision,
+          observedCandidatePaths: verifiedCandidatePaths
+        })
+        switch (published.kind) {
+          case "published":
+            break
+          case "root_not_found":
+          case "mapping_revision_conflict":
+            readinessError = { code: "root_changed", message: "saved root changed during scan" }
+            break
+          case "policy_revision_conflict":
+            readinessError = { code: "policy_changed", message: "saved root policy changed during scan" }
+            break
+        }
+      }
+    }
+
     const hasErrors = progress.analysisErrorCount > 0 || coverage.status === "partial"
+    const failed = readinessError !== null
     yield* finish(store, {
       taskId: task.task_id,
-      status: hasErrors ? "completed_with_errors" : "succeeded",
+      status: failed ? "failed" : hasErrors ? "completed_with_errors" : "succeeded",
       directoriesVisited: progress.directoriesVisited,
       candidatesDiscovered: progress.candidatesDiscovered,
       candidatesAnalyzed: progress.candidatesAnalyzed,
       analysisErrorCount: progress.analysisErrorCount,
       reviewNeededCount: progress.reviewNeededCount,
       coverage: progress.coverage,
-      error: hasErrors
+      error: !failed && hasErrors
         ? { code: progress.analysisErrorCount > 0 ? "analysis_error" : "partial_coverage", message: progress.analysisErrorCount > 0 ? "one or more discoveries could not be analyzed" : "scan coverage is partial" }
         : null,
-      readinessError: null
+      readinessError
     })
   }).pipe(Effect.catchCause((cause) => finishUnexpected(store, task, progress, cause)))
 })
