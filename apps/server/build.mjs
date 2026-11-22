@@ -11,7 +11,7 @@ const shared = {
   target: "node22",
   // Effect and the Node platform adapter stay external and are resolved from
   // node_modules; the workspace contracts package is bundled in.
-  external: ["effect", "effect/*", "@effect/*"],
+  external: ["effect", "effect/*", "@effect/*", "sharp"],
   logLevel: "info"
 }
 
@@ -31,4 +31,10 @@ await build({
   ...shared,
   entryPoints: [path.join(dir, "src/analysis/manifest-probe.ts")],
   outfile: path.join(dir, "dist/manifest-probe.mjs")
+})
+
+await build({
+  ...shared,
+  entryPoints: [path.join(dir, "src/thumbnails/thumbnail-decoder.ts")],
+  outfile: path.join(dir, "dist/thumbnail-decoder.mjs")
 })

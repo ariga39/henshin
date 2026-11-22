@@ -315,6 +315,10 @@ const selectStaged = db.prepare(
 selectStaged.setReadBigInts(true)
 const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ?")
 const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ?")
+const selectAcceptedThumbnailEntry = db.prepare(
+  "SELECT entry_id, root_id, relative_path, kind, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
+)
+selectAcceptedThumbnailEntry.setReadBigInts(true)
 const insertEntry = db.prepare(
   "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, ?, ?, ?)"
 )
@@ -334,7 +338,7 @@ const updateScanTask = db.prepare(
   "UPDATE scan_tasks SET status = ?, directories_visited = ?, candidates_discovered = ?, candidates_analyzed = ?, analysis_error_count = ?, review_needed_count = ?, coverage_json = ?, readiness_error_code = ?, readiness_error_message = ?, error_code = ?, error_message = ?, updated_at_ms = ? WHERE task_id = ? AND status IN ('running', 'queued')"
 )
 const upsertStagedDiscovery = db.prepare(
-  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = excluded.hold_state, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
+  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = CASE WHEN staged_discoveries.hold_state = 'held' THEN 'held' ELSE excluded.hold_state END, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
 )
 const recoverScanTasks = db.prepare(
   "UPDATE scan_tasks SET status = 'interrupted', error_code = 'server_restart', error_message = 'scan interrupted by server restart', updated_at_ms = ? WHERE status IN ('queued', 'running')"
@@ -862,7 +866,27 @@ const entryRow = (row: {
   page_count: Number(row.page_count),
   state: row.state,
   content_version: row.content_version.toString(),
-  location_revision: row.location_revision.toString()
+  location_revision: row.location_revision.toString(),
+  cover: {
+    key: `default-v1.${row.entry_id}.${row.content_version.toString()}`,
+    profile: "default-cover-v1"
+  }
+})
+
+const acceptedThumbnailEntryRow = (row: {
+  entry_id: string
+  root_id: string
+  relative_path: string
+  kind: "archive" | "image-directory"
+  content_version: bigint
+  manifest_json: string
+}): import("./worker-protocol").AcceptedThumbnailEntryRow => ({
+  entry_id: row.entry_id,
+  root_id: row.root_id,
+  relative_path: row.relative_path,
+  kind: row.kind,
+  content_version: row.content_version.toString(),
+  manifest_json: row.manifest_json
 })
 
 const titleForCandidate = (relativePath: string, kind: "archive" | "image-directory"): string => {
@@ -1176,6 +1200,10 @@ const handle = (request: WorkerRequest): unknown => {
         request.directories, request.candidates, request.coverageJson, Date.now(), request.taskId
       ))
       return null
+    case "readAcceptedThumbnailEntry": {
+      const row = selectAcceptedThumbnailEntry.get(request.entryId) as Parameters<typeof acceptedThumbnailEntryRow>[0] | undefined
+      return row === undefined ? null : acceptedThumbnailEntryRow(row)
+    }
     case "markScanRunning":
       requireScanTransition(updateScanRunning.run(Date.now(), request.taskId))
       return null
