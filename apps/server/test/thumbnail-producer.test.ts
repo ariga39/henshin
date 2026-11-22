@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import { randomUUID } from "node:crypto"
 import { vi } from "vitest"
+import { BlobWriter, Uint8ArrayReader, ZipWriter } from "@zip.js/zip.js"
 
 vi.mock("node:url", async () => {
   const actual = await vi.importActual<typeof import("node:url")>("node:url")
@@ -65,16 +66,36 @@ const manifestView = (manifest: SourceManifest) => ({
   }
 })
 
-const makeServices = async (cachePublish: "succeed" | "fail") => {
+const makeServices = async (cachePublish: "succeed" | "fail", sourceKind: "directory" | "archive" = "directory") => {
   const rootPath = await mkdtemp(join(os.tmpdir(), "henshin-thumbnail-producer-"))
   temporaryRoots.push(rootPath)
-  const bookPath = join(rootPath, "book")
-  await mkdir(bookPath)
-  await writeFile(join(bookPath, "001.png"), Buffer.from("corrupt page"))
-  await writeFile(
-    join(bookPath, "002.png"),
-    await sharp({ create: { width: 640, height: 800, channels: 3, background: { r: 30, g: 90, b: 220 } } }).png().toBuffer()
-  )
+  const bookPath = sourceKind === "directory" ? join(rootPath, "book") : join(rootPath, "book.cbz")
+  const goodPage = await sharp({ create: { width: 640, height: 800, channels: 3, background: { r: 30, g: 90, b: 220 } } }).png().toBuffer()
+  if (sourceKind === "directory") {
+    await mkdir(bookPath)
+    await writeFile(join(bookPath, "001.png"), Buffer.from("corrupt page"))
+    await writeFile(join(bookPath, "002.png"), goodPage)
+  } else {
+    const writer = new ZipWriter(new BlobWriter("application/zip"))
+    await writer.add("001.png", new Uint8ArrayReader(Buffer.from("corrupt page")), { compressionMethod: 0 })
+    await writer.add("002.png", new Uint8ArrayReader(goodPage), { compressionMethod: 0 })
+    await writer.add("003.png", new Uint8ArrayReader(Buffer.from("later corrupt page")), { compressionMethod: 0 })
+    const blob = await writer.close()
+    const bytes = Buffer.from(await blob.arrayBuffer())
+    const localHeaders: Array<number> = []
+    let searchFrom = 0
+    while (localHeaders.length < 3) {
+      const offset = bytes.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]), searchFrom)
+      if (offset < 0) break
+      localHeaders.push(offset)
+      searchFrom = offset + 4
+    }
+    const third = localHeaders[2]
+    if (third === undefined) throw new Error("expected third CBZ member")
+    const dataStart = third + 30 + bytes.readUInt16LE(third + 26) + bytes.readUInt16LE(third + 28)
+    bytes[dataStart] = (bytes[dataStart] ?? 0) ^ 0xff
+    await writeFile(bookPath, bytes)
+  }
   const manifest = await Effect.runPromise(analyzeSourceManifest({ sourcePath: bookPath }))
   const selected = await selectSourceRoot(rootPath)
   if (!selected.ok) throw new Error("fixture root could not be selected")
@@ -96,8 +117,8 @@ const makeServices = async (cachePublish: "succeed" | "fail") => {
   const accepted = {
     entry_id: entryId,
     root_id: rootId,
-    relative_path: "book",
-    kind: "image-directory" as const,
+    relative_path: sourceKind === "directory" ? "book" : "book.cbz",
+    kind: sourceKind === "directory" ? "image-directory" as const : "archive" as const,
     content_version: "1",
     manifest_json: JSON.stringify(manifestView(manifest))
   }
@@ -150,6 +171,19 @@ describe("real default-cover producer", () => {
     )
     expect(result.kind).toBe("ready")
     if (result.kind !== "ready") throw new Error("expected rendered cover")
+    await expect(sharp(result.bytes).metadata()).resolves.toMatchObject({ format: "webp", width: 320, height: 480 })
+  })
+
+  it("renders the first good page from a real CBZ without touching a later corrupt member", async () => {
+    const fixture = await makeServices("succeed", "archive")
+    const result = await Effect.runPromise(
+      Effect.gen(function*() {
+        const producer = yield* ThumbnailProducer
+        return yield* producer.load(`default-v1.${fixture.entryId}.1`)
+      }).pipe(Effect.provide(fixture.layer))
+    )
+    expect(result.kind).toBe("ready")
+    if (result.kind !== "ready") throw new Error("expected rendered CBZ cover")
     await expect(sharp(result.bytes).metadata()).resolves.toMatchObject({ format: "webp", width: 320, height: 480 })
   })
 })
