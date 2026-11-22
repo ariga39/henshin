@@ -11,6 +11,7 @@ import type {
   ServerRoot,
   SavedDraft
 } from "@henshin/contracts"
+import type { OpenJournalView } from "./client"
 
 export type Outcome =
   | { readonly kind: "committed"; readonly revision: string }
@@ -37,6 +38,7 @@ export interface ViewState {
   readonly outcome: Outcome | null
   readonly recovery_attempts: ReadonlyArray<CommandAttempt>
   readonly recovery_result: CommandReconciliation | null
+  readonly open_journal: ReadonlyArray<OpenJournalView>
   readonly root_preview_path: string
   readonly root_preview_selected_path: string | null
   readonly root_preview_status: "idle" | "loading" | "ready" | "error"
@@ -97,6 +99,7 @@ const initialState: ViewState = {
   outcome: null,
   recovery_attempts: [],
   recovery_result: null,
+  open_journal: [],
   root_preview_path: "",
   root_preview_selected_path: null,
   root_preview_status: "idle",

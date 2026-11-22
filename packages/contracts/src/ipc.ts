@@ -48,6 +48,9 @@ export type DisconnectIpcRequest = typeof DisconnectIpcRequest.Type
 export const ConnectionStatusIpcRequest = Schema.Struct({})
 export type ConnectionStatusIpcRequest = typeof ConnectionStatusIpcRequest.Type
 
+export const ListOpenJournalIpcRequest = Schema.Struct({})
+export type ListOpenJournalIpcRequest = typeof ListOpenJournalIpcRequest.Type
+
 export const GetNoteIpcRequest = Schema.Struct({
   note_id: NoteId
 })

@@ -8,6 +8,7 @@ import {
   disconnect,
   reconnect,
   loadRecovery,
+  loadOpenJournal,
   loadSavedDraft,
   reconcileRecovery,
   saveLocalDraft,
@@ -103,6 +104,26 @@ export const App = () => {
         >
           Disconnect
         </button>
+      </section>
+      <section aria-labelledby="open-delivery-actions">
+        <h2 id="open-delivery-actions">Reader handoff delivery</h2>
+        <p>
+          Accepted reader handoffs stay pending until the authenticated original server acknowledges the same event.
+        </p>
+        <button data-testid="load-open-journal" onClick={() => void runtime.runPromise(loadOpenJournal)}>
+          Refresh handoff status
+        </button>
+        <p data-testid="open-delivery-status">
+          {state.open_journal.filter((row) => row.deliveryStatus === "pending").length} pending handoff event(s)
+        </p>
+        {state.open_journal.filter((row) => row.deliveryStatus !== "acknowledged").map((row) => (
+          <article key={row.actionId} data-testid={`open-event-${row.actionId}`}>
+            <p>
+              entry {row.entryId}: {row.deliveryStatus === "held" ? "held" : "pending"}
+            </p>
+            {row.deliveryErrorMessage !== null && <p>{row.deliveryErrorMessage}</p>}
+          </article>
+        ))}
       </section>
       <label htmlFor="text-input">New text</label>
       <input

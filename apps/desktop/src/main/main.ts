@@ -13,6 +13,8 @@ import {
   HandshakeIpcRequest,
   IpcChannels,
   LibraryHttpClient,
+  OpenEventHttpClient,
+  ListOpenJournalIpcRequest,
   LibrarySearchIpcRequest,
   LoadDraftIpcRequest,
   ListCommandAttemptsIpcRequest,
@@ -48,6 +50,8 @@ import {
   reconcileNoteCommand
 } from "./CommandCoordinator"
 import { LocalDatabaseWorker } from "./persistence/LocalDatabaseWorker"
+import { OpenJournalStore } from "./persistence/OpenJournalStore"
+import { deliverOpenEvents } from "./OpenEventDelivery"
 import {
   ConnectionInstanceMismatchError,
   ConnectionLifecycle,
@@ -72,7 +76,7 @@ interface IpcErr {
 
 let mainWindow: BrowserWindow | null = null
 let serverChild: ServerChild | null = null
-type MainServices = DraftStore | CommandAttemptStore
+type MainServices = DraftStore | CommandAttemptStore | OpenJournalStore
 let runtime: ManagedRuntime.ManagedRuntime<MainServices, never> | null = null
 let connection: ConnectionLifecycle | null = null
 let rendererUrl = ""
@@ -218,11 +222,30 @@ const requireConnection = (): ConnectionLifecycle => {
   return connection
 }
 
+const deliverPendingOpenEvents = async (): Promise<void> => {
+  const activeConnection = connection
+  if (activeConnection === null) return
+  const session = activeConnection.getSession()
+  if (session === null) return
+  try {
+    const store = await requireRuntime().runPromise(Effect.gen(function*() {
+      return yield* OpenJournalStore
+    }))
+    await activeConnection.run(Effect.gen(function*() {
+      const client = yield* OpenEventHttpClient
+      return yield* deliverOpenEvents(store, client, session)
+    }))
+  } catch {
+    // A lost response, paused connection, or local write failure leaves the
+    // immutable event pending. The next deliberate reconnect retries it.
+  }
+}
+
 const runNetworkResult = <A>(
   effect: Effect.Effect<
     IpcOk<A> | IpcErr,
     never,
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient
   >
 ): Promise<IpcOk<A> | IpcErr> =>
   requireConnection()
@@ -421,7 +444,7 @@ const registerIpc = (): void => {
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return requireConnection()
       .connect()
-      .then(connectionStatusResult)
+      .then((status) => deliverPendingOpenEvents().then(() => connectionStatusResult(status)))
       .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
   })
 
@@ -437,6 +460,25 @@ const registerIpc = (): void => {
     const decoded = Schema.decodeUnknownOption(ConnectionStatusIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return connectionStatusResult(requireConnection().getStatus())
+  })
+
+  ipcMain.handle(IpcChannels.listOpenJournal, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ListOpenJournalIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    try {
+      const instanceId = requireNamespace()
+      return requireRuntime().runPromise(
+        toResult(
+          Effect.gen(function*() {
+            const journal = yield* OpenJournalStore
+            return { data: yield* journal.list(instanceId) }
+          })
+        )
+      )
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
   })
 
   ipcMain.handle(IpcChannels.getNote, (event, raw: unknown) => {
@@ -725,7 +767,8 @@ const bootstrap = async (): Promise<void> => {
   runtime = ManagedRuntime.make(
     Layer.mergeAll(
       DraftStore.layerFromWorker,
-      CommandAttemptStore.layerFromWorker
+      CommandAttemptStore.layerFromWorker,
+      OpenJournalStore.layerFromWorker
     ).pipe(Layer.provide(localWorker))
   )
 
@@ -736,6 +779,7 @@ const bootstrap = async (): Promise<void> => {
     bearerToken: serverChild.bearerToken
   })
   await connection.connect()
+  await deliverPendingOpenEvents()
 
   registerIpc()
   createWindow()
