@@ -657,16 +657,16 @@ const selectStagedForResolution = db.prepare(
   "SELECT analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
 const selectResolutionSiblingClaims = db.prepare(
-  "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
+  "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
 )
 const selectResolutionSiblingClaimsAfter = db.prepare(
-  "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? AND (relative_path > ? OR (relative_path = ? AND entry_id > ?)) ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
+  "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? AND (relative_path > ? OR (relative_path = ? AND entry_id > ?)) ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
 )
 const selectResolutionSiblingCursor = db.prepare(
-  "SELECT entry_id, root_id, relative_path FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
+  "SELECT entry_id, root_id, relative_path FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
 )
 const MAX_RESOLUTION_SIBLINGS = 128
-const selectEntryById = db.prepare("SELECT entry_id FROM library_entries WHERE entry_id = ? AND state = 'accepted'")
+const selectEntryById = db.prepare("SELECT entry_id FROM library_entries WHERE entry_id = ?")
 const selectOpenEvent = db.prepare(
   "SELECT event_id, instance_id, entry_id, device_id, observed_location_revision, observed_content_version, occurred_at_ms, receipt_at_ms FROM open_events WHERE event_id = ?"
 )

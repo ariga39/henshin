@@ -871,10 +871,26 @@ describe("normal library scan", () => {
     if (target === undefined) throw new Error("expected target entry")
     expect(entries.data.entries).toHaveLength(131)
 
+    await writeFile(path.join(fixture, "book-127", "001.jpg"), "changed")
+    const replacementScan = await withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in replacementScan.data)) throw new Error("expected replacement scan task")
+    expect((await waitForTerminal(server, replacementScan.data.task.task_id)).status).toBe("completed_with_errors")
+
     const beforeRestart = await withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).resolution({ params: { id: target.entry_id }, query: {} })
     }))
     expect(beforeRestart.data.sibling_claims_truncated).toBe(true)
+    expect(beforeRestart.data.sibling_claims.at(-1)?.relative_path).toBe("book-127")
 
     await server.stop()
     const db = new DatabaseSync(server.dbPath)
@@ -932,6 +948,7 @@ describe("normal library scan", () => {
     expect(first.data.sibling_claims_revision).not.toBe(beforeRestart.data.sibling_claims_revision)
     expect(first.data.sibling_claims).toHaveLength(128)
     expect(first.data.sibling_claims.map((claim) => claim.relative_path)).not.toContain("book-999")
+    expect(first.data.sibling_claims.at(-1)?.relative_path).toBe("book-127")
     expect(first.data.sibling_claims_next_cursor).not.toBeNull()
 
     const second = await withLibraryClient(restarted, Effect.gen(function*() {
@@ -951,6 +968,7 @@ describe("normal library scan", () => {
       sibling_claims_revision: first.data.sibling_claims_revision
     })
     expect(second.data.sibling_claims.map((claim) => claim.relative_path)).toContain("book-999")
+    expect(second.data.sibling_claims.map((claim) => claim.relative_path)).toContain("book-128")
   })
 
   it("pages nested mixed-case and normalization-equivalent sibling claims through HTTP", async () => {
