@@ -20,11 +20,7 @@ import {
   RootListIpcRequest,
   RootCommandIpcRequest,
   RootSaveIpcRequest,
-  ReviewCandidatesIpcRequest,
   ServerHttpClient,
-  ReviewHttpClient,
-  TaskHttpClient,
-  TaskListIpcRequest,
   SaveDraftIpcRequest,
   ReconcileCommandIpcRequest,
   ConnectionStatusView,
@@ -216,11 +212,7 @@ const requireConnection = (): ConnectionLifecycle => {
 }
 
 const runNetworkResult = <A>(
-  effect: Effect.Effect<
-    IpcOk<A> | IpcErr,
-    never,
-    PrototypeHttpClient | ServerHttpClient | TaskHttpClient | ReviewHttpClient
-  >
+  effect: Effect.Effect<IpcOk<A> | IpcErr, never, PrototypeHttpClient | ServerHttpClient>
 ): Promise<IpcOk<A> | IpcErr> =>
   requireConnection()
     .run(effect)
@@ -304,40 +296,8 @@ const registerIpc = (): void => {
       toResult(
         Effect.gen(function*() {
           const client = yield* ServerHttpClient
-          if ("expected_mapping_revision" in decoded.value) {
-            const { root_id, ...payload } = decoded.value
-            return yield* client.command({ params: { id: root_id }, payload })
-          }
           const { root_id, ...payload } = decoded.value
           return yield* client.command({ params: { id: root_id }, payload })
-        })
-      )
-    )
-  })
-
-  ipcMain.handle(IpcChannels.taskList, (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(TaskListIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    return runNetworkResult(
-      toResult(
-        Effect.gen(function*() {
-          const client = yield* TaskHttpClient
-          return yield* client.list()
-        })
-      )
-    )
-  })
-
-  ipcMain.handle(IpcChannels.reviewCandidates, (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ReviewCandidatesIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    return runNetworkResult(
-      toResult(
-        Effect.gen(function*() {
-          const client = yield* ReviewHttpClient
-          return yield* client.candidates()
         })
       )
     )
