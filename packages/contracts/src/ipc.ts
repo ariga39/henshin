@@ -4,8 +4,7 @@ import {
   RootPolicyCommand,
   RootPreviewRequest,
   RootRegistrationRequest,
-  RootScanCommand,
-  ScanTaskSubmission
+  RootScanCommand
 } from "./root"
 import type {
   CommandAttempt,
@@ -153,5 +152,3 @@ export type TaskListIpcRequest = typeof TaskListIpcRequest.Type
 
 export const ReviewCandidatesIpcRequest = Schema.Struct({})
 export type ReviewCandidatesIpcRequest = typeof ReviewCandidatesIpcRequest.Type
-
-export type HeldScanIpcResult = ScanTaskSubmission

@@ -164,6 +164,7 @@ export const NormalPublishOutcome = Schema.Union([
 export type NormalPublishOutcome = typeof NormalPublishOutcome.Type
 
 export const ScanStartOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("active_scan_conflict"), taskId: Uuid, policyRevision: Revision }),
   Schema.Struct({ kind: Schema.Literal("created"), task: ScanTaskRow }),
   Schema.Struct({ kind: Schema.Literal("replayed"), task: ScanTaskRow }),
   Schema.Struct({ kind: Schema.Literal("active"), task: ScanTaskRow }),

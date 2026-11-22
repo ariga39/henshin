@@ -329,9 +329,9 @@ const selectLibraryEntries = (cursor: string | null, limit: number) => cursor ==
 const insertScanTask = db.prepare(
   "INSERT INTO scan_tasks(task_id, operation_id, epoch, root_id, mapping_revision, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, command_payload, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)"
 )
-const updateScanRunning = db.prepare("UPDATE scan_tasks SET status = 'running', updated_at_ms = ? WHERE task_id = ?")
+const updateScanRunning = db.prepare("UPDATE scan_tasks SET status = 'running', updated_at_ms = ? WHERE task_id = ? AND status = 'queued'")
 const updateScanTask = db.prepare(
-  "UPDATE scan_tasks SET status = ?, directories_visited = ?, candidates_discovered = ?, candidates_analyzed = ?, analysis_error_count = ?, review_needed_count = ?, coverage_json = ?, readiness_error_code = ?, readiness_error_message = ?, error_code = ?, error_message = ?, updated_at_ms = ? WHERE task_id = ?"
+  "UPDATE scan_tasks SET status = ?, directories_visited = ?, candidates_discovered = ?, candidates_analyzed = ?, analysis_error_count = ?, review_needed_count = ?, coverage_json = ?, readiness_error_code = ?, readiness_error_message = ?, error_code = ?, error_message = ?, updated_at_ms = ? WHERE task_id = ? AND status IN ('running', 'queued')"
 )
 const upsertStagedDiscovery = db.prepare(
   "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = excluded.hold_state, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
@@ -664,13 +664,16 @@ const startManualScan = (
       return { kind: "policy_revision_conflict", currentPolicyRevision: root.policyRevision }
     }
 
+    db.prepare(`UPDATE scan_tasks SET status = 'interrupted', updated_at_ms = ?, error_code = 'server_restart',
+      error_message = 'scan interrupted by server restart' WHERE root_id = ? AND epoch <> ?
+      AND status IN ('queued', 'running')`).run(Date.now(), request.rootId, request.epoch)
     const active = db.prepare(
-      "SELECT task_id, command_payload FROM scan_tasks WHERE root_id = ? AND mapping_revision = ? AND status IN ('queued', 'running') ORDER BY created_at_ms ASC, rowid ASC LIMIT 1"
-    ).get(request.rootId, BigInt(request.expectedMappingRevision)) as { task_id: string; command_payload: string } | undefined
+      "SELECT task_id, command_payload, json_extract(command_payload, '$.expected_policy_revision') AS policy_revision FROM scan_tasks WHERE root_id = ? AND mapping_revision = ? AND status IN ('queued', 'running') ORDER BY created_at_ms ASC, rowid ASC LIMIT 1"
+    ).get(request.rootId, BigInt(request.expectedMappingRevision)) as { task_id: string; command_payload: string; policy_revision: string } | undefined
     if (active !== undefined) {
       if (active.command_payload !== commandPayload) {
         db.exec("ROLLBACK")
-        return { kind: "policy_revision_conflict", currentPolicyRevision: root.policyRevision }
+        return { kind: "active_scan_conflict", taskId: active.task_id, policyRevision: active.policy_revision }
       }
       db.prepare("INSERT INTO scan_start_aliases(epoch, operation_id, task_id) VALUES(?, ?, ?)").run(
         request.epoch, request.operationId, active.task_id
@@ -798,6 +801,10 @@ const commitRootPolicy = (
   }
 }
 
+const requireScanTransition = (result: { changes: number | bigint }): void => {
+  if (Number(result.changes) !== 1) throw new Error("scan task is no longer active for this operation")
+}
+
 const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }>): void => {
   db.exec("BEGIN IMMEDIATE")
   try {
@@ -818,13 +825,13 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
       Date.now()
     )
     const priorStatus = existing?.task_id === request.taskId ? existing.analysis_status : undefined
-    db.prepare(`UPDATE scan_tasks SET
+    requireScanTransition(db.prepare(`UPDATE scan_tasks SET
       candidates_analyzed = candidates_analyzed + ?, analysis_error_count = analysis_error_count + ?,
-      review_needed_count = review_needed_count + ?, updated_at_ms = ? WHERE task_id = ?`).run(
+      review_needed_count = review_needed_count + ?, updated_at_ms = ? WHERE task_id = ? AND root_id = ? AND status = 'running'`).run(
       Number(request.analysisStatus === "ready") - Number(priorStatus === "ready"),
       Number(request.analysisStatus === "error") - Number(priorStatus === "error"),
-      Number(priorStatus === undefined), Date.now(), request.taskId
-    )
+      Number(priorStatus === undefined), Date.now(), request.taskId, request.rootId
+    ))
     db.exec("COMMIT")
   } catch (error) {
     db.exec("ROLLBACK")
@@ -985,7 +992,7 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
 }
 
 const finishScan = (request: Extract<WorkerRequest, { op: "finishScan" }>): void => {
-  updateScanTask.run(
+  requireScanTransition(updateScanTask.run(
     request.status,
     BigInt(request.directoriesVisited),
     BigInt(request.candidatesDiscovered),
@@ -999,7 +1006,7 @@ const finishScan = (request: Extract<WorkerRequest, { op: "finishScan" }>): void
     request.errorMessage,
     Date.now(),
     request.taskId
-  )
+  ))
 }
 
 const operationResult = (
@@ -1164,13 +1171,13 @@ const handle = (request: WorkerRequest): unknown => {
     case "listLibraryEntries":
       return libraryEntries(request)
     case "recordDiscovery":
-      db.prepare(`UPDATE scan_tasks SET directories_visited = ?, candidates_discovered = ?, coverage_json = ?,
+      requireScanTransition(db.prepare(`UPDATE scan_tasks SET directories_visited = ?, candidates_discovered = ?, coverage_json = ?,
         updated_at_ms = ? WHERE task_id = ? AND status = 'running'`).run(
         request.directories, request.candidates, request.coverageJson, Date.now(), request.taskId
-      )
+      ))
       return null
     case "markScanRunning":
-      updateScanRunning.run(Date.now(), request.taskId)
+      requireScanTransition(updateScanRunning.run(Date.now(), request.taskId))
       return null
     case "stageDiscovery":
       stageDiscovery(request)
