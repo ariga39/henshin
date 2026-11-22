@@ -1,7 +1,7 @@
 import { Effect } from "effect"
 import type { ConnectionStatusView } from "@henshin/contracts"
 import { PrototypeClient, RootPreviewClient } from "./client"
-import { viewStore } from "./store"
+import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
 export const FORM_ID = "synthetic-note"
@@ -18,6 +18,7 @@ export const previewRoot = (path: string) =>
         root_preview_status: "loading",
         root_preview: null,
         root_preview_error: null,
+        root_save_operation_id: null,
         root_save_status: "idle",
         root_save_error: null
       })
@@ -58,27 +59,36 @@ export const loadRoots = Effect.gen(function*() {
   }
 })
 
+export const canSaveRoot = (state: ViewState): boolean => {
+  const preview = state.root_preview
+  return preview !== null &&
+    state.root_preview_status === "ready" &&
+    state.root_save_status !== "loading" &&
+    state.root_preview_path === preview.selected_server_path &&
+    state.root_label.length > 0 &&
+    !state.root_saved_roots.some((root) => root.canonical_server_path === preview.preview_identity.canonical_server_path)
+}
+
 export const saveRoot = Effect.gen(function*() {
   const client = yield* RootPreviewClient
   const state = viewStore.getState()
   const preview = state.root_preview
-  if (
-    preview === null ||
-    state.root_preview_status !== "ready" ||
-    state.root_preview_path !== preview.selected_server_path ||
-    state.root_label.length === 0
-  ) return
+  if (!preview || !canSaveRoot(state)) return
 
   const confirmedPath = preview.selected_server_path
   const confirmedLabel = state.root_label
+  const operationId = state.root_save_target_label === confirmedLabel && state.root_save_target_path === confirmedPath
+    ? state.root_save_operation_id ?? newOperationId()
+    : newOperationId()
   yield* Effect.sync(() => viewStore.set({
+    root_save_operation_id: operationId,
     root_save_status: "loading",
     root_save_error: null,
     root_save_target_label: confirmedLabel,
     root_save_target_path: confirmedPath
   }))
   const result = yield* client.save({
-    operation_id: newOperationId(),
+    operation_id: operationId,
     instance_id: preview.instance_id,
     epoch: preview.epoch,
     label: state.root_label,

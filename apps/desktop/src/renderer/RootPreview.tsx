@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { previewRoot, saveRoot } from "./workflows"
+import { canSaveRoot, previewRoot, saveRoot } from "./workflows"
 
 const rootPreviewStatusText = (state: ReturnType<typeof viewStore.getState>): string => {
   if (state.root_save_status === "loading") return "Saving server root…"
@@ -27,10 +27,6 @@ export const RootPreviewScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   const loading = state.root_preview_status === "loading"
   const saving = state.root_save_status === "loading"
-  const canSave = state.root_preview !== null &&
-    state.root_preview_status === "ready" &&
-    state.root_preview_path === state.root_preview.selected_server_path &&
-    state.root_label.length > 0
   return (
     <main className="collection">
       <h1>Collection setup</h1>
@@ -60,7 +56,7 @@ export const RootPreviewScreen = () => {
         <h2 data-testid="root-preview-selected-path">{state.root_preview_selected_path}</h2>
       )}
       <p role="status" data-testid="root-preview-outcome">{rootPreviewStatusText(state)}</p>
-      <button data-testid="root-save" disabled={!canSave || saving} onClick={() => void runtime.runPromise(saveRoot)}>
+      <button data-testid="root-save" disabled={!canSaveRoot(state)} onClick={() => void runtime.runPromise(saveRoot)}>
         {saving ? "Saving…" : "Save server root"}
       </button>
       {state.root_preview_status === "error" && state.root_preview_selected_path === state.root_preview_path && (
