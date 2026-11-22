@@ -351,7 +351,7 @@ describe("normal library scan", () => {
 
   })
 
-  it("keeps a changed occupied path staged without changing the accepted identity", async () => {
+  it("blocks Open resolution for a pending changed occupied path without changing accepted identity", async () => {
     const server = await start()
     const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-replacement-"))
     fixturePaths.add(fixture)
@@ -411,9 +411,13 @@ describe("normal library scan", () => {
     expect(after.data.entries[0]).toMatchObject({
       entry_id: accepted.entry_id,
       relative_path: "book",
+      state: "replacement-pending",
       page_count: 1,
       content_version: "1",
       location_revision: "1"
+    })
+    expect(after.data.entries[0]?.replacement).toMatchObject({
+      candidate_observation: { analysis_status: "ready" }
     })
 
     const changedResolution = await withLibraryClient(server, Effect.gen(function*() {
