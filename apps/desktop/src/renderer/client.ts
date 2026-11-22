@@ -19,7 +19,8 @@ import type {
   StagedDiscovery,
   ServerRoot,
   ServerRootList,
-  SavedDraftAbsent
+  SavedDraftAbsent,
+  ThumbnailKey
 } from "@henshin/contracts"
 
 export type Result<A> =
@@ -93,6 +94,7 @@ export interface ScanReviewBridge {
 export interface LibraryBridge {
   get(): Promise<Result<LibraryView>>
   search(input: { readonly page_size?: number; readonly cursor?: string }): Promise<Result<LibraryEntryPage>>
+  getThumbnail(key: ThumbnailKey): Promise<Result<Uint8Array>>
 }
 
 /**
@@ -194,13 +196,15 @@ export class LibraryClient extends Context.Service<
   {
     readonly get: () => Effect.Effect<Result<LibraryView>>
     readonly search: (input: { readonly page_size?: number; readonly cursor?: string }) => Effect.Effect<Result<LibraryEntryPage>>
+    readonly getThumbnail: (key: ThumbnailKey) => Effect.Effect<Result<Uint8Array>>
   }
 >()("henshin/desktop/renderer/LibraryClient") {
   static readonly layer = Layer.succeed(
     LibraryClient,
     LibraryClient.of({
       get: () => callIpc(() => window.henshinLibrary.get()),
-      search: (input) => callIpc(() => window.henshinLibrary.search(input))
+      search: (input) => callIpc(() => window.henshinLibrary.search(input)),
+      getThumbnail: (key) => callIpc(() => window.henshinLibrary.getThumbnail(key))
     })
   )
 }

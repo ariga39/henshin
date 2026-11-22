@@ -130,7 +130,8 @@ const run = <A>(
     Layer.succeed(ScanReviewClient, scanClient),
     Layer.succeed(LibraryClient, LibraryClient.of({
       get: () => Effect.succeed({ ok: true as const, data: { library_id: root.library_id, change_revision: "0", roots: [] } }),
-      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "0" } })
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "0" } }),
+      getThumbnail: () => Effect.succeed({ ok: false as const, error: { code: "thumbnail_missing", message: "not used", retryable: false } })
     }))
   )
 ))

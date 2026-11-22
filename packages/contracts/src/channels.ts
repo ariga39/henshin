@@ -9,6 +9,7 @@ export const IpcChannels = {
   rootCommand: "henshin:root-command",
   libraryGet: "henshin:library-get",
   librarySearch: "henshin:library-search",
+  thumbnailGet: "henshin:thumbnail-get",
   taskList: "henshin:task-list",
   reviewCandidates: "henshin:review-candidates",
   handshake: "henshin-prototype:handshake",

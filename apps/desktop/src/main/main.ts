@@ -14,6 +14,8 @@ import {
   IpcChannels,
   LibraryHttpClient,
   LibrarySearchIpcRequest,
+  ThumbnailGetIpcRequest,
+  ThumbnailHttpClient,
   LoadDraftIpcRequest,
   ListCommandAttemptsIpcRequest,
   PrototypeHttpClient,
@@ -180,6 +182,14 @@ const toResult = <A, R>(effect: Effect.Effect<{ readonly data: A }, unknown, R>)
     })
   )
 
+const toRawResult = <A, R>(effect: Effect.Effect<A, unknown, R>): Effect.Effect<IpcOk<A> | IpcErr, never, R> =>
+  effect.pipe(
+    Effect.match({
+      onFailure: (error) => ({ ok: false as const, error: toPublicError(error) }),
+      onSuccess: (data) => ({ ok: true as const, data })
+    })
+  )
+
 const assertTrustedSender = (event: IpcMainInvokeEvent): void => {
   if (mainWindow === null || event.sender !== mainWindow.webContents) {
     throw new Error("rejected IPC from an untrusted web contents")
@@ -221,7 +231,7 @@ const runNetworkResult = <A>(
   effect: Effect.Effect<
     IpcOk<A> | IpcErr,
     never,
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | ThumbnailHttpClient
   >
 ): Promise<IpcOk<A> | IpcErr> =>
   requireConnection()
@@ -342,6 +352,20 @@ const registerIpc = (): void => {
         Effect.gen(function*() {
           const client = yield* LibraryHttpClient
           return yield* client.search({ payload: decoded.value })
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.thumbnailGet, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ThumbnailGetIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return runNetworkResult(
+      toRawResult(
+        Effect.gen(function*() {
+          const client = yield* ThumbnailHttpClient
+          return yield* client.get({ params: { key: decoded.value.key } })
         })
       )
     )
