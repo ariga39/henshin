@@ -3,6 +3,7 @@ import type {
   CommandReconciliation,
   ConnectionStatusView,
   NoteView,
+  RootPreviewRequest,
   RootPreviewResult,
   ServerRoot,
   SavedDraft
@@ -36,12 +37,15 @@ export interface ViewState {
   readonly root_preview_selected_path: string | null
   readonly root_preview_status: "idle" | "loading" | "ready" | "error"
   readonly root_preview: RootPreviewResult | null
+  readonly root_preview_request: RootPreviewRequest | null
+  readonly root_preview_generation: number
   readonly root_preview_error: string | null
   readonly root_label: string
   readonly root_saved_roots: ReadonlyArray<ServerRoot>
   readonly root_roots_status: "idle" | "loading" | "ready" | "error"
   readonly root_roots_error: string | null
   readonly root_save_status: "idle" | "loading" | "ready" | "error"
+  readonly root_save_operation_id: string | null
   readonly root_save_error: string | null
   readonly root_save_target_label: string | null
   readonly root_save_target_path: string | null
@@ -67,12 +71,15 @@ const initialState: ViewState = {
   root_preview_selected_path: null,
   root_preview_status: "idle",
   root_preview: null,
+  root_preview_request: null,
+  root_preview_generation: 0,
   root_preview_error: null,
   root_label: "",
   root_saved_roots: [],
   root_roots_status: "idle",
   root_roots_error: null,
   root_save_status: "idle",
+  root_save_operation_id: null,
   root_save_error: null,
   root_save_target_label: null,
   root_save_target_path: null,
