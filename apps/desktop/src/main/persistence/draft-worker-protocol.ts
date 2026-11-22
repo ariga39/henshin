@@ -117,6 +117,13 @@ export const OpenJournalStatus = Schema.Union([
 ])
 export type OpenJournalStatus = typeof OpenJournalStatus.Type
 
+export const OpenDeliveryStatus = Schema.Union([
+  Schema.Literal("pending"),
+  Schema.Literal("acknowledged"),
+  Schema.Literal("held")
+])
+export type OpenDeliveryStatus = typeof OpenDeliveryStatus.Type
+
 export const OpenJournalRow = Schema.Struct({
   instanceId: Uuid,
   actionId: Uuid,
@@ -126,6 +133,9 @@ export const OpenJournalRow = Schema.Struct({
   observedContentVersion: Revision,
   status: OpenJournalStatus,
   event: Schema.NullOr(OpenEvent),
+  deliveryStatus: Schema.NullOr(OpenDeliveryStatus),
+  deliveryErrorCode: Schema.NullOr(Schema.String),
+  deliveryErrorMessage: Schema.NullOr(Schema.String),
   failureCode: Schema.NullOr(Schema.String),
   failureMessage: Schema.NullOr(Schema.String),
   createdAtMs: Schema.Int,
@@ -226,6 +236,14 @@ export const DraftWorkerRequest = Schema.Union([
     observedContentVersion: Revision
   }),
   Schema.Struct({ op: Schema.Literal("recordOpenAccepted"), instanceId: Uuid, actionId: Uuid, event: OpenEvent }),
+  Schema.Struct({ op: Schema.Literal("acknowledgeOpenEvent"), instanceId: Uuid, actionId: Uuid }),
+  Schema.Struct({
+    op: Schema.Literal("holdOpenEvent"),
+    instanceId: Uuid,
+    actionId: Uuid,
+    deliveryErrorCode: Schema.String,
+    deliveryErrorMessage: Schema.String
+  }),
   Schema.Struct({
     op: Schema.Literal("recordOpenFailed"),
     instanceId: Uuid,

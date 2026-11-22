@@ -90,6 +90,9 @@ db.exec(`
     observed_content_version INTEGER NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('prepared', 'accepted', 'failed', 'unknown')),
     event_json TEXT,
+    delivery_status TEXT NOT NULL DEFAULT 'pending',
+    delivery_error_code TEXT,
+    delivery_error_message TEXT,
     failure_code TEXT,
     failure_message TEXT,
     created_at_ms INTEGER NOT NULL,
@@ -100,6 +103,19 @@ db.exec(`
       (status <> 'failed' AND failure_code IS NULL AND failure_message IS NULL))
   );
 `)
+
+const launchJournalColumns = new Set(
+  (db.prepare("PRAGMA table_info(launch_journal)").all() as unknown as ReadonlyArray<{ name: string }>).map((column) => column.name)
+)
+if (!launchJournalColumns.has("delivery_status")) {
+  db.exec("ALTER TABLE launch_journal ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'pending'")
+}
+if (!launchJournalColumns.has("delivery_error_code")) {
+  db.exec("ALTER TABLE launch_journal ADD COLUMN delivery_error_code TEXT")
+}
+if (!launchJournalColumns.has("delivery_error_message")) {
+  db.exec("ALTER TABLE launch_journal ADD COLUMN delivery_error_message TEXT")
+}
 
 // A prepared intent has no reliable dispatch outcome after this worker has
 // been closed and reopened. Preserve it as diagnostic unknown rather than
@@ -153,7 +169,8 @@ listReaderProfiles.setReadBigInts(true)
 const selectOpenJournal = db.prepare(`
   SELECT instance_id, action_id, entry_id, device_id,
          observed_location_revision, observed_content_version, status,
-         event_json, failure_code, failure_message, created_at_ms, updated_at_ms
+         event_json, delivery_status, delivery_error_code, delivery_error_message,
+         failure_code, failure_message, created_at_ms, updated_at_ms
   FROM launch_journal
   WHERE instance_id = ? AND action_id = ?
 `)
@@ -161,7 +178,8 @@ selectOpenJournal.setReadBigInts(true)
 const listOpenJournal = db.prepare(`
   SELECT instance_id, action_id, entry_id, device_id,
          observed_location_revision, observed_content_version, status,
-         event_json, failure_code, failure_message, created_at_ms, updated_at_ms
+         event_json, delivery_status, delivery_error_code, delivery_error_message,
+         failure_code, failure_message, created_at_ms, updated_at_ms
   FROM launch_journal
   WHERE instance_id = ?
   ORDER BY updated_at_ms DESC, action_id ASC
@@ -188,8 +206,14 @@ const insertOpenJournal = db.prepare(`
 `)
 const updateOpenAccepted = db.prepare(`
   UPDATE launch_journal
-  SET status = 'accepted', event_json = ?, updated_at_ms = ?
+  SET status = 'accepted', event_json = ?, delivery_status = 'pending',
+      delivery_error_code = NULL, delivery_error_message = NULL, updated_at_ms = ?
   WHERE instance_id = ? AND action_id = ? AND status = 'prepared'
+`)
+const updateOpenDelivery = db.prepare(`
+  UPDATE launch_journal
+  SET delivery_status = ?, delivery_error_code = ?, delivery_error_message = ?, updated_at_ms = ?
+  WHERE instance_id = ? AND action_id = ? AND status = 'accepted'
 `)
 const updateOpenFailed = db.prepare(`
   UPDATE launch_journal
@@ -353,6 +377,9 @@ type OpenJournalDbRow = {
   observed_content_version: bigint
   status: OpenJournalRow["status"]
   event_json: string | null
+  delivery_status: OpenJournalRow["deliveryStatus"]
+  delivery_error_code: string | null
+  delivery_error_message: string | null
   failure_code: string | null
   failure_message: string | null
   created_at_ms: bigint
@@ -370,6 +397,9 @@ const toOpenJournalRow = (row: OpenJournalDbRow): OpenJournalRow => ({
   event: row.event_json === null
     ? null
     : Schema.decodeUnknownSync(OpenEvent)(JSON.parse(row.event_json)),
+  deliveryStatus: row.status === "accepted" ? row.delivery_status : null,
+  deliveryErrorCode: row.status === "accepted" ? row.delivery_error_code : null,
+  deliveryErrorMessage: row.status === "accepted" ? row.delivery_error_message : null,
   failureCode: row.failure_code,
   failureMessage: row.failure_message,
   createdAtMs: Number(row.created_at_ms),
@@ -889,6 +919,45 @@ const handle = (request: DraftWorkerRequest): unknown => {
         db.exec("COMMIT")
         const entry = readOpenJournal(request.instanceId, request.actionId)
         if (entry === undefined) throw new Error("accepted open event was not readable")
+        return { kind: "updated", entry }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "acknowledgeOpenEvent":
+    case "holdOpenEvent": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const current = readOpenJournal(request.instanceId, request.actionId)
+        if (current === undefined) {
+          db.exec("ROLLBACK")
+          return { kind: "not_found" }
+        }
+        if (current.status !== "accepted" || current.event === null) {
+          db.exec("COMMIT")
+          return { kind: "conflict" }
+        }
+        const nextStatus = request.op === "acknowledgeOpenEvent" ? "acknowledged" : "held"
+        if (current.deliveryStatus === nextStatus) {
+          db.exec("COMMIT")
+          return { kind: "existing", entry: current }
+        }
+        if (current.deliveryStatus === "acknowledged" && nextStatus === "held") {
+          db.exec("COMMIT")
+          return { kind: "conflict" }
+        }
+        updateOpenDelivery.run(
+          nextStatus,
+          request.op === "holdOpenEvent" ? request.deliveryErrorCode : null,
+          request.op === "holdOpenEvent" ? request.deliveryErrorMessage : null,
+          Date.now(),
+          request.instanceId,
+          request.actionId
+        )
+        db.exec("COMMIT")
+        const entry = readOpenJournal(request.instanceId, request.actionId)
+        if (entry === undefined) throw new Error("open event delivery update was not readable")
         return { kind: "updated", entry }
       } catch (error) {
         rollbackIfActive()
