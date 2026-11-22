@@ -374,6 +374,17 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
         catch: () => undefined
       })
       if (!rootStillCurrent.ok) {
+        if (progress.coverage !== null) {
+          progress = {
+            ...progress,
+            coverage: {
+              ...progress.coverage,
+              status: "partial",
+              issues: [...progress.coverage.issues, { code: rootStillCurrent.code }],
+              issue_count: progress.coverage.issue_count + 1
+            }
+          }
+        }
         readinessError = { code: "root_changed", message: "saved root changed or became unavailable during scan" }
       } else {
         const published = yield* store.publishNormal({
@@ -415,7 +426,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
       ...progress,
       reviewNeededCount
     }
-    const hasErrors = progress.analysisErrorCount > 0 || coverage.status === "partial" || unstableCandidateCount > 0 || allocationDeferred
+    const hasErrors = progress.analysisErrorCount > 0 || progress.coverage?.status === "partial" || unstableCandidateCount > 0 || allocationDeferred
     const failed = readinessError !== null && readinessError.code !== "allocation_deferred"
     yield* finish(store, {
       taskId: task.task_id,
