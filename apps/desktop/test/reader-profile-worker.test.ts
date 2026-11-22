@@ -1,7 +1,7 @@
 import { build } from "esbuild"
 import { Effect, Layer, ManagedRuntime } from "effect"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { mkdtemp, rm } from "node:fs/promises"
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -90,5 +90,17 @@ describe("reader profile validation", () => {
   it("accepts a native executable and rejects a missing selection", async () => {
     await expect(validateExecutablePath(process.execPath)).resolves.toBeUndefined()
     await expect(validateExecutablePath(path.join(workerDirectory, "missing-reader"))).rejects.toThrow("unavailable")
+  })
+
+  it("rejects executable text and interpreter scripts after bounded header inspection", async () => {
+    const scriptPath = path.join(workerDirectory, "reader-script")
+    const textPath = path.join(workerDirectory, "reader-text")
+    await writeFile(scriptPath, "#!/bin/sh\necho not a native reader\n")
+    await writeFile(textPath, "plain text pretending to be an executable\n")
+    await chmod(scriptPath, 0o755)
+    await chmod(textPath, 0o755)
+
+    await expect(validateExecutablePath(scriptPath)).rejects.toThrow("interpreter and shell wrappers")
+    await expect(validateExecutablePath(textPath)).rejects.toThrow("supported native executable")
   })
 })

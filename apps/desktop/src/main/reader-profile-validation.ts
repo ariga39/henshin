@@ -1,4 +1,4 @@
-import { access, constants as fsConstants, lstat, readFile } from "node:fs/promises"
+import { access, constants as fsConstants, lstat, open } from "node:fs/promises"
 import { extname, isAbsolute } from "node:path"
 import type { ReaderProfileSaveIpcRequest } from "@henshin/contracts"
 
@@ -32,6 +32,7 @@ export class ReaderExecutableSelectionError extends Error {
 const MAX_PROFILE_NAME_LENGTH = 128
 const MAX_ARGUMENT_TOKENS = 32
 const MAX_ARGUMENT_LENGTH = 512
+const EXECUTABLE_HEADER_BYTES = 4096
 const SHELL_OR_SCRIPT_EXTENSIONS = new Set([
   ".bat",
   ".bash",
@@ -50,6 +51,40 @@ const SHELL_OR_SCRIPT_EXTENSIONS = new Set([
   ".wsf",
   ".zsh"
 ])
+
+const hasBytes = (header: Uint8Array, offset: number, bytes: ReadonlyArray<number>): boolean =>
+  offset + bytes.length <= header.length && bytes.every((byte, index) => header[offset + index] === byte)
+
+const isMachOHeader = (header: Uint8Array): boolean =>
+  hasBytes(header, 0, [0xfe, 0xed, 0xfa, 0xce]) ||
+  hasBytes(header, 0, [0xfe, 0xed, 0xfa, 0xcf]) ||
+  hasBytes(header, 0, [0xce, 0xfa, 0xed, 0xfe]) ||
+  hasBytes(header, 0, [0xcf, 0xfa, 0xed, 0xfe]) ||
+  hasBytes(header, 0, [0xca, 0xfe, 0xba, 0xbe]) ||
+  hasBytes(header, 0, [0xca, 0xfe, 0xba, 0xbf]) ||
+  hasBytes(header, 0, [0xbe, 0xba, 0xfe, 0xca]) ||
+  hasBytes(header, 0, [0xbf, 0xba, 0xfe, 0xca])
+
+const isElfHeader = (header: Uint8Array): boolean => hasBytes(header, 0, [0x7f, 0x45, 0x4c, 0x46])
+
+const isPeHeader = (header: Uint8Array): boolean => {
+  if (!hasBytes(header, 0, [0x4d, 0x5a]) || header.length < 0x40) return false
+  const peOffset = header[0x3c] | (header[0x3d] << 8) | (header[0x3e] << 16) | (header[0x3f] << 24)
+  return peOffset >= 0x40 && hasBytes(header, peOffset, [0x50, 0x45, 0x00, 0x00])
+}
+
+const isSupportedNativeExecutable = (header: Uint8Array): boolean => {
+  switch (process.platform) {
+    case "darwin":
+      return isMachOHeader(header)
+    case "linux":
+      return isElfHeader(header)
+    case "win32":
+      return isPeHeader(header)
+    default:
+      return false
+  }
+}
 
 export const validateReaderProfile = (
   input: Pick<ReaderProfileSaveIpcRequest, "name" | "launch_mode" | "supported_formats" | "target_mode" | "argument_tokens">,
@@ -128,13 +163,24 @@ export const validateExecutablePath = async (selectedPath: string): Promise<void
     }
   }
 
+  let header: Buffer
   try {
-    const header = await readFile(selectedPath, { encoding: "utf8", flag: "r" })
-    if (header.startsWith("#!")) {
-      throw new ReaderExecutableSelectionError("interpreter and shell wrappers are not supported")
+    const file = await open(selectedPath, "r")
+    try {
+      header = Buffer.alloc(EXECUTABLE_HEADER_BYTES)
+      const { bytesRead } = await file.read(header, 0, header.length, 0)
+      header = header.subarray(0, bytesRead)
+    } finally {
+      await file.close()
     }
   } catch (error) {
     if (error instanceof ReaderExecutableSelectionError) throw error
     throw new ReaderExecutableSelectionError("the selected executable could not be inspected")
+  }
+  if (hasBytes(header, 0, [0x23, 0x21])) {
+    throw new ReaderExecutableSelectionError("interpreter and shell wrappers are not supported")
+  }
+  if (!isSupportedNativeExecutable(header)) {
+    throw new ReaderExecutableSelectionError("the selected file is not a supported native executable")
   }
 }
