@@ -25,9 +25,14 @@ const enumerateChildren = (selectedPath: string): Effect.Effect<RootPreview, unk
     try: async () => {
       const directory = await opendir(selectedPath)
       const children: Array<RootPreview["children"][number]> = []
-      for await (const entry of directory) {
-        children.push({ name: entry.name, kind: childKind(entry) })
-        if (children.length > ROOT_PREVIEW_SAMPLE_LIMIT) break
+      try {
+        while (children.length <= ROOT_PREVIEW_SAMPLE_LIMIT) {
+          const entry = await directory.read()
+          if (entry === null) break
+          children.push({ name: entry.name, kind: childKind(entry) })
+        }
+      } finally {
+        await directory.close()
       }
 
       const truncated = children.length > ROOT_PREVIEW_SAMPLE_LIMIT
