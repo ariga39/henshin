@@ -152,7 +152,19 @@ describe("desktop open journal SQLite worker", () => {
     const reopened = await startWorker(first.dbPath)
     await expect(reopened.running.call({ op: "getOpenJournal", instanceId, actionId })).resolves.toMatchObject({
       status: "accepted",
+      deliveryStatus: "pending",
       event: { event_id: actionId, occurred_at_ms: event.occurred_at_ms }
+    })
+    await expect(reopened.running.call({ op: "acknowledgeOpenEvent", instanceId, actionId })).resolves.toMatchObject({
+      kind: "updated",
+      entry: { status: "accepted", deliveryStatus: "acknowledged", event }
+    })
+    await reopened.running.close()
+    workers.delete(reopened.running)
+    const acknowledged = await startWorker(first.dbPath)
+    await expect(acknowledged.running.call({ op: "getOpenJournal", instanceId, actionId })).resolves.toMatchObject({
+      status: "accepted",
+      deliveryStatus: "acknowledged"
     })
   })
 

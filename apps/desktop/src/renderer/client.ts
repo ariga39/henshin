@@ -34,6 +34,25 @@ import type {
   ReaderProfileTestTargetSelectIpcRequest,
   ReaderProfileTestTargetSelectIpcResult
 } from "@henshin/contracts"
+import type { OpenEvent } from "@henshin/contracts/event"
+
+export interface OpenJournalView {
+  readonly instanceId: string
+  readonly actionId: string
+  readonly entryId: string
+  readonly deviceId: string
+  readonly observedLocationRevision: string
+  readonly observedContentVersion: string
+  readonly status: "prepared" | "accepted" | "failed" | "unknown"
+  readonly event: OpenEvent | null
+  readonly deliveryStatus: "pending" | "acknowledged" | "held" | null
+  readonly deliveryErrorCode: string | null
+  readonly deliveryErrorMessage: string | null
+  readonly failureCode: string | null
+  readonly failureMessage: string | null
+  readonly createdAtMs: number
+  readonly updatedAtMs: number
+}
 
 export type Result<A> =
   | { readonly ok: true; readonly data: A }
@@ -52,6 +71,7 @@ export interface PrototypeBridge {
   connect(): Promise<Result<ConnectionStatusView>>
   disconnect(): Promise<Result<ConnectionStatusView>>
   connectionStatus(): Promise<Result<ConnectionStatusView>>
+  listOpenJournal?(): Promise<Result<ReadonlyArray<OpenJournalView>>>
   getNote(noteId: string): Promise<Result<NoteView>>
   editNote(input: EditNoteInput): Promise<Result<NoteView>>
   saveDraft(input: SaveDraftInput): Promise<Result<SavedDraft>>
@@ -154,6 +174,7 @@ export class PrototypeClient extends Context.Service<
     readonly connect: () => Effect.Effect<Result<ConnectionStatusView>>
     readonly disconnect: () => Effect.Effect<Result<ConnectionStatusView>>
     readonly connectionStatus: () => Effect.Effect<Result<ConnectionStatusView>>
+    readonly listOpenJournal?: () => Effect.Effect<Result<ReadonlyArray<OpenJournalView>>>
     readonly getNote: (noteId: string) => Effect.Effect<Result<NoteView>>
     readonly editNote: (input: EditNoteInput) => Effect.Effect<Result<NoteView>>
     readonly saveDraft: (input: SaveDraftInput) => Effect.Effect<Result<SavedDraft>>
@@ -171,6 +192,7 @@ export class PrototypeClient extends Context.Service<
       connect: () => callIpc(() => window.henshinPrototype.connect()),
       disconnect: () => callIpc(() => window.henshinPrototype.disconnect()),
       connectionStatus: () => callIpc(() => window.henshinPrototype.connectionStatus()),
+      listOpenJournal: () => callIpc(() => window.henshinPrototype.listOpenJournal!()),
       getNote: (noteId) => callIpc(() => window.henshinPrototype.getNote(noteId)),
       editNote: (input) => callIpc(() => window.henshinPrototype.editNote(input)),
       saveDraft: (input) => callIpc(() => window.henshinPrototype.saveDraft(input)),

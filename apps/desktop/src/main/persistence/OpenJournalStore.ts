@@ -49,6 +49,21 @@ export class OpenJournalStore extends Context.Service<
       OpenJournalRow,
       LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError
     >
+    readonly acknowledge: (
+      key: Pick<OpenJournalInput, "instanceId" | "actionId">
+    ) => Effect.Effect<
+      OpenJournalRow,
+      LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError
+    >
+    readonly hold: (
+      key: Pick<OpenJournalInput, "instanceId" | "actionId"> & {
+        readonly deliveryErrorCode: string
+        readonly deliveryErrorMessage: string
+      }
+    ) => Effect.Effect<
+      OpenJournalRow,
+      LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError
+    >
     readonly recordFailed: (
       key: Pick<OpenJournalInput, "instanceId" | "actionId"> & OpenJournalFailure
     ) => Effect.Effect<
@@ -129,6 +144,17 @@ export class OpenJournalStore extends Context.Service<
         event: OpenEvent
       ) => mutation({ op: "recordOpenAccepted", ...key, event }, "record accepted open")
 
+      const acknowledge = (
+        key: Pick<OpenJournalInput, "instanceId" | "actionId">
+      ) => mutation({ op: "acknowledgeOpenEvent", ...key }, "acknowledge open event")
+
+      const hold = (
+        key: Pick<OpenJournalInput, "instanceId" | "actionId"> & {
+          readonly deliveryErrorCode: string
+          readonly deliveryErrorMessage: string
+        }
+      ) => mutation({ op: "holdOpenEvent", ...key }, "hold open event")
+
       const recordFailed = (
         key: Pick<OpenJournalInput, "instanceId" | "actionId"> & OpenJournalFailure
       ) => mutation({ op: "recordOpenFailed", ...key }, "record failed open")
@@ -155,7 +181,7 @@ export class OpenJournalStore extends Context.Service<
           })
         )
 
-      return OpenJournalStore.of({ prepare, recordAccepted, recordFailed, list, get })
+      return OpenJournalStore.of({ prepare, recordAccepted, acknowledge, hold, recordFailed, list, get })
     })
   )
 }

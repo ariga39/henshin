@@ -20,6 +20,8 @@ import {
   LocalMappingActivateIpcResult,
   LocalMappingListIpcRequest,
   LocalMappingPreviewIpcRequest,
+  OpenEventHttpClient,
+  ListOpenJournalIpcRequest,
   LibrarySearchIpcRequest,
   OpenBookIpcRequest,
   ThumbnailGetIpcRequest,
@@ -87,6 +89,7 @@ import {
   validateReaderProfile,
   resolveReaderTestTarget
 } from "./reader-profile-validation"
+import { deliverOpenEvents } from "./OpenEventDelivery"
 import {
   ConnectionInstanceMismatchError,
   ConnectionLifecycle,
@@ -390,11 +393,30 @@ const requireConnection = (): ConnectionLifecycle => {
   return connection
 }
 
+const deliverPendingOpenEvents = async (): Promise<void> => {
+  const activeConnection = connection
+  if (activeConnection === null) return
+  const session = activeConnection.getSession()
+  if (session === null) return
+  try {
+    const store = await requireRuntime().runPromise(Effect.gen(function*() {
+      return yield* OpenJournalStore
+    }))
+    await activeConnection.run(Effect.gen(function*() {
+      const client = yield* OpenEventHttpClient
+      return yield* deliverOpenEvents(store, client, session)
+    }))
+  } catch {
+    // A lost response, paused connection, or local write failure leaves the
+    // immutable event pending. The next deliberate reconnect retries it.
+  }
+}
+
 const runNetworkResult = <A>(
   effect: Effect.Effect<
     IpcOk<A> | IpcErr,
     never,
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | ThumbnailHttpClient
+    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | ThumbnailHttpClient | OpenEventHttpClient
   >,
   timeout?: Duration.Duration,
   errorMapper: (error: unknown) => PublicError = toPublicError
@@ -1172,7 +1194,7 @@ const registerIpc = (): void => {
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return requireConnection()
       .connect()
-      .then(connectionStatusResult)
+      .then((status) => deliverPendingOpenEvents().then(() => connectionStatusResult(status)))
       .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
   })
 
@@ -1188,6 +1210,25 @@ const registerIpc = (): void => {
     const decoded = Schema.decodeUnknownOption(ConnectionStatusIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return connectionStatusResult(requireConnection().getStatus())
+  })
+
+  ipcMain.handle(IpcChannels.listOpenJournal, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ListOpenJournalIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    try {
+      const instanceId = requireNamespace()
+      return requireRuntime().runPromise(
+        toResult(
+          Effect.gen(function*() {
+            const journal = yield* OpenJournalStore
+            return { data: yield* journal.list(instanceId) }
+          })
+        )
+      )
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
   })
 
   ipcMain.handle(IpcChannels.getNote, (event, raw: unknown) => {
@@ -1499,6 +1540,8 @@ const bootstrap = async (): Promise<void> => {
     bearerToken: serverChild.bearerToken
   })
   await connection.connect()
+  openCoordinator = createOpenCoordinator()
+  await deliverPendingOpenEvents()
   openCoordinator = createOpenCoordinator()
 
   registerIpc()

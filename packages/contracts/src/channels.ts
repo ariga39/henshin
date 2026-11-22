@@ -25,6 +25,7 @@ export const IpcChannels = {
   connect: "henshin-prototype:connect",
   disconnect: "henshin-prototype:disconnect",
   connectionStatus: "henshin-prototype:connection-status",
+  listOpenJournal: "henshin-prototype:list-open-journal",
   getNote: "henshin-prototype:get-note",
   editNote: "henshin-prototype:edit-note",
   saveDraft: "henshin-prototype:save-draft",

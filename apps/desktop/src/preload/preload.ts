@@ -59,6 +59,7 @@ if (new URLSearchParams(window.location.search).get("mode") === "prototype") {
     connect: () => ipcRenderer.invoke(IpcChannels.connect, {}),
     disconnect: () => ipcRenderer.invoke(IpcChannels.disconnect, {}),
     connectionStatus: () => ipcRenderer.invoke(IpcChannels.connectionStatus, {}),
+    listOpenJournal: () => ipcRenderer.invoke(IpcChannels.listOpenJournal, {}),
     getNote: (noteId: string) => ipcRenderer.invoke(IpcChannels.getNote, { note_id: noteId }),
     editNote: (input: {
       readonly note_id: string
