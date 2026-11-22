@@ -64,7 +64,6 @@ describe("saved root scan policy", () => {
         })
       })
     )
-
     const exactOperationId = randomUUID()
     const exact = await withClient(
       server,
@@ -82,8 +81,10 @@ describe("saved root scan policy", () => {
         })
       })
     )
-    expect(exact.data.policy_revision).toBe("1")
-    expect(exact.data.exclusions).toEqual([{ path: "series/book.cbz", scope: "exact" }])
+    if ("task" in exact.data) throw new Error("expected root policy response")
+    const exactRoot = exact.data
+    expect(exactRoot.policy_revision).toBe("1")
+    expect(exactRoot.exclusions).toEqual([{ path: "series/book.cbz", scope: "exact" }])
 
     const subtree = await withClient(
       server,
@@ -95,14 +96,16 @@ describe("saved root scan policy", () => {
             operation_id: randomUUID(),
             instance_id: server.instanceId,
             epoch: server.epoch,
-            expected_policy_revision: exact.data.policy_revision,
+            expected_policy_revision: exactRoot.policy_revision,
             command: { type: "exclude", exclusion: { path: "series-extra", scope: "subtree" } }
           }
         })
       })
     )
-    expect(subtree.data.policy_revision).toBe("2")
-    expect(subtree.data.exclusions).toEqual([
+    if ("task" in subtree.data) throw new Error("expected root policy response")
+    const subtreeRoot = subtree.data
+    expect(subtreeRoot.policy_revision).toBe("2")
+    expect(subtreeRoot.exclusions).toEqual([
       { path: "series/book.cbz", scope: "exact" },
       { path: "series-extra", scope: "subtree" }
     ])
@@ -136,14 +139,16 @@ describe("saved root scan policy", () => {
             operation_id: randomUUID(),
             instance_id: server.instanceId,
             epoch: server.epoch,
-            expected_policy_revision: subtree.data.policy_revision,
+            expected_policy_revision: subtreeRoot.policy_revision,
             command: { type: "remove-exclusion", exclusion: { path: "series/book.cbz", scope: "exact" } }
           }
         })
       })
     )
-    expect(restored.data.policy_revision).toBe("3")
-    expect(restored.data.exclusions).toEqual([{ path: "series-extra", scope: "subtree" }])
+    if ("task" in restored.data) throw new Error("expected root policy response")
+    const restoredRoot = restored.data
+    expect(restoredRoot.policy_revision).toBe("3")
+    expect(restoredRoot.exclusions).toEqual([{ path: "series-extra", scope: "subtree" }])
 
     const restoredDiscovery = await withClient(
       server,
@@ -175,7 +180,7 @@ describe("saved root scan policy", () => {
         })
       })
     )
-    expect(replay.data).toEqual(exact.data)
+    expect(replay.data).toEqual(exactRoot)
 
     const stale = await withClient(
       server,
@@ -265,7 +270,7 @@ describe("saved root scan policy", () => {
         return yield* client.list()
       })
     )
-    expect(listedBeforeRestart.data[0]?.exclusions).toEqual(restored.data.exclusions)
+    expect(listedBeforeRestart.data[0]?.exclusions).toEqual(restoredRoot.exclusions)
 
     await server.stop()
     const restarted = await startServer(server.dbPath)
@@ -278,6 +283,6 @@ describe("saved root scan policy", () => {
       })
     )
     expect(listedAfterRestart.data[0]?.policy_revision).toBe("3")
-    expect(listedAfterRestart.data[0]?.exclusions).toEqual(restored.data.exclusions)
+    expect(listedAfterRestart.data[0]?.exclusions).toEqual(restoredRoot.exclusions)
   })
 })

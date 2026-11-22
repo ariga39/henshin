@@ -186,6 +186,17 @@ export class RootVerificationFailed extends Schema.TaggedError<RootVerificationF
   { httpApiStatus: 409 }
 ) {}
 
+export class TaskNotFound extends Schema.TaggedError<TaskNotFound>()(
+  "TaskNotFound",
+  {
+    code: Schema.Literal("not_found"),
+    message: Schema.String,
+    retryable: Schema.Literal(false),
+    ...envelope
+  },
+  { httpApiStatus: 404 }
+) {}
+
 /**
  * Every public error, as a single schema. Clients map an unknown failure to the
  * public shape only when it decodes here; anything else becomes an opaque
@@ -206,6 +217,8 @@ export const PublicApiError = Schema.Union([
   InstanceMismatch,
   RootPreviewUnavailable,
   RootVerificationFailed,
+  RootNotFound,
+  TaskNotFound,
   InternalError
 ])
 export type PublicApiError = typeof PublicApiError.Type
