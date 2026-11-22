@@ -284,6 +284,14 @@ const toResult = <A, R>(effect: Effect.Effect<{ readonly data: A }, unknown, R>)
     })
   )
 
+const toRawResult = <A, R>(effect: Effect.Effect<A, unknown, R>): Effect.Effect<IpcOk<A> | IpcErr, never, R> =>
+  effect.pipe(
+    Effect.match({
+      onFailure: (error) => ({ ok: false as const, error: toPublicError(error) }),
+      onSuccess: (data) => ({ ok: true as const, data })
+    })
+  )
+
 const assertTrustedSender = (event: IpcMainInvokeEvent): void => {
   if (mainWindow === null || event.sender !== mainWindow.webContents) {
     throw new Error("rejected IPC from an untrusted web contents")
