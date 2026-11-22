@@ -32,6 +32,7 @@ const launch = async (dbPath: string, clientDbPath = `${dbPath}.client`): Promis
     cwd: APP_DIR,
     env: {
       ...process.env,
+      HENSHIN_PROTOTYPE_MODE: "1",
       HENSHIN_PROTOTYPE_DB: dbPath,
       HENSHIN_PROTOTYPE_CLIENT_DB: clientDbPath
     }

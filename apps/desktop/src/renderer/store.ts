@@ -1,4 +1,4 @@
-import type { CommandAttempt, CommandReconciliation, NoteView, SavedDraft } from "@henshin/contracts"
+import type { CommandAttempt, CommandReconciliation, NoteView, RootPreview, SavedDraft } from "@henshin/contracts"
 
 export type Outcome =
   | { readonly kind: "committed"; readonly revision: string }
@@ -23,6 +23,11 @@ export interface ViewState {
   readonly outcome: Outcome | null
   readonly recovery_attempts: ReadonlyArray<CommandAttempt>
   readonly recovery_result: CommandReconciliation | null
+  readonly root_preview_path: string
+  readonly root_preview_selected_path: string | null
+  readonly root_preview_status: "idle" | "loading" | "ready" | "error"
+  readonly root_preview: RootPreview | null
+  readonly root_preview_error: string | null
 }
 
 const initialState: ViewState = {
@@ -37,7 +42,12 @@ const initialState: ViewState = {
   saved_draft: null,
   outcome: null,
   recovery_attempts: [],
-  recovery_result: null
+  recovery_result: null,
+  root_preview_path: "",
+  root_preview_selected_path: null,
+  root_preview_status: "idle",
+  root_preview: null,
+  root_preview_error: null
 }
 
 const createViewStore = () => {

@@ -1,7 +1,7 @@
 import { Context, Layer } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
 import { HttpApiClient, HttpApiMiddleware } from "effect/http-api"
-import { PrototypeApi } from "./api"
+import { PrototypeApi, ServerApi } from "./api"
 import { Authentication } from "./auth"
 
 /**
@@ -24,6 +24,29 @@ export class PrototypeHttpClient extends Context.Service<
     return Layer.effect(
       PrototypeHttpClient,
       HttpApiClient.make(PrototypeApi, {
+        transformClient: (client) =>
+          client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
+      })
+    ).pipe(Layer.provide(AuthenticationClient), Layer.provide(FetchHttpClient.layer))
+  }
+}
+
+/** Authenticated typed client for the product server API. */
+export class ServerHttpClient extends Context.Service<
+  ServerHttpClient,
+  HttpApiClient.ForApi<typeof ServerApi>
+>()("henshin/http/ServerHttpClient") {
+  static readonly layer = (options: {
+    readonly baseUrl: string
+    readonly bearerToken: string
+  }): Layer.Layer<ServerHttpClient> => {
+    const AuthenticationClient = HttpApiMiddleware.layerClient(Authentication, ({ next, request }) =>
+      next(HttpClientRequest.bearerToken(request, options.bearerToken))
+    )
+
+    return Layer.effect(
+      ServerHttpClient,
+      HttpApiClient.make(ServerApi, {
         transformClient: (client) =>
           client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
       })
