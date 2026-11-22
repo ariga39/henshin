@@ -43,14 +43,14 @@ export const RootPolicyCommand = Schema.Union([
 ])
 export type RootPolicyCommand = typeof RootPolicyCommand.Type
 
-export const RootCommandRequest = Schema.Struct({
+export const RootPolicyCommandRequest = Schema.Struct({
   operation_id: Uuid,
   instance_id: Uuid,
   epoch: Uuid,
   expected_policy_revision: Revision,
   command: RootPolicyCommand
 })
-export type RootCommandRequest = typeof RootCommandRequest.Type
+export type RootPolicyCommandRequest = typeof RootPolicyCommandRequest.Type
 
 /**
  * A bounded read-only sample of a server-local directory. The selected path is
@@ -180,6 +180,27 @@ export type ServerRoot = typeof ServerRoot.Type
 export const ServerRootList = Schema.Array(ServerRoot)
 export type ServerRootList = typeof ServerRootList.Type
 
+export const RootScanCommand = Schema.Struct({
+  type: Schema.Literal("start-scan"),
+  mode: Schema.Literal("manual"),
+  hold_new_discoveries: Schema.Literal(true)
+})
+export type RootScanCommand = typeof RootScanCommand.Type
+
+/** The explicit, non-accepting manual scan command for a saved root. */
+export const RootScanCommandRequest = Schema.Struct({
+  operation_id: Uuid,
+  instance_id: Uuid,
+  epoch: Uuid,
+  expected_mapping_revision: Revision,
+  expected_policy_revision: Revision,
+  command: RootScanCommand
+})
+export type RootScanCommandRequest = typeof RootScanCommandRequest.Type
+
+export const RootCommandRequest = Schema.Union([RootPolicyCommandRequest, RootScanCommandRequest])
+export type RootCommandRequest = typeof RootCommandRequest.Type
+
 export const ScanTaskError = Schema.Struct({
   code: Schema.String,
   message: Schema.String
@@ -219,6 +240,11 @@ export type ScanTask = typeof ScanTask.Type
 
 export const ScanTaskList = Schema.Array(ScanTask)
 export type ScanTaskList = typeof ScanTaskList.Type
+
+export const ScanTaskSubmission = Schema.Struct({
+  task: ScanTask
+})
+export type ScanTaskSubmission = typeof ScanTaskSubmission.Type
 
 export const ScanManifestPage = Schema.Struct({
   name: Schema.String,

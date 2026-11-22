@@ -1,7 +1,7 @@
 import { Context, Layer } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
 import { HttpApiClient, HttpApiMiddleware } from "effect/http-api"
-import { PrototypeApi, ServerApi } from "./api"
+import { PrototypeApi, ReviewApi, ServerApi, TaskApi } from "./api"
 import { Authentication } from "./auth"
 
 /**
@@ -54,6 +54,50 @@ export class ServerHttpClient extends Context.Service<
       HttpApiClient.make(ServerApi, {
         transformClient: (client) =>
           client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
+      })
+    ).pipe(Layer.provide(AuthenticationClient), Layer.provide(options.transportLayer ?? FetchHttpClient.layer))
+  }
+}
+
+/** Authenticated task-status client for durable background work. */
+export class TaskHttpClient extends Context.Service<
+  TaskHttpClient,
+  HttpApiClient.ForApi<typeof TaskApi>
+>()("henshin/http/TaskHttpClient") {
+  static readonly layer = (options: {
+    readonly baseUrl: string
+    readonly bearerToken: string
+    readonly transportLayer?: Layer.Layer<HttpClient.HttpClient>
+  }): Layer.Layer<TaskHttpClient> => {
+    const AuthenticationClient = HttpApiMiddleware.layerClient(Authentication, ({ next, request }) =>
+      next(HttpClientRequest.bearerToken(request, options.bearerToken))
+    )
+    return Layer.effect(
+      TaskHttpClient,
+      HttpApiClient.make(TaskApi, {
+        transformClient: (client) => client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
+      })
+    ).pipe(Layer.provide(AuthenticationClient), Layer.provide(options.transportLayer ?? FetchHttpClient.layer))
+  }
+}
+
+/** Authenticated review-queue client for staged discoveries. */
+export class ReviewHttpClient extends Context.Service<
+  ReviewHttpClient,
+  HttpApiClient.ForApi<typeof ReviewApi>
+>()("henshin/http/ReviewHttpClient") {
+  static readonly layer = (options: {
+    readonly baseUrl: string
+    readonly bearerToken: string
+    readonly transportLayer?: Layer.Layer<HttpClient.HttpClient>
+  }): Layer.Layer<ReviewHttpClient> => {
+    const AuthenticationClient = HttpApiMiddleware.layerClient(Authentication, ({ next, request }) =>
+      next(HttpClientRequest.bearerToken(request, options.bearerToken))
+    )
+    return Layer.effect(
+      ReviewHttpClient,
+      HttpApiClient.make(ReviewApi, {
+        transformClient: (client) => client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
       })
     ).pipe(Layer.provide(AuthenticationClient), Layer.provide(options.transportLayer ?? FetchHttpClient.layer))
   }
