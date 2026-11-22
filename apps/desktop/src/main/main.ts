@@ -111,6 +111,7 @@ const testTargetSelections = new Map<string, {
   readonly profileId: string
   readonly profileRevision: string
   readonly selectedPath: string
+  readonly resolvedTarget: string
   readonly createdAt: number
 }>()
 const TEST_TARGET_SELECTION_TTL_MS = 10 * 60 * 1000
@@ -559,6 +560,7 @@ const registerIpc = (): void => {
         profileId: profile.profile_id,
         profileRevision: profile.revision,
         selectedPath,
+        resolvedTarget,
         createdAt: now
       })
       return {
@@ -599,7 +601,12 @@ const registerIpc = (): void => {
       if (selection.profileId !== profile.profile_id || selection.profileRevision !== profile.revision) {
         throw new ReaderTestTargetSelectionError()
       }
-      const resolvedTarget = await resolveReaderTestTarget(selection.selectedPath, profile.target_mode)
+      const currentResolvedTarget = await resolveReaderTestTarget(selection.selectedPath, profile.target_mode)
+      if (currentResolvedTarget !== selection.resolvedTarget) {
+        testTargetSelections.delete(request.selection_handle)
+        throw new ReaderTestTargetSelectionError("the resolved test target changed; preview it again before launching the reader")
+      }
+      const resolvedTarget = selection.resolvedTarget
 
       let result: ReaderProfileTestResult
       if (profile.launch_mode === "explicit-executable") {
