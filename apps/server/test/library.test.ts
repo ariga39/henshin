@@ -392,7 +392,9 @@ describe("normal library scan", () => {
     const accepted = before.data.entries[0]
     if (accepted === undefined) throw new Error("expected accepted entry")
 
-    await writeFile(path.join(fixture, "book", "002.jpg"), "changed page")
+    await rm(path.join(fixture, "book"), { recursive: true, force: true })
+    await makeImageBook(fixture, "book")
+    await writeFile(path.join(fixture, "book", "001.jpg"), "edit")
     const second = await scan()
     if (!("task" in second.data)) throw new Error("expected replacement scan task")
     const terminal = await waitForTerminal(server, second.data.task.task_id)
@@ -434,7 +436,7 @@ describe("normal library scan", () => {
     }))
     expect(staged.data).toHaveLength(1)
     expect(staged.data[0]).toMatchObject({ relative_path: "book", analysis_status: "ready" })
-    expect(staged.data[0]?.manifest?.pages).toHaveLength(2)
+    expect(staged.data[0]?.manifest?.pages).toHaveLength(1)
   })
 
   it("keeps an accepted archive usable after a transient server source failure", async () => {
@@ -567,10 +569,13 @@ describe("normal library scan", () => {
   })
 
   it("keeps identical accepted evidence usable after a failed ordinary scan", async () => {
+    const previousQuietInterval = process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
+    process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = "1000"
     const server = await start()
-    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-staged-failure-"))
-    fixturePaths.add(fixture)
-    await makeImageBook(fixture, "book")
+    try {
+      const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-resolution-staged-failure-"))
+      fixturePaths.add(fixture)
+      await makeImageBook(fixture, "book")
 
     const root = await withServerClient(server, Effect.gen(function*() {
       const client = yield* ServerHttpClient
@@ -625,7 +630,11 @@ describe("normal library scan", () => {
     const resolution = await withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
     }))
-    expect(resolution.data).toMatchObject({ status: "usable", reason: null })
+      expect(resolution.data).toMatchObject({ status: "usable", reason: null })
+    } finally {
+      if (previousQuietInterval === undefined) delete process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
+      else process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = previousQuietInterval
+    }
   })
 
   it("keeps identical accepted evidence usable after an interrupted scan", async () => {
@@ -753,8 +762,8 @@ describe("normal library scan", () => {
     }))
     expect(beforeRescan.data).toMatchObject({
       entry_id: accepted.entry_id,
-      status: "unresolved",
-      reason: "insufficient-evidence"
+      status: "usable",
+      reason: null
     })
     expect(beforeRescan.data.accepted_observation.observation_token).toBeUndefined()
 

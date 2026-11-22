@@ -1150,22 +1150,36 @@ const titleForCandidate = (relativePath: string, kind: "archive" | "image-direct
   return name
 }
 
-const comparableManifest = (value: string): string | null => {
+const comparableManifest = (value: string): {
+  readonly value: string
+  readonly beforeToken?: string
+  readonly afterToken?: string
+} | null => {
   try {
     const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
     if (Option.isNone(decoded)) return null
-    const { observation_token: _beforeToken, ...before } = decoded.value.before
-    const { observation_token: _afterToken, ...after } = decoded.value.after
-    return JSON.stringify({ ...decoded.value, before, after })
+    const { observation_token: beforeToken, ...before } = decoded.value.before
+    const { observation_token: afterToken, ...after } = decoded.value.after
+    return {
+      value: JSON.stringify({ ...decoded.value, before, after }),
+      beforeToken,
+      afterToken
+    }
   } catch {
     return null
   }
 }
 
+const observationsEquivalent = (left: string | undefined, right: string | undefined): boolean =>
+  left === undefined || left.length === 0 || right === undefined || right.length === 0 || left === right
+
 const manifestsEquivalent = (left: string, right: string): boolean => {
   const comparableLeft = comparableManifest(left)
   const comparableRight = comparableManifest(right)
-  return comparableLeft !== null && comparableLeft === comparableRight
+  return comparableLeft !== null && comparableRight !== null &&
+    comparableLeft.value === comparableRight.value &&
+    observationsEquivalent(comparableLeft.beforeToken, comparableRight.beforeToken) &&
+    observationsEquivalent(comparableLeft.afterToken, comparableRight.afterToken)
 }
 
 const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalScan" }>): import("./worker-protocol").NormalPublishOutcome => {
@@ -1454,25 +1468,23 @@ const entryResolution = (
   let reason: "known-change" | "insufficient-evidence" | null = null
   if (staged !== undefined) {
     if (staged.analysis_status === "ready" && staged.manifest_json !== null) {
-      reason = staged.manifest_json === row.manifest_json ? null : "known-change"
+      reason = manifestsEquivalent(row.manifest_json, staged.manifest_json) ? null : "known-change"
     } else {
       const stagedError = staged.analysis_error_json === null
         ? null
         : Schema.decodeUnknownOption(ScanAnalysisError)(JSON.parse(staged.analysis_error_json))
-      if (
+      if (stagedError !== null && !Option.isNone(stagedError) && stagedError.value.code === "candidate-changed") {
+        reason = "known-change"
+      } else if (
         stagedError === null ||
         Option.isNone(stagedError) ||
-        !["candidate-changed", "location-unavailable", "missing-target", "read-failure", "root-changed", "root-unavailable"].includes(stagedError.value.code)
+        !["location-unavailable", "missing-target", "read-failure", "root-changed", "root-unavailable"].includes(stagedError.value.code)
       ) {
         reason = "insufficient-evidence"
       }
     }
   }
-  if (
-    manifest.value.after.observation_token === undefined ||
-    manifest.value.after.observation_token.length === 0 ||
-    manifest.value.pages[0] === undefined
-  ) {
+  if (manifest.value.pages[0] === undefined) {
     reason = reason ?? "insufficient-evidence"
   }
 
