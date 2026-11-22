@@ -70,10 +70,21 @@ export const loadRoots = Effect.gen(function*() {
 })
 
 export const refreshRootPolicy = Effect.gen(function*() {
-  const request = viewStore.getState().root_preview_request
-  if (request === null) return
-  yield* previewRoot(request)
+  const initialState = viewStore.getState()
+  const request = initialState.root_preview_request
+  const expectedGeneration = request === null
+    ? initialState.root_preview_generation
+    : initialState.root_preview_generation + 1
+  yield* Effect.sync(() => viewStore.set({ root_policy_status: "loading", root_policy_error: null }))
+  if (request !== null) yield* previewRoot(request)
   yield* loadRoots
+  const current = viewStore.getState()
+  if (
+    current.root_preview_generation === expectedGeneration &&
+    (current.root_policy_status === "loading" || current.root_policy_status === "error")
+  ) {
+    yield* Effect.sync(() => viewStore.set({ root_policy_status: "idle", root_policy_error: null }))
+  }
 })
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
@@ -83,6 +94,7 @@ const updateRootExclusion = (input: {
   readonly rootId: string
   readonly path: string
   readonly scope: "exact" | "subtree"
+  readonly expectedPolicyRevision: string
 }, type: "exclude" | "remove-exclusion") =>
   Effect.gen(function*() {
     const client = yield* RootPreviewClient
@@ -113,7 +125,7 @@ const updateRootExclusion = (input: {
       operation_id: newOperationId(),
       instance_id: preview.instance_id,
       epoch: preview.epoch,
-      expected_policy_revision: preview.policy_revision,
+      expected_policy_revision: input.expectedPolicyRevision,
       command: { type, exclusion: { path: input.path, scope: input.scope } }
     })
     if (!result.ok) {
@@ -142,12 +154,14 @@ export const excludeRootPath = (input: {
   readonly rootId: string
   readonly path: string
   readonly scope: "exact" | "subtree"
+  readonly expectedPolicyRevision: string
 }) => updateRootExclusion(input, "exclude")
 
 export const removeRootExclusion = (input: {
   readonly rootId: string
   readonly path: string
   readonly scope: "exact" | "subtree"
+  readonly expectedPolicyRevision: string
 }) => updateRootExclusion(input, "remove-exclusion")
 
 export const canSaveRoot = (state: ViewState): boolean => {

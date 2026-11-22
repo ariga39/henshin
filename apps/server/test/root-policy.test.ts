@@ -334,27 +334,27 @@ describe("saved root scan policy", () => {
       const paths = Array.from({ length: MAX_ROOT_EXCLUSIONS }, (_, i) => ({ path: `book-${i}.cbz`, scope: "exact" }))
       db.prepare("UPDATE server_roots SET exclusions = ? WHERE root_id = ?").run(JSON.stringify(paths), saved.root_id)
       const reduced = await apply(paths[0]!.path, randomUUID(), "0", "remove-exclusion")
-      expect(reduced).toMatchObject({ _tag: "Success", value: { policy_revision: "1", exclusions: paths.slice(1) } })
+      expect(reduced).toMatchObject({ _tag: "Success", value: { data: { policy_revision: "1", exclusions: paths.slice(1) } } })
       const refilled = await apply("overflow.cbz", randomUUID(), "1")
       expect(refilled).toMatchObject({
         _tag: "Success",
-        value: { policy_revision: "2", exclusions: [...paths.slice(1), { path: "overflow.cbz", scope: "exact" }] }
+        value: { data: { policy_revision: "2", exclusions: [...paths.slice(1), { path: "overflow.cbz", scope: "exact" }] } }
       })
       expect(await apply("second-overflow.cbz", randomUUID(), "2")).toMatchObject({
         _tag: "Failure",
         failure: { _tag: "InvalidRequest" }
       })
       const live = randomUUID()
-      expect(await apply(paths[0]!.path, live, "2")).toMatchObject({ _tag: "Success" })
+      expect(await apply(paths[1]!.path, live, "2")).toMatchObject({ _tag: "Success" })
       const insert = db.prepare(`
         INSERT INTO root_policy_operations(epoch, operation_id, root_id, payload, result, created_at_ms)
         VALUES (?, ?, ?, '{}', '{}', ?)
       `)
       insert.run(server.epoch, "expired", saved.root_id, 0)
       insert.run("obsolete-epoch", "obsolete", saved.root_id, Date.now())
-      expect(await apply(paths[1]!.path, randomUUID(), "3")).toMatchObject({ _tag: "Success" })
+      expect(await apply(paths[2]!.path, randomUUID(), "2")).toMatchObject({ _tag: "Success" })
       expect(db.prepare("SELECT COUNT(*) AS n FROM root_policy_operations").get()?.n).toBe(4)
-      expect(await apply(paths[0]!.path, live)).toMatchObject({ _tag: "Success" })
+      expect(await apply(paths[1]!.path, live, "2")).toMatchObject({ _tag: "Success" })
     } finally {
       db.close()
     }
