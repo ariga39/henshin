@@ -188,6 +188,10 @@ export const WorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("listScanTasks") }),
   Schema.Struct({ op: Schema.Literal("readScanTask"), taskId: Uuid }),
   Schema.Struct({ op: Schema.Literal("listStagedDiscoveries") }),
+  Schema.Struct({
+    op: Schema.Literal("recordDiscovery"), taskId: Uuid, directories: Schema.Natural,
+    candidates: Schema.Natural, coverageJson: Schema.String
+  }),
   Schema.Struct({ op: Schema.Literal("markScanRunning"), taskId: Uuid }),
   Schema.Struct({
     op: Schema.Literal("stageDiscovery"),
