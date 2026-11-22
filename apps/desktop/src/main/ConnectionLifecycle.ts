@@ -214,11 +214,12 @@ export class ConnectionLifecycle {
       A,
       E,
       PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient
-    >
+    >,
+    timeout = NETWORK_DEADLINE
   ): Promise<A> {
     const lease = this.lease
     if (lease === null) return Promise.reject(new ConnectionPausedError({ state: this.status.state }))
-    const fiber = lease.runtime.runFork(effect.pipe(Effect.timeout(NETWORK_DEADLINE))) as Fiber.Fiber<A, E | never>
+    const fiber = lease.runtime.runFork(effect.pipe(Effect.timeout(timeout))) as Fiber.Fiber<A, E | never>
     const fibers = this.activeFibers.get(lease.generation) ?? new Set<Fiber.Fiber<unknown, unknown>>()
     fibers.add(fiber as Fiber.Fiber<unknown, unknown>)
     this.activeFibers.set(lease.generation, fibers)

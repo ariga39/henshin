@@ -133,6 +133,8 @@ export const HandshakeView = Schema.Struct({
 export type HandshakeView = typeof HandshakeView.Type
 
 export const RootPreviewIpcRequest = RootPreviewRequest
+export const LocalMappingPreviewIpcRequest = Schema.Struct({ root_id: Uuid })
+export type LocalMappingPreviewIpcRequest = typeof LocalMappingPreviewIpcRequest.Type
 export const RootListIpcRequest = Schema.Struct({})
 export type RootListIpcRequest = typeof RootListIpcRequest.Type
 export const RootSaveIpcRequest = RootRegistrationRequest
@@ -157,6 +159,7 @@ export const RootCommandIpcRequest = Schema.Union([
   })
 ])
 export type RootCommandIpcRequest = typeof RootCommandIpcRequest.Type
+export type LocalMappingPreviewIpcResult = import("./root").LocalMappingPreview | null
 
 export const LibrarySearchIpcRequest = LibrarySearchRequest
 export type LibrarySearchIpcRequest = typeof LibrarySearchIpcRequest.Type
