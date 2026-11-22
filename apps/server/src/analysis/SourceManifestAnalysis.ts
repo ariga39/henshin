@@ -236,6 +236,13 @@ class LimitExceeded extends Error {
   }
 }
 
+class ArchiveMemberReadFailure extends Error {
+  constructor() {
+    super("archive member could not be read")
+    this.name = "ArchiveMemberReadFailure"
+  }
+}
+
 class StructuralCorruption extends Error {
   constructor() {
     super("archive structure is invalid")
@@ -908,6 +915,8 @@ export const readArchivePages = async (
     readonly limits?: Partial<ManifestLimits>
     readonly maxPageBytes?: number
     readonly signal?: AbortSignal
+    readonly onPage?: (name: string, bytes: Uint8Array) => Promise<boolean>
+    readonly expectedEntryCount?: number
   }
 ): Promise<ArchivePageReadResult> => {
   const combined = combineLimits(options?.limits)
@@ -959,7 +968,7 @@ export const readArchivePages = async (
         await entry.getData(new WritableStream<Uint8Array>({
           write(chunk) {
             checkBudget(context)
-            if (chunk.length > bytes.length - offset) throw new LimitExceeded()
+            if (chunk.length > bytes.length - offset) throw new ArchiveMemberReadFailure()
             bytes.set(chunk, offset)
             offset += chunk.length
           }
@@ -970,8 +979,12 @@ export const readArchivePages = async (
           checkOverlappingEntryOnly: false,
           checkOverlappingEntry: true
         })
-        if (offset !== bytes.length) throw new SourceChanged()
-        pages.set(entry.filename, bytes)
+        if (offset !== bytes.length) throw new ArchiveMemberReadFailure()
+        if (options?.onPage !== undefined) {
+          if (await options.onPage(entry.filename, bytes)) break
+        } else {
+          pages.set(entry.filename, bytes)
+        }
       } catch (error) {
         if (context.signal?.aborted) throw new ProbeInterruption("cancelled")
         if (error instanceof ProbeInterruption || error instanceof LimitExceeded || error instanceof SourceChanged) {
@@ -989,7 +1002,7 @@ export const readArchivePages = async (
         kind: "archive",
         bytes: sourceBytes,
         mtimeMs: afterStats.mtimeMs,
-        entryCount,
+        entryCount: options?.expectedEntryCount ?? entryCount,
         observationToken: JSON.stringify(statToken(afterStats))
       }
     }

@@ -185,6 +185,21 @@ export const NormalPublishOutcome = Schema.Union([
 ])
 export type NormalPublishOutcome = typeof NormalPublishOutcome.Type
 
+export const ReleaseHeldDiscoveryOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("committed"), candidate: StagedDiscoveryRow }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), candidate: StagedDiscoveryRow }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("operation_expired") }),
+  Schema.Struct({ kind: Schema.Literal("storage_full") }),
+  Schema.Struct({ kind: Schema.Literal("root_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("candidate_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("candidate_version_conflict"), currentCandidateVersion: Schema.Natural }),
+  Schema.Struct({ kind: Schema.Literal("mapping_revision_conflict"), currentMappingRevision: Revision }),
+  Schema.Struct({ kind: Schema.Literal("policy_revision_conflict"), currentPolicyRevision: Revision }),
+  Schema.Struct({ kind: Schema.Literal("candidate_not_held"), currentCandidateVersion: Schema.Natural })
+])
+export type ReleaseHeldDiscoveryOutcome = typeof ReleaseHeldDiscoveryOutcome.Type
+
 export const ScanStartOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("active_scan_conflict"), taskId: Uuid, policyRevision: Revision }),
   Schema.Struct({ kind: Schema.Literal("created"), task: ScanTaskRow }),
@@ -273,6 +288,16 @@ export const WorkerRequest = Schema.Union([
     mappingRevision: Revision,
     expectedPolicyRevision: Revision,
     observedCandidatePaths: Schema.Array(Schema.String)
+  }),
+  Schema.Struct({
+    op: Schema.Literal("releaseHeldDiscovery"),
+    candidateId: Uuid,
+    rootId: Uuid,
+    operationId: Uuid,
+    epoch: Uuid,
+    expectedCandidateVersion: Schema.Natural,
+    expectedMappingRevision: Revision,
+    expectedPolicyRevision: Revision
   }),
   Schema.Struct({ op: Schema.Literal("readLibrary") }),
   Schema.Struct({ op: Schema.Literal("listLibraryEntries"), pageSize: Schema.Natural, cursor: Schema.NullOr(Uuid) }),
