@@ -4,6 +4,7 @@ import { isAbsolute, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalEditPayload } from "@henshin/contracts/canonical"
+import { RootExclusions } from "@henshin/contracts/root"
 import {
   WorkerMessage,
   WorkerResponse,
@@ -35,7 +36,7 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
-const CURRENT_SCHEMA_VERSION = 2
+const CURRENT_SCHEMA_VERSION = 3
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
@@ -81,6 +82,8 @@ db.exec(`
     device TEXT NOT NULL,
     inode TEXT NOT NULL,
     mapping_revision INTEGER NOT NULL,
+    policy_revision INTEGER NOT NULL DEFAULT 0,
+    exclusions TEXT NOT NULL DEFAULT '[]',
     state TEXT NOT NULL CHECK (state = 'active')
   );
   CREATE TABLE IF NOT EXISTS root_operations (
@@ -88,7 +91,27 @@ db.exec(`
     payload TEXT NOT NULL,
     result TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS root_policy_operations (
+    epoch TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    root_id TEXT NOT NULL REFERENCES server_roots(root_id),
+    payload TEXT NOT NULL,
+    result TEXT NOT NULL,
+    PRIMARY KEY (epoch, operation_id)
+  );
 `)
+
+const rootColumns = new Set(
+  (db.prepare("PRAGMA table_info(server_roots)").all() as unknown as ReadonlyArray<{ name: string }>).map(
+    (column) => column.name
+  )
+)
+if (!rootColumns.has("policy_revision")) {
+  db.exec("ALTER TABLE server_roots ADD COLUMN policy_revision INTEGER NOT NULL DEFAULT 0")
+}
+if (!rootColumns.has("exclusions")) {
+  db.exec("ALTER TABLE server_roots ADD COLUMN exclusions TEXT NOT NULL DEFAULT '[]'")
+}
 
 const selectNote = db.prepare("SELECT note_id, text, revision FROM prototype_note WHERE note_id = ?")
 selectNote.setReadBigInts(true)
@@ -111,16 +134,29 @@ const compactOperations = db.prepare(`
   )
 `)
 const selectRoots = db.prepare(
-  "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, state FROM server_roots ORDER BY rowid ASC"
+  "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, state FROM server_roots ORDER BY rowid ASC"
 )
 selectRoots.setReadBigInts(true)
+const selectRoot = db.prepare(
+  "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, state FROM server_roots WHERE root_id = ?"
+)
+selectRoot.setReadBigInts(true)
 const selectLibrary = db.prepare("SELECT library_id FROM server_library WHERE id = 1")
 const selectRootOperation = db.prepare("SELECT payload, result FROM root_operations WHERE operation_id = ?")
 const insertRoot = db.prepare(
-  "INSERT INTO server_roots(library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active')"
+  "INSERT INTO server_roots(library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')"
 )
 const insertRootOperation = db.prepare(
   "INSERT INTO root_operations(operation_id, payload, result) VALUES(?, ?, ?)"
+)
+const selectRootPolicyOperation = db.prepare(
+  "SELECT payload, result FROM root_policy_operations WHERE epoch = ? AND operation_id = ?"
+)
+const insertRootPolicyOperation = db.prepare(
+  "INSERT INTO root_policy_operations(epoch, operation_id, root_id, payload, result) VALUES(?, ?, ?, ?, ?)"
+)
+const updateRootPolicy = db.prepare(
+  "UPDATE server_roots SET policy_revision = ?, exclusions = ? WHERE root_id = ?"
 )
 
 let closed = false
@@ -142,18 +178,26 @@ const rootRow = (row: {
   device: string
   inode: string
   mapping_revision: bigint
+  policy_revision: bigint
+  exclusions: string
   state: "active"
-}): ServerRootRow => ({
-  libraryId: row.library_id,
-  rootId: row.root_id,
-  label: row.label,
-  selectedPath: row.selected_path,
-  canonicalPath: row.canonical_path,
-  device: row.device,
-  inode: row.inode,
-  mappingRevision: row.mapping_revision.toString(),
-  state: row.state
-})
+}): ServerRootRow => {
+  const exclusions = Schema.decodeUnknownOption(RootExclusions)(JSON.parse(row.exclusions))
+  if (Option.isNone(exclusions)) throw new Error("invalid persisted root exclusions")
+  return {
+    libraryId: row.library_id,
+    rootId: row.root_id,
+    label: row.label,
+    selectedPath: row.selected_path,
+    canonicalPath: row.canonical_path,
+    device: row.device,
+    inode: row.inode,
+    mappingRevision: row.mapping_revision.toString(),
+    policyRevision: row.policy_revision.toString(),
+    exclusions: exclusions.value,
+    state: row.state
+  }
+}
 
 const rootRows = (): ReadonlyArray<ServerRootRow> =>
   (selectRoots.all() as unknown as ReadonlyArray<{
@@ -165,8 +209,29 @@ const rootRows = (): ReadonlyArray<ServerRootRow> =>
     device: string
     inode: string
     mapping_revision: bigint
+    policy_revision: bigint
+    exclusions: string
     state: "active"
   }>).map(rootRow)
+
+const rootById = (rootId: string): ServerRootRow | undefined => {
+  const row = selectRoot.get(rootId) as
+    | {
+        library_id: string
+        root_id: string
+        label: string
+        selected_path: string
+        canonical_path: string
+        device: string
+        inode: string
+        mapping_revision: bigint
+        policy_revision: bigint
+        exclusions: string
+        state: "active"
+      }
+    | undefined
+  return row === undefined ? undefined : rootRow(row)
+}
 
 const containsPath = (ancestor: string, descendant: string): boolean => {
   const child = relative(ancestor, descendant)
@@ -202,8 +267,11 @@ const registerRoot = (
         db.exec("ROLLBACK")
         return { kind: "operation_conflict" }
       }
+      const stored = JSON.parse(existing.result) as { rootId?: string }
+      const current = stored.rootId === undefined ? undefined : rootById(stored.rootId)
+      if (current === undefined) throw new Error("registered root is missing")
       db.exec("COMMIT")
-      return { kind: "replayed", root: JSON.parse(existing.result) as ServerRootRow }
+      return { kind: "replayed", root: current }
     }
 
     const existingRoots = rootRows()
@@ -228,6 +296,8 @@ const registerRoot = (
       device: request.device,
       inode: request.inode,
       mappingRevision: "1",
+      policyRevision: "0",
+      exclusions: [],
       state: "active"
     }
     insertRoot.run(
@@ -238,7 +308,9 @@ const registerRoot = (
       root.canonicalPath,
       root.device,
       root.inode,
-      BigInt(root.mappingRevision)
+      BigInt(root.mappingRevision),
+      BigInt(root.policyRevision),
+      JSON.stringify(root.exclusions)
     )
     insertRootOperation.run(request.operationId, payload, JSON.stringify(root))
     db.exec("COMMIT")
@@ -272,8 +344,85 @@ const lookupRootOperation = (
     inode: request.inode
   })
   return existing.payload === payload
-    ? { kind: "replay", root: JSON.parse(existing.result) as ServerRootRow }
+    ? (() => {
+        const stored = JSON.parse(existing.result) as { rootId?: string }
+        const root = stored.rootId === undefined ? undefined : rootById(stored.rootId)
+        if (root === undefined) throw new Error("registered root is missing")
+        return { kind: "replay", root }
+      })()
     : { kind: "operation_conflict" }
+}
+
+const rootPolicyPayload = (input: {
+  readonly rootId: string
+  readonly expectedPolicyRevision: string
+  readonly command: Extract<WorkerRequest, { op: "commitRootPolicy" }>["command"]
+}): string =>
+  JSON.stringify({
+    command: input.command,
+    expected_policy_revision: input.expectedPolicyRevision,
+    root_id: input.rootId
+  })
+
+const commitRootPolicy = (
+  request: Extract<WorkerRequest, { op: "commitRootPolicy" }>
+): import("./worker-protocol").RootPolicyCommandOutcome => {
+  const payload = rootPolicyPayload({
+    rootId: request.rootId,
+    expectedPolicyRevision: request.expectedPolicyRevision,
+    command: request.command
+  })
+
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const existing = selectRootPolicyOperation.get(request.epoch, request.operationId) as
+      | { payload: string; result: string }
+      | undefined
+    if (existing !== undefined) {
+      if (existing.payload !== payload) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_conflict" }
+      }
+      const root = JSON.parse(existing.result) as ServerRootRow
+      db.exec("COMMIT")
+      return { kind: "replayed", root }
+    }
+
+    const current = rootById(request.rootId)
+    if (current === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "root_not_found" }
+    }
+    if (current.policyRevision !== request.expectedPolicyRevision) {
+      db.exec("ROLLBACK")
+      return { kind: "policy_revision_conflict", currentPolicyRevision: current.policyRevision }
+    }
+
+    const exclusions = current.exclusions.some(
+      (exclusion) =>
+        exclusion.path === request.command.exclusion.path && exclusion.scope === request.command.exclusion.scope
+    )
+      ? current.exclusions
+      : [...current.exclusions, request.command.exclusion]
+    const nextRevision =
+      exclusions === current.exclusions
+        ? current.policyRevision
+        : (BigInt(current.policyRevision) + 1n).toString()
+    const root: ServerRootRow = { ...current, policyRevision: nextRevision, exclusions }
+    updateRootPolicy.run(BigInt(root.policyRevision), JSON.stringify(root.exclusions), root.rootId)
+    insertRootPolicyOperation.run(
+      request.epoch,
+      request.operationId,
+      root.rootId,
+      payload,
+      JSON.stringify(root)
+    )
+    db.exec("COMMIT")
+    return { kind: "committed", root }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
 }
 
 const operationResult = (
@@ -423,6 +572,8 @@ const handle = (request: WorkerRequest): unknown => {
       return commitNote(request)
     case "registerRoot":
       return registerRoot(request)
+    case "commitRootPolicy":
+      return commitRootPolicy(request)
     case "close":
       if (!closed) {
         closed = true
