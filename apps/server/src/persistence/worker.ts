@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { DatabaseSync } from "node:sqlite"
+import { isAbsolute, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalEditPayload } from "@henshin/contracts/canonical"
@@ -10,6 +11,9 @@ import {
   type NoteRow,
   type OperationLookupOutcome,
   type OperationResultRow,
+  type ServerRootRow,
+  RootRegistrationOutcome,
+  RootReplayLookup,
   type WorkerRequest
 } from "./worker-protocol"
 
@@ -48,6 +52,10 @@ db.exec(`
     instance_id TEXT NOT NULL,
     schema_version INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS server_library (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    library_id TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS prototype_note (
     note_id TEXT PRIMARY KEY,
     text TEXT NOT NULL,
@@ -60,6 +68,22 @@ db.exec(`
     result TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     PRIMARY KEY (epoch, operation_id)
+  );
+  CREATE TABLE IF NOT EXISTS server_roots (
+    library_id TEXT NOT NULL REFERENCES server_library(library_id),
+    root_id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    selected_path TEXT NOT NULL,
+    canonical_path TEXT NOT NULL,
+    device TEXT NOT NULL,
+    inode TEXT NOT NULL,
+    mapping_revision INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state = 'active')
+  );
+  CREATE TABLE IF NOT EXISTS root_operations (
+    operation_id TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    result TEXT NOT NULL
   );
 `)
 
@@ -83,6 +107,18 @@ const compactOperations = db.prepare(`
     LIMIT ?
   )
 `)
+const selectRoots = db.prepare(
+  "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, state FROM server_roots ORDER BY rowid ASC"
+)
+selectRoots.setReadBigInts(true)
+const selectLibrary = db.prepare("SELECT library_id FROM server_library WHERE id = 1")
+const selectRootOperation = db.prepare("SELECT payload, result FROM root_operations WHERE operation_id = ?")
+const insertRoot = db.prepare(
+  "INSERT INTO server_roots(library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active')"
+)
+const insertRootOperation = db.prepare(
+  "INSERT INTO root_operations(operation_id, payload, result) VALUES(?, ?, ?)"
+)
 
 let closed = false
 
@@ -92,6 +128,149 @@ const readNoteRow = (noteId: string): NoteRow | undefined => {
     | undefined
   if (row === undefined) return undefined
   return { note_id: row.note_id, text: row.text, revision: row.revision.toString() }
+}
+
+const rootRow = (row: {
+  library_id: string
+  root_id: string
+  label: string
+  selected_path: string
+  canonical_path: string
+  device: string
+  inode: string
+  mapping_revision: bigint
+  state: "active"
+}): ServerRootRow => ({
+  libraryId: row.library_id,
+  rootId: row.root_id,
+  label: row.label,
+  selectedPath: row.selected_path,
+  canonicalPath: row.canonical_path,
+  device: row.device,
+  inode: row.inode,
+  mappingRevision: row.mapping_revision.toString(),
+  state: row.state
+})
+
+const rootRows = (): ReadonlyArray<ServerRootRow> =>
+  (selectRoots.all() as unknown as ReadonlyArray<{
+    library_id: string
+    root_id: string
+    label: string
+    selected_path: string
+    canonical_path: string
+    device: string
+    inode: string
+    mapping_revision: bigint
+    state: "active"
+  }>).map(rootRow)
+
+const containsPath = (ancestor: string, descendant: string): boolean => {
+  const child = relative(ancestor, descendant)
+  return child === "" || (child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child))
+}
+
+const rootsOverlap = (
+  left: { canonicalPath: string; device: string; inode: string },
+  right: { canonicalPath: string; device: string; inode: string }
+): boolean =>
+  (left.device === right.device && left.inode === right.inode) ||
+  containsPath(left.canonicalPath, right.canonicalPath) ||
+  containsPath(right.canonicalPath, left.canonicalPath)
+
+const registerRoot = (
+  request: Extract<WorkerRequest, { op: "registerRoot" }>
+): RootRegistrationOutcome => {
+  const payload = rootPayload({
+    label: request.label,
+    selectedPath: request.selectedPath,
+    canonicalPath: request.canonicalPath,
+    device: request.device,
+    inode: request.inode
+  })
+
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const existing = selectRootOperation.get(request.operationId) as
+      | { payload: string; result: string }
+      | undefined
+    if (existing !== undefined) {
+      if (existing.payload !== payload) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_conflict" }
+      }
+      db.exec("COMMIT")
+      return { kind: "replayed", root: JSON.parse(existing.result) as ServerRootRow }
+    }
+
+    const existingRoots = rootRows()
+    const candidate = {
+      canonicalPath: request.canonicalPath,
+      device: request.device,
+      inode: request.inode
+    }
+    if (existingRoots.some((root) => rootsOverlap(candidate, root))) {
+      db.exec("ROLLBACK")
+      return { kind: "root_overlap" }
+    }
+
+    const library = selectLibrary.get() as { library_id: string } | undefined
+    if (library === undefined) throw new Error("server library is not initialized")
+    const root: ServerRootRow = {
+      libraryId: library.library_id,
+      rootId: randomUUID(),
+      label: request.label,
+      selectedPath: request.selectedPath,
+      canonicalPath: request.canonicalPath,
+      device: request.device,
+      inode: request.inode,
+      mappingRevision: "1",
+      state: "active"
+    }
+    insertRoot.run(
+      root.libraryId,
+      root.rootId,
+      root.label,
+      root.selectedPath,
+      root.canonicalPath,
+      root.device,
+      root.inode,
+      BigInt(root.mappingRevision)
+    )
+    insertRootOperation.run(request.operationId, payload, JSON.stringify(root))
+    db.exec("COMMIT")
+    return { kind: "registered", root }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const rootPayload = (input: {
+  readonly label: string
+  readonly selectedPath: string
+  readonly canonicalPath: string
+  readonly device: string
+  readonly inode: string
+}): string => JSON.stringify(input)
+
+const lookupRootOperation = (
+  request: Extract<WorkerRequest, { op: "lookupRootOperation" }>
+): RootReplayLookup => {
+  const existing = selectRootOperation.get(request.operationId) as
+    | { payload: string; result: string }
+    | undefined
+  if (existing === undefined) return { kind: "not_found" }
+  const payload = rootPayload({
+    label: request.label,
+    selectedPath: request.selectedPath,
+    canonicalPath: request.canonicalPath,
+    device: request.device,
+    inode: request.inode
+  })
+  return existing.payload === payload
+    ? { kind: "replay", root: JSON.parse(existing.result) as ServerRootRow }
+    : { kind: "operation_conflict" }
 }
 
 const operationResult = (
@@ -211,6 +390,11 @@ const handle = (request: WorkerRequest): unknown => {
           instanceId
         )
       }
+      const library = selectLibrary.get() as { library_id: string } | undefined
+      if (library === undefined) {
+        db.prepare("INSERT INTO server_library(id, library_id) VALUES(1, ?)").run(randomUUID())
+      }
+      db.prepare("UPDATE server_state SET schema_version = 2 WHERE id = 1").run()
       db.prepare("INSERT OR IGNORE INTO prototype_note(note_id, text, revision) VALUES(?, ?, 0)").run(
         SEED_NOTE_ID,
         SEED_NOTE_TEXT
@@ -219,10 +403,16 @@ const handle = (request: WorkerRequest): unknown => {
     }
     case "readNote":
       return readNoteRow(request.noteId) ?? null
+    case "listRoots":
+      return rootRows()
+    case "lookupRootOperation":
+      return lookupRootOperation(request)
     case "readOperation":
       return readOperation(request)
     case "commitNote":
       return commitNote(request)
+    case "registerRoot":
+      return registerRoot(request)
     case "close":
       if (!closed) {
         closed = true

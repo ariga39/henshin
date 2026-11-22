@@ -17,7 +17,9 @@ export const previewRoot = (path: string) =>
         root_preview_selected_path: path,
         root_preview_status: "loading",
         root_preview: null,
-        root_preview_error: null
+        root_preview_error: null,
+        root_save_status: "idle",
+        root_save_error: null
       })
     )
 
@@ -42,6 +44,52 @@ export const previewRoot = (path: string) =>
       )
     }
   })
+
+export const loadRoots = Effect.gen(function*() {
+  const client = yield* RootPreviewClient
+  yield* Effect.sync(() => viewStore.set({ root_roots_status: "loading", root_roots_error: null }))
+  const result = yield* client.list()
+  if (result.ok) {
+    yield* Effect.sync(() => viewStore.set({ root_saved_roots: result.data, root_roots_status: "ready" }))
+  } else {
+    yield* Effect.sync(() =>
+      viewStore.set({ root_roots_status: "error", root_roots_error: result.error.message })
+    )
+  }
+})
+
+export const saveRoot = Effect.gen(function*() {
+  const client = yield* RootPreviewClient
+  const state = viewStore.getState()
+  const preview = state.root_preview
+  if (preview === null || state.root_preview_status !== "ready" || state.root_label.length === 0) return
+
+  yield* Effect.sync(() => viewStore.set({ root_save_status: "loading", root_save_error: null }))
+  const result = yield* client.save({
+    operation_id: newOperationId(),
+    instance_id: preview.instance_id,
+    epoch: preview.epoch,
+    label: state.root_label,
+    path: preview.selected_server_path,
+    preview_identity: preview.preview_identity
+  })
+  if (result.ok) {
+    yield* Effect.sync(() => {
+      const roots = viewStore.getState().root_saved_roots
+      viewStore.set({
+        root_saved_roots: roots.some((root) => root.root_id === result.data.root_id)
+          ? roots.map((root) => root.root_id === result.data.root_id ? result.data : root)
+          : [...roots, result.data],
+        root_save_status: "ready",
+        root_save_error: null
+      })
+    })
+  } else {
+    yield* Effect.sync(() =>
+      viewStore.set({ root_save_status: "error", root_save_error: result.error.message })
+    )
+  }
+})
 
 const isCurrent = (generation: number): boolean =>
   viewStore.getState().connection_generation === generation
