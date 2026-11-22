@@ -150,14 +150,14 @@ export type LibraryEntryRow = typeof LibraryEntryRow.Type
 export const ResolveReplacementOutcome = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("committed"),
-    decision: Schema.Literal("keep"),
+    decision: Schema.Union([Schema.Literal("keep"), Schema.Literal("replace")]),
     candidate: StagedDiscoveryRow,
     entry: LibraryEntryRow,
     detachedEntryId: Schema.NullOr(Uuid)
   }),
   Schema.Struct({
     kind: Schema.Literal("replayed"),
-    decision: Schema.Literal("keep"),
+    decision: Schema.Union([Schema.Literal("keep"), Schema.Literal("replace")]),
     candidate: StagedDiscoveryRow,
     entry: LibraryEntryRow,
     detachedEntryId: Schema.NullOr(Uuid)
@@ -185,7 +185,7 @@ export type ResolveReplacementOutcome = typeof ResolveReplacementOutcome.Type
 export const EntryResolutionLookupOutcome = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("replayed"),
-    decision: Schema.Literal("keep"),
+    decision: Schema.Union([Schema.Literal("keep"), Schema.Literal("replace")]),
     candidate: StagedDiscoveryRow,
     entry: LibraryEntryRow,
     detachedEntryId: Schema.NullOr(Uuid)
@@ -408,7 +408,7 @@ export const WorkerRequest = Schema.Union([
     entryId: Uuid,
     operationId: Uuid,
     epoch: Uuid,
-    decision: Schema.Literal("keep"),
+    decision: Schema.Union([Schema.Literal("keep"), Schema.Literal("replace")]),
     expectedCandidateVersion: Schema.Natural,
     expectedDecisionVersion: Revision,
     expectedLocationRevision: Revision,
@@ -422,7 +422,7 @@ export const WorkerRequest = Schema.Union([
     entryId: Uuid,
     operationId: Uuid,
     epoch: Uuid,
-    decision: Schema.Literal("keep"),
+    decision: Schema.Union([Schema.Literal("keep"), Schema.Literal("replace")]),
     expectedCandidateVersion: Schema.Natural,
     expectedDecisionVersion: Revision,
     expectedLocationRevision: Revision,

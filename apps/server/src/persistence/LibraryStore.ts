@@ -17,7 +17,7 @@ export interface ReplacementResolutionInput {
   readonly entryId: string
   readonly operationId: string
   readonly epoch: string
-  readonly decision: "keep"
+  readonly decision: "keep" | "replace"
   readonly expectedCandidateVersion: number
   readonly expectedDecisionVersion: string
   readonly expectedLocationRevision: string

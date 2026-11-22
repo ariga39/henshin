@@ -389,16 +389,18 @@ db.exec(`
     kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
     title TEXT NOT NULL,
     page_count INTEGER NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending')),
+    state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending', 'detached')),
     content_version INTEGER NOT NULL,
     location_revision INTEGER NOT NULL,
     decision_version INTEGER NOT NULL DEFAULT 1,
     manifest_json TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    accepted_observation_json TEXT,
-    UNIQUE (root_id, relative_path)
+    accepted_observation_json TEXT
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS library_entries_current_location_unique
+    ON library_entries(root_id, relative_path)
+    WHERE state IN ('accepted', 'replacement-pending');
   CREATE TABLE IF NOT EXISTS open_events (
     event_id TEXT PRIMARY KEY,
     instance_id TEXT NOT NULL,
@@ -531,7 +533,7 @@ if (!db.prepare("SELECT 1 FROM pragma_table_info('root_policy_operations') WHERE
 const libraryEntriesTable = db.prepare(
   "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'library_entries'"
 ).get() as { sql: string } | undefined
-if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("replacement-pending")) {
+if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("detached")) {
   db.exec("PRAGMA foreign_keys = OFF")
   db.exec("BEGIN IMMEDIATE")
   try {
@@ -545,7 +547,7 @@ if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("repl
         kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
         title TEXT NOT NULL,
         page_count INTEGER NOT NULL,
-        state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending')),
+        state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending', 'detached')),
         content_version INTEGER NOT NULL,
         location_revision INTEGER NOT NULL,
         decision_version INTEGER NOT NULL DEFAULT 1,
@@ -553,15 +555,21 @@ if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("repl
         created_at_ms INTEGER NOT NULL,
         updated_at_ms INTEGER NOT NULL,
         accepted_observation_json TEXT,
-        UNIQUE (root_id, relative_path)
       );
-      INSERT INTO library_entries_v7
-        SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count,
-          state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms,
-          accepted_observation_json
-        FROM library_entries;
+      INSERT INTO library_entries_v7(
+        entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count,
+        state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms,
+        accepted_observation_json
+      )
+      SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count,
+        state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms,
+        accepted_observation_json
+      FROM library_entries;
       DROP TABLE library_entries;
       ALTER TABLE library_entries_v7 RENAME TO library_entries;
+      CREATE UNIQUE INDEX library_entries_current_location_unique
+        ON library_entries(root_id, relative_path)
+        WHERE state IN ('accepted', 'replacement-pending');
     `)
     const migratedAt = Date.now()
     const migrated = db.prepare(`
@@ -752,6 +760,9 @@ const markEntryPending = db.prepare(
 )
 const acceptReplacement = db.prepare(
   "UPDATE library_entries SET kind = ?, title = ?, page_count = ?, state = 'accepted', decision_version = decision_version + 1, content_version = content_version + 1, manifest_json = ?, accepted_observation_json = ?, updated_at_ms = ? WHERE entry_id = ? AND state = 'replacement-pending'"
+)
+const detachEntry = db.prepare(
+  "UPDATE library_entries SET state = 'detached', decision_version = decision_version + 1, location_revision = location_revision + 1, updated_at_ms = ? WHERE entry_id = ? AND state = 'replacement-pending'"
 )
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
 const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
@@ -1528,7 +1539,7 @@ const resolveReplacement = (
         return { kind: "operation_expired" }
       }
       const result = JSON.parse(existing.result) as {
-        decision: "keep"
+        decision: "keep" | "replace"
         candidate: import("./worker-protocol").StagedDiscoveryRow
         entry: import("./worker-protocol").LibraryEntryRow
         detachedEntryId: string | null
@@ -1572,7 +1583,7 @@ const resolveReplacement = (
       kind: "archive" | "image-directory"
       title: string
       page_count: bigint
-      state: "accepted" | "replacement-pending"
+      state: "accepted" | "replacement-pending" | "detached"
       decision_version: bigint
       content_version: bigint
       location_revision: bigint
@@ -1601,7 +1612,12 @@ const resolveReplacement = (
       db.exec("ROLLBACK")
       return { kind: "candidate_not_ready" }
     }
-    if (request.freshManifestJson === null || !manifestsEquivalent(candidate.manifest_json, request.freshManifestJson)) {
+    if (
+      request.freshManifestJson === null ||
+      (request.decision === "replace"
+        ? candidate.manifest_json !== request.freshManifestJson
+        : !manifestsEquivalent(candidate.manifest_json, request.freshManifestJson))
+    ) {
       db.exec("ROLLBACK")
       return { kind: "fresh_observation_conflict" }
     }
@@ -1618,26 +1634,49 @@ const resolveReplacement = (
       return { kind: "storage_full" }
     }
 
-    const updated = acceptReplacement.run(
-      candidate.kind,
-      titleForCandidate(candidate.relative_path, candidate.kind),
-      BigInt(pageCount),
-      candidate.manifest_json,
-      JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind)),
-      now,
-      entry.entry_id
-    )
-    if (Number(updated.changes) !== 1) throw new Error("replacement entry is no longer pending")
+    let resolvedEntryId = entry.entry_id
+    let detachedEntryId: string | null = null
+    if (request.decision === "keep") {
+      const updated = acceptReplacement.run(
+        candidate.kind,
+        titleForCandidate(candidate.relative_path, candidate.kind),
+        BigInt(pageCount),
+        candidate.manifest_json,
+        JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind)),
+        now,
+        entry.entry_id
+      )
+      if (Number(updated.changes) !== 1) throw new Error("replacement entry is no longer pending")
+    } else {
+      const detached = detachEntry.run(now, entry.entry_id)
+      if (Number(detached.changes) !== 1) throw new Error("replacement entry is no longer pending")
+      detachedEntryId = entry.entry_id
+      resolvedEntryId = randomUUID()
+      insertEntry.run(
+        resolvedEntryId,
+        root.libraryId,
+        request.rootId,
+        candidate.relative_path,
+        join(root.selectedPath, ...candidate.relative_path.split("/")),
+        candidate.kind,
+        titleForCandidate(candidate.relative_path, candidate.kind),
+        BigInt(pageCount),
+        candidate.manifest_json,
+        now,
+        now,
+        JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind))
+      )
+    }
     const candidateView = stagedDiscoveryRow(candidate)
     deleteStaged.run(candidate.candidate_id)
     bumpLibraryRevision.run()
-    const resolved = selectEntryForResolution.get(entry.entry_id, request.rootId) as Parameters<typeof entryRow>[0]
+    const resolved = selectEntryForResolution.get(resolvedEntryId, request.rootId) as Parameters<typeof entryRow>[0]
     if (resolved === undefined) throw new Error("resolved entry is missing")
     const result = {
       decision: request.decision,
       candidate: candidateView,
       entry: entryRow(resolved),
-      detachedEntryId: null
+      detachedEntryId
     }
     insertReviewOperation.run(
       request.epoch,
