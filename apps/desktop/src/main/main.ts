@@ -18,6 +18,7 @@ import {
   PublicApiError,
   RootPreviewIpcRequest,
   RootListIpcRequest,
+  RootCommandIpcRequest,
   RootSaveIpcRequest,
   ServerHttpClient,
   SaveDraftIpcRequest,
@@ -282,6 +283,21 @@ const registerIpc = (): void => {
         Effect.gen(function*() {
           const client = yield* ServerHttpClient
           return yield* client.save({ payload: decoded.value })
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.rootCommand, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(RootCommandIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* ServerHttpClient
+          const { root_id, ...payload } = decoded.value
+          return yield* client.command({ params: { id: root_id }, payload })
         })
       )
     )

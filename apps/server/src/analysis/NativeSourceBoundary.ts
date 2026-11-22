@@ -488,6 +488,12 @@ export interface SourceRootDiscovery {
 
 export interface DiscoverSourceRootOptions {
   readonly limits?: Partial<SourceDiscoveryLimits>
+  readonly exclusions?: ReadonlyArray<SourceDiscoveryExclusion>
+}
+
+export interface SourceDiscoveryExclusion {
+  readonly path: string
+  readonly scope: "exact" | "subtree"
 }
 
 const supportedImageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp"])
@@ -596,6 +602,15 @@ export const discoverSourceRoot = async (
 ): Promise<NativeBoundaryResult<SourceRootDiscovery>> => {
   const limits = sourceDiscoveryLimits(options?.limits)
   if (limits === undefined) return failure("directory-limit")
+  const exclusions = options?.exclusions ?? []
+  const isSubtreeExcluded = (relativePath: string): boolean =>
+    exclusions.some(
+      (exclusion) =>
+        exclusion.scope === "subtree" &&
+        (relativePath === exclusion.path || relativePath.startsWith(`${exclusion.path}/`))
+    )
+  const isExactlyExcluded = (relativePath: string): boolean =>
+    exclusions.some((exclusion) => exclusion.scope === "exact" && relativePath === exclusion.path)
 
   const context: OperationContext = {
     limits: discoveryNativeLimits(limits),
@@ -656,6 +671,7 @@ export const discoverSourceRoot = async (
     directoriesVisited += 1
 
     if (next.relativePath !== "") {
+      if (isSubtreeExcluded(next.relativePath)) continue
       let queuedStats: Awaited<ReturnType<typeof lstat>>
       try {
         queuedStats = await lstat(next.nativePath, { bigint: true })
@@ -754,6 +770,7 @@ export const discoverSourceRoot = async (
           directoryComplete = false
           continue
         }
+        if (isSubtreeExcluded(relativePath)) continue
 
         let stats: Awaited<ReturnType<typeof lstat>>
         try {
@@ -786,6 +803,8 @@ export const discoverSourceRoot = async (
           directories.push({ relativePath, nativePath: resolved.value.nativePath, identity: identityOf(stats) })
           continue
         }
+
+        if (stats.isFile() && isExactlyExcluded(relativePath)) continue
 
         if (stats.isFile() && isArchiveName(name)) {
           const resolved = await resolveSourceCandidate(
@@ -842,7 +861,7 @@ export const discoverSourceRoot = async (
       }
     }
 
-    if (directoryComplete && next.relativePath !== "" && directImageCount > 0) {
+    if (directoryComplete && next.relativePath !== "" && directImageCount > 0 && !isExactlyExcluded(next.relativePath)) {
       candidateCount += 1
       if (candidates.length >= limits.maxCandidates) {
         markPartial("directory-limit", next.relativePath)
@@ -854,7 +873,7 @@ export const discoverSourceRoot = async (
         directImageCount,
         unsupportedDirectImageCount
       })
-    } else if (directoryComplete && next.relativePath !== "" && unsupportedDirectImageCount > 0) {
+    } else if (directoryComplete && next.relativePath !== "" && unsupportedDirectImageCount > 0 && !isExactlyExcluded(next.relativePath)) {
       unsupportedDirectoryCount += 1
       appendSample(unsupportedDirectories, next.relativePath)
     }
