@@ -20,6 +20,7 @@ import {
   RootListIpcRequest,
   RootCommandIpcRequest,
   RootSaveIpcRequest,
+  ReleaseHeldDiscoveryIpcRequest,
   ReviewCandidatesIpcRequest,
   ServerHttpClient,
   ReviewHttpClient,
@@ -340,6 +341,39 @@ const registerIpc = (): void => {
         Effect.gen(function*() {
           const client = yield* ReviewHttpClient
           return yield* client.candidates()
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.reviewCommand, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ReleaseHeldDiscoveryIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    let session: Session
+    try {
+      session = requireSession()
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
+    return runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* ReviewHttpClient
+          const input = decoded.value
+          return yield* client.command({
+            params: { id: input.candidate_id },
+            payload: {
+              root_id: input.root_id,
+              operation_id: input.operation_id,
+              instance_id: session.instanceId,
+              epoch: session.epoch,
+              expected_candidate_version: input.expected_candidate_version,
+              expected_mapping_revision: input.expected_mapping_revision,
+              expected_policy_revision: input.expected_policy_revision,
+              command: input.command
+            }
+          })
         })
       )
     )

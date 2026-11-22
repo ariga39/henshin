@@ -9,6 +9,7 @@ export const IpcChannels = {
   rootCommand: "henshin:root-command",
   taskList: "henshin:task-list",
   reviewCandidates: "henshin:review-candidates",
+  reviewCommand: "henshin:review-command",
   handshake: "henshin-prototype:handshake",
   connect: "henshin-prototype:connect",
   disconnect: "henshin-prototype:disconnect",

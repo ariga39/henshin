@@ -104,6 +104,62 @@ export const loadScanResults = Effect.gen(function*() {
   return yield* loadScanResultsFor(client)
 })
 
+export const releaseHeldDiscovery = (candidateId: string) =>
+  Effect.gen(function*() {
+    const client = yield* ScanReviewClient
+    const state = viewStore.getState()
+    const candidate = state.staged_discoveries.find((item) => item.candidate_id === candidateId)
+    const root = candidate === undefined
+      ? undefined
+      : state.root_saved_roots.find((item) => item.root_id === candidate.root_id)
+    if (candidate === undefined || root === undefined || candidate.hold_state !== "held") return
+
+    const operationId = state.scan_release_candidate_id === candidateId
+      ? state.scan_release_operation_id ?? newOperationId()
+      : newOperationId()
+    yield* Effect.sync(() => viewStore.set({
+      scan_release_status: "loading",
+      scan_release_candidate_id: candidateId,
+      scan_release_operation_id: operationId,
+      scan_release_error: null
+    }))
+
+    const result = yield* client.release({
+      candidate_id: candidate.candidate_id,
+      root_id: candidate.root_id,
+      operation_id: operationId,
+      expected_candidate_version: candidate.candidate_version,
+      expected_mapping_revision: root.mapping_revision,
+      expected_policy_revision: root.policy_revision,
+      command: { type: "release-hold" }
+    })
+    if (!result.ok) {
+      if (result.error.code === "revision_conflict" || result.error.code === "not_found") {
+        yield* loadRoots
+        yield* loadScanResults
+      }
+      yield* Effect.sync(() => viewStore.set({
+        scan_release_status: "error",
+        scan_release_operation_id: result.error.code === "revision_conflict" || result.error.code === "not_found"
+          ? null
+          : operationId,
+        scan_release_error: result.error.message
+      }))
+      return
+    }
+
+    yield* Effect.sync(() => {
+      const current = viewStore.getState()
+      viewStore.set({
+        staged_discoveries: current.staged_discoveries.map((item) =>
+          item.candidate_id === result.data.candidate.candidate_id ? result.data.candidate : item
+        ),
+        scan_release_status: "idle",
+        scan_release_error: null
+      })
+    })
+  })
+
 const watchScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
   while (true) {
     const loaded = yield* loadScanResultsFor(client)

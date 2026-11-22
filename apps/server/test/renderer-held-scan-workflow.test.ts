@@ -11,6 +11,7 @@ import { RootPreviewClient, ScanReviewClient, type Result } from "../../desktop/
 import {
   loadRootWorkspace,
   retryScanResults,
+  releaseHeldDiscovery,
   startHeldScan,
   watchHeldScans
 } from "../../desktop/src/renderer/workflows"
@@ -113,6 +114,10 @@ const resetView = () => {
     scan_error: null,
     scan_start_status: "idle",
     scan_start_error: null,
+    scan_release_status: "idle",
+    scan_release_candidate_id: null,
+    scan_release_operation_id: null,
+    scan_release_error: null,
     scan_hold_new_discoveries: false
   })
 }
@@ -142,10 +147,42 @@ const rootClientWith = (overrides: Partial<RootPreviewClient["Service"]> = {}): 
 const scanClientWith = (overrides: Partial<ScanReviewClient["Service"]> = {}): ScanReviewClient["Service"] => ScanReviewClient.of({
   listTasks: () => Effect.succeed({ ok: true, data: [] }),
   candidates: () => Effect.succeed({ ok: true, data: [] }),
+  release: () => Effect.succeed({ ok: true, data: {
+    operation_id: "77777777-7777-4777-8777-777777777777",
+    candidate: { ...candidate, candidate_version: 2, hold_state: "eligible" }
+  } }),
   ...overrides
 })
 
 describe("held scan renderer workflows", () => {
+  it("releases one held discovery using the current candidate and root fences", async () => {
+    let releaseInput: Parameters<ScanReviewClient["Service"]["release"]>[0] | undefined
+    const released = { ...candidate, candidate_version: 2, hold_state: "eligible" as const }
+    const scanClient = scanClientWith({
+      release: (input) => {
+        releaseInput = input
+        return Effect.succeed({ ok: true, data: {
+          operation_id: input.operation_id,
+          candidate: released
+        } })
+      }
+    })
+    viewStore.set({ root_saved_roots: [root], staged_discoveries: [candidate], scan_status: "ready" })
+
+    await run(releaseHeldDiscovery(candidate.candidate_id), rootClientWith(), scanClient)
+
+    expect(releaseInput).toMatchObject({
+      candidate_id: candidate.candidate_id,
+      root_id: root.root_id,
+      expected_candidate_version: candidate.candidate_version,
+      expected_mapping_revision: root.mapping_revision,
+      expected_policy_revision: root.policy_revision,
+      command: { type: "release-hold" }
+    })
+    expect(viewStore.getState().staged_discoveries).toEqual([released])
+    expect(viewStore.getState().scan_release_status).toBe("idle")
+  })
+
   it("starts from the policy revision observed by the saved-root preview", async () => {
     let commandInput: RootCommandIpcRequest | undefined
     const submitted = task("succeeded")

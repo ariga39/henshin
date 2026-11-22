@@ -2,7 +2,7 @@ import type { RootPreviewResult, ScanTask, StagedDiscovery } from "@henshin/cont
 import { useSyncExternalStore } from "react"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { retryScanResults, startHeldScan } from "./workflows"
+import { releaseHeldDiscovery, retryScanResults, startHeldScan } from "./workflows"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -116,6 +116,22 @@ export const HeldScanReview = () => {
               <span data-testid="staged-discovery-root">{taskRootLabel(state, candidate.root_id)}</span>
               <span data-testid="staged-discovery-path">{candidate.relative_path}</span>
               <small>{discoveryStatus(candidate)}; hold: {candidate.hold_state}</small>
+              {candidate.hold_state === "held" && (
+                <button
+                  data-testid={`release-hold-${candidate.candidate_id}`}
+                  disabled={state.scan_release_status === "loading"}
+                  onClick={() => void runtime.runPromise(releaseHeldDiscovery(candidate.candidate_id))}
+                >
+                  {state.scan_release_candidate_id === candidate.candidate_id && state.scan_release_status === "loading"
+                    ? "Releasing hold…"
+                    : "Release hold"}
+                </button>
+              )}
+              {state.scan_release_candidate_id === candidate.candidate_id && state.scan_release_status === "error" && (
+                <p role="alert" data-testid={`release-hold-error-${candidate.candidate_id}`}>
+                  Could not release hold: {state.scan_release_error}
+                </p>
+              )}
             </li>
           ))}
         </ul>
