@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, rm, truncate, writeFile } from "node:fs/promises"
 import os from "node:os"
 import { randomUUID } from "node:crypto"
 import { vi } from "vitest"
@@ -14,7 +14,8 @@ vi.mock("node:url", async () => {
 })
 
 import sharp from "sharp"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, PlatformError } from "effect"
+import { ChildProcessSpawner } from "effect/process"
 import { NodeServices } from "@effect/platform-node"
 import { afterEach, describe, expect, it } from "vitest"
 import {
@@ -69,7 +70,15 @@ const manifestView = (manifest: SourceManifest) => ({
 const makeServices = async (
   cachePublish: "succeed" | "fail",
   sourceKind: "directory" | "archive" = "directory",
-  options: { readonly legacyObservations?: boolean; readonly nonNaturalArchiveOrder?: boolean } = {}
+  options: {
+    readonly legacyObservations?: boolean
+    readonly nonNaturalArchiveOrder?: boolean
+    readonly warmCache?: Uint8Array
+    readonly cacheReadFails?: boolean
+    readonly rootUnavailable?: boolean
+    readonly allPagesCorrupt?: boolean
+    readonly transientFirstDecode?: boolean
+  } = {}
 ) => {
   const rootPath = await mkdtemp(join(os.tmpdir(), "henshin-thumbnail-producer-"))
   temporaryRoots.push(rootPath)
@@ -79,7 +88,7 @@ const makeServices = async (
   if (sourceKind === "directory") {
     await mkdir(bookPath)
     await writeFile(join(bookPath, "001.png"), Buffer.from("corrupt page"))
-    await writeFile(join(bookPath, "002.png"), goodPage)
+    await writeFile(join(bookPath, "002.png"), options.allPagesCorrupt ? Buffer.from("also corrupt") : goodPage)
   } else {
     const writer = new ZipWriter(new BlobWriter("application/zip"))
     const entries: ReadonlyArray<readonly [string, Uint8Array]> = options.nonNaturalArchiveOrder
@@ -121,7 +130,7 @@ const makeServices = async (
     libraryId: randomUUID(),
     rootId,
     label: "Books",
-    selectedPath: selected.value.selectedPath,
+    selectedPath: options.rootUnavailable ? join(rootPath, "unavailable-root") : selected.value.selectedPath,
     canonicalPath: selected.value.canonicalPath,
     device: selected.value.identity.device,
     inode: selected.value.identity.inode,
@@ -151,24 +160,51 @@ const makeServices = async (
   const library = {
     acceptedThumbnailEntry: () => Effect.succeed(accepted)
   } as unknown as LibraryStore["Service"]
-  const roots = {
-    list: () => Effect.succeed([root])
-  } as unknown as RootStore["Service"]
+  let cacheReads = 0
   const cache = {
-    read: () => Effect.succeed(null),
+    read: () => options.cacheReadFails
+      ? Effect.fail(new ThumbnailCacheError({ message: "simulated cache read failure" }))
+      : Effect.sync(() => {
+          cacheReads += 1
+          return options.warmCache ?? null
+        }),
     publish: (_key: string, bytes: Uint8Array) => cachePublish === "fail"
       ? Effect.fail(new ThumbnailCacheError({ message: "simulated cache publication failure" }))
       : Effect.sync(() => { published = bytes })
   } as unknown as ThumbnailCache["Service"]
+  const rootService = {
+    list: () => Effect.succeed([root])
+  } as unknown as RootStore["Service"]
+  const nodeLayer = options.transientFirstDecode
+    ? Layer.effect(
+        ChildProcessSpawner.ChildProcessSpawner,
+        Effect.gen(function*() {
+          const actual = yield* ChildProcessSpawner.ChildProcessSpawner
+          let first = true
+          return ChildProcessSpawner.make((command) => {
+            if (first) {
+              first = false
+              return Effect.fail(PlatformError.systemError({
+                _tag: "Unknown",
+                module: "thumbnail-test",
+                method: "spawn",
+                description: "simulated transient decoder startup failure"
+              }))
+            }
+            return actual.spawn(command)
+          })
+        })
+      ).pipe(Layer.provide(NodeServices.layer))
+    : NodeServices.layer
   const layer = ThumbnailProducer.layer.pipe(
     Layer.provide(Layer.mergeAll(
       Layer.succeed(LibraryStore, library),
-      Layer.succeed(RootStore, roots),
+      Layer.succeed(RootStore, rootService),
       Layer.succeed(ThumbnailCache, cache),
-      NodeServices.layer
+      nodeLayer
     ))
   )
-  return { entryId, layer, getPublished: () => published }
+  return { entryId, layer, bookPath, getPublished: () => published, getCacheReads: () => cacheReads }
 }
 
 describe("real default-cover producer", () => {
@@ -212,6 +248,45 @@ describe("real default-cover producer", () => {
     await expect(sharp(result.bytes).metadata()).resolves.toMatchObject({ format: "webp", width: 320, height: 480 })
   })
 
+  it("falls through a transient first-page decoder failure to a later CBZ cover", async () => {
+    const fixture = await makeServices("succeed", "archive", { transientFirstDecode: true })
+    const result = await Effect.runPromise(
+      Effect.gen(function*() {
+        const producer = yield* ThumbnailProducer
+        return yield* producer.load(`default-v1.${fixture.entryId}.1`)
+      }).pipe(Effect.provide(fixture.layer))
+    )
+    expect(result.kind).toBe("ready")
+    if (result.kind !== "ready") throw new Error("expected fallback cover")
+    await expect(sharp(result.bytes).metadata()).resolves.toMatchObject({ format: "webp", width: 320, height: 480 })
+  })
+
+  it("keeps a transient decoder failure retryable when no candidate succeeds", async () => {
+    const fixture = await makeServices("succeed", "directory", {
+      allPagesCorrupt: true,
+      transientFirstDecode: true
+    })
+    const result = await Effect.runPromise(
+      Effect.gen(function*() {
+        const producer = yield* ThumbnailProducer
+        return yield* producer.load(`default-v1.${fixture.entryId}.1`)
+      }).pipe(Effect.provide(fixture.layer))
+    )
+    expect(result).toEqual({ kind: "updating" })
+  })
+
+  it("keeps a permanently over-limit accepted archive terminal", async () => {
+    const fixture = await makeServices("succeed", "archive")
+    await truncate(fixture.bookPath, 4 * 1024 ** 3 + 1)
+    const result = await Effect.runPromise(
+      Effect.gen(function*() {
+        const producer = yield* ThumbnailProducer
+        return yield* producer.load(`default-v1.${fixture.entryId}.1`)
+      }).pipe(Effect.provide(fixture.layer))
+    )
+    expect(result).toEqual({ kind: "missing" })
+  })
+
   it("renders the accepted manifest's first page when ZIP order is non-natural", async () => {
     const fixture = await makeServices("succeed", "archive", { nonNaturalArchiveOrder: true })
     const result = await Effect.runPromise(
@@ -235,5 +310,74 @@ describe("real default-cover producer", () => {
       }).pipe(Effect.provide(fixture.layer))
     )
     expect(result.kind).toBe("ready")
+  })
+
+  it("does not serve a warm legacy cache entry after the source changes", async () => {
+    const fixture = await makeServices("succeed", "directory", {
+      legacyObservations: true,
+      warmCache: new Uint8Array([1, 2, 3])
+    })
+    await writeFile(join(fixture.bookPath, "002.png"), Buffer.from("changed page"))
+    const result = await Effect.runPromise(
+      Effect.gen(function*() {
+        const producer = yield* ThumbnailProducer
+        return yield* producer.load(`default-v1.${fixture.entryId}.1`)
+      }).pipe(Effect.provide(fixture.layer))
+    )
+    expect(result).toEqual({ kind: "missing" })
+    expect(fixture.getCacheReads()).toBe(0)
+  })
+
+  it("regenerates when reading the optional cache fails", async () => {
+    const fixture = await makeServices("succeed", "directory", { cacheReadFails: true })
+    const result = await Effect.runPromise(
+      Effect.gen(function*() {
+        const producer = yield* ThumbnailProducer
+        return yield* producer.load(`default-v1.${fixture.entryId}.1`)
+      }).pipe(Effect.provide(fixture.layer))
+    )
+    expect(result.kind).toBe("ready")
+  })
+
+  it("keeps an unavailable accepted root retryable", async () => {
+    const fixture = await makeServices("succeed", "directory", { rootUnavailable: true })
+    const result = await Effect.runPromise(
+      Effect.gen(function*() {
+        const producer = yield* ThumbnailProducer
+        return yield* producer.load(`default-v1.${fixture.entryId}.1`)
+      }).pipe(Effect.provide(fixture.layer))
+    )
+    expect(result).toEqual({ kind: "updating" })
+  })
+
+  it("keeps a genuinely unhealthy accepted source terminal", async () => {
+    const fixture = await makeServices("succeed", "directory", { allPagesCorrupt: true })
+    const result = await Effect.runPromise(
+      Effect.gen(function*() {
+        const producer = yield* ThumbnailProducer
+        return yield* producer.load(`default-v1.${fixture.entryId}.1`)
+      }).pipe(Effect.provide(fixture.layer))
+    )
+    expect(result).toEqual({ kind: "missing" })
+  })
+
+  it("keeps a budget timeout retryable and backs off the next render", async () => {
+    const fixture = await makeServices("succeed")
+    const values = [0, 31_000]
+    const now = vi.spyOn(Date, "now").mockImplementation(() => values.shift() ?? 31_000)
+    try {
+      const [first, second] = await Effect.runPromise(
+        Effect.gen(function*() {
+          const producer = yield* ThumbnailProducer
+          const first = yield* producer.load(`default-v1.${fixture.entryId}.1`)
+          const second = yield* producer.load(`default-v1.${fixture.entryId}.1`)
+          return [first, second] as const
+        }).pipe(Effect.provide(fixture.layer))
+      )
+      expect(first).toEqual({ kind: "updating" })
+      expect(second).toEqual({ kind: "updating" })
+    } finally {
+      now.mockRestore()
+    }
   })
 })

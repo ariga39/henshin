@@ -1,6 +1,6 @@
 import { createServer } from "node:http"
 import path from "node:path"
-import { NodeHttpServerRequest, NodeStream, NodeHttpServer } from "@effect/platform-node"
+import { NodeHttpServerRequest, NodeStream, NodeHttpServer, NodeServices } from "@effect/platform-node"
 import { ByteSize, Data, Effect, Layer, Schema, Stream } from "effect"
 import {
   HttpIncomingMessage,
@@ -12,12 +12,13 @@ import {
 } from "effect/http"
 import type { ServeError } from "effect/http/HttpServerError"
 import { HttpApiBuilder } from "effect/http-api"
-import { LibraryApi, OpenEventApi, PrototypeApi, ReviewApi, ServerApi, TaskApi } from "@henshin/contracts"
+import { LibraryApi, OpenEventApi, PrototypeApi, ReviewApi, ServerApi, TaskApi, ThumbnailApi } from "@henshin/contracts"
 import { AuthenticationLayer } from "./api/AuthenticationLayer"
 import { PrototypeHandlers } from "./api/handlers"
 import { RootHandlers } from "./api/root-preview"
 import { ReviewHandlers, TaskHandlers } from "./api/scan"
 import { LibraryHandlers } from "./api/library"
+import { ThumbnailHandlers } from "./api/thumbnails"
 import { OpenEventHandlers } from "./api/open-events"
 import { AuthConfig, ServerState } from "./identity"
 import { DatabaseWorker, type DatabaseWorkerError } from "./persistence/DatabaseWorker"
@@ -27,6 +28,8 @@ import { ScanStore } from "./persistence/ScanStore"
 import { LibraryStore } from "./persistence/LibraryStore"
 import { OpenEventStore } from "./persistence/OpenEventStore"
 import { ServerOwnershipLayer, type ServerOwnershipError } from "./persistence/ServerOwnership"
+import { ThumbnailCache } from "./thumbnails/ThumbnailCache"
+import { ThumbnailProducer } from "./thumbnails/ThumbnailProducer"
 
 const MAX_BODY_BYTES = 1024 * 1024
 const BODIED_METHODS = new Set<string>(["PUT", "POST", "PATCH"])
@@ -198,6 +201,19 @@ export const makeAppLayer = (
     Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer, LibraryStore.layer))
   )
   const LibraryRoutesLayer = HttpApiBuilder.layer(LibraryApi).pipe(Layer.provide(LibraryHandlersLayer))
+  const ThumbnailHandlersLayer = ThumbnailHandlers.pipe(
+    Layer.provide(ThumbnailProducer.layer),
+    Layer.provide(
+      Layer.mergeAll(
+        AuthenticationLayer,
+        LibraryStore.layer,
+        RootStore.layer,
+        ThumbnailCache.layer(path.join(path.dirname(options.dbPath), "thumbnail-cache")),
+        NodeServices.layer
+      )
+    )
+  )
+  const ThumbnailRoutesLayer = HttpApiBuilder.layer(ThumbnailApi).pipe(Layer.provide(ThumbnailHandlersLayer))
   const OpenEventHandlersLayer = OpenEventHandlers.pipe(
     Layer.provide(Layer.mergeAll(AuthenticationLayer, OpenEventStore.layer))
   )
@@ -208,6 +224,7 @@ export const makeAppLayer = (
     TaskRoutesLayer,
     ReviewRoutesLayer,
     LibraryRoutesLayer,
+    ThumbnailRoutesLayer,
     OpenEventRoutesLayer
   )
 
