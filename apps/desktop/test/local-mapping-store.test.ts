@@ -1,5 +1,5 @@
 import { build } from "esbuild"
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -15,12 +15,16 @@ const instanceA = "11111111-1111-4111-8111-111111111111"
 const instanceB = "22222222-2222-4222-8222-222222222222"
 const instanceC = "33333333-3333-4333-8333-333333333333"
 const instanceD = "44444444-4444-4444-8444-444444444444"
+const instanceE = "55555555-5555-4555-8555-555555555555"
 const rootA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 const rootB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 const rootC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 const rootD = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 const rootE = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
 const rootF = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+const rootG = "11111111-aaaa-4111-8111-111111111111"
+const rootH = "22222222-aaaa-4222-8222-222222222222"
+const rootI = "33333333-aaaa-4333-8333-333333333333"
 
 const activate = (
   instanceId: string,
@@ -64,8 +68,9 @@ describe("local mapping store", () => {
   })
 
   it("persists active mappings with revision and namespace fences", async () => {
-    const databaseDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-db-"))
-    const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-fixture-"))
+    const databaseDirectory = await realpath(await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-db-")))
+    const fixtureDirectory = await realpath(await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-fixture-")))
+    const linkedTargetParent = await realpath(await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-target-")))
     try {
       const renamedCollection = path.join(fixtureDirectory, "renamed-collection")
       const collectionAlias = path.join(fixtureDirectory, "collection-alias")
@@ -81,6 +86,14 @@ describe("local mapping store", () => {
       await symlink(physicalParent, physicalParentAlias, "dir")
       const protectedResolutionLoop = path.join(fixtureDirectory, "protected-resolution-loop")
       await symlink("protected-resolution-loop", protectedResolutionLoop, "dir")
+      const linkedTargetA = path.join(linkedTargetParent, "target-a")
+      const linkedTargetB = path.join(linkedTargetParent, "target-b")
+      const linkedAliasParent = path.join(fixtureDirectory, "linked-alias-parent")
+      const linkedAlias = path.join(linkedAliasParent, "linked-root")
+      await mkdir(linkedTargetA)
+      await mkdir(linkedTargetB)
+      await mkdir(linkedAliasParent)
+      await symlink(linkedTargetA, linkedAlias, "dir")
       await writeFile(notDirectory, "not a directory")
       const upperCaseSibling = path.join(fixtureDirectory, "Books")
       const lowerCaseSibling = path.join(fixtureDirectory, "books")
@@ -259,6 +272,24 @@ describe("local mapping store", () => {
         )
         expect(parentAfterChild).toEqual({ kind: "root_conflict" })
 
+        const linkedRoot = yield* store.activate(
+          activate(instanceE, rootG, linkedAlias, linkedTargetA)
+        )
+        expect(linkedRoot).toEqual({
+          kind: "activated",
+          mapping: {
+            instanceId: instanceE,
+            rootId: rootG,
+            selectedPath: linkedAlias,
+            canonicalPath: linkedTargetA,
+            mappingRevision: "1"
+          }
+        })
+        const linkedAliasParentRoot = yield* store.activate(
+          activate(instanceE, rootH, linkedAliasParent, linkedAliasParent)
+        )
+        expect(linkedAliasParentRoot).toMatchObject({ kind: "activated", mapping: { mappingRevision: "1" } })
+
         if (process.platform === "linux") {
           const firstSibling = yield* store.activate(
             activate(instanceA, "cccccccc-cccc-4ccc-8ccc-cccccccccccc", upperCaseSibling, upperCaseSibling)
@@ -273,9 +304,24 @@ describe("local mapping store", () => {
 
       await Effect.runPromise(Effect.scoped(program))
 
+      await rm(linkedAlias, { force: true })
+      await symlink(linkedTargetB, linkedAlias, "dir")
+
       const reopened = await Effect.runPromise(
         Effect.gen(function*() {
           const store = yield* LocalMappingStore
+          const linkedMapping = yield* store.load({ instanceId: instanceE, rootId: rootG })
+          expect(linkedMapping).toEqual({
+            instanceId: instanceE,
+            rootId: rootG,
+            selectedPath: linkedAlias,
+            canonicalPath: linkedTargetA,
+            mappingRevision: "1"
+          })
+          const retargetedRoot = yield* store.activate(
+            activate(instanceE, rootI, linkedTargetB, linkedTargetB)
+          )
+          expect(retargetedRoot).toEqual({ kind: "root_conflict" })
           return yield* store.load({ instanceId: instanceA, rootId: rootA })
         }).pipe(Effect.provide(LocalMappingStore.layer(databasePath, workerUrl)), Effect.scoped)
       )
@@ -287,6 +333,7 @@ describe("local mapping store", () => {
     } finally {
       await rm(databaseDirectory, { recursive: true, force: true })
       await rm(fixtureDirectory, { recursive: true, force: true })
+      await rm(linkedTargetParent, { recursive: true, force: true })
     }
   })
 })

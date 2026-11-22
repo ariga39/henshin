@@ -480,10 +480,10 @@ const resolveLocalPath = (input: string): ResolvedLocalPath => {
     try {
       const realCurrent = realpathSync.native(current)
       const stats = statSync(current, { bigint: true })
-      const ancestorIdentities = ancestorIdentitiesOf(current)
+      const ancestorIdentities = ancestorIdentitiesOf(realCurrent)
       return {
         comparisonPath: missingSuffix.length === 0 ? realCurrent : join(realCurrent, ...missingSuffix),
-        endpointIdentity: missingSuffix.length === 0 ? identityOf(current) ?? null : null,
+        endpointIdentity: missingSuffix.length === 0 ? identityOf(realCurrent) ?? null : null,
         ancestorIdentities,
         resolutionError: null,
         exact: missingSuffix.length === 0,
@@ -612,6 +612,16 @@ const storedMappingPathEvidence = (mapping: PersistedLocalMapping): MappingPathE
     mapping.canonical_resolution
   )
 })
+
+const refreshedMappingPathEvidence = (mapping: PersistedLocalMapping): MappingPathEvidence => {
+  const stored = storedMappingPathEvidence(mapping)
+  const selectedPath = resolveLocalPath(mapping.selected_path)
+  const canonicalPath = resolveLocalPath(mapping.canonical_path)
+  return {
+    selectedPath: selectedPath.resolutionError === null ? selectedPath : stored.selectedPath,
+    canonicalPath: canonicalPath.resolutionError === null ? canonicalPath : stored.canonicalPath
+  }
+}
 
 const handle = (request: DraftWorkerRequest): unknown => {
   switch (request.op) {
@@ -986,12 +996,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
           mappingRevision: mapping.mapping_revision.toString(),
           selectedPath: mapping.selected_path,
           canonicalPath: mapping.canonical_path,
-          evidence: mapping.selected_resolution === null || mapping.canonical_resolution === null
-            ? {
-                selectedPath: resolveLocalPath(mapping.selected_path),
-                canonicalPath: resolveLocalPath(mapping.canonical_path)
-              }
-            : storedMappingPathEvidence(mapping)
+          evidence: refreshedMappingPathEvidence(mapping)
         })
       }
       ensureBeforeDeadline()
@@ -1038,7 +1043,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
           instanceId: request.instanceId,
           rootId: request.rootId,
           selectedPath: request.selectedPath,
-          canonicalPath: request.canonicalPath,
+          canonicalPath: canonicalPath.comparisonPath,
           mappingRevision: (BigInt(request.expectedMappingRevision) + 1n).toString()
         }
         ensureBeforeDeadline()
