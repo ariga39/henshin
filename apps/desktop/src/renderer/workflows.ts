@@ -77,6 +77,11 @@ export const loadRoots = Effect.gen(function*() {
 
 const scanIsActive = (task: ScanTask): boolean => task.status === "queued" || task.status === "running"
 
+const releaseErrorMessage = (error: { readonly code: string; readonly message: string }): string =>
+  error.code === "epoch_changed" || error.code === "instance_mismatch"
+    ? `${error.message}${error.message.endsWith(".") ? "" : "."} Reconnect before retrying the release.`
+    : error.message
+
 const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
   yield* Effect.sync(() => viewStore.set({ scan_status: "loading", scan_error: null }))
   const tasks = yield* client.listTasks()
@@ -91,10 +96,29 @@ const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(f
     yield* Effect.sync(() => viewStore.set({ scan_status: "error", scan_error: candidates.error.message }))
     return false
   }
+  const current = viewStore.getState()
+  const releaseTarget = current.scan_release_candidate_id === null
+    ? undefined
+    : candidates.data.find((candidate) =>
+        candidate.candidate_id === current.scan_release_candidate_id &&
+        candidate.root_id === current.scan_release_root_id)
+  const releaseResolved = releaseTarget !== undefined && releaseTarget.hold_state !== "held"
   yield* Effect.sync(() => viewStore.set({
     staged_discoveries: candidates.data,
     scan_status: "ready",
-    scan_error: null
+    scan_error: null,
+    ...(releaseResolved
+      ? {
+          scan_release_status: "idle" as const,
+          scan_release_candidate_id: null,
+          scan_release_root_id: null,
+          scan_release_operation_id: null,
+          scan_release_candidate_version: null,
+          scan_release_mapping_revision: null,
+          scan_release_policy_revision: null,
+          scan_release_error: null
+        }
+      : {})
   }))
   return true
 })
@@ -157,15 +181,14 @@ export const releaseHeldDiscovery = (candidateId: string) =>
         scan_release_status: "error",
         ...(definiteFailure
           ? {
-              scan_release_candidate_id: null,
-              scan_release_root_id: null,
+              scan_release_root_id: candidate.root_id,
               scan_release_operation_id: null,
               scan_release_candidate_version: null,
               scan_release_mapping_revision: null,
               scan_release_policy_revision: null
             }
           : {}),
-        scan_release_error: result.error.message
+        scan_release_error: releaseErrorMessage(result.error)
       }))
       return
     }
