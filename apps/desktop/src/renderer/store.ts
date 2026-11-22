@@ -10,7 +10,9 @@ import type {
   StagedDiscovery,
   ServerRoot,
   SavedDraft,
-  ReaderProfile
+  ReaderProfile,
+  ReaderProfileTestResult,
+  ReaderProfileTestTarget
 } from "@henshin/contracts"
 
 export type Outcome =
@@ -81,6 +83,10 @@ export interface ViewState {
   readonly reader_profile_selection_handle: string | null
   readonly reader_profile_selection_name: string | null
   readonly reader_profile_selection_error: string | null
+  readonly reader_profile_test_target: ReaderProfileTestTarget | null
+  readonly reader_profile_test_status: "idle" | "selecting" | "ready" | "launching" | "accepted" | "error"
+  readonly reader_profile_test_result: ReaderProfileTestResult | null
+  readonly reader_profile_test_error: string | null
   readonly library_entries: ReadonlyArray<LibraryEntry>
   readonly library_cursor: string | null
   readonly library_has_more: boolean
@@ -149,6 +155,10 @@ const initialState: ViewState = {
   reader_profile_selection_handle: null,
   reader_profile_selection_name: null,
   reader_profile_selection_error: null,
+  reader_profile_test_target: null,
+  reader_profile_test_status: "idle",
+  reader_profile_test_result: null,
+  reader_profile_test_error: null,
   library_entries: [],
   library_cursor: null,
   library_has_more: false,

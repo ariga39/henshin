@@ -23,7 +23,12 @@ import type {
   SavedDraftAbsent,
   ReaderExecutableSelectionIpcResult,
   ReaderProfile,
-  ReaderProfileSaveIpcRequest
+  ReaderProfileSaveIpcRequest,
+  ReaderProfileTestIpcRequest,
+  ReaderProfileTestResult,
+  ReaderProfileTestTarget,
+  ReaderProfileTestTargetSelectIpcRequest,
+  ReaderProfileTestTargetSelectIpcResult
 } from "@henshin/contracts"
 
 export type Result<A> =
@@ -87,6 +92,8 @@ export interface ReaderProfileBridge {
   list(): Promise<Result<ReadonlyArray<ReaderProfile>>>
   selectExecutable(): Promise<Result<ReaderExecutableSelectionIpcResult>>
   save(input: ReaderProfileSaveIpcRequest): Promise<Result<ReaderProfile>>
+  selectTestTarget(input: ReaderProfileTestTargetSelectIpcRequest): Promise<Result<ReaderProfileTestTargetSelectIpcResult>>
+  test(input: ReaderProfileTestIpcRequest): Promise<Result<ReaderProfileTestResult>>
 }
 
 export interface RootPreviewBridge {
@@ -208,6 +215,8 @@ export class ReaderProfileClient extends Context.Service<
     readonly list: () => Effect.Effect<Result<ReadonlyArray<ReaderProfile>>>
     readonly selectExecutable: () => Effect.Effect<Result<ReaderExecutableSelectionIpcResult>>
     readonly save: (input: ReaderProfileSaveIpcRequest) => Effect.Effect<Result<ReaderProfile>>
+    readonly selectTestTarget: (input: ReaderProfileTestTargetSelectIpcRequest) => Effect.Effect<Result<ReaderProfileTestTargetSelectIpcResult>>
+    readonly test: (input: ReaderProfileTestIpcRequest) => Effect.Effect<Result<ReaderProfileTestResult>>
   }
 >()("henshin/desktop/renderer/ReaderProfileClient") {
   static readonly layer = Layer.succeed(
@@ -215,7 +224,9 @@ export class ReaderProfileClient extends Context.Service<
     ReaderProfileClient.of({
       list: () => callIpc(() => window.henshinReaderProfiles.list()),
       selectExecutable: () => callIpc(() => window.henshinReaderProfiles.selectExecutable()),
-      save: (input) => callIpc(() => window.henshinReaderProfiles.save(input))
+      save: (input) => callIpc(() => window.henshinReaderProfiles.save(input)),
+      selectTestTarget: (input) => callIpc(() => window.henshinReaderProfiles.selectTestTarget(input)),
+      test: (input) => callIpc(() => window.henshinReaderProfiles.test(input))
     })
   )
 }
