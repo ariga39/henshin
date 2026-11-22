@@ -10,6 +10,7 @@ export const IpcChannels = {
   readerProfileList: "henshin:reader-profile-list",
   readerSelectExecutable: "henshin:reader-select-executable",
   readerProfileSave: "henshin:reader-profile-save",
+  librarySearch: "henshin:library-search",
   taskList: "henshin:task-list",
   reviewCandidates: "henshin:review-candidates",
   handshake: "henshin-prototype:handshake",

@@ -74,6 +74,13 @@ test("saves a picked local reader profile across restart and preserves the saved
     await expect(first.window.getByTestId("reader-profile-error")).toContainText("only compatible")
     await expect(saved).toContainText("Disposable reader")
     await expect(saved).toContainText("Archive")
+
+    await first.window.getByTestId("open-library").click()
+    await expect(first.window.getByTestId("library-screen")).toBeVisible()
+    await first.window.getByTestId("library-setup").click()
+    await expect(first.window.getByTestId("reader-settings")).toBeVisible()
+    await expect(first.window.getByTestId("reader-profile-list")).toContainText("Disposable reader")
+
     await first.app.close()
 
     const restarted = await launch(dbPath)
@@ -83,6 +90,10 @@ test("saves a picked local reader profile across restart and preserves the saved
     await expect(reopened).toContainText("--profile")
     await expect(reopened).toContainText("{target}")
     await expect(reopened).not.toContainText("stale edit")
+    await reopened.getByRole("button", { name: "Edit" }).click()
+    await expect(restarted.window.getByTestId("reader-profile-name")).toHaveValue("Disposable reader")
+    await expect(restarted.window.getByTestId("reader-selected-executable")).toHaveText(executableName)
+    await expect(restarted.window.getByTestId("reader-profile-arguments")).toHaveValue("--profile\n{target}")
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

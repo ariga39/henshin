@@ -16,6 +16,7 @@ import {
   RootVerificationFailed,
   RootPreviewUnavailable,
   ActiveScanConflict,
+  CandidateNotFound,
   TaskNotFound,
   StorageFull
 } from "./errors"
@@ -34,6 +35,8 @@ import {
   ServerRoot,
   ServerRootList
 } from "./root"
+import { ReviewCandidateCommandRequest, ReviewCommandResult } from "./review"
+import { LibraryEntryPage, LibrarySearchRequest, LibraryView } from "./library"
 
 /**
  * Isolated synthetic prototype API. The `/prototype/v1` prefix and the
@@ -161,6 +164,40 @@ export const ReviewApi = HttpApi.make("henshin-review").add(
       HttpApiEndpoint.get("candidates", "/review/candidates", {
         success: SuccessEnvelope(StagedDiscoveryList),
         error: [AuthenticationRequired, InternalError]
+      }),
+      HttpApiEndpoint.post("command", "/review/candidates/:id/commands", {
+        params: { id: Uuid },
+        payload: ReviewCandidateCommandRequest,
+        success: SuccessEnvelope(ReviewCommandResult),
+        error: [
+          AuthenticationRequired,
+          CandidateNotFound,
+          InvalidRequest,
+          OperationConflict,
+          OperationExpired,
+          EpochChanged,
+          InstanceMismatch,
+          RevisionConflict,
+          StorageFull,
+          InternalError
+        ]
+      })
+    )
+    .prefix("/api/v1")
+    .middleware(Authentication)
+)
+
+export const LibraryApi = HttpApi.make("henshin-library").add(
+  HttpApiGroup.make("library", { topLevel: true })
+    .add(
+      HttpApiEndpoint.get("get", "/library", {
+        success: SuccessEnvelope(LibraryView),
+        error: [AuthenticationRequired, InternalError]
+      }),
+      HttpApiEndpoint.post("search", "/entries/search", {
+        payload: LibrarySearchRequest,
+        success: SuccessEnvelope(LibraryEntryPage),
+        error: [AuthenticationRequired, InvalidRequest, InternalError]
       })
     )
     .prefix("/api/v1")
