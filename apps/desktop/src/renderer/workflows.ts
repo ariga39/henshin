@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import type { ConnectionStatusView } from "@henshin/contracts"
+import type { ConnectionStatusView, RootPreviewRequest } from "@henshin/contracts"
 import { PrototypeClient, RootPreviewClient } from "./client"
 import { viewStore, type ViewState } from "./store"
 
@@ -8,15 +8,22 @@ export const FORM_ID = "synthetic-note"
 
 const newOperationId = (): string => crypto.randomUUID()
 
-export const previewRoot = (path: string) =>
+export const previewRoot = (selection: RootPreviewRequest | string) =>
   Effect.gen(function*() {
     const client = yield* RootPreviewClient
+    const input: RootPreviewRequest = typeof selection === "string" ? { path: selection } : selection
+    const requestedPath = "path" in input ? input.path : null
+    const generation = viewStore.getState().root_preview_generation + 1
     yield* Effect.sync(() =>
       viewStore.set({
-        root_preview_path: path,
-        root_preview_selected_path: path,
+        ...(requestedPath === null ? { root_preview_selected_path: null } : {
+          root_preview_path: requestedPath,
+          root_preview_selected_path: requestedPath
+        }),
         root_preview_status: "loading",
         root_preview: null,
+        root_preview_request: input,
+        root_preview_generation: generation,
         root_preview_error: null,
         root_save_operation_id: null,
         root_save_status: "idle",
@@ -24,7 +31,8 @@ export const previewRoot = (path: string) =>
       })
     )
 
-    const result = yield* client.preview(path)
+    const result = yield* client.preview(input)
+    if (viewStore.getState().root_preview_generation !== generation) return
     if (result.ok) {
       yield* Effect.sync(() =>
         viewStore.set({
@@ -38,7 +46,7 @@ export const previewRoot = (path: string) =>
       yield* Effect.sync(() =>
         viewStore.set({
           root_preview_status: "error",
-          root_preview_selected_path: path,
+          ...(requestedPath === null ? {} : { root_preview_selected_path: requestedPath }),
           root_preview: null,
           root_preview_error: result.error.message
         })
@@ -61,7 +69,7 @@ export const loadRoots = Effect.gen(function*() {
 
 export const canSaveRoot = (state: ViewState): boolean => {
   const preview = state.root_preview
-  return preview !== null &&
+  return preview !== null && "children" in preview &&
     state.root_preview_status === "ready" &&
     state.root_save_status !== "loading" &&
     state.root_preview_path === preview.selected_server_path &&
@@ -73,7 +81,7 @@ export const saveRoot = Effect.gen(function*() {
   const client = yield* RootPreviewClient
   const state = viewStore.getState()
   const preview = state.root_preview
-  if (!preview || !canSaveRoot(state)) return
+  if (!preview || !("children" in preview) || !canSaveRoot(state)) return
 
   const confirmedPath = preview.selected_server_path
   const confirmedLabel = state.root_label

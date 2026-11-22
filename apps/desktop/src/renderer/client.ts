@@ -8,7 +8,8 @@ import type {
   NoteView,
   PublicError,
   SavedDraft,
-  RootPreview,
+  RootPreviewResult,
+  RootPreviewRequest,
   RootRegistrationRequest,
   ServerRoot,
   ServerRootList,
@@ -70,7 +71,7 @@ declare global {
 }
 
 export interface RootPreviewBridge {
-  preview(path: string): Promise<Result<RootPreview>>
+  preview(input: RootPreviewRequest): Promise<Result<RootPreviewResult>>
   list(): Promise<Result<ServerRootList>>
   save(input: RootRegistrationRequest): Promise<Result<ServerRoot>>
 }
@@ -136,7 +137,7 @@ export class PrototypeClient extends Context.Service<
 export class RootPreviewClient extends Context.Service<
   RootPreviewClient,
   {
-    readonly preview: (path: string) => Effect.Effect<Result<RootPreview>>
+    readonly preview: (input: RootPreviewRequest) => Effect.Effect<Result<RootPreviewResult>>
     readonly list: () => Effect.Effect<Result<ServerRootList>>
     readonly save: (input: RootRegistrationRequest) => Effect.Effect<Result<ServerRoot>>
   }
@@ -144,7 +145,7 @@ export class RootPreviewClient extends Context.Service<
   static readonly layer = Layer.succeed(
     RootPreviewClient,
     RootPreviewClient.of({
-      preview: (path) => callIpc(() => window.henshinRootPreview.preview(path)),
+      preview: (input) => callIpc(() => window.henshinRootPreview.preview(input)),
       list: () => callIpc(() => window.henshinRootPreview.list()),
       save: (input) => callIpc(() => window.henshinRootPreview.save(input))
     })

@@ -21,6 +21,7 @@ import { EditNotePayload, HandshakeData, Note, OperationResult } from "./note"
 import {
   RootPreview,
   RootPreviewRequest,
+  RootPreviewResult,
   RootRegistrationRequest,
   ServerRoot,
   ServerRootList
@@ -90,7 +91,7 @@ export const ServerApi = HttpApi.make("henshin-server").add(
       }),
       HttpApiEndpoint.post("preview", "/roots/preview", {
         payload: RootPreviewRequest,
-        success: SuccessEnvelope(RootPreview),
+        success: SuccessEnvelope(RootPreviewResult),
         error: [AuthenticationRequired, InvalidRequest, RootPreviewUnavailable, InternalError]
       }),
       HttpApiEndpoint.post("save", "/roots", {

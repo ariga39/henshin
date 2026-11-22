@@ -102,3 +102,36 @@ test("previews, confirms a labeled root, survives restart, and recovers from sta
     await rm(fixtureDirectory, { recursive: true, force: true })
   }
 })
+
+test("previews book candidates for an existing saved root after restart", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-root-discovery-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-root-discovery-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+
+  try {
+    const book = path.join(fixtureDirectory, "book")
+    await mkdir(book)
+    await writeFile(path.join(book, "001.jpg"), "sample")
+    await writeFile(path.join(fixtureDirectory, "loose.jpg"), "sample")
+
+    const first = await launch(dbPath)
+    await expect(first.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await first.window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await first.window.getByTestId("root-preview-submit").click()
+    await first.window.getByTestId("root-label").fill("Books")
+    await first.window.getByTestId("root-save").click()
+    await expect(first.window.getByTestId("root-saved")).toContainText("Books")
+
+    await first.app.close()
+    const restarted = await launch(dbPath)
+    await expect(restarted.window.getByTestId("root-saved")).toContainText("Books")
+    await restarted.window.getByTestId("root-saved-preview").click()
+    await expect(restarted.window.getByTestId("root-preview-candidates").locator("li")).toHaveCount(1)
+    await expect(restarted.window.getByTestId("root-preview-candidates").locator("li").first()).toContainText("book")
+    await expect(restarted.window.getByTestId("root-preview-coverage")).toContainText("1 unassigned loose images")
+    await expect(restarted.window.getByTestId("root-save")).toHaveCount(0)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+  }
+})

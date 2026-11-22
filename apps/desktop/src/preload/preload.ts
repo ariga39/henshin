@@ -2,7 +2,8 @@ import { contextBridge, ipcRenderer } from "electron"
 import { IpcChannels } from "@henshin/contracts/channels"
 
 contextBridge.exposeInMainWorld("henshinRootPreview", {
-  preview: (path: string) => ipcRenderer.invoke(IpcChannels.rootPreview, { path }),
+  preview: (input: { readonly path: string } | { readonly kind: "saved-root"; readonly root_id: string }) =>
+    ipcRenderer.invoke(IpcChannels.rootPreview, input),
   list: () => ipcRenderer.invoke(IpcChannels.rootList, {}),
   save: (input: {
     readonly operation_id: string
