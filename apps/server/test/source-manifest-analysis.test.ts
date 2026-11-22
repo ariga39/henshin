@@ -274,6 +274,22 @@ describe("bounded source manifest analysis", () => {
     expect(before).toEqual(after)
   })
 
+  it("includes direct child stats in the reusable directory observation token", async () => {
+    const root = await makeTempRoot()
+    const source = join(root, "direct")
+    await (await import("node:fs/promises")).mkdir(source)
+    const page = join(source, "001.jpg")
+    await writeFile(page, pageBytes)
+
+    const first = await analyze(source)
+    const pageStat = await stat(page)
+    await utimes(page, pageStat.atimeMs, pageStat.mtimeMs + 2_000)
+    const second = await analyze(source)
+
+    expect(first.before.observationToken).not.toBe(second.before.observationToken)
+    expect(first.pages).toEqual(second.pages)
+  })
+
   it("preserves a leading BOM in direct, EFS, and Unicode-path-extra names", async () => {
     const root = await makeTempRoot()
     const direct = join(root, "direct")
