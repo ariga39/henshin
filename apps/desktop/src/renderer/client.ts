@@ -6,6 +6,7 @@ import type {
   DiscardedDraft,
   HandshakeView,
   LibraryEntryPage,
+  LocalMappingPreviewIpcResult,
   NoteView,
   PublicError,
   SavedDraft,
@@ -20,7 +21,8 @@ import type {
   StagedDiscovery,
   ServerRoot,
   ServerRootList,
-  SavedDraftAbsent
+  SavedDraftAbsent,
+  ThumbnailKey
 } from "@henshin/contracts"
 
 export type Result<A> =
@@ -74,6 +76,7 @@ declare global {
   interface Window {
     readonly henshinPrototype: PrototypeBridge
     readonly henshinRootPreview: RootPreviewBridge
+    readonly henshinLocalMapping: LocalMappingBridge
     readonly henshinLibrary: LibraryBridge
     readonly henshinScanReview: ScanReviewBridge
   }
@@ -86,6 +89,10 @@ export interface RootPreviewBridge {
   command(input: RootCommandIpcRequest): Promise<Result<ServerRoot | ScanTaskSubmission>>
 }
 
+export interface LocalMappingBridge {
+  preview(input: { readonly root_id: string }): Promise<Result<LocalMappingPreviewIpcResult>>
+}
+
 export interface ScanReviewBridge {
   listTasks(): Promise<Result<ReadonlyArray<ScanTask>>>
   candidates(): Promise<Result<ReadonlyArray<StagedDiscovery>>>
@@ -94,6 +101,7 @@ export interface ScanReviewBridge {
 
 export interface LibraryBridge {
   search(input: { readonly page_size?: number; readonly cursor?: string }): Promise<Result<LibraryEntryPage>>
+  getThumbnail(key: ThumbnailKey): Promise<Result<Uint8Array>>
 }
 
 /**
@@ -174,6 +182,20 @@ export class RootPreviewClient extends Context.Service<
   )
 }
 
+export class LocalMappingClient extends Context.Service<
+  LocalMappingClient,
+  {
+    readonly preview: (rootId: string) => Effect.Effect<Result<LocalMappingPreviewIpcResult>>
+  }
+>()("henshin/desktop/renderer/LocalMappingClient") {
+  static readonly layer = Layer.succeed(
+    LocalMappingClient,
+    LocalMappingClient.of({
+      preview: (rootId) => callIpc(() => window.henshinLocalMapping.preview({ root_id: rootId }))
+    })
+  )
+}
+
 export class ScanReviewClient extends Context.Service<
   ScanReviewClient,
   {
@@ -196,12 +218,14 @@ export class LibraryClient extends Context.Service<
   LibraryClient,
   {
     readonly search: (input: { readonly page_size?: number; readonly cursor?: string }) => Effect.Effect<Result<LibraryEntryPage>>
+    readonly getThumbnail: (key: ThumbnailKey) => Effect.Effect<Result<Uint8Array>>
   }
 >()("henshin/desktop/renderer/LibraryClient") {
   static readonly layer = Layer.succeed(
     LibraryClient,
     LibraryClient.of({
-      search: (input) => callIpc(() => window.henshinLibrary.search(input))
+      search: (input) => callIpc(() => window.henshinLibrary.search(input)),
+      getThumbnail: (key) => callIpc(() => window.henshinLibrary.getThumbnail(key))
     })
   )
 }

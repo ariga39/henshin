@@ -1,6 +1,8 @@
 import { Schema } from "effect"
 import { Revision, Uuid } from "./ids"
-import { ScanManifestObservation, ScanManifestPage, ServerRootList } from "./root"
+import { RootRelativePath } from "./root"
+import { ServerRootList } from "./root"
+import { ThumbnailReference } from "./thumbnail"
 
 export const LibraryEntry = Schema.Struct({
   entry_id: Uuid,
@@ -13,7 +15,8 @@ export const LibraryEntry = Schema.Struct({
   page_count: Schema.Natural,
   state: Schema.Literal("accepted"),
   content_version: Revision,
-  location_revision: Revision
+  location_revision: Revision,
+  cover: Schema.NullOr(ThumbnailReference)
 })
 export type LibraryEntry = typeof LibraryEntry.Type
 
@@ -40,28 +43,21 @@ export const LibrarySearchRequest = Schema.Struct({
 })
 export type LibrarySearchRequest = typeof LibrarySearchRequest.Type
 
-export const EntryResolutionSiblingClaim = Schema.Struct({
-  entry_id: Uuid,
-  relative_path: Schema.String
-})
-export type EntryResolutionSiblingClaim = typeof EntryResolutionSiblingClaim.Type
+export const INDEXED_ROOT_SAMPLE_LIMIT = 32 as const
 
-export const EntryResolution = Schema.Struct({
-  entry_id: Uuid,
-  root_id: Uuid,
-  relative_path: Schema.String,
+export const IndexedRootSample = Schema.Struct({
+  relative_path: RootRelativePath,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
-  decision_version: Revision,
-  location_revision: Revision,
-  content_version: Revision,
-  status: Schema.Union([Schema.Literal("usable"), Schema.Literal("unresolved")]),
-  reason: Schema.NullOr(Schema.Union([
-    Schema.Literal("known-change"),
-    Schema.Literal("insufficient-evidence")
-  ])),
-  accepted_observation: ScanManifestObservation,
-  first_page: Schema.NullOr(ScanManifestPage),
-  sibling_claims: Schema.Array(EntryResolutionSiblingClaim),
-  sibling_claims_truncated: Schema.Boolean
+  format_evidence: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
+  size_bytes: Schema.NullOr(Schema.Natural)
 })
-export type EntryResolution = typeof EntryResolution.Type
+export type IndexedRootSample = typeof IndexedRootSample.Type
+
+export const IndexedRootSamplePage = Schema.Struct({
+  root_id: Uuid,
+  samples: Schema.Array(IndexedRootSample),
+  sample_limit: Schema.Literal(INDEXED_ROOT_SAMPLE_LIMIT),
+  sample_truncated: Schema.Boolean,
+  library_change_revision: Revision
+})
+export type IndexedRootSamplePage = typeof IndexedRootSamplePage.Type

@@ -3,8 +3,9 @@ import { DatabaseSync } from "node:sqlite"
 import { basename, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
-import { canonicalEditPayload } from "@henshin/contracts/canonical"
-import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanManifest } from "@henshin/contracts/root"
+import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contracts/canonical"
+import { MAX_ROOT_EXCLUSIONS, RootExclusions } from "@henshin/contracts/root"
+import { ScanManifest } from "@henshin/contracts"
 import {
   WorkerMessage,
   WorkerResponse,
@@ -167,11 +168,27 @@ db.exec(`
     state TEXT NOT NULL CHECK (state = 'accepted'),
     content_version INTEGER NOT NULL,
     location_revision INTEGER NOT NULL,
-    decision_version INTEGER NOT NULL DEFAULT 1,
     manifest_json TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     UNIQUE (root_id, relative_path)
+  );
+  CREATE TABLE IF NOT EXISTS open_events (
+    event_id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL REFERENCES library_entries(entry_id),
+    device_id TEXT NOT NULL,
+    observed_location_revision INTEGER NOT NULL,
+    observed_content_version INTEGER NOT NULL,
+    occurred_at_ms INTEGER NOT NULL,
+    receipt_at_ms INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS open_events_entry_occurrence
+    ON open_events(entry_id, occurred_at_ms DESC, event_id ASC);
+  CREATE TABLE IF NOT EXISTS entry_statistics (
+    entry_id TEXT PRIMARY KEY REFERENCES library_entries(entry_id) ON DELETE CASCADE,
+    open_count INTEGER NOT NULL DEFAULT 0,
+    last_opened_at_ms INTEGER
   );
 `)
 
@@ -190,11 +207,6 @@ if (!rootColumns.has("exclusions")) {
 const serverLibraryColumns = db.prepare("PRAGMA table_info(server_library)").all() as unknown as ReadonlyArray<{ name: string }>
 if (!serverLibraryColumns.some((column) => column.name === "change_revision")) {
   db.exec("ALTER TABLE server_library ADD COLUMN change_revision INTEGER NOT NULL DEFAULT 0")
-}
-
-const libraryEntryColumns = db.prepare("PRAGMA table_info(library_entries)").all() as unknown as ReadonlyArray<{ name: string }>
-if (!libraryEntryColumns.some((column) => column.name === "decision_version")) {
-  db.exec("ALTER TABLE library_entries ADD COLUMN decision_version INTEGER NOT NULL DEFAULT 1")
 }
 
 const scanTaskTable = db.prepare(
@@ -329,22 +341,32 @@ const selectStaged = db.prepare(
   "SELECT candidate_id, candidate_version, task_id, analysis_status, hold_state FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
 selectStaged.setReadBigInts(true)
+const selectAcceptedThumbnailEntry = db.prepare(
+  "SELECT entry_id, root_id, relative_path, kind, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
+)
+selectAcceptedThumbnailEntry.setReadBigInts(true)
 const selectStagedById = db.prepare(
   "SELECT candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms FROM staged_discoveries WHERE candidate_id = ? AND root_id = ?"
 )
 selectStagedById.setReadBigInts(true)
 const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC")
 const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ? AND state = 'accepted'")
-const selectEntryResolution = db.prepare(
-  "SELECT entry_id, root_id, relative_path, kind, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
+const selectEntryById = db.prepare("SELECT entry_id FROM library_entries WHERE entry_id = ? AND state = 'accepted'")
+const selectOpenEvent = db.prepare(
+  "SELECT event_id, instance_id, entry_id, device_id, observed_location_revision, observed_content_version, occurred_at_ms, receipt_at_ms FROM open_events WHERE event_id = ?"
 )
-selectEntryResolution.setReadBigInts(true)
-const selectStagedForResolution = db.prepare(
-  "SELECT analysis_status, manifest_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
+selectOpenEvent.setReadBigInts(true)
+const insertOpenEvent = db.prepare(
+  "INSERT INTO open_events(event_id, instance_id, entry_id, device_id, observed_location_revision, observed_content_version, occurred_at_ms, receipt_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?)"
 )
-const MAX_RESOLUTION_SIBLINGS = 128
+const insertEntryStatistics = db.prepare(
+  "INSERT OR IGNORE INTO entry_statistics(entry_id, open_count, last_opened_at_ms) VALUES(?, 0, NULL)"
+)
+const updateEntryStatistics = db.prepare(
+  "UPDATE entry_statistics SET open_count = open_count + 1, last_opened_at_ms = CASE WHEN last_opened_at_ms IS NULL OR last_opened_at_ms < ? THEN ? ELSE last_opened_at_ms END WHERE entry_id = ?"
+)
 const insertEntry = db.prepare(
-  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?)"
+  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, ?, ?, ?)"
 )
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
 const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
@@ -352,6 +374,9 @@ const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revisio
 const selectLibraryEntries = (cursor: string | null, limit: number) => cursor === null
   ? db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision FROM library_entries ORDER BY entry_id ASC LIMIT ?").all(limit)
   : db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision FROM library_entries WHERE entry_id > ? ORDER BY entry_id ASC LIMIT ?").all(cursor, limit)
+const selectIndexedRootSamples = db.prepare(
+  "SELECT relative_path, kind, manifest_json FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC LIMIT ?"
+)
 const insertScanTask = db.prepare(
   "INSERT INTO scan_tasks(task_id, operation_id, epoch, root_id, mapping_revision, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, command_payload, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)"
 )
@@ -1037,7 +1062,27 @@ const entryRow = (row: {
   page_count: Number(row.page_count),
   state: row.state,
   content_version: row.content_version.toString(),
-  location_revision: row.location_revision.toString()
+  location_revision: row.location_revision.toString(),
+  cover: {
+    key: `default-v1.${row.entry_id}.${row.content_version.toString()}`,
+    profile: "default-cover-v1"
+  }
+})
+
+const acceptedThumbnailEntryRow = (row: {
+  entry_id: string
+  root_id: string
+  relative_path: string
+  kind: "archive" | "image-directory"
+  content_version: bigint
+  manifest_json: string
+}): import("./worker-protocol").AcceptedThumbnailEntryRow => ({
+  entry_id: row.entry_id,
+  root_id: row.root_id,
+  relative_path: row.relative_path,
+  kind: row.kind,
+  content_version: row.content_version.toString(),
+  manifest_json: row.manifest_json
 })
 
 const titleForCandidate = (relativePath: string, kind: "archive" | "image-directory"): string => {
@@ -1208,79 +1253,120 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
   }
 }
 
-const escapeLikePrefix = (value: string): string => value.replace(/[\\%_]/g, "\\$&")
-
-const entryResolution = (
-  request: Extract<WorkerRequest, { op: "readEntryResolution" }>
-): import("./worker-protocol").LibraryEntryResolutionRow => {
-  const row = selectEntryResolution.get(request.entryId) as {
-    entry_id: string
-    root_id: string
+const indexedRootSamples = (
+  request: Extract<WorkerRequest, { op: "listIndexedRootSamples" }>
+): import("./worker-protocol").IndexedRootSamplePageRow => {
+  const rows = selectIndexedRootSamples.all(request.rootId, request.sampleLimit) as unknown as ReadonlyArray<{
     relative_path: string
     kind: "archive" | "image-directory"
-    decision_version: bigint
-    location_revision: bigint
-    content_version: bigint
     manifest_json: string
-  } | undefined
-  if (row === undefined) return null
-
-  const manifest = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(row.manifest_json))
-  if (manifest._tag === "None") throw new Error("invalid persisted accepted manifest")
-
-  const separator = row.relative_path.lastIndexOf("/")
-  const parentPath = separator < 0 ? "" : row.relative_path.slice(0, separator)
-  const siblingRows = parentPath.length === 0
-    ? db.prepare(
-      "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND instr(relative_path, '/') = 0 ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
-    ).all(row.root_id, MAX_RESOLUTION_SIBLINGS + 2) as unknown as ReadonlyArray<{ entry_id: string; relative_path: string }>
-    : db.prepare(
-      "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND relative_path LIKE ? ESCAPE '\\' AND instr(substr(relative_path, length(?) + 2), '/') = 0 ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
-    ).all(
-      row.root_id,
-      `${escapeLikePrefix(parentPath)}/%`,
-      parentPath,
-      MAX_RESOLUTION_SIBLINGS + 2
-    ) as unknown as ReadonlyArray<{ entry_id: string; relative_path: string }>
-  const siblingClaims = siblingRows
-    .filter((sibling) => sibling.entry_id !== row.entry_id)
-    .slice(0, MAX_RESOLUTION_SIBLINGS)
-    .map((sibling) => ({ entry_id: sibling.entry_id, relative_path: sibling.relative_path }))
-  const siblingClaimsTruncated = siblingRows.filter((sibling) => sibling.entry_id !== row.entry_id).length > MAX_RESOLUTION_SIBLINGS
-
-  const staged = selectStagedForResolution.get(row.root_id, row.relative_path) as {
-    analysis_status: "ready" | "error"
-    manifest_json: string | null
-  } | undefined
-  let reason: "known-change" | "insufficient-evidence" | null = null
-  if (staged !== undefined) {
-    reason = staged.analysis_status === "ready" && staged.manifest_json !== null && staged.manifest_json !== row.manifest_json
-      ? "known-change"
-      : "insufficient-evidence"
-  }
-  if (
-    manifest.value.after.observation_token === undefined ||
-    manifest.value.after.observation_token.length === 0 ||
-    manifest.value.pages[0] === undefined ||
-    siblingClaimsTruncated
-  ) {
-    reason = reason ?? "insufficient-evidence"
-  }
-
+  }>
+  const page = rows.slice(0, 32)
   return {
-    entry_id: row.entry_id,
-    root_id: row.root_id,
-    relative_path: row.relative_path,
-    kind: row.kind,
-    decision_version: row.decision_version.toString(),
-    location_revision: row.location_revision.toString(),
-    content_version: row.content_version.toString(),
-    status: reason === null ? "usable" : "unresolved",
-    reason,
-    accepted_observation: manifest.value.after,
-    first_page: manifest.value.pages[0] ?? null,
-    sibling_claims: siblingClaims,
-    sibling_claims_truncated: siblingClaimsTruncated
+    samples: page.map((row) => {
+      const parsed = JSON.parse(row.manifest_json) as unknown
+      const manifest = Schema.decodeUnknownOption(ScanManifest)(parsed)
+      if (Option.isNone(manifest)) throw new Error("invalid accepted manifest")
+      const formats = Array.from(new Set(manifest.value.pages.map((entry) => entry.format))).slice(0, 8)
+      return {
+        relative_path: row.relative_path,
+        kind: row.kind,
+        format_evidence: formats,
+        size_bytes: row.kind === "archive"
+          ? manifest.value.after.bytes
+          : manifest.value.pages.reduce((total, page) => total + page.declared_bytes, 0)
+      }
+    }),
+    sample_truncated: rows.length > 32,
+    library_change_revision: librarySummary().change_revision
+  }
+}
+
+const openEventPayload = (event: Extract<WorkerRequest, { op: "acceptOpenEvents" }>['events'][number]): string =>
+  canonicalOpenEventPayload({
+    eventId: event.event_id,
+    instanceId: event.instance_id,
+    entryId: event.entry_id,
+    deviceId: event.device_id,
+    observedLocationRevision: event.observed_location_revision,
+    observedContentVersion: event.observed_content_version,
+    occurredAtMs: event.occurred_at_ms
+  })
+
+const storedOpenEventPayload = (row: {
+  event_id: string
+  instance_id: string
+  entry_id: string
+  device_id: string
+  observed_location_revision: bigint
+  observed_content_version: bigint
+  occurred_at_ms: bigint
+}): string => canonicalOpenEventPayload({
+  eventId: row.event_id,
+  instanceId: row.instance_id,
+  entryId: row.entry_id,
+  deviceId: row.device_id,
+  observedLocationRevision: row.observed_location_revision.toString(),
+  observedContentVersion: row.observed_content_version.toString(),
+  occurredAtMs: Number(row.occurred_at_ms)
+})
+
+const acceptOpenEvents = (
+  request: Extract<WorkerRequest, { op: "acceptOpenEvents" }>
+): import("./worker-protocol").OpenEventBatchOutcome => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const results: Array<import("@henshin/contracts/event").OpenEventOutcome> = []
+    for (const event of request.events) {
+      const existing = selectOpenEvent.get(event.event_id) as {
+        event_id: string
+        instance_id: string
+        entry_id: string
+        device_id: string
+        observed_location_revision: bigint
+        observed_content_version: bigint
+        occurred_at_ms: bigint
+        receipt_at_ms: bigint
+      } | undefined
+      if (existing !== undefined) {
+        results.push(
+          storedOpenEventPayload(existing) === openEventPayload(event)
+            ? {
+                event_id: event.event_id,
+                outcome: "already_accepted",
+                receipt_at_ms: Number(existing.receipt_at_ms)
+              }
+            : { event_id: event.event_id, outcome: "conflict" }
+        )
+        continue
+      }
+
+      if (selectEntryById.get(event.entry_id) === undefined) {
+        results.push({ event_id: event.event_id, outcome: "missing_entry" })
+        continue
+      }
+
+      const receiptAtMs = Date.now()
+      insertOpenEvent.run(
+        event.event_id,
+        event.instance_id,
+        event.entry_id,
+        event.device_id,
+        BigInt(event.observed_location_revision),
+        BigInt(event.observed_content_version),
+        BigInt(event.occurred_at_ms),
+        receiptAtMs
+      )
+      insertEntryStatistics.run(event.entry_id)
+      updateEntryStatistics.run(event.occurred_at_ms, event.occurred_at_ms, event.entry_id)
+      bumpLibraryRevision.run()
+      results.push({ event_id: event.event_id, outcome: "accepted", receipt_at_ms: receiptAtMs })
+    }
+    db.exec("COMMIT")
+    return { results }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
   }
 }
 
@@ -1445,6 +1531,10 @@ const handle = (request: WorkerRequest): unknown => {
       if (schemaVersion !== undefined && schemaVersion < CURRENT_SCHEMA_VERSION) {
         db.prepare("UPDATE server_state SET schema_version = ? WHERE id = 1").run(CURRENT_SCHEMA_VERSION)
       }
+      db.exec(`
+        INSERT OR IGNORE INTO entry_statistics(entry_id, open_count, last_opened_at_ms)
+        SELECT entry_id, 0, NULL FROM library_entries
+      `)
       db.prepare("INSERT OR IGNORE INTO prototype_note(note_id, text, revision) VALUES(?, ?, 0)").run(
         SEED_NOTE_ID,
         SEED_NOTE_TEXT
@@ -1479,14 +1569,20 @@ const handle = (request: WorkerRequest): unknown => {
       return librarySummary()
     case "listLibraryEntries":
       return libraryEntries(request)
-    case "readEntryResolution":
-      return entryResolution(request)
+    case "listIndexedRootSamples":
+      return indexedRootSamples(request)
+    case "acceptOpenEvents":
+      return acceptOpenEvents(request)
     case "recordDiscovery":
       requireScanTransition(db.prepare(`UPDATE scan_tasks SET directories_visited = ?, candidates_discovered = ?, coverage_json = ?,
         updated_at_ms = ? WHERE task_id = ? AND status = 'running'`).run(
         request.directories, request.candidates, request.coverageJson, Date.now(), request.taskId
       ))
       return null
+    case "readAcceptedThumbnailEntry": {
+      const row = selectAcceptedThumbnailEntry.get(request.entryId) as Parameters<typeof acceptedThumbnailEntryRow>[0] | undefined
+      return row === undefined ? null : acceptedThumbnailEntryRow(row)
+    }
     case "markScanRunning":
       requireScanTransition(updateScanRunning.run(Date.now(), request.taskId))
       return null
