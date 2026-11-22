@@ -334,11 +334,11 @@ describe("saved root scan policy", () => {
       const paths = Array.from({ length: MAX_ROOT_EXCLUSIONS }, (_, i) => ({ path: `book-${i}.cbz`, scope: "exact" }))
       db.prepare("UPDATE server_roots SET exclusions = ? WHERE root_id = ?").run(JSON.stringify(paths), saved.root_id)
       const reduced = await apply(paths[0]!.path, randomUUID(), "0", "remove-exclusion")
-      expect(reduced).toMatchObject({ _tag: "Success", value: { data: { policy_revision: "1", exclusions: paths.slice(1) } } })
+      expect(reduced).toMatchObject({ _tag: "Success", success: { data: { policy_revision: "1", exclusions: paths.slice(1) } } })
       const refilled = await apply("overflow.cbz", randomUUID(), "1")
       expect(refilled).toMatchObject({
         _tag: "Success",
-        value: { data: { policy_revision: "2", exclusions: [...paths.slice(1), { path: "overflow.cbz", scope: "exact" }] } }
+        success: { data: { policy_revision: "2", exclusions: [...paths.slice(1), { path: "overflow.cbz", scope: "exact" }] } }
       })
       expect(await apply("second-overflow.cbz", randomUUID(), "2")).toMatchObject({
         _tag: "Failure",
