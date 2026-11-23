@@ -234,7 +234,7 @@ const initialState: ViewState = {
   scan_resolution_error: null,
   scan_hold_new_discoveries: false,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
-  connection_target: { mode: "managed", base_url: null, instance_id: null },
+  connection_target: { mode: "managed", base_url: null, instance_id: null, saved: false },
   pending_remote_connection: null,
   remote_probe_status: "idle",
   connection_generation: 0,

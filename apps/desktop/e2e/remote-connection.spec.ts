@@ -321,7 +321,7 @@ test.afterEach(async () => {
   for (const root of temporaryRoots.splice(0)) await rm(root, { recursive: true, force: true })
 })
 
-test("connects a normal desktop for one session, requires re-entry, and rejects redirects", async () => {
+test("connects the normal desktop to the correct TLS library and rejects redirects", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "henshin-remote-connection-"))
   const serviceData = path.join(root, "service")
   const localData = path.join(root, "local")
@@ -377,7 +377,11 @@ test("connects a normal desktop for one session, requires re-entry, and rejects 
     await expect(first.window.getByTestId("remote-confirmation")).toBeVisible()
     await expect(first.window.getByTestId("connection-target")).toContainText("managed local service")
     await expect(first.window.getByTestId("remote-confirmation")).toContainText(remote.instanceId)
-    await expect(first.window.getByTestId("remote-session-only-warning")).toBeVisible()
+    const sessionOnly = await first.window.getByTestId("remote-session-only-warning").count() === 1
+    test.info().annotations.push({
+      type: "credential-storage",
+      description: sessionOnly ? "session-only; protected storage unavailable" : "protected persistence via functional Electron storage"
+    })
     await first.window.getByTestId("remote-confirm").click()
     await expect(first.window.getByTestId("library-screen")).toBeVisible({ timeout: 30_000 })
     await expect(first.window.getByTestId("library-entry")).toContainText("remote-book")
@@ -445,20 +449,47 @@ test("connects a normal desktop for one session, requires re-entry, and rejects 
     await expect(first.window.getByTestId("library-screen")).toBeVisible({ timeout: 30_000 })
     await expect(follower.getByTestId("connection-status")).toContainText("connected")
     await expect(first.window.getByTestId("connection-outcome")).toHaveCount(0)
-    await first.window.getByTestId("library-setup").click()
-    await expect(first.window.getByTestId("connection-target")).toContainText("session only")
+    if (sessionOnly) {
+      await first.window.getByTestId("library-setup").click()
+      await expect(first.window.getByTestId("connection-target")).toContainText("session only")
+    }
     await first.app.close()
     launchedApps.splice(launchedApps.indexOf(first.app), 1)
 
-    const second = await launchDesktop(path.join(localData, "managed.sqlite"), userData, certificatePath)
-    await expect(second.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
-    await expect(second.window.getByTestId("connection-target")).toContainText("managed local service")
-    await second.window.getByTestId("remote-base-url").fill(proxy.baseUrl)
-    await second.window.getByTestId("remote-bearer-token").fill(remoteToken)
-    await second.window.getByTestId("remote-connect").click()
-    await expect(second.window.getByTestId("remote-session-only-warning")).toBeVisible()
-    await expect(second.window.getByTestId("remote-confirmation")).toContainText(remote.instanceId)
-    await second.window.getByTestId("remote-confirm").click()
+    let profileText: string | null = null
+    try {
+      profileText = await readFile(path.join(userData, "connection-profile.json"), "utf8")
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
+    }
+    if (sessionOnly) {
+      if (profileText !== null) {
+        expect(JSON.parse(profileText)).toEqual({ active: "managed", remote: null })
+        expect(profileText).not.toContain(remoteToken)
+      }
+    } else {
+      expect(profileText).not.toBeNull()
+      expect(profileText).not.toContain(remoteToken)
+    }
+
+    let ownedLocal: RunningServer | null = null
+    let second: Awaited<ReturnType<typeof launchDesktop>>
+    if (sessionOnly) {
+      second = await launchDesktop(path.join(localData, "managed.sqlite"), userData, certificatePath)
+      await expect(second.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+      await expect(second.window.getByTestId("connection-target")).toContainText("managed local service")
+      await second.window.getByTestId("remote-base-url").fill(proxy.baseUrl)
+      await second.window.getByTestId("remote-bearer-token").fill(remoteToken)
+      await second.window.getByTestId("remote-connect").click()
+      await expect(second.window.getByTestId("remote-session-only-warning")).toBeVisible()
+      await expect(second.window.getByTestId("remote-confirmation")).toContainText(remote.instanceId)
+      await second.window.getByTestId("remote-confirm").click()
+    } else {
+      const ownedDatabase = path.join(localData, "owned.sqlite")
+      const localToken = await initializeOwner(["--database", ownedDatabase])
+      ownedLocal = await startServer(["--database", ownedDatabase], localToken)
+      second = await launchDesktop(path.join(localData, "owned.sqlite"), userData, certificatePath)
+    }
     await expect(second.window.getByTestId("library-screen")).toBeVisible({ timeout: 30_000 })
     await expect(second.window.getByTestId("library-entry")).toContainText("remote-book")
 
@@ -469,6 +500,12 @@ test("connects a normal desktop for one session, requires re-entry, and rejects 
     await expect(second.window.getByRole("alert")).toContainText("Connection issue")
     expect(redirectTarget.requests).toBe(0)
     await expect(second.window.getByTestId("connection-target")).toContainText(proxy.baseUrl)
+    if (!sessionOnly) {
+      const profileAfterRejectedSwitch = await readFile(path.join(userData, "connection-profile.json"), "utf8")
+      expect(profileAfterRejectedSwitch).toContain(proxy.baseUrl)
+      expect(profileAfterRejectedSwitch).not.toContain(redirect.baseUrl)
+    }
+    if (ownedLocal !== null) expect(ownedLocal.child.exitCode).toBeNull()
     expect(remote.child.exitCode).toBeNull()
   } finally {
     await proxy.close().catch(() => undefined)
@@ -703,4 +740,37 @@ test("shows actionable HTTP and handshake response diagnostics", async () => {
     await serverError.close().catch(() => undefined)
     await malformed.close().catch(() => undefined)
   }
+})
+
+test("recovers a corrupt saved profile through managed mode and restart", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "henshin-corrupt-connection-profile-"))
+  const dbPath = path.join(root, "managed.sqlite")
+  const userData = path.join(root, "desktop")
+  temporaryRoots.push(root)
+  await mkdir(userData)
+  await writeFile(path.join(userData, "connection-profile.json"), "not-json")
+
+  const first = await launchDesktop(dbPath, userData, null)
+  await expect(first.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+  await expect(first.window.getByTestId("connection-status")).toContainText("blocked")
+  await expect(first.window.getByText("Connection issue: saved connection profile is unreadable")).toBeVisible()
+  await expect(first.window.getByTestId("connection-target")).not.toContainText("invalid.invalid")
+
+  await first.window.getByTestId("connection-reconnect").click()
+  await expect(first.window.getByTestId("connection-outcome")).toContainText("saved connection profile is unreadable")
+  await expect(first.window.getByTestId("connection-status")).toContainText("blocked")
+
+  await first.window.getByTestId("connection-use-managed").click()
+  await expect(first.window.getByTestId("connection-target")).toContainText("managed local service")
+  await expect(first.window.getByTestId("connection-status")).toContainText("connected")
+  await first.app.close()
+  launchedApps.splice(launchedApps.indexOf(first.app), 1)
+
+  await expect.poll(async () => JSON.parse(await readFile(path.join(userData, "connection-profile.json"), "utf8")))
+    .toEqual({ active: "managed", remote: null })
+
+  const second = await launchDesktop(dbPath, userData, null)
+  await expect(second.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+  await expect(second.window.getByTestId("connection-target")).toContainText("managed local service")
+  await expect(second.window.getByTestId("connection-status")).toContainText("connected")
 })

@@ -23,7 +23,7 @@ export const ConnectionSetup = () => {
       <p data-testid="connection-target">
         {state.connection_target.mode === "managed"
           ? "Using this desktop's managed local service."
-          : `Remote server: ${state.connection_target.base_url ?? "not configured"} (session only; re-enter the credential after restart)`}
+          : `Remote server: ${state.connection_target.base_url ?? "not configured"}${state.connection_target.saved ? "" : " (session only; re-enter the credential after restart)"}`}
       </p>
       <p data-testid="connection-status">Connection: {state.connection.state}</p>
       {state.connection.state === "blocked" && state.connection.reason !== null && state.outcome?.kind !== "error" && (
@@ -49,15 +49,17 @@ export const ConnectionSetup = () => {
             The server reported instance <code>{pending.instance_id}</code>.
             Confirm this identity before using its library.
           </p>
-          <p data-testid="remote-session-only-warning">
-            This connection is for this session only. Re-enter the credential after restart.
-          </p>
+          {pending.storage_mode === "session_only" && (
+            <p data-testid="remote-session-only-warning">
+              Protected credential storage is unavailable. The credential will be used only for this session and must be entered again after restart.
+            </p>
+          )}
           <button
             data-testid="remote-confirm"
             disabled={transitioning}
             onClick={() => void runtime.runPromise(confirmRemote)}
           >
-            Use for this session only
+            {pending.storage_mode === "protected" ? "Confirm and save connection" : "Use for this session only"}
           </button>
           <button
             data-testid="remote-cancel"

@@ -60,7 +60,8 @@ export type RemoteConnectIpcRequest = typeof RemoteConnectIpcRequest.Type
 export const RemoteConnectionCandidateView = Schema.Struct({
   candidate_id: Uuid,
   base_url: Schema.String,
-  instance_id: Uuid
+  instance_id: Uuid,
+  storage_mode: Schema.Union([Schema.Literal("protected"), Schema.Literal("session_only")])
 })
 export type RemoteConnectionCandidateView = typeof RemoteConnectionCandidateView.Type
 
@@ -84,7 +85,8 @@ export type ConnectionStatusIpcRequest = typeof ConnectionStatusIpcRequest.Type
 export const ConnectionTargetView = Schema.Struct({
   mode: Schema.Union([Schema.Literal("managed"), Schema.Literal("remote")]),
   base_url: Schema.NullOr(Schema.String),
-  instance_id: Schema.NullOr(Uuid)
+  instance_id: Schema.NullOr(Uuid),
+  saved: Schema.Boolean
 })
 export type ConnectionTargetView = typeof ConnectionTargetView.Type
 

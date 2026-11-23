@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest"
+import { HANDSHAKE_API_VERSION, HANDSHAKE_CAPABILITY } from "@henshin/contracts"
+import { createServer } from "node:http"
 import { Schema } from "effect"
 import * as HttpClientError from "effect/http/HttpClientError"
-import { classifyConnectionFailure, ConnectionEndpointError, ConnectionLifecycle } from "../src/main/ConnectionLifecycle"
+import {
+  classifyConnectionFailure,
+  ConnectionEndpointError,
+  ConnectionInstanceMismatchError,
+  ConnectionLifecycle
+} from "../src/main/ConnectionLifecycle"
 
 const request = {} as HttpClientError.HttpClientError["request"]
 const response = (status: number) => ({ status } as HttpClientError.StatusCodeError["response"])
@@ -38,6 +45,37 @@ describe("remote connection endpoint validation", () => {
     "https://library.example.test/#"
   ])("rejects an unsafe endpoint: %s", (endpoint) => {
     expect(() => ConnectionLifecycle.validateRemoteEndpoint(endpoint)).toThrow(ConnectionEndpointError)
+  })
+
+  it("blocks a saved profile when the authenticated server identity changes", async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" })
+      response.end(JSON.stringify({
+        instance_id: "00000000-0000-4000-8000-000000000002",
+        epoch: "00000000-0000-4000-8000-000000000003",
+        request_id: "00000000-0000-4000-8000-000000000004",
+        server_time: Date.now(),
+        data: {
+          api_version: HANDSHAKE_API_VERSION,
+          capabilities: [HANDSHAKE_CAPABILITY.libraryBrowse]
+        }
+      }))
+    })
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    const address = server.address()
+    if (address === null || typeof address === "string") throw new Error("identity fixture did not bind a port")
+    const lifecycle = new ConnectionLifecycle({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      bearerToken: "fixture-owner-token",
+      expectedInstanceId: "00000000-0000-4000-8000-000000000001"
+    })
+    try {
+      await expect(lifecycle.connect()).rejects.toBeInstanceOf(ConnectionInstanceMismatchError)
+      expect(lifecycle.getStatus()).toMatchObject({ state: "blocked", reason: "instance_mismatch" })
+    } finally {
+      await lifecycle.close()
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)))
+    }
   })
 })
 

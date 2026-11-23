@@ -119,6 +119,12 @@ import {
 } from "./ConnectionLifecycle"
 import { OpenCoordinator, type OpenCoordinatorPorts } from "./OpenCoordinator"
 import { loadDeviceId } from "./device-identity"
+import {
+  ConnectionProfileStore,
+  ConnectionProfileStoreError,
+  type ConnectionStorageMode,
+  type RemoteConnectionProfile
+} from "./ConnectionProfileStore"
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
 const LOCAL_MAPPING_REQUEST_TIMEOUT = Duration.seconds(12)
@@ -150,16 +156,19 @@ let connection: ConnectionLifecycle | null = null
 let openCoordinator: OpenCoordinator | null = null
 let managedDatabasePath: string | null = null
 let managedChildStart: Promise<ServerChild> | null = null
+let connectionProfileStore: ConnectionProfileStore | null = null
+let startupConnectionError: ConnectionProfileStoreError | ConnectionEndpointError | null = null
 let connectionTarget: ConnectionTargetView = {
   mode: "managed",
   base_url: null,
-  instance_id: null
+  instance_id: null,
+  saved: false
 }
 interface PendingRemoteConnection {
   readonly candidateId: string
   readonly candidate: ConnectionLifecycle
-  readonly instanceId: string
-  readonly baseUrl: string
+  readonly profile: RemoteConnectionProfile
+  readonly storageMode: ConnectionStorageMode
 }
 let pendingRemoteConnection: PendingRemoteConnection | null = null
 let connectionOperation: Promise<void> = Promise.resolve()
@@ -312,6 +321,9 @@ const toPublicError = (error: unknown): PublicError => {
   }
   if (error instanceof ConnectionConfirmationError) {
     return { code: "connection_confirmation_required", message: error.message, retryable: false }
+  }
+  if (error instanceof ConnectionProfileStoreError) {
+    return { code: error.code, message: error.message, retryable: false }
   }
   if (error instanceof CommandAttemptStoreFullError) {
     return {
@@ -774,7 +786,8 @@ const setConnectionTarget = (target: ConnectionTargetView): boolean => {
   if (
     connectionTarget.mode === target.mode &&
     connectionTarget.base_url === target.base_url &&
-    connectionTarget.instance_id === target.instance_id
+    connectionTarget.instance_id === target.instance_id &&
+    connectionTarget.saved === target.saved
   ) return false
   connectionTarget = target
   invalidateConnectionWorkspace()
@@ -809,6 +822,7 @@ const registerIpc = (): void => {
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return serializeConnectionOperation(async () => {
       await discardPendingRemoteConnection()
+      if (startupConnectionError !== null) throw startupConnectionError
       const activeConnection = requireConnection()
       const previousSession = activeConnection.getCachedSession()
       const managedNeedsStart = connectionTarget.mode === "managed" && serverChild === null
@@ -873,19 +887,17 @@ const registerIpc = (): void => {
       try {
         const status = await candidate.connect()
         if (status.instance_id === null) throw new ConnectionEndpointError({ message: "server identity was not provided" })
+        const profile = { baseUrl, bearerToken: request.bearer_token, instanceId: status.instance_id }
+        const storageMode = connectionProfileStore?.storageMode() ?? "session_only"
         const candidateId = randomUUID()
-        await setPendingRemoteConnection({
-          candidateId,
-          candidate,
-          instanceId: status.instance_id,
-          baseUrl
-        })
+        await setPendingRemoteConnection({ candidateId, candidate, profile, storageMode })
         return {
           ok: true as const,
           data: {
             candidate_id: candidateId,
             base_url: baseUrl,
-            instance_id: status.instance_id
+            instance_id: status.instance_id,
+            storage_mode: storageMode
           } satisfies RemoteConnectionCandidateView
         }
       } catch (error) {
@@ -907,12 +919,23 @@ const registerIpc = (): void => {
       pendingRemoteConnection = null
       notifyRemoteCandidateInvalidated(pending.candidateId)
       const previous = requireConnection()
+      try {
+        if (pending.storageMode === "protected") {
+          if (connectionProfileStore === null) throw new ConnectionProfileStoreError("connection profile storage is not ready")
+          await connectionProfileStore.saveRemote(pending.profile)
+        }
+      } catch (error) {
+        await pending.candidate.close()
+        throw error
+      }
       connection = pending.candidate
       connectionTarget = {
         mode: "remote",
-        base_url: pending.baseUrl,
-        instance_id: pending.instanceId
+        base_url: pending.profile.baseUrl,
+        instance_id: pending.profile.instanceId,
+        saved: pending.storageMode === "protected"
       }
+      startupConnectionError = null
       // Each lease replacement invalidates server workspace state exactly
       // once, including when the visible target is unchanged.
       invalidateConnectionWorkspace()
@@ -946,9 +969,16 @@ const registerIpc = (): void => {
       .then(async (child) => {
         const candidate = new ConnectionLifecycle({ baseUrl: child.baseUrl, bearerToken: child.bearerToken })
         const status = await candidate.connect()
+        try {
+          if (connectionProfileStore !== null) await connectionProfileStore.useManaged()
+        } catch (error) {
+          await candidate.close()
+          throw error
+        }
         const previous = requireConnection()
         connection = candidate
-        setConnectionTarget({ mode: "managed", base_url: null, instance_id: status.instance_id })
+        setConnectionTarget({ mode: "managed", base_url: null, instance_id: status.instance_id, saved: false })
+        startupConnectionError = null
         await previous.close()
         updateTargetFromStatus(status)
         notifyConnectionStatusChanged(status)
@@ -2083,6 +2113,27 @@ const bootstrap = async (): Promise<void> => {
     path.dirname(clientDbPath)
   ]
   managedDatabasePath = dbPath
+  connectionProfileStore = new ConnectionProfileStore(app.getPath("userData"))
+  let savedConnection: Awaited<ReturnType<ConnectionProfileStore["load"]>> = { active: "managed", remote: null }
+  let savedConnectionError: ConnectionProfileStoreError | ConnectionEndpointError | null = null
+  if (!prototypeMode) {
+    try {
+      savedConnection = await connectionProfileStore.load()
+    } catch (error) {
+      savedConnectionError = error instanceof ConnectionProfileStoreError
+        ? error
+        : new ConnectionProfileStoreError("saved connection profile could not be loaded")
+    }
+  }
+  if (savedConnectionError === null && savedConnection.active === "remote" && savedConnection.remote !== null) {
+    try {
+      ConnectionLifecycle.validateRemoteEndpoint(savedConnection.remote.baseUrl)
+    } catch (error) {
+      savedConnectionError = error instanceof ConnectionEndpointError
+        ? error
+        : new ConnectionEndpointError({ message: "saved connection profile has an invalid endpoint" })
+    }
+  }
 
   const draftWorkerUrl = pathToFileURL(path.join(app.getAppPath(), "dist", "draft-worker.mjs"))
   const localWorker = LocalDatabaseWorker.layer(clientDbPath, { workerUrl: draftWorkerUrl })
@@ -2097,28 +2148,55 @@ const bootstrap = async (): Promise<void> => {
     ).pipe(Layer.provide(localWorker))
   )
 
-  // The owned child remains supervised independently. A remote session only
+  // The owned child remains supervised independently. A remote profile only
   // changes the authenticated HTTP target; it never grants main permission to
   // stop the independently running service.
-  try {
-    const child = await ensureManagedChild()
-    connectionTarget = { mode: "managed", base_url: null, instance_id: null }
+  startupConnectionError = savedConnectionError
+  if (savedConnectionError !== null) {
+    connectionTarget = { mode: "remote", base_url: null, instance_id: null, saved: false }
+    connection = new ConnectionLifecycle({ baseUrl: "", bearerToken: "" })
+    connection.markBlocked(savedConnectionError.message)
+  } else if (savedConnection.active === "remote" && savedConnection.remote !== null) {
+    connectionTarget = {
+      mode: "remote",
+      base_url: savedConnection.remote.baseUrl,
+      instance_id: savedConnection.remote.instanceId,
+      saved: true
+    }
     connection = new ConnectionLifecycle({
-      baseUrl: child.baseUrl,
-      bearerToken: child.bearerToken
+      baseUrl: savedConnection.remote.baseUrl,
+      bearerToken: savedConnection.remote.bearerToken,
+      expectedInstanceId: savedConnection.remote.instanceId
     })
     try {
-      await connection.connect()
+      const status = await connection.connect()
+      updateTargetFromStatus(status)
+      openEventDeliveryScheduler.schedule()
     } catch (error) {
-      console.error("managed service connection failed:", error instanceof Error ? error.message : error)
+      console.error("remote connection unavailable:", error instanceof Error ? error.message : error)
     }
-    updateTargetFromStatus(connection.getStatus())
-    openEventDeliveryScheduler.schedule()
-  } catch (error) {
-    connectionTarget = { mode: "managed", base_url: null, instance_id: null }
-    connection = new ConnectionLifecycle({ baseUrl: "", bearerToken: "" })
-    connection.markBlocked(managedStartupFailureReason(error))
+  } else {
+    try {
+      const child = await ensureManagedChild()
+      connectionTarget = { mode: "managed", base_url: null, instance_id: null, saved: false }
+      connection = new ConnectionLifecycle({
+        baseUrl: child.baseUrl,
+        bearerToken: child.bearerToken
+      })
+      try {
+        await connection.connect()
+      } catch (error) {
+        console.error("managed service connection failed:", error instanceof Error ? error.message : error)
+      }
+      updateTargetFromStatus(connection.getStatus())
+      openEventDeliveryScheduler.schedule()
+    } catch (error) {
+      connectionTarget = { mode: "managed", base_url: null, instance_id: null, saved: false }
+      connection = new ConnectionLifecycle({ baseUrl: "", bearerToken: "" })
+      connection.markBlocked(managedStartupFailureReason(error))
+    }
   }
+
   openCoordinator = createOpenCoordinator()
   openEventDeliveryScheduler.schedule()
 
