@@ -98,9 +98,10 @@ const collectNotices = async (nodeModulesDirectory) => {
   return lines.join("\n")
 }
 
-const removeWorkspaceContract = async (nodeModulesDirectory) => {
+const removeWorkspacePackages = async (nodeModulesDirectory) => {
   await rm(path.join(nodeModulesDirectory, "@henshin"), { recursive: true, force: true })
   const virtualStore = path.join(nodeModulesDirectory, ".pnpm")
+  await rm(path.join(virtualStore, "node_modules", "@henshin"), { recursive: true, force: true })
   const entries = await readdir(virtualStore, { withFileTypes: true })
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.isSymbolicLink()) continue
@@ -186,7 +187,7 @@ const build = async () => {
 
     await rename(path.join(deployDirectory, "node_modules"), path.join(bundleDirectory, "node_modules"))
     const nodeModulesDirectory = path.join(bundleDirectory, "node_modules")
-    await removeWorkspaceContract(nodeModulesDirectory)
+    await removeWorkspacePackages(nodeModulesDirectory)
     await pruneEffectSources(nodeModulesDirectory)
     await prunePnpmMetadata(nodeModulesDirectory)
 
