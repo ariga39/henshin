@@ -189,7 +189,7 @@ jobs:
             param($Running)
             if (-not $Running.Process.HasExited) {
               Stop-Process -Id $Running.Process.Id -Force
-              [void]$Running.Process.WaitForExit(10_000)
+              [void]$Running.Process.WaitForExit(10000)
             }
             if (-not $Running.Process.HasExited) { throw "foreground service did not stop" }
             [System.IO.File]::WriteAllText($Running.OutputPath, $Running.Stdout.GetAwaiter().GetResult())
