@@ -1981,10 +1981,12 @@ const bootstrap = async (): Promise<void> => {
     startupConnected = true
   } catch (error) {
     console.warn("managed service unavailable during startup; rendering cached Library", error instanceof Error ? error.message : error)
-    connection = new ConnectionLifecycle({
-      baseUrl: "http://127.0.0.1:1",
-      bearerToken: randomUUID()
-    })
+    if (connection === null) {
+      connection = new ConnectionLifecycle({
+        baseUrl: "http://127.0.0.1:1",
+        bearerToken: randomUUID()
+      })
+    }
   }
   openCoordinator = createOpenCoordinator()
 

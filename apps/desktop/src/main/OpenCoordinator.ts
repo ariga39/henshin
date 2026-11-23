@@ -713,7 +713,7 @@ export class OpenCoordinator {
         } catch {
           throw new OfflineOpenUnavailableError()
         }
-        if (cached === undefined || cached.epoch !== input.epoch) throw new OfflineOpenUnavailableError()
+        if (cached === undefined) throw new OfflineOpenUnavailableError()
         resolution = cached.resolution
       } else {
         this.ports.assertCurrent(input.instanceId, input.epoch)

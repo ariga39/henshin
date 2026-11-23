@@ -666,7 +666,7 @@ describe("desktop Open coordinator", () => {
     })
   })
 
-  it("blocks offline Open when the cached resolution belongs to another server epoch", async () => {
+  it("allows offline Open after the server epoch changes when local evidence still matches", async () => {
     await withCoordinatorFixture("offline-stale-cache", async (fixture) => {
       let dispatchCount = 0
       const coordinator = makeCoordinator(fixture, {
@@ -674,12 +674,9 @@ describe("desktop Open coordinator", () => {
         dispatch: async () => { dispatchCount += 1 }
       })
       const result = await coordinator.open({ ...fixture.input, offline: true })
-      expect(result).toMatchObject({
-        status: "failed",
-        message: "offline Open is unavailable because this entry has no cached accepted server resolution"
-      })
-      expect(dispatchCount).toBe(0)
-      expect(fixture.journal.rows.size).toBe(0)
+      expect(result).toMatchObject({ status: "accepted", event_durable: true })
+      expect(dispatchCount).toBe(1)
+      expect(fixture.journal.rows.size).toBe(1)
     })
   })
 

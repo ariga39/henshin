@@ -1783,10 +1783,14 @@ export const selectCachedNamespace = (instanceId: string) => Effect.gen(function
   const generation = viewStore.beginConnectionTransition("connecting")
   const result = yield* client.selectCachedNamespace({ instance_id: instanceId })
   if (!result.ok) {
-    if (isCurrent(generation)) yield* Effect.sync(() => viewStore.set({
-      cached_namespaces_error: result.error.message,
-      cached_namespace_id: null
-    }))
+    if (isCurrent(generation)) {
+      const status = yield* client.connectionStatus()
+      if (status.ok) viewStore.publishConnection(status.data, generation)
+      if (isCurrent(generation)) yield* Effect.sync(() => viewStore.set({
+        cached_namespaces_error: result.error.message,
+        cached_namespace_id: null
+      }))
+    }
     return false
   }
   if (!viewStore.publishConnection(result.data, generation)) return false
@@ -1864,7 +1868,7 @@ export const reconnectLibrary = Effect.gen(function*() {
   }
   if (!isCurrent(connectionGeneration)) return
   yield* Effect.sync(() => viewStore.publishConnection(result.data, connectionGeneration))
-  yield* loadLibrary()
+  yield* loadRootWorkspace
 })
 
 export const loadConnectionStatus = Effect.gen(function*() {

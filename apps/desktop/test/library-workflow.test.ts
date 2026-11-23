@@ -11,6 +11,7 @@ import {
   openSelectedLibraryEntry,
   searchLibrary,
   selectLibraryEntry,
+  selectCachedNamespace,
   updateLibraryNote
 } from "../src/renderer/workflows"
 import { viewStore } from "../src/renderer/store"
@@ -443,6 +444,34 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().connection.state).toBe("connected")
     expect(viewStore.getState().library_freshness?.source).toBe("live")
     expect(viewStore.getState().library_entries).toEqual([entry(entryAId, "book-a")])
+  })
+
+  it("restores the disconnected picker after cached-namespace selection fails", async () => {
+    const connection = ConnectionClient.of({
+      connect: () => Effect.succeed({ ok: false as const, error: { code: "unused", message: "unused", retryable: false } }),
+      disconnect: () => Effect.succeed({ ok: false as const, error: { code: "unused", message: "unused", retryable: false } }),
+      connectionStatus: () => Effect.succeed({
+        ok: true as const,
+        data: { state: "disconnected", instance_id: null, epoch: null, reason: "explicit_disconnect" }
+      }),
+      listCachedNamespaces: () => Effect.succeed({ ok: true as const, data: [] }),
+      selectCachedNamespace: () => Effect.succeed({
+        ok: false as const,
+        error: { code: "cached_namespace_not_found", message: "that cached namespace is gone", retryable: false }
+      })
+    })
+    viewStore.set({
+      connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
+      connection_generation: 7,
+      cached_namespace_id: null,
+      cached_namespaces_error: null
+    })
+
+    await runConnection(selectCachedNamespace(namespaceId), connection)
+
+    expect(viewStore.getState().connection).toMatchObject({ state: "disconnected", instance_id: null })
+    expect(viewStore.getState().cached_namespace_id).toBeNull()
+    expect(viewStore.getState().cached_namespaces_error).toBe("that cached namespace is gone")
   })
 
   it("keeps the latest terminal action through reselection and follows a newer active action", async () => {

@@ -329,16 +329,14 @@ test("reopens the cached Library after a cold managed-service outage and deliver
       try { return await readFile(markerPath, "utf8") } catch { return "" }
     }).toBe("")
 
-    await first.window.getByTestId("library-disconnect").click()
-    await expect(first.window.getByTestId("library-connection-status")).toHaveText("disconnected")
-    await entry.getByTestId(/library-entry-details-/).click()
-    await first.window.getByTestId("library-open-profile").selectOption(profileId)
-    await first.window.getByTestId("library-open").click()
-    await expect(first.window.getByTestId("library-open-result")).toHaveText(/^accepted:/)
-    await expect.poll(async () => {
-      try { return await readFile(markerPath, "utf8") } catch { return "" }
-    }).toBe(`${expectedTarget}\n`)
     await first.app.close()
+
+    const onlineRestart = await launch(dbPath)
+    await expect(onlineRestart.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await onlineRestart.window.getByTestId("open-library").click()
+    await expect(onlineRestart.window.getByTestId("library-connection-status")).toHaveText("connected")
+    await expect(onlineRestart.window.getByTestId("library-entry").filter({ hasText: "cold-book" })).toBeVisible()
+    await onlineRestart.app.close()
 
     ownerLock = new DatabaseSync(path.join(dbDirectory, ".henshin-server-owner.sqlite"))
     ownerLock.exec("BEGIN IMMEDIATE")
@@ -358,7 +356,15 @@ test("reopens the cached Library after a cold managed-service outage and deliver
     await cold.window.getByTestId("cached-namespace-select").selectOption(namespaceId)
     await cold.window.getByTestId("cached-namespace-select-button").click()
     await expect(cold.window.getByTestId("library-cache-status")).toContainText("partial and stale")
-    await expect(cold.window.getByTestId("library-entry").filter({ hasText: "cold-book" })).toBeVisible()
+    const coldEntry = cold.window.getByTestId("library-entry").filter({ hasText: "cold-book" })
+    await expect(coldEntry).toBeVisible()
+    await coldEntry.getByTestId(/library-entry-details-/).click()
+    await cold.window.getByTestId("library-open-profile").selectOption(profileId)
+    await cold.window.getByTestId("library-open").click()
+    await expect(cold.window.getByTestId("library-open-result")).toHaveText(/^accepted:/)
+    await expect.poll(async () => {
+      try { return await readFile(markerPath, "utf8") } catch { return "" }
+    }).toBe(`${expectedTarget}\n`)
 
     ownerLock.exec("ROLLBACK")
     ownerLock.close()
@@ -366,6 +372,9 @@ test("reopens the cached Library after a cold managed-service outage and deliver
     await cold.window.getByTestId("library-reconnect").click()
     await expect(cold.window.getByTestId("library-connection-status")).toHaveText("connected", { timeout: 30_000 })
     await expect(cold.window.getByTestId("library-cache-status")).toHaveCount(0)
+    await cold.window.getByTestId("library-setup").click()
+    await expect(cold.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await expect(cold.window.getByTestId("root-saved")).toContainText("Cold outage fixture")
 
     const serverRows = (): Array<{ readonly event_id: string; readonly entry_id: string; readonly open_count: number }> => {
       const database = new DatabaseSync(dbPath)

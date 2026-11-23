@@ -197,6 +197,17 @@ export class ConnectionLifecycle {
       await disposeBounded(runtime)
       if (generation !== this.generation) return this.status
       this.lease = null
+      if (error instanceof ConnectionInstanceMismatchError) {
+        this.expectedInstanceId = null
+        this.cachedSession = null
+        this.status = {
+          state: "disconnected",
+          instance_id: null,
+          epoch: null,
+          reason: "instance_mismatch"
+        }
+        throw error
+      }
       this.status = {
         state: "blocked",
         instance_id: this.expectedInstanceId,
