@@ -451,6 +451,7 @@ test("inspects and recovers retained handoff outcomes from the ordinary desktop 
   const clientDbPath = `${dbPath}.client`
   const unknownActionId = randomUUID()
   const heldActionId = randomUUID()
+  const protectedActionId = randomUUID()
   const entryId = randomUUID()
   const deviceId = randomUUID()
 
@@ -483,10 +484,12 @@ test("inspects and recovers retained handoff outcomes from the ordinary desktop 
         delivery_error_code, delivery_error_message, failure_code, failure_message,
         created_at_ms, updated_at_ms
       ) VALUES(?, ?, ?, ?, 3, 5, 'prepared', NULL, 'pending', NULL, NULL, NULL, NULL, ?, ?),
-               (?, ?, ?, ?, 3, 5, 'accepted', ?, 'held', 'offline', 'server unavailable', NULL, NULL, ?, ?)
+               (?, ?, ?, ?, 3, 5, 'accepted', ?, 'held', 'offline', 'server unavailable', NULL, NULL, ?, ?),
+               (?, ?, ?, ?, 3, 5, 'failed', NULL, 'pending', NULL, NULL, 'reader_failed', 'reader rejected the target', ?, ?)
     `).run(
       instanceId, unknownActionId, randomUUID(), deviceId, now, now,
-      instanceId, heldActionId, randomUUID(), deviceId, heldEvent, now, now
+      instanceId, heldActionId, entryId, deviceId, heldEvent, now, now,
+      instanceId, protectedActionId, randomUUID(), deviceId, now, now
     )
     clientDatabase.close()
 
@@ -507,6 +510,9 @@ test("inspects and recovers retained handoff outcomes from the ordinary desktop 
           retryable: true
         }
       })
+    await expect(second.window.getByTestId("open-journal-error")).toContainText("another server namespace")
+    await second.window.getByTestId("load-open-journal").click()
+    await expect(second.window.getByTestId("open-journal-error")).toHaveCount(0)
     await expect(second.window.getByTestId(`dismiss-unknown-${unknownActionId}`)).toBeVisible()
     second.window.once("dialog", async (dialog) => {
       expect(dialog.message()).toContain("pending reading count can be lost")
@@ -527,6 +533,7 @@ test("inspects and recovers retained handoff outcomes from the ordinary desktop 
 
     const third = await launch(dbPath)
     await expect(third.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await expect(third.window.getByTestId(`open-event-${protectedActionId}`)).toContainText("failed")
     await expect(third.window.getByTestId(`open-event-${heldActionId}`)).toHaveCount(0)
     await expect(third.window.getByTestId(`dismiss-unknown-${unknownActionId}`)).toHaveCount(0)
   } finally {

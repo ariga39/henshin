@@ -303,9 +303,15 @@ describe("desktop open journal SQLite worker", () => {
       actionId: pendingActionId
     })).resolves.toEqual({ kind: "conflict" })
 
+    for (let index = 5; index < 64; index += 1) {
+      await expect(prepare(first.running, { instanceId })).resolves.toMatchObject({ kind: "admitted" })
+    }
+
     await first.running.close()
     workers.delete(first.running)
     const reopened = await startWorker(first.dbPath)
+
+    await expect(prepare(reopened.running, { instanceId })).resolves.toEqual({ kind: "full" })
 
     await expect(reopened.running.call({
       op: "dismissUnknownOpen",

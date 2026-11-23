@@ -1,11 +1,15 @@
-import { describe, expect, it } from "vitest"
+import { Effect, Layer } from "effect"
+import { afterEach, describe, expect, it } from "vitest"
 import type { OpenJournalView } from "../../desktop/src/renderer/client"
+import { OpenJournalClient } from "../../desktop/src/renderer/client"
 import {
   acceptedOpenJournalRows,
   nonAcceptedOpenJournalRows,
   openJournalStatusText,
   pendingOpenJournalRows
 } from "../../desktop/src/renderer/openJournalPresentation"
+import { loadOpenJournal } from "../../desktop/src/renderer/workflows"
+import { viewStore } from "../../desktop/src/renderer/store"
 
 const row = (overrides: Partial<OpenJournalView>): OpenJournalView => ({
   instanceId: "11111111-1111-4111-8111-111111111111",
@@ -38,5 +42,29 @@ describe("open journal presentation", () => {
     expect(pendingOpenJournalRows(rows)).toHaveLength(1)
     expect(acceptedOpenJournalRows(rows)).toHaveLength(1)
     expect(nonAcceptedOpenJournalRows(rows).map(openJournalStatusText)).toEqual(["prepared", "failed", "unknown"])
+  })
+
+  afterEach(() => {
+    viewStore.set({ open_journal: [], open_journal_error: null })
+  })
+
+  it("keeps status unavailable on a failed read and clears the journal error after retry", async () => {
+    let reads = 0
+    const client = OpenJournalClient.of({
+      list: () => Effect.succeed(
+        reads++ === 0
+          ? { ok: false as const, error: { code: "open_journal_unavailable", message: "journal read failed", retryable: true } }
+          : { ok: true as const, data: [row({ status: "failed", deliveryStatus: null })] }
+      ),
+      recover: () => Effect.succeed({ ok: true as const, data: null })
+    })
+
+    await Effect.runPromise(Effect.provide(loadOpenJournal, Layer.succeed(OpenJournalClient, client)))
+    expect(viewStore.getState().open_journal).toEqual([])
+    expect(viewStore.getState().open_journal_error).toBe("journal read failed")
+
+    await Effect.runPromise(Effect.provide(loadOpenJournal, Layer.succeed(OpenJournalClient, client)))
+    expect(viewStore.getState().open_journal).toHaveLength(1)
+    expect(viewStore.getState().open_journal_error).toBeNull()
   })
 })

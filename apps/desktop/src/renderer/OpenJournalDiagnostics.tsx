@@ -33,7 +33,16 @@ export const OpenJournalDiagnostics = () => {
       <button data-testid="load-open-journal" onClick={() => void runtime.runPromise(loadOpenJournal)}>
         Refresh handoff status
       </button>
-      <p data-testid="open-delivery-status">{pendingOpenEvents.length} pending handoff event(s)</p>
+      {state.open_journal_error === null ? (
+        <p data-testid="open-delivery-status">{pendingOpenEvents.length} pending handoff event(s)</p>
+      ) : (
+        <>
+          <p role="alert" data-testid="open-journal-error">
+            Handoff journal unavailable: {state.open_journal_error}
+          </p>
+          <p data-testid="open-delivery-status">Handoff status unavailable; refresh to retry.</p>
+        </>
+      )}
       {acceptedOpenEvents.map((row) => (
         <article key={row.actionId} data-testid={`open-event-${row.actionId}`}>
           <p>
@@ -49,7 +58,7 @@ export const OpenJournalDiagnostics = () => {
                 data-testid={`discard-held-${row.actionId}`}
                 onClick={() => {
                   if (window.confirm("Discard this held event? The pending reading count can be lost and the event will not be replayed.")) {
-                      void runtime.runPromise(discardHeldOpenEvent(row))
+                    void runtime.runPromise(discardHeldOpenEvent(row))
                   }
                 }}
               >

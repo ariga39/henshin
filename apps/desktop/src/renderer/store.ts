@@ -44,6 +44,7 @@ export interface ViewState {
   readonly recovery_attempts: ReadonlyArray<CommandAttempt>
   readonly recovery_result: CommandReconciliation | null
   readonly open_journal: ReadonlyArray<OpenJournalView>
+  readonly open_journal_error: string | null
   readonly root_preview_path: string
   readonly root_preview_selected_path: string | null
   readonly root_preview_status: "idle" | "loading" | "ready" | "error"
@@ -128,6 +129,7 @@ const initialState: ViewState = {
   recovery_attempts: [],
   recovery_result: null,
   open_journal: [],
+  open_journal_error: null,
   root_preview_path: "",
   root_preview_selected_path: null,
   root_preview_status: "idle",

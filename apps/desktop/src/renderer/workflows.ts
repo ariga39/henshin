@@ -1042,9 +1042,9 @@ export const loadOpenJournal = Effect.gen(function*() {
   const result = yield* client.list()
   if (result.ok) {
     if (!isCurrent(connectionGeneration) || verifiedInstanceId(viewStore.getState()) !== ownerInstanceId) return
-    yield* Effect.sync(() => viewStore.set({ open_journal: result.data }))
+    yield* Effect.sync(() => viewStore.set({ open_journal: result.data, open_journal_error: null }))
   } else if (isCurrent(connectionGeneration) && verifiedInstanceId(viewStore.getState()) === ownerInstanceId) {
-    yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+    yield* Effect.sync(() => viewStore.set({ open_journal_error: result.error.message }))
   }
 })
 
@@ -1062,7 +1062,7 @@ const mutateOpenJournal = (
     if (result.ok) {
       yield* loadOpenJournal
     } else {
-      yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+      yield* Effect.sync(() => viewStore.set({ open_journal_error: result.error.message }))
     }
   })
 
