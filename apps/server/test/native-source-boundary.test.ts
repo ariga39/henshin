@@ -64,11 +64,12 @@ describe("native source boundary precursor", () => {
     const name = "book.cbz"
     await writeFile(join(directory, name), "book")
     const root = await selectedRoot(directory)
-    const limits = { deadlineMs: 25 }
-    const now = vi.spyOn(Date, "now").mockReturnValue(1_000)
+    const limits = { deadlineMs: 30_000 }
+    expect(await resolveSourceCandidate(root, name, { limits })).toMatchObject({ ok: true })
+
+    const start = 1_000
+    const now = vi.spyOn(Date, "now").mockReturnValueOnce(start).mockReturnValue(start + limits.deadlineMs)
     try {
-      expect(await resolveSourceCandidate(root, name, { limits })).toMatchObject({ ok: true })
-      now.mockReturnValueOnce(1_000).mockReturnValue(1_025)
       expect(await resolveSourceCandidate(root, name, { limits }))
         .toMatchObject({ ok: false, code: "directory-limit" })
     } finally {
