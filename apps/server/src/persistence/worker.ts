@@ -827,6 +827,9 @@ const updateEntryStatistics = db.prepare(
 const insertEntry = db.prepare(
   "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, title_search, basename_search, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms, accepted_observation_json, availability_status, availability_observed_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?, ?, 'present', ?)"
 )
+const updateEntryAvailability = db.prepare(
+  "UPDATE library_entries SET availability_status = ?, availability_observed_at_ms = ?, updated_at_ms = ? WHERE entry_id = ?"
+)
 const markEntryPending = db.prepare(
   "UPDATE library_entries SET state = 'replacement-pending', updated_at_ms = ? WHERE entry_id = ? AND state = 'accepted'"
 )
@@ -1754,7 +1757,8 @@ const resolveReplacement = (
         candidate.manifest_json,
         now,
         now,
-        JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind))
+        JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind)),
+        now
       )
     }
     const candidateView = stagedDiscoveryRow(candidate)
@@ -1908,9 +1912,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       if (isExcluded(entry.relative_path)) continue
       const status = observed.has(entry.relative_path) ? "present" : "missing"
       if (entry.availability_status !== status || entry.availability_observed_at_ms !== observedAtMs) {
-        db.prepare(
-          "UPDATE library_entries SET availability_status = ?, availability_observed_at_ms = ?, updated_at_ms = ? WHERE entry_id = ?"
-        ).run(status, observedAtMs, observedAtMs, entry.entry_id)
+        updateEntryAvailability.run(status, observedAtMs, observedAtMs, entry.entry_id)
         availabilityChanged = true
       }
     }
@@ -1990,7 +1992,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
         }
         continue
       }
-      if (missingPaths.length > 0 || changedPaths.length > 0) continue
+      if (missingPaths.length > 0 || unidentifiedPaths.length > 0 || changedPaths.length > 0) continue
       const title = titleForCandidate(candidate.relative_path, candidate.kind)
       insertEntry.run(
         randomUUID(),

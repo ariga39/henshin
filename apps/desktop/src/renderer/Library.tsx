@@ -245,7 +245,7 @@ export const LibraryScreen = () => {
                   </small>
                 )}
                 <small data-testid="library-availability">{availabilityText(entry)}</small>
-                <small>{entry.entry_id}</small>
+                <small data-testid="library-entry-id">{entry.entry_id}</small>
               </div>
             </li>
           ))}

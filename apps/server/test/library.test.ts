@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises"
 import { DatabaseSync } from "node:sqlite"
 import os from "node:os"
 import path from "node:path"
@@ -1350,6 +1350,62 @@ describe("normal library scan", () => {
       return yield* client.candidates()
     }))
     expect(staged.data.map((candidate) => candidate.relative_path)).toEqual(["new-book"])
+  })
+
+  it("defers new allocation when an existing occupied path is unidentified", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-unidentified-"))
+    fixturePaths.add(fixture)
+    const existingArchive = path.join(fixture, "existing-a.cbz")
+    await makeZip(existingArchive)
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+          label: "Unidentified occupied path", path: fixture, preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+    const scan = () => withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+
+    const first = await scan()
+    if (!("task" in first.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
+    await makeImageBook(fixture, "new-b")
+    await chmod(existingArchive, 0o000)
+    try {
+      const unreadable = await scan()
+      if (!("task" in unreadable.data)) throw new Error("expected unreadable-path scan task")
+      const terminal = await waitForTerminal(server, unreadable.data.task.task_id)
+      expect(terminal.status).toBe("completed_with_errors")
+      expect(terminal.readiness_error?.code).toBe("allocation_deferred")
+      expect(terminal.readiness_error?.message).toContain("unidentified occupied paths")
+
+      const entries = await withLibraryClient(server, Effect.gen(function*() {
+        return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
+      }))
+      expect(entries.data.entries.map((entry) => entry.relative_path)).toEqual(["existing-a.cbz"])
+      const staged = await withReviewClient(server, Effect.gen(function*() {
+        return yield* (yield* ReviewHttpClient).candidates()
+      }))
+      expect(staged.data.map((candidate) => candidate.relative_path).sort()).toEqual(["existing-a.cbz", "new-b"])
+    } finally {
+      await chmod(existingArchive, 0o644)
+    }
   })
 
   it("does not treat an excluded accepted path as a missing claim", async () => {
