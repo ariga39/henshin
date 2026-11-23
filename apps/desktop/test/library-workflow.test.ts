@@ -1,12 +1,12 @@
 import { Effect, Layer } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
-import type { LibraryEntry, LibraryEntryDetails, LibraryEntryPage, OpenBookIpcResult, ReaderProfile } from "@henshin/contracts"
-import { LibraryClient, type Result } from "../src/renderer/client"
+import type { ConnectionStatusView, LibraryEntry, LibraryEntryDetails, LibraryEntryPage, OpenBookIpcResult, ReaderProfile } from "@henshin/contracts"
+import { ConnectionClient, LibraryClient, type Result } from "../src/renderer/client"
 import {
   chooseLibraryOpenProfile,
+  disconnectLibrary,
   libraryOpenStateFor,
   loadActiveLibraryOpenState,
-    loadLibrary,
   loadLibrary,
   openSelectedLibraryEntry,
   searchLibrary,
@@ -73,6 +73,8 @@ const makeLibraryClient = (overrides: Partial<LibraryClient["Service"]>): Librar
   getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() }),
   ...overrides
 })
+const runConnection = <A>(effect: Effect.Effect<A, unknown, ConnectionClient>, client: ConnectionClient["Service"]) =>
+  Effect.runPromise(Effect.provide(effect, Layer.succeed(ConnectionClient, client)))
 
 const resetView = () => {
   viewStore.set({
@@ -294,6 +296,107 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_status).toBe("error")
     expect(viewStore.getState().library_freshness?.source).toBe("live")
     expect(viewStore.getState().library_freshness?.stale).toBe(false)
+  })
+
+  it("keeps an empty cached miss in the explicit partial-cache state", async () => {
+    const client = LibraryClient.of({
+      search: () => Effect.succeed({
+        ok: false as const,
+        error: { code: "offline_library_unavailable", message: "cached Library is not available", retryable: true }
+      }),
+      open: () => Effect.succeed({ ok: false as const, error: { code: "unused", message: "unused", retryable: false } }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      connection: { state: "disconnected", instance_id: namespaceId, epoch: null, reason: "explicit_disconnect" },
+      connection_generation: 8,
+      library_entries: [],
+      library_freshness: { source: "cached", stale: true, partial: true, observed_at_ms: 1, instance_id: namespaceId },
+      library_status: "ready"
+    })
+
+    await run(loadLibrary(false), client)
+
+    expect(viewStore.getState().library_status).toBe("ready")
+    expect(viewStore.getState().library_freshness).toMatchObject({ source: "cached", stale: true, partial: true })
+    expect(viewStore.getState().library_error).toBe("cached Library is not available")
+  })
+
+  it("restores the retained cached view when disconnect fences a pending load", async () => {
+    let resolveSearch!: (value: Result<LibraryEntryPage>) => void
+    const client = LibraryClient.of({
+      search: () => Effect.promise(() => new Promise<Result<LibraryEntryPage>>((resolve) => { resolveSearch = resolve })),
+      open: () => Effect.succeed({ ok: false as const, error: { code: "unused", message: "unused", retryable: false } }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    const connection = ConnectionClient.of({
+      connect: () => Effect.succeed({ ok: false as const, error: { code: "unused", message: "unused", retryable: false } }),
+      disconnect: () => Effect.succeed({
+        ok: true as const,
+        data: { state: "disconnected", instance_id: namespaceId, epoch: null, reason: "explicit_disconnect" }
+      }),
+      connectionStatus: () => Effect.succeed({
+        ok: true as const,
+        data: { state: "disconnected", instance_id: namespaceId, epoch: null, reason: "explicit_disconnect" }
+      })
+    })
+    viewStore.set({
+      connection: { state: "connected", instance_id: namespaceId, epoch: "99999999-9999-4999-8999-999999999999", reason: null },
+      connection_generation: 7,
+      library_entries: [entry(entryAId, "book-a")],
+      library_freshness: { source: "live", stale: false, partial: false, observed_at_ms: 1, instance_id: namespaceId },
+      library_status: "ready"
+    })
+
+    const pendingLoad = run(loadLibrary(false), client)
+    await Promise.resolve()
+    await runConnection(disconnectLibrary, connection)
+
+    expect(viewStore.getState().connection.state).toBe("disconnected")
+    expect(viewStore.getState().library_status).toBe("ready")
+    expect(viewStore.getState().library_freshness?.source).toBe("cached")
+
+    resolveSearch({ ok: true, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "2" } })
+    await pendingLoad
+    expect(viewStore.getState().library_status).toBe("ready")
+    expect(viewStore.getState().library_entries).toEqual([entry(entryAId, "book-a")])
+  })
+
+  it("does not let a late disconnect completion relabel a newer connection", async () => {
+    let resolveDisconnect!: (value: Result<ConnectionStatusView>) => void
+    const connection = ConnectionClient.of({
+      connect: () => Effect.succeed({ ok: false as const, error: { code: "unused", message: "unused", retryable: false } }),
+      disconnect: () => Effect.promise(() => new Promise<Result<ConnectionStatusView>>((resolve) => { resolveDisconnect = resolve })),
+      connectionStatus: () => Effect.succeed({
+        ok: true as const,
+        data: { state: "connected", instance_id: namespaceId, epoch: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", reason: null }
+      })
+    })
+    viewStore.set({
+      connection: { state: "connected", instance_id: namespaceId, epoch: "99999999-9999-4999-8999-999999999999", reason: null },
+      connection_generation: 7,
+      library_entries: [entry(entryAId, "book-a")],
+      library_freshness: { source: "live", stale: false, partial: false, observed_at_ms: 1, instance_id: namespaceId },
+      library_status: "ready"
+    })
+
+    const pendingDisconnect = runConnection(disconnectLibrary, connection)
+    await Promise.resolve()
+    viewStore.beginConnectionTransition("connecting")
+    viewStore.set({
+      connection: { state: "connected", instance_id: namespaceId, epoch: "aaaaaaaa-aaaa-8aaa-8aaa-aaaaaaaaaaaa", reason: null }
+    })
+    resolveDisconnect({
+      ok: true,
+      data: { state: "disconnected", instance_id: namespaceId, epoch: null, reason: "explicit_disconnect" }
+    })
+    await pendingDisconnect
+
+    expect(viewStore.getState().connection.state).toBe("connected")
+    expect(viewStore.getState().library_freshness?.source).toBe("live")
+    expect(viewStore.getState().library_entries).toEqual([entry(entryAId, "book-a")])
   })
 
   it("keeps the latest terminal action through reselection and follows a newer active action", async () => {

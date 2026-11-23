@@ -1522,7 +1522,9 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
               library_error: result.error.message
             }
           : {
-              library_status: "error",
+              library_status: state.connection.state !== "connected" && state.library_freshness?.source === "cached"
+                ? "ready"
+                : "error",
               library_error: result.error.message,
               ...(state.connection.state !== "connected" && state.library_freshness !== null
                 ? { library_freshness: { ...state.library_freshness, source: "cached", stale: true, partial: true } }
@@ -1726,7 +1728,7 @@ export const disconnectLibrary = Effect.gen(function*() {
   const result = yield* client.disconnect()
   if (result.ok) {
     yield* Effect.sync(() => {
-      viewStore.publishConnection(result.data, connectionGeneration)
+      if (!viewStore.publishConnection(result.data, connectionGeneration) || !isCurrent(connectionGeneration)) return
       const state = viewStore.getState()
       const filtered = state.library_query.trim() !== ""
       viewStore.set(filtered
@@ -1739,6 +1741,8 @@ export const disconnectLibrary = Effect.gen(function*() {
             library_error: "Filtered Library results were cleared while disconnected. Reconnect to search again."
           }
         : {
+            library_status: state.library_freshness === null ? "idle" : "ready",
+            library_error: null,
             library_freshness: state.library_freshness === null
               ? null
               : { ...state.library_freshness, source: "cached", stale: true, partial: true }
@@ -1772,6 +1776,7 @@ export const reconnectLibrary = Effect.gen(function*() {
               library_error: result.error.message
             }
           : {
+              library_status: state.library_freshness === null ? "idle" : "ready",
               library_error: result.error.message,
               ...(state.library_entries.length > 0 && state.library_freshness !== null
                 ? { library_freshness: { ...state.library_freshness, source: "cached", stale: true, partial: true } }
