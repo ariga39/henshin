@@ -32,7 +32,8 @@ import type {
   ReaderProfileTestResult,
   ReaderProfileTestTarget,
   ReaderProfileTestTargetSelectIpcRequest,
-  ReaderProfileTestTargetSelectIpcResult
+  ReaderProfileTestTargetSelectIpcResult,
+  RecoverOpenJournalIpcRequest
 } from "@henshin/contracts"
 import type { OpenEvent } from "@henshin/contracts/event"
 
@@ -71,8 +72,6 @@ export interface PrototypeBridge {
   connect(): Promise<Result<ConnectionStatusView>>
   disconnect(): Promise<Result<ConnectionStatusView>>
   connectionStatus(): Promise<Result<ConnectionStatusView>>
-  onOpenJournalChanged?(listener: () => void): () => void
-  listOpenJournal?(): Promise<Result<ReadonlyArray<OpenJournalView>>>
   getNote(noteId: string): Promise<Result<NoteView>>
   editNote(input: EditNoteInput): Promise<Result<NoteView>>
   saveDraft(input: SaveDraftInput): Promise<Result<SavedDraft>>
@@ -81,6 +80,12 @@ export interface PrototypeBridge {
   listCommandAttempts(): Promise<Result<ReadonlyArray<CommandAttempt>>>
   reconcileCommand(operationId: string): Promise<Result<CommandReconciliation>>
   dismissCommand(operationId: string): Promise<Result<CommandAttempt>>
+}
+
+export interface OpenJournalBridge {
+  onChanged(listener: () => void): () => void
+  list(): Promise<Result<ReadonlyArray<OpenJournalView>>>
+  recover(input: RecoverOpenJournalIpcRequest): Promise<Result<null>>
 }
 
 export interface SaveDraftInput {
@@ -106,6 +111,7 @@ export interface DiscardDraftInput {
 declare global {
   interface Window {
     readonly henshinPrototype: PrototypeBridge
+    readonly henshinOpenJournal: OpenJournalBridge
     readonly henshinRootPreview: RootPreviewBridge
     readonly henshinLocalMapping: LocalMappingBridge
     readonly henshinScanReview: ScanReviewBridge
@@ -175,7 +181,6 @@ export class PrototypeClient extends Context.Service<
     readonly connect: () => Effect.Effect<Result<ConnectionStatusView>>
     readonly disconnect: () => Effect.Effect<Result<ConnectionStatusView>>
     readonly connectionStatus: () => Effect.Effect<Result<ConnectionStatusView>>
-    readonly listOpenJournal?: () => Effect.Effect<Result<ReadonlyArray<OpenJournalView>>>
     readonly getNote: (noteId: string) => Effect.Effect<Result<NoteView>>
     readonly editNote: (input: EditNoteInput) => Effect.Effect<Result<NoteView>>
     readonly saveDraft: (input: SaveDraftInput) => Effect.Effect<Result<SavedDraft>>
@@ -193,7 +198,6 @@ export class PrototypeClient extends Context.Service<
       connect: () => callIpc(() => window.henshinPrototype.connect()),
       disconnect: () => callIpc(() => window.henshinPrototype.disconnect()),
       connectionStatus: () => callIpc(() => window.henshinPrototype.connectionStatus()),
-      listOpenJournal: () => callIpc(() => window.henshinPrototype.listOpenJournal!()),
       getNote: (noteId) => callIpc(() => window.henshinPrototype.getNote(noteId)),
       editNote: (input) => callIpc(() => window.henshinPrototype.editNote(input)),
       saveDraft: (input) => callIpc(() => window.henshinPrototype.saveDraft(input)),
@@ -202,6 +206,22 @@ export class PrototypeClient extends Context.Service<
       listCommandAttempts: () => callIpc(() => window.henshinPrototype.listCommandAttempts()),
       reconcileCommand: (operationId) => callIpc(() => window.henshinPrototype.reconcileCommand(operationId)),
       dismissCommand: (operationId) => callIpc(() => window.henshinPrototype.dismissCommand(operationId))
+    })
+  )
+}
+
+export class OpenJournalClient extends Context.Service<
+  OpenJournalClient,
+  {
+    readonly list: () => Effect.Effect<Result<ReadonlyArray<OpenJournalView>>>
+    readonly recover: (input: RecoverOpenJournalIpcRequest) => Effect.Effect<Result<null>>
+  }
+>()("henshin/desktop/renderer/OpenJournalClient") {
+  static readonly layer = Layer.succeed(
+    OpenJournalClient,
+    OpenJournalClient.of({
+      list: () => callIpc(() => window.henshinOpenJournal.list()),
+      recover: (input) => callIpc(() => window.henshinOpenJournal.recover(input))
     })
   )
 }

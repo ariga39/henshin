@@ -9,7 +9,8 @@ import type {
   ReleaseHeldDiscoveryIpcRequest,
   RootCommandIpcRequest,
   RootPreviewRequest,
-  RootRegistrationRequest
+  RootRegistrationRequest,
+  RecoverOpenJournalIpcRequest
 } from "@henshin/contracts"
 import { IpcChannels } from "@henshin/contracts/channels"
 
@@ -51,18 +52,23 @@ contextBridge.exposeInMainWorld("henshinLibrary", {
   getThumbnail: (key: string) => ipcRenderer.invoke(IpcChannels.thumbnailGet, { key })
 })
 
+contextBridge.exposeInMainWorld("henshinOpenJournal", {
+  onChanged: (listener: () => void) => {
+    const handler = () => listener()
+    ipcRenderer.on(IpcChannels.openJournalChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.openJournalChanged, handler)
+  },
+  list: () => ipcRenderer.invoke(IpcChannels.listOpenJournal, {}),
+  recover: (input: RecoverOpenJournalIpcRequest) =>
+    ipcRenderer.invoke(IpcChannels.recoverOpenJournal, input)
+})
+
 if (new URLSearchParams(window.location.search).get("mode") === "prototype") {
   contextBridge.exposeInMainWorld("henshinPrototype", {
     handshake: () => ipcRenderer.invoke(IpcChannels.handshake, {}),
     connect: () => ipcRenderer.invoke(IpcChannels.connect, {}),
     disconnect: () => ipcRenderer.invoke(IpcChannels.disconnect, {}),
     connectionStatus: () => ipcRenderer.invoke(IpcChannels.connectionStatus, {}),
-    onOpenJournalChanged: (listener: () => void) => {
-      const handler = () => listener()
-      ipcRenderer.on(IpcChannels.openJournalChanged, handler)
-      return () => ipcRenderer.removeListener(IpcChannels.openJournalChanged, handler)
-    },
-    listOpenJournal: () => ipcRenderer.invoke(IpcChannels.listOpenJournal, {}),
     getNote: (noteId: string) => ipcRenderer.invoke(IpcChannels.getNote, { note_id: noteId }),
     editNote: (input: {
       readonly note_id: string

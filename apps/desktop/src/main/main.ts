@@ -40,6 +40,7 @@ import {
   TaskListIpcRequest,
   SaveDraftIpcRequest,
   ReconcileCommandIpcRequest,
+  RecoverOpenJournalIpcRequest,
   ConnectionStatusView,
   localMappingSampleCanActivate,
   type PublicError,
@@ -67,7 +68,12 @@ import {
   reconcileNoteCommand
 } from "./CommandCoordinator"
 import { LocalDatabaseWorker } from "./persistence/LocalDatabaseWorker"
-import { OpenJournalStore } from "./persistence/OpenJournalStore"
+import {
+  OpenJournalConflictError,
+  OpenJournalNotFoundError,
+  OpenJournalStore,
+  OpenJournalStoreFullError
+} from "./persistence/OpenJournalStore"
 import { drainOpenEvents } from "./OpenEventDelivery"
 import { LocalMappingStore, type LocalMappingActivationOutcome } from "./persistence/LocalMappingStore"
 import {
@@ -190,6 +196,11 @@ const invalidRequestError: PublicError = {
   message: "invalid IPC request",
   retryable: false
 }
+const staleOpenJournalNamespaceError: PublicError = {
+  code: "open_journal_namespace",
+  message: "this handoff entry belongs to another server namespace; refresh the diagnostics before recovering it",
+  retryable: true
+}
 
 const decodePublicError = Schema.decodeUnknownOption(PublicApiError)
 
@@ -234,6 +245,27 @@ const toPublicError = (error: unknown): PublicError => {
     return {
       code: "command_attempt_store_full",
       message: "command recovery storage is full (64 retained attempts); terminal and dismissed attempts become cleanup-eligible after seven days, while unresolved attempts require reconciliation or dismissal",
+      retryable: false
+    }
+  }
+  if (error instanceof OpenJournalStoreFullError) {
+    return {
+      code: "open_journal_full",
+      message: "reader handoff journal is full (64 rows); dismiss an unknown intent or discard a held event after reviewing its consequence",
+      retryable: false
+    }
+  }
+  if (error instanceof OpenJournalConflictError) {
+    return {
+      code: "open_journal_conflict",
+      message: "the handoff entry changed or is not eligible for this action",
+      retryable: false
+    }
+  }
+  if (error instanceof OpenJournalNotFoundError) {
+    return {
+      code: "open_journal_not_found",
+      message: "the handoff entry is no longer retained",
       retryable: false
     }
   }
@@ -1077,6 +1109,48 @@ const registerIpc = (): void => {
     )
   })
 
+  ipcMain.handle(IpcChannels.listOpenJournal, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ListOpenJournalIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    try {
+      const instanceId = requireNamespace()
+      return requireRuntime().runPromise(
+        toResult(
+          Effect.gen(function*() {
+            const journal = yield* OpenJournalStore
+            return { data: yield* journal.list(instanceId) }
+          })
+        )
+      )
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
+  })
+
+  ipcMain.handle(IpcChannels.recoverOpenJournal, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(RecoverOpenJournalIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    try {
+      const instanceId = requireNamespace()
+      if (decoded.value.instance_id !== instanceId) return { ok: false as const, error: staleOpenJournalNamespaceError }
+      return requireRuntime().runPromise(
+        toResult(
+          Effect.gen(function*() {
+            const journal = yield* OpenJournalStore
+            yield* (decoded.value.command === "dismiss_unknown"
+              ? journal.dismissUnknown({ instanceId, actionId: decoded.value.action_id })
+              : journal.discardHeld({ instanceId, actionId: decoded.value.action_id }))
+            return { data: null }
+          })
+        )
+      )
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
+  })
+
   if (!prototypeMode) return
 
   ipcMain.handle(IpcChannels.handshake, (event, raw: unknown) => {
@@ -1122,25 +1196,6 @@ const registerIpc = (): void => {
     const decoded = Schema.decodeUnknownOption(ConnectionStatusIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return connectionStatusResult(requireConnection().getStatus())
-  })
-
-  ipcMain.handle(IpcChannels.listOpenJournal, (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ListOpenJournalIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    try {
-      const instanceId = requireNamespace()
-      return requireRuntime().runPromise(
-        toResult(
-          Effect.gen(function*() {
-            const journal = yield* OpenJournalStore
-            return { data: yield* journal.list(instanceId) }
-          })
-        )
-      )
-    } catch (error) {
-      return { ok: false as const, error: toPublicError(error) }
-    }
   })
 
   ipcMain.handle(IpcChannels.getNote, (event, raw: unknown) => {

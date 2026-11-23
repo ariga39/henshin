@@ -1,4 +1,4 @@
-import { Deferred, Effect, Fiber } from "effect"
+import { Deferred, Effect, Fiber, Option } from "effect"
 import { localMappingPreviewCanActivate } from "@henshin/contracts"
 import type {
   ConnectionStatusView,
@@ -12,12 +12,14 @@ import type {
 } from "@henshin/contracts"
 import {
   LibraryClient,
+  OpenJournalClient,
   LocalMappingClient,
   PrototypeClient,
   ReaderProfileClient,
   RootPreviewClient,
   ScanReviewClient
 } from "./client"
+import type { OpenJournalView } from "./client"
 import { viewStore, type ViewState } from "./store"
 
 export const NOTE_ID = "note-1"
@@ -1031,19 +1033,44 @@ export const loadConnectionStatus = Effect.gen(function*() {
 })
 
 export const loadOpenJournal = Effect.gen(function*() {
-  const client = yield* PrototypeClient
-  if (client.listOpenJournal === undefined) return
+  const clientOption = yield* Effect.serviceOption(OpenJournalClient)
+  if (Option.isNone(clientOption)) return
+  const client = clientOption.value
   const initialState = viewStore.getState()
   const connectionGeneration = initialState.connection_generation
   const ownerInstanceId = verifiedInstanceId(initialState)
-  const result = yield* client.listOpenJournal()
+  const result = yield* client.list()
   if (result.ok) {
     if (!isCurrent(connectionGeneration) || verifiedInstanceId(viewStore.getState()) !== ownerInstanceId) return
-    yield* Effect.sync(() => viewStore.set({ open_journal: result.data }))
+    yield* Effect.sync(() => viewStore.set({ open_journal: result.data, open_journal_error: null }))
   } else if (isCurrent(connectionGeneration) && verifiedInstanceId(viewStore.getState()) === ownerInstanceId) {
-    yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+    yield* Effect.sync(() => viewStore.set({ open_journal_error: result.error.message }))
   }
 })
+
+const mutateOpenJournal = (
+  row: Pick<OpenJournalView, "instanceId" | "actionId">,
+  command: "dismiss_unknown" | "discard_held"
+) =>
+  Effect.gen(function*() {
+    const client = yield* OpenJournalClient
+    const result = yield* client.recover({
+      instance_id: row.instanceId,
+      action_id: row.actionId,
+      command
+    })
+    if (result.ok) {
+      yield* loadOpenJournal
+    } else {
+      yield* Effect.sync(() => viewStore.set({ open_journal_error: result.error.message }))
+    }
+  })
+
+export const dismissUnknownOpenJournal = (row: Pick<OpenJournalView, "instanceId" | "actionId">) =>
+  mutateOpenJournal(row, "dismiss_unknown")
+
+export const discardHeldOpenEvent = (row: Pick<OpenJournalView, "instanceId" | "actionId">) =>
+  mutateOpenJournal(row, "discard_held")
 
 export const saveNote = (text: string) =>
   Effect.gen(function*() {

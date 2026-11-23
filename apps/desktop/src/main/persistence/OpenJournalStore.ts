@@ -5,6 +5,7 @@ import {
   OpenJournalAdmission,
   OpenJournalMutation,
   OpenJournalReadResult,
+  OpenJournalRemoval,
   OpenJournalRows,
   type DraftWorkerRequest,
   type OpenJournalRow
@@ -30,6 +31,7 @@ export class OpenJournalStoreFullError extends Data.TaggedError("OpenJournalStor
 
 const decodeAdmission = Schema.decodeUnknownOption(OpenJournalAdmission)
 const decodeMutation = Schema.decodeUnknownOption(OpenJournalMutation)
+const decodeRemoval = Schema.decodeUnknownOption(OpenJournalRemoval)
 const decodeRows = Schema.decodeUnknownOption(OpenJournalRows)
 const decodeRow = Schema.decodeUnknownOption(OpenJournalReadResult)
 
@@ -70,6 +72,12 @@ export class OpenJournalStore extends Context.Service<
       OpenJournalRow,
       LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError
     >
+    readonly dismissUnknown: (
+      key: Pick<OpenJournalInput, "instanceId" | "actionId">
+    ) => Effect.Effect<void, LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError>
+    readonly discardHeld: (
+      key: Pick<OpenJournalInput, "instanceId" | "actionId">
+    ) => Effect.Effect<void, LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError>
     readonly list: (instanceId: string) => Effect.Effect<ReadonlyArray<OpenJournalRow>, LocalDatabaseWorkerError>
     readonly get: (
       key: Pick<OpenJournalInput, "instanceId" | "actionId">
@@ -159,6 +167,38 @@ export class OpenJournalStore extends Context.Service<
         key: Pick<OpenJournalInput, "instanceId" | "actionId"> & OpenJournalFailure
       ) => mutation({ op: "recordOpenFailed", ...key }, "record failed open")
 
+      const removal = (
+        request: DraftWorkerRequest,
+        operation: string
+      ): Effect.Effect<void, LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError> =>
+        call(request).pipe(
+          Effect.flatMap((value): Effect.Effect<
+            void,
+            LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError
+          > => {
+            const decoded = decodeRemoval(value)
+            if (Option.isNone(decoded)) {
+              return Effect.fail(new LocalDatabaseWorkerError({ message: `invalid ${operation} result` }))
+            }
+            switch (decoded.value.kind) {
+              case "deleted":
+                return Effect.succeed(undefined)
+              case "not_found":
+                return Effect.fail(new OpenJournalNotFoundError())
+              case "conflict":
+                return Effect.fail(new OpenJournalConflictError())
+            }
+          })
+        )
+
+      const dismissUnknown = (
+        key: Pick<OpenJournalInput, "instanceId" | "actionId">
+      ) => removal({ op: "dismissUnknownOpen", ...key }, "dismiss unknown open")
+
+      const discardHeld = (
+        key: Pick<OpenJournalInput, "instanceId" | "actionId">
+      ) => removal({ op: "discardHeldOpenEvent", ...key }, "discard held open event")
+
       const list = (instanceId: string): Effect.Effect<ReadonlyArray<OpenJournalRow>, LocalDatabaseWorkerError> =>
         call({ op: "listOpenJournal", instanceId }).pipe(
           Effect.flatMap((value) => {
@@ -181,7 +221,17 @@ export class OpenJournalStore extends Context.Service<
           })
         )
 
-      return OpenJournalStore.of({ prepare, recordAccepted, acknowledge, hold, recordFailed, list, get })
+      return OpenJournalStore.of({
+        prepare,
+        recordAccepted,
+        acknowledge,
+        hold,
+        recordFailed,
+        dismissUnknown,
+        discardHeld,
+        list,
+        get
+      })
     })
   )
 }
