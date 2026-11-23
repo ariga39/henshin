@@ -8,6 +8,7 @@ import { ReplacementComparison } from "@henshin/contracts"
 import {
   ClearEntryNoteCommand,
   EntryCommandResult,
+  EhGalleryMetadata,
   LibraryEntryDetails,
   RemovePersonalTitleCommand,
   SetEntryNoteCommand,
@@ -387,6 +388,25 @@ export const PersonalTitleOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("revision_conflict"), currentDecisionVersion: Revision })
 ])
 export type PersonalTitleOutcome = typeof PersonalTitleOutcome.Type
+
+export const EhRefreshStartOutcome = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("started"),
+    galleryId: Uuid,
+    token: Schema.String,
+    refreshRevision: Revision
+  }),
+  Schema.Struct({ kind: Schema.Literal("gallery_not_found") })
+])
+export type EhRefreshStartOutcome = typeof EhRefreshStartOutcome.Type
+
+export const EhRefreshFinishOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("committed"), metadata: EhGalleryMetadata }),
+  Schema.Struct({ kind: Schema.Literal("stale"), metadata: EhGalleryMetadata }),
+  Schema.Struct({ kind: Schema.Literal("gallery_not_found") })
+])
+export type EhRefreshFinishOutcome = typeof EhRefreshFinishOutcome.Type
+
 export const IndexedRootSampleRow = Schema.Struct({
   relative_path: RootRelativePath,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
@@ -661,6 +681,25 @@ export const WorkerRequest = Schema.Union([
       RemovePersonalTitleCommand,
       SetEntryNoteCommand,
       ClearEntryNoteCommand
+    ])
+  }),
+  Schema.Struct({
+    op: Schema.Literal("startEhRefresh"),
+    source: Schema.Literal("EH"),
+    gid: Schema.String.check(Schema.isPattern(/^[0-9]{1,20}$/))
+  }),
+  Schema.Struct({
+    op: Schema.Literal("finishEhRefresh"),
+    galleryId: Uuid,
+    refreshRevision: Revision,
+    outcome: Schema.Union([
+      Schema.Struct({
+        kind: Schema.Literal("success"),
+        title: Schema.String,
+        titleJpn: Schema.String,
+        tags: Schema.Array(Schema.String)
+      }),
+      Schema.Struct({ kind: Schema.Literal("failure"), error: Schema.String })
     ])
   }),
   Schema.Struct({ op: Schema.Literal("readAcceptedThumbnailEntry"), entryId: Uuid }),

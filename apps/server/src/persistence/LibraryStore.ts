@@ -10,6 +10,8 @@ import {
   BindEntryOutcome,
   PersonalTitleOutcome,
   EntryCommandOutcome,
+  EhRefreshFinishOutcome,
+  EhRefreshStartOutcome,
   LibrarySummaryRow,
   EntryResolutionLookupOutcome,
   ResolveReplacementOutcome
@@ -50,6 +52,8 @@ const decodeEntryDetailsResult = Schema.decodeUnknownOption(Schema.NullOr(Librar
 const decodeBindEntry = Schema.decodeUnknownOption(BindEntryOutcome)
 const decodePersonalTitle = Schema.decodeUnknownOption(PersonalTitleOutcome)
 const decodeEntryCommand = Schema.decodeUnknownOption(EntryCommandOutcome)
+const decodeEhRefreshStart = Schema.decodeUnknownOption(EhRefreshStartOutcome)
+const decodeEhRefreshFinish = Schema.decodeUnknownOption(EhRefreshFinishOutcome)
 const decodeStaged = Schema.decodeUnknownOption(StagedDiscovery)
 
 const jsonValue = (value: string | null): unknown => {
@@ -110,6 +114,17 @@ export class LibraryStore extends Context.Service<
       readonly expectedDecisionVersion: string
       readonly command: { readonly type: "set-note"; readonly text: string } | { readonly type: "clear-note" }
     }) => Effect.Effect<typeof EntryCommandOutcome.Type, DatabaseWorkerError>
+    readonly startEhRefresh: (input: {
+      readonly source: "EH"
+      readonly gid: string
+    }) => Effect.Effect<typeof EhRefreshStartOutcome.Type, DatabaseWorkerError>
+    readonly finishEhRefresh: (input: {
+      readonly galleryId: string
+      readonly refreshRevision: string
+      readonly outcome:
+        | { readonly kind: "success"; readonly title: string; readonly titleJpn: string; readonly tags: ReadonlyArray<string> }
+        | { readonly kind: "failure"; readonly error: string }
+    }) => Effect.Effect<typeof EhRefreshFinishOutcome.Type, DatabaseWorkerError>
     readonly indexedRootSamples: (rootId: string) => Effect.Effect<IndexedRootSamplePage, DatabaseWorkerError>
     readonly resolution: (input: {
       readonly entryId: string
@@ -174,6 +189,18 @@ export class LibraryStore extends Context.Service<
         ...input
       }).pipe(
         Effect.flatMap((value) => decodeOrFail(decodeEntryCommand, value, "invalid entry note result"))
+      )
+      const startEhRefresh = (input: Parameters<LibraryStore["Service"]["startEhRefresh"]>[0]) => worker.call({
+        op: "startEhRefresh",
+        ...input
+      }).pipe(
+        Effect.flatMap((value) => decodeOrFail(decodeEhRefreshStart, value, "invalid EH refresh start result"))
+      )
+      const finishEhRefresh = (input: Parameters<LibraryStore["Service"]["finishEhRefresh"]>[0]) => worker.call({
+        op: "finishEhRefresh",
+        ...input
+      }).pipe(
+        Effect.flatMap((value) => decodeOrFail(decodeEhRefreshFinish, value, "invalid EH refresh finish result"))
       )
       const resolution = (input: {
         readonly entryId: string
@@ -263,6 +290,8 @@ export class LibraryStore extends Context.Service<
         bindEntry,
         updatePersonalTitle,
         updateEntryNote,
+        startEhRefresh,
+        finishEhRefresh,
         entry,
         summary,
         page

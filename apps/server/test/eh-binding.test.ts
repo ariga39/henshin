@@ -180,6 +180,42 @@ describe("durable EH binding", () => {
     }))
     expect(replay.data).toEqual(bound.data)
 
+    const legacyDb = new DatabaseSync(server.dbPath)
+    const persisted = legacyDb.prepare(
+      "SELECT result FROM entry_operations WHERE epoch = ? AND operation_id = ?"
+    ).get(server.epoch, operationId) as { result: string }
+    const legacyResult = JSON.parse(persisted.result) as { entry: Record<string, unknown> }
+    delete legacyResult.entry.metadata
+    legacyDb.prepare(
+      "UPDATE entry_operations SET result = ? WHERE epoch = ? AND operation_id = ?"
+    ).run(JSON.stringify(legacyResult), server.epoch, operationId)
+    legacyDb.close()
+
+    const rebound = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: {
+          ...bindPayload,
+          operation_id: randomUUID(),
+          expected_decision_version: "2",
+          command: { type: "bind" as const, url: "https://e-hentai.org/g/67890/rebound-token/" }
+        }
+      })
+    }))
+    expect(rebound.data.entry.binding?.gid).toBe("67890")
+    expect(rebound.data.entry.decision_version).toBe("3")
+
+    const legacyReplay = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: bindPayload
+      })
+    }))
+    expect(legacyReplay.data).toEqual({
+      ...bound.data,
+      entry: { ...bound.data.entry, metadata: null }
+    })
+
     const stale = await withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).entryCommand({
         params: { id: indexed.entry_id },
@@ -187,7 +223,7 @@ describe("durable EH binding", () => {
       }).pipe(Effect.flip)
     }))
     expect(stale._tag).toBe("RevisionConflict")
-    if (stale._tag === "RevisionConflict") expect(stale.details.current_revision).toBe("2")
+    if (stale._tag === "RevisionConflict") expect(stale.details.current_revision).toBe("3")
 
     const statsBeforeDb = new DatabaseSync(server.dbPath)
     const readingStatsBefore = statsBeforeDb.prepare("SELECT entry_id, open_count FROM entry_statistics WHERE entry_id = ?").get(indexed.entry_id)
@@ -202,7 +238,7 @@ describe("durable EH binding", () => {
       operation_id: randomUUID(),
       instance_id: server.instanceId,
       epoch: server.epoch,
-      expected_decision_version: "2",
+      expected_decision_version: "3",
       command: { type: "set-personal-title" as const, title: "Personal title" }
     }
     const titled = await withLibraryClient(server, Effect.gen(function*() {
@@ -213,7 +249,7 @@ describe("durable EH binding", () => {
     }))
     expect(titled.data.entry.title).toBe("Personal title")
     expect(titled.data.entry.title_override).toBe("Personal title")
-    expect(titled.data.entry.decision_version).toBe("3")
+    expect(titled.data.entry.decision_version).toBe("4")
     expect(titled.data.entry).toMatchObject(identity)
 
     const titleReplay = await withLibraryClient(server, Effect.gen(function*() {
@@ -230,14 +266,14 @@ describe("durable EH binding", () => {
         payload: {
           ...setTitlePayload,
           operation_id: randomUUID(),
-          expected_decision_version: "3",
+          expected_decision_version: "4",
           command: { type: "set-personal-title" as const, title: "" }
         }
       })
     }))
     expect(emptyTitle.data.entry.title).toBe("")
     expect(emptyTitle.data.entry.title_override).toBe("")
-    expect(emptyTitle.data.entry.decision_version).toBe("4")
+    expect(emptyTitle.data.entry.decision_version).toBe("5")
     expect(emptyTitle.data.entry).toMatchObject(identity)
     const emptyPage = await withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 10 } })
@@ -253,14 +289,14 @@ describe("durable EH binding", () => {
         payload: {
           ...setTitlePayload,
           operation_id: randomUUID(),
-          expected_decision_version: "4",
+          expected_decision_version: "5",
           command: { type: "remove-personal-title" as const }
         }
       })
     }))
     expect(removedTitle.data.entry.title).toBe(bound.data.entry.title)
     expect(removedTitle.data.entry.title_override).toBeNull()
-    expect(removedTitle.data.entry.decision_version).toBe("5")
+    expect(removedTitle.data.entry.decision_version).toBe("6")
     expect(removedTitle.data.entry).toMatchObject(identity)
 
     const staleTitle = await withLibraryClient(server, Effect.gen(function*() {
@@ -269,20 +305,20 @@ describe("durable EH binding", () => {
         payload: {
           ...setTitlePayload,
           operation_id: randomUUID(),
-          expected_decision_version: "4",
+          expected_decision_version: "5",
           command: { type: "set-personal-title" as const, title: "stale" }
         }
       }).pipe(Effect.flip)
     }))
     expect(staleTitle._tag).toBe("RevisionConflict")
-    if (staleTitle._tag === "RevisionConflict") expect(staleTitle.details.current_revision).toBe("5")
+    if (staleTitle._tag === "RevisionConflict") expect(staleTitle.details.current_revision).toBe("6")
 
     const crossCommandCollision = await withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).entryCommand({
         params: { id: indexed.entry_id },
         payload: {
           ...setTitlePayload,
-          expected_decision_version: "5",
+          expected_decision_version: "6",
           command: { type: "set-personal-title" as const, title: "collision" }
         }
       }).pipe(Effect.flip)
@@ -290,12 +326,10 @@ describe("durable EH binding", () => {
     expect(crossCommandCollision._tag).toBe("OperationConflict")
 
     const db = new DatabaseSync(server.dbPath)
-    expect(db.prepare("SELECT source, gid, token, preferred_domain FROM galleries").all()).toEqual([{
-      source: "EH",
-      gid: "12345",
-      token: "AbC_9",
-      preferred_domain: "exhentai.org"
-    }])
+    expect(db.prepare("SELECT source, gid, token, preferred_domain FROM galleries").all()).toEqual(expect.arrayContaining([
+      { source: "EH", gid: "12345", token: "AbC_9", preferred_domain: "exhentai.org" },
+      { source: "EH", gid: "67890", token: "rebound-token", preferred_domain: "e-hentai.org" }
+    ]))
     expect(db.prepare("SELECT entry_id FROM bindings").get()).toEqual({ entry_id: indexed.entry_id })
     expect(db.prepare("SELECT entry_id, open_count FROM entry_statistics WHERE entry_id = ?").get(indexed.entry_id)).toEqual(readingStatsBefore)
     expect(db.prepare("SELECT entry_id FROM entry_overrides WHERE entry_id = ?").get(indexed.entry_id)).toBeUndefined()
@@ -307,10 +341,10 @@ describe("durable EH binding", () => {
     const afterRestart = await withLibraryClient(restarted, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).entry({ params: { id: indexed.entry_id } })
     }))
-    expect(afterRestart.data.binding).toEqual(bound.data.entry.binding)
+    expect(afterRestart.data.binding).toEqual(rebound.data.entry.binding)
     expect(afterRestart.data.title).toBe(bound.data.entry.title)
     expect(afterRestart.data.title_override).toBeNull()
-    expect(afterRestart.data.decision_version).toBe("5")
+    expect(afterRestart.data.decision_version).toBe("6")
     expect(afterRestart.data).toMatchObject(identity)
   })
 

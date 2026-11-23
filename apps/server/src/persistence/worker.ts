@@ -8,6 +8,8 @@ import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contra
 import {
   INDEXED_ROOT_SAMPLE_LIMIT,
   EntryCommandResult,
+  EhGalleryMetadata,
+  LibraryEntryDetails,
   ReplacementCandidateObservation,
   ReplacementObservation,
   ScanManifest,
@@ -34,6 +36,8 @@ import {
   BackupDrillStartOutcome,
   RootRegistrationOutcome,
   RootReplayLookup,
+  EhRefreshFinishOutcome,
+  EhRefreshStartOutcome,
   type WorkerRequest
 } from "./worker-protocol"
 
@@ -500,6 +504,14 @@ db.exec(`
     gid TEXT NOT NULL,
     token TEXT NOT NULL,
     preferred_domain TEXT NOT NULL CHECK (preferred_domain IN ('e-hentai.org', 'exhentai.org')),
+    metadata_title TEXT,
+    metadata_title_jpn TEXT,
+    metadata_tags_json TEXT,
+    metadata_status TEXT NOT NULL DEFAULT 'pending' CHECK (metadata_status IN ('pending', 'ready', 'error')),
+    metadata_error TEXT,
+    metadata_last_attempt_at_ms INTEGER,
+    metadata_last_success_at_ms INTEGER,
+    refresh_revision INTEGER NOT NULL DEFAULT 0,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     UNIQUE (source, gid)
@@ -572,6 +584,20 @@ if (!libraryEntryColumns.some((column) => column.name === "title_search")) {
 if (!libraryEntryColumns.some((column) => column.name === "basename_search")) {
   db.exec("ALTER TABLE library_entries ADD COLUMN basename_search TEXT NOT NULL DEFAULT ''")
 }
+
+const galleryColumns = new Set(
+  (db.prepare("PRAGMA table_info(galleries)").all() as unknown as ReadonlyArray<{ name: string }>).map(
+    (column) => column.name
+  )
+)
+if (!galleryColumns.has("metadata_title")) db.exec("ALTER TABLE galleries ADD COLUMN metadata_title TEXT")
+if (!galleryColumns.has("metadata_title_jpn")) db.exec("ALTER TABLE galleries ADD COLUMN metadata_title_jpn TEXT")
+if (!galleryColumns.has("metadata_tags_json")) db.exec("ALTER TABLE galleries ADD COLUMN metadata_tags_json TEXT")
+if (!galleryColumns.has("metadata_status")) db.exec("ALTER TABLE galleries ADD COLUMN metadata_status TEXT NOT NULL DEFAULT 'pending'")
+if (!galleryColumns.has("metadata_error")) db.exec("ALTER TABLE galleries ADD COLUMN metadata_error TEXT")
+if (!galleryColumns.has("metadata_last_attempt_at_ms")) db.exec("ALTER TABLE galleries ADD COLUMN metadata_last_attempt_at_ms INTEGER")
+if (!galleryColumns.has("metadata_last_success_at_ms")) db.exec("ALTER TABLE galleries ADD COLUMN metadata_last_success_at_ms INTEGER")
+if (!galleryColumns.has("refresh_revision")) db.exec("ALTER TABLE galleries ADD COLUMN refresh_revision INTEGER NOT NULL DEFAULT 0")
 const addedAcceptedObservationSummary = !libraryEntryColumns.some((column) => column.name === "accepted_observation_json")
 if (addedAcceptedObservationSummary) {
   db.exec("ALTER TABLE library_entries ADD COLUMN accepted_observation_json TEXT")
@@ -1020,7 +1046,9 @@ const selectEntryDetails = db.prepare(`
     o.notes AS note_text, o.notes_revision AS note_revision,
     CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
     s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
-    s.candidate_observation_json
+    s.candidate_observation_json,
+    g.metadata_title, g.metadata_title_jpn, g.metadata_tags_json, g.metadata_status,
+    g.metadata_error, g.metadata_last_attempt_at_ms, g.metadata_last_success_at_ms
   FROM library_entries e
   LEFT JOIN entry_overrides o ON o.entry_id = e.entry_id
   LEFT JOIN bindings b ON b.entry_id = e.entry_id
@@ -1065,6 +1093,39 @@ const upsertBinding = db.prepare(
 )
 const upsertEntryNote = db.prepare(
   "INSERT INTO entry_overrides(entry_id, title_present, title, title_search, notes, notes_revision, notes_updated_at_ms) VALUES(?, 0, NULL, NULL, ?, 1, ?) ON CONFLICT(entry_id) DO UPDATE SET notes = excluded.notes, notes_revision = COALESCE(entry_overrides.notes_revision, 0) + 1, notes_updated_at_ms = excluded.notes_updated_at_ms"
+  )
+const selectGalleryForRefresh = db.prepare(
+  "SELECT gallery_id, token, refresh_revision FROM galleries WHERE source = ? AND gid = ?"
+)
+selectGalleryForRefresh.setReadBigInts(true)
+const startGalleryRefresh = db.prepare(
+  `UPDATE galleries
+   SET metadata_status = 'pending', metadata_error = NULL,
+       metadata_last_attempt_at_ms = ?, refresh_revision = refresh_revision + 1,
+       updated_at_ms = ?
+   WHERE gallery_id = ?`
+)
+const selectGalleryMetadata = db.prepare(
+  `SELECT source, gid, metadata_title, metadata_title_jpn, metadata_tags_json, metadata_status,
+          metadata_error, metadata_last_attempt_at_ms, metadata_last_success_at_ms
+     FROM galleries WHERE gallery_id = ?`
+)
+selectGalleryMetadata.setReadBigInts(true)
+const recoverInterruptedEhRefreshes = db.prepare(
+  `UPDATE galleries
+      SET metadata_status = 'error', metadata_error = ?, updated_at_ms = ?
+    WHERE metadata_status = 'pending' AND metadata_last_attempt_at_ms IS NOT NULL`
+)
+const finishGalleryRefresh = db.prepare(
+  `UPDATE galleries
+      SET metadata_title = ?, metadata_title_jpn = ?, metadata_tags_json = ?,
+          metadata_status = ?, metadata_error = ?, metadata_last_success_at_ms = ?, updated_at_ms = ?
+    WHERE gallery_id = ? AND refresh_revision = ?`
+)
+const finishGalleryRefreshFailure = db.prepare(
+  `UPDATE galleries
+      SET metadata_status = 'error', metadata_error = ?, updated_at_ms = ?
+    WHERE gallery_id = ? AND refresh_revision = ?`
 )
 const advanceEntryDecision = db.prepare(
   "UPDATE library_entries SET decision_version = decision_version + 1, updated_at_ms = ? WHERE entry_id = ?"
@@ -2500,6 +2561,13 @@ const entryDetailsRow = (row: {
   candidate_kind: "archive" | "image-directory" | null
   candidate_analysis_status: "ready" | "error" | null
   candidate_observation_json: string | null
+  metadata_title: string | null
+  metadata_title_jpn: string | null
+  metadata_tags_json: string | null
+  metadata_status: "pending" | "ready" | "error" | null
+  metadata_error: string | null
+  metadata_last_attempt_at_ms: bigint | null
+  metadata_last_success_at_ms: bigint | null
 }): import("./worker-protocol").LibraryEntryDetailsRow => ({
   entry_id: row.entry_id,
   library_id: row.library_id,
@@ -2540,12 +2608,144 @@ const entryDetailsRow = (row: {
       },
   note: row.note_text === null || row.note_revision === null
     ? null
-    : { text: row.note_text, revision: row.note_revision.toString() }
+    : { text: row.note_text, revision: row.note_revision.toString() },
+  metadata: row.binding_source === null || row.binding_gid === null || row.metadata_status === null
+    ? null
+    : galleryMetadata({
+        title: row.metadata_title,
+        titleJpn: row.metadata_title_jpn,
+        tagsJson: row.metadata_tags_json,
+        status: row.metadata_status,
+        error: row.metadata_error,
+        lastAttemptAtMs: row.metadata_last_attempt_at_ms,
+        lastSuccessAtMs: row.metadata_last_success_at_ms
+      })
 })
+
+const galleryMetadata = (row: {
+  title: string | null
+  titleJpn: string | null
+  tagsJson: string | null
+  status: "pending" | "ready" | "error"
+  error: string | null
+  lastAttemptAtMs: bigint | null
+  lastSuccessAtMs: bigint | null
+}): EhGalleryMetadata => {
+  let tags: ReadonlyArray<string> = []
+  if (row.tagsJson !== null) {
+    const decoded = Schema.decodeUnknownOption(Schema.Array(Schema.String))(JSON.parse(row.tagsJson))
+    if (Option.isNone(decoded)) throw new Error("invalid persisted EH metadata tags")
+    tags = decoded.value
+  }
+  return {
+    status: row.status,
+    title: row.title,
+    title_jpn: row.titleJpn,
+    tags,
+    latest_error: row.error,
+    last_attempt_at_ms: row.lastAttemptAtMs === null ? null : Number(row.lastAttemptAtMs),
+    last_success_at_ms: row.lastSuccessAtMs === null ? null : Number(row.lastSuccessAtMs)
+  }
+}
+
+const galleryMetadataById = (galleryId: string): EhGalleryMetadata => {
+  const row = selectGalleryMetadata.get(galleryId) as {
+    metadata_title: string | null
+    metadata_title_jpn: string | null
+    metadata_tags_json: string | null
+    metadata_status: "pending" | "ready" | "error"
+    metadata_error: string | null
+    metadata_last_attempt_at_ms: bigint | null
+    metadata_last_success_at_ms: bigint | null
+  } | undefined
+  if (row === undefined) throw new Error("gallery disappeared during EH refresh")
+  return galleryMetadata({
+    title: row.metadata_title,
+    titleJpn: row.metadata_title_jpn,
+    tagsJson: row.metadata_tags_json,
+    status: row.metadata_status,
+    error: row.metadata_error,
+    lastAttemptAtMs: row.metadata_last_attempt_at_ms,
+    lastSuccessAtMs: row.metadata_last_success_at_ms
+  })
+}
 
 const readEntryDetails = (entryId: string): import("./worker-protocol").LibraryEntryDetailsRow | null => {
   const row = selectEntryDetails.get(entryId) as Parameters<typeof entryDetailsRow>[0] | undefined
   return row === undefined ? null : entryDetailsRow(row)
+}
+
+const PersistedBindEntryResult = Schema.Struct({
+  operation_id: Uuid,
+  entry: Schema.Struct({
+    ...LibraryEntryDetails.fields,
+    metadata: Schema.optional(Schema.NullOr(EhGalleryMetadata))
+  })
+})
+
+const startEhRefresh = (
+  request: Extract<WorkerRequest, { op: "startEhRefresh" }>
+): typeof EhRefreshStartOutcome.Type => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const gallery = selectGalleryForRefresh.get(request.source, request.gid) as {
+      gallery_id: string
+      token: string
+      refresh_revision: bigint
+    } | undefined
+    if (gallery === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "gallery_not_found" }
+    }
+    const now = Date.now()
+    startGalleryRefresh.run(now, now, gallery.gallery_id)
+    const refreshRevision = gallery.refresh_revision + 1n
+    db.exec("COMMIT")
+    return {
+      kind: "started",
+      galleryId: gallery.gallery_id,
+      token: gallery.token,
+      refreshRevision: refreshRevision.toString()
+    }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const finishEhRefresh = (
+  request: Extract<WorkerRequest, { op: "finishEhRefresh" }>
+): typeof EhRefreshFinishOutcome.Type => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const revision = BigInt(request.refreshRevision)
+    const now = Date.now()
+    const result = request.outcome.kind === "success"
+      ? finishGalleryRefresh.run(
+          request.outcome.title,
+          request.outcome.titleJpn,
+          JSON.stringify(request.outcome.tags),
+          "ready",
+          null,
+          now,
+          now,
+          request.galleryId,
+          revision
+        )
+      : finishGalleryRefreshFailure.run(request.outcome.error, now, request.galleryId, revision)
+    if (Number(result.changes) === 0) {
+      const metadata = galleryMetadataById(request.galleryId)
+      db.exec("ROLLBACK")
+      return { kind: "stale", metadata }
+    }
+    bumpLibraryRevision.run()
+    const metadata = galleryMetadataById(request.galleryId)
+    db.exec("COMMIT")
+    return { kind: "committed", metadata }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
 }
 
 const bindEntry = (
@@ -2581,10 +2781,24 @@ const bindEntry = (
         db.exec("ROLLBACK")
         return { kind: "operation_expired" }
       }
-      const replay = Schema.decodeUnknownOption(EntryCommandResult)(JSON.parse(previous.result))
-      if (Option.isNone(replay)) throw new Error("invalid persisted bind result")
+      const persisted = JSON.parse(previous.result) as unknown
+      const replay = Schema.decodeUnknownOption(EntryCommandResult)(persisted)
+      if (Option.isSome(replay)) {
+        db.exec("COMMIT")
+        return { kind: "replayed", result: replay.value }
+      }
+      const legacy = Schema.decodeUnknownOption(PersistedBindEntryResult)(persisted)
+      if (Option.isNone(legacy) || legacy.value.entry.metadata !== undefined) {
+        throw new Error("invalid persisted bind result")
+      }
       db.exec("COMMIT")
-      return { kind: "replayed", result: replay.value }
+      return {
+        kind: "replayed",
+        result: {
+          operation_id: legacy.value.operation_id,
+          entry: { ...legacy.value.entry, metadata: null }
+        }
+      }
     }
 
     const current = selectEntryDetails.get(request.entryId) as Parameters<typeof entryDetailsRow>[0] | undefined
@@ -3409,6 +3623,11 @@ const handle = (request: WorkerRequest): unknown => {
       cleanupBackupDrillStaging()
       const interruptedAtMs = Date.now()
       interruptRunningBackupDrills.run(interruptedAtMs, interruptedAtMs)
+      const recoveredEhRefreshes = recoverInterruptedEhRefreshes.run(
+        "metadata refresh interrupted by server restart",
+        Date.now()
+      )
+      if (Number(recoveredEhRefreshes.changes) > 0) bumpLibraryRevision.run()
       db.exec(`
         INSERT OR IGNORE INTO entry_statistics(entry_id, open_count, last_opened_at_ms)
         SELECT entry_id, 0, NULL FROM library_entries
@@ -3479,6 +3698,12 @@ const handle = (request: WorkerRequest): unknown => {
       return bindEntry(request)
     case "updateEntryCommand":
       return updateEntryCommand(request)
+    case "updatePersonalTitle":
+      return updatePersonalTitle(request)
+    case "startEhRefresh":
+      return startEhRefresh(request)
+    case "finishEhRefresh":
+      return finishEhRefresh(request)
     case "acceptOpenEvents":
       return acceptOpenEvents(request)
     case "recordDiscovery":

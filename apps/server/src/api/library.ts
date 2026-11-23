@@ -18,6 +18,8 @@ import { ServerState } from "../identity"
 import { InvalidLibraryEntryResolutionCursor, InvalidLibrarySearchCursor, LibraryStore } from "../persistence/LibraryStore"
 import { RootStore } from "../persistence/RootStore"
 import { parseCanonicalEhGalleryUrl } from "../eh-url"
+import { makeEhMetadataScheduler } from "../eh-metadata"
+import type { EhGalleryRefreshRequest, EhGalleryMetadata } from "@henshin/contracts"
 
 const errorBase = (server: ServerState["Service"], requestId: string) => ({
   request_id: requestId,
@@ -52,6 +54,40 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
     const server = yield* ServerState
     const library = yield* LibraryStore
     const roots = yield* RootStore
+    type RefreshOutcome =
+      | { readonly kind: "gallery_not_found" }
+      | { readonly kind: "finished"; readonly metadata: EhGalleryMetadata }
+    const inFlightRefreshes = new Map<string, Promise<RefreshOutcome>>()
+    const metadataScheduler = makeEhMetadataScheduler()
+    const refresh = (payload: EhGalleryRefreshRequest): Effect.Effect<RefreshOutcome, unknown> => {
+      const key = `${payload.source}:${payload.gid}`
+      const existing = inFlightRefreshes.get(key)
+      if (existing !== undefined) return Effect.tryPromise(() => existing)
+
+      const pending = Effect.runPromise(Effect.gen(function*() {
+        const started = yield* library.startEhRefresh(payload)
+        if (started.kind === "gallery_not_found") return started
+        const fetched = yield* Effect.tryPromise({
+          try: () => metadataScheduler.fetch({ gid: payload.gid, token: started.token }),
+          catch: (error) => error
+        })
+        const finished = yield* library.finishEhRefresh({
+          galleryId: started.galleryId,
+          refreshRevision: started.refreshRevision,
+          outcome: fetched.kind === "success"
+            ? fetched
+            : { kind: "failure", error: fetched.error }
+        })
+        if (finished.kind === "gallery_not_found") return { kind: "gallery_not_found" as const }
+        return { kind: "finished" as const, metadata: finished.metadata }
+      }))
+      inFlightRefreshes.set(key, pending)
+      void pending.then(
+        () => { if (inFlightRefreshes.get(key) === pending) inFlightRefreshes.delete(key) },
+        () => { if (inFlightRefreshes.get(key) === pending) inFlightRefreshes.delete(key) }
+      )
+      return Effect.tryPromise(() => pending)
+    }
     return handlers
       .handle("get", () =>
         Effect.gen(function*() {
@@ -266,6 +302,33 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
                 details: { field: "command.url" },
                 ...errorBase(server, context.request_id)
               })
+          }
+        })
+      )
+      .handle("ehRefresh", ({ payload }) =>
+        Effect.gen(function*() {
+          const context = yield* RequestContext
+          const refreshed = yield* refresh(payload).pipe(
+            Effect.mapError(() => new InternalError({
+              code: "internal_error",
+              message: "internal error",
+              retryable: false,
+              ...errorBase(server, context.request_id)
+            }))
+          )
+          if (refreshed.kind === "gallery_not_found") {
+            return yield* new InvalidRequest({
+              code: "invalid_request",
+              message: "the gallery is not currently bound",
+              retryable: false,
+              details: { field: "gid" },
+              ...errorBase(server, context.request_id)
+            })
+          }
+          return {
+            ...errorBase(server, context.request_id),
+            server_time: Date.now(),
+            data: { source: payload.source, gid: payload.gid, metadata: refreshed.metadata }
           }
         })
       )

@@ -3,6 +3,34 @@ import { Revision, Text, Uuid } from "./ids"
 import { ReplacementComparison } from "./library"
 import { ThumbnailReference } from "./thumbnail"
 
+export const EhGalleryMetadata = Schema.Struct({
+  status: Schema.Union([
+    Schema.Literal("pending"),
+    Schema.Literal("ready"),
+    Schema.Literal("error")
+  ]),
+  title: Schema.NullOr(Schema.String),
+  title_jpn: Schema.NullOr(Schema.String),
+  tags: Schema.Array(Schema.String),
+  latest_error: Schema.NullOr(Schema.String),
+  last_attempt_at_ms: Schema.NullOr(Schema.Int),
+  last_success_at_ms: Schema.NullOr(Schema.Int)
+})
+export type EhGalleryMetadata = typeof EhGalleryMetadata.Type
+
+export const EhGalleryRefreshRequest = Schema.Struct({
+  source: Schema.Literal("EH"),
+  gid: Schema.String.check(Schema.isPattern(/^[0-9]{1,20}$/))
+})
+export type EhGalleryRefreshRequest = typeof EhGalleryRefreshRequest.Type
+
+export const EhGalleryRefreshResult = Schema.Struct({
+  source: Schema.Literal("EH"),
+  gid: Schema.String.check(Schema.isPattern(/^[0-9]{1,20}$/)),
+  metadata: EhGalleryMetadata
+})
+export type EhGalleryRefreshResult = typeof EhGalleryRefreshResult.Type
+
 /** Public identity and preferred link for one E-Hentai/ExHentai gallery. */
 export const EhGalleryBinding = Schema.Struct({
   source: Schema.Literal("EH"),
@@ -90,7 +118,8 @@ export const LibraryEntryDetails = Schema.Struct({
   binding: Schema.NullOr(EhGalleryBinding),
   note: Schema.NullOr(EntryNote).pipe(
     Schema.withDecodingDefaultType(Effect.succeed(null))
-  )
+  ),
+  metadata: Schema.NullOr(EhGalleryMetadata)
 })
 export type LibraryEntryDetails = typeof LibraryEntryDetails.Type
 
