@@ -173,6 +173,39 @@ const assertNoSymbolicLinks = async (directory, links = []) => {
   return links
 }
 
+const materializeDirectory = async (directory) => {
+  const materializedDirectory = `${directory}.materialized`
+  await rm(materializedDirectory, { recursive: true, force: true })
+  await cp(directory, materializedDirectory, { recursive: true, dereference: true })
+
+  const publicNodeModules = path.join(materializedDirectory, ".pnpm", "node_modules")
+  if (await exists(publicNodeModules)) {
+    for (const entry of await readdir(publicNodeModules, { withFileTypes: true })) {
+      if (entry.name === ".bin" || entry.isSymbolicLink()) continue
+      const source = path.join(publicNodeModules, entry.name)
+      const destination = path.join(materializedDirectory, entry.name)
+      if (entry.name.startsWith("@") && entry.isDirectory()) {
+        await mkdir(destination, { recursive: true })
+        for (const scopedEntry of await readdir(source, { withFileTypes: true })) {
+          if (scopedEntry.isSymbolicLink()) continue
+          const scopedDestination = path.join(destination, scopedEntry.name)
+          if (await exists(scopedDestination)) continue
+          await cp(
+            path.join(source, scopedEntry.name),
+            scopedDestination,
+            { recursive: true, dereference: true }
+          )
+        }
+      } else if (!(await exists(destination))) {
+        await cp(source, destination, { recursive: true, dereference: true })
+      }
+    }
+  }
+
+  await rm(directory, { recursive: true, force: true })
+  await rename(materializedDirectory, directory)
+}
+
 const prunePnpmMetadata = async (nodeModulesDirectory) => {
   await rm(path.join(nodeModulesDirectory, ".modules.yaml"), { force: true })
   await rm(path.join(nodeModulesDirectory, ".package-map.json"), { force: true })
@@ -228,7 +261,10 @@ const build = async () => {
       "@henshin/server",
       "deploy",
       "--prod",
-      "--legacy",
+      "--offline",
+      "--frozen-lockfile",
+      "--trust-lockfile",
+      "--config.inject-workspace-packages=true",
       "--config.node-linker=hoisted",
       "--config.confirmModulesPurge=false",
       deployDirectory
@@ -253,6 +289,7 @@ const build = async () => {
     await removeBinaryDirectories(nodeModulesDirectory)
     await pruneEffectSources(nodeModulesDirectory)
     await prunePnpmMetadata(nodeModulesDirectory)
+    await materializeDirectory(nodeModulesDirectory)
     const symbolicLinks = await assertNoSymbolicLinks(nodeModulesDirectory)
     if (symbolicLinks.length > 0) {
       throw new Error(`standalone runtime contains unsupported symbolic links: ${symbolicLinks.join(", ")}`)
