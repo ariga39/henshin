@@ -1,4 +1,5 @@
 import { Schema } from "effect"
+import { MAX_EH_METADATA_RESPONSE_BYTES } from "../eh-metadata"
 import { INDEXED_ROOT_SAMPLE_LIMIT, ServerAvailability } from "@henshin/contracts"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import { OpenEvent, OpenEventOutcome } from "@henshin/contracts/event"
@@ -698,7 +699,7 @@ export const WorkerRequest = Schema.Union([
         title: Schema.String,
         titleJpn: Schema.String,
         tags: Schema.Array(Schema.String),
-        rawResponse: Schema.String.check(Schema.isMaxLength(256 * 1024)),
+        rawResponse: Schema.String.check(Schema.isMaxLength(MAX_EH_METADATA_RESPONSE_BYTES)),
         retrievedAtMs: Schema.Int
       }),
       Schema.Struct({ kind: Schema.Literal("failure"), error: Schema.String })

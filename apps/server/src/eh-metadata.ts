@@ -1,7 +1,7 @@
 import { Schema } from "effect"
 
 const DEFAULT_GDATA_URL = "https://api.e-hentai.org/api.php"
-const MAX_RESPONSE_BYTES = 256 * 1024
+export const MAX_EH_METADATA_RESPONSE_BYTES = 256 * 1024
 const REQUEST_TIMEOUT_MS = 5_000
 
 const GdataItem = Schema.Struct({
@@ -95,7 +95,7 @@ const readBoundedText = async (response: Response): Promise<string> => {
       if (next.done) break
       const chunk = next.value
       total += chunk.byteLength
-      if (total > MAX_RESPONSE_BYTES) throw new Error("upstream response exceeded the bounded size")
+      if (total > MAX_EH_METADATA_RESPONSE_BYTES) throw new Error("upstream response exceeded the bounded size")
       chunks.push(chunk)
     }
   } finally {
