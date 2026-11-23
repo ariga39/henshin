@@ -148,3 +148,25 @@ To rotate a lost or compromised owner token, stop the service and run the same
 initialization command with `--rotate-owner` in place of `--initialize-owner`.
 Save the replacement token and restart the service. Each independent client
 needs the new token to reconnect.
+
+Register a server backup destination through the stopped local administration
+command. The destination must be an existing directory outside the active
+database directory and every saved collection root:
+
+```sh
+node apps/server/dist/server.mjs backup-destination register \
+  --data-dir "$PWD/.henshin-server-data" \
+  --name primary --path "/mnt/backup/henshin"
+node apps/server/dist/server.mjs backup-destination list \
+  --data-dir "$PWD/.henshin-server-data"
+```
+
+The list command reports the persisted destination ID and native identity. A
+remount is reported as `needs-reconfirmation`; replacing a destination keeps
+its ID and requires an explicit confirmation:
+
+```sh
+node apps/server/dist/server.mjs backup-destination replace \
+  --data-dir "$PWD/.henshin-server-data" \
+  --id <destination-id> --path "/mnt/backup/new" --confirm
+```

@@ -284,6 +284,33 @@ describe("native source boundary precursor", () => {
     await expect(access(join(books2, "new"))).rejects.toMatchObject({ code: "ENOENT" })
   })
 
+  it("uses saved separation evidence for an unavailable disjoint peer", async () => {
+    const root = await makeTempRoot()
+    const source = join(root, "source")
+    const unavailableDestination = join(root, "offline-destination")
+    await mkdir(source)
+    const sourceObservation = await selectedRoot(source)
+    const savedDestination = {
+      selectedPath: unavailableDestination,
+      canonicalPath: unavailableDestination,
+      identity: { device: "saved-device", inode: "saved-inode" }
+    }
+
+    expect(await validateLocationSeparation({
+      sourceRoots: [sourceObservation],
+      writableLocations: [savedDestination]
+    })).toMatchObject({ ok: true })
+
+    expect(await validateLocationSeparation({
+      sourceRoots: [sourceObservation],
+      writableLocations: [{
+        ...savedDestination,
+        canonicalPath: sourceObservation.canonicalPath,
+        identity: sourceObservation.identity
+      }]
+    })).toMatchObject({ ok: false, code: "location-overlap" })
+  })
+
   it("uses identity rather than mutable directory timestamps for ordinary collection edits", async () => {
     const root = await makeTempRoot()
     const sourceRoot = join(root, "collection")

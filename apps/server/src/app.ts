@@ -24,6 +24,7 @@ import { AuthConfig, ServerState } from "./identity"
 import { DatabaseWorker, type DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { NoteStore } from "./persistence/NoteStore"
 import { RootStore } from "./persistence/RootStore"
+import { BackupDestinationStore } from "./persistence/BackupDestinationStore"
 import { ScanStore } from "./persistence/ScanStore"
 import { LibraryStore } from "./persistence/LibraryStore"
 import { OpenEventStore } from "./persistence/OpenEventStore"
@@ -191,7 +192,7 @@ export const makeAppLayer = (
   )
   const RoutesLayer = HttpApiBuilder.layer(PrototypeApi).pipe(Layer.provide(HandlersLayer))
   const RootPreviewHandlersLayer = RootHandlers(path.dirname(options.dbPath)).pipe(
-    Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer, ScanStore.layer))
+    Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer, BackupDestinationStore.layer, ScanStore.layer))
   )
   const RootPreviewRoutesLayer = HttpApiBuilder.layer(ServerApi).pipe(
     // The product API has its own route namespace but shares the authenticated

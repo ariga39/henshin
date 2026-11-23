@@ -1,7 +1,9 @@
+import { execFile as execFileCallback } from "node:child_process"
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
+import { promisify } from "node:util"
 import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import { ServerHttpClient } from "@henshin/contracts"
@@ -11,6 +13,8 @@ import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "
 const servers: RunningServer[] = []
 const dbPaths = new Set<string>()
 const fixturePaths = new Set<string>()
+const execFile = promisify(execFileCallback)
+const SERVER_PATH = path.resolve("apps/server/dist/server.mjs")
 
 const start = async (): Promise<RunningServer> => {
   const dbPath = await makeTempDbPath()
@@ -54,6 +58,20 @@ const listRoots = async (server: RunningServer) =>
       return yield* client.list()
     })
   )
+
+const registerDestination = async (dbPath: string, name: string, destinationPath: string): Promise<void> => {
+  await execFile(process.execPath, [
+    SERVER_PATH,
+    "backup-destination",
+    "register",
+    "--database",
+    dbPath,
+    "--name",
+    name,
+    "--path",
+    destinationPath
+  ])
+}
 
 afterEach(async () => {
   for (const server of servers.splice(0)) await server.stop()
@@ -178,5 +196,51 @@ describe("server root registration", () => {
     expect(response.status).toBe(409)
     expect((await response.json() as { code: string }).code).toBe("epoch_changed")
     expect((await listRoots(restarted)).data).toEqual([])
+  })
+
+  it("uses the real save path to reject a registered destination overlap", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-root-save-"))
+    fixturePaths.add(fixture)
+    const destination = path.join(fixture, "destination")
+    const disjointRoot = path.join(fixture, "books")
+    await mkdir(destination)
+    await mkdir(disjointRoot)
+
+    await server.stop()
+    await registerDestination(server.dbPath, "primary", destination)
+    const restarted = await startServer(server.dbPath)
+    servers.push(restarted)
+
+    const disjointPreview = await preview(restarted, disjointRoot)
+    const disjointPayload = {
+      operation_id: randomUUID(),
+      instance_id: disjointPreview.data.instance_id,
+      epoch: disjointPreview.data.epoch,
+      label: "Books",
+      path: disjointRoot,
+      preview_identity: disjointPreview.data.preview_identity
+    }
+    const saved = await withClient(
+      restarted,
+      Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        return yield* client.save({ payload: disjointPayload })
+      })
+    )
+    expect(saved.data.label).toBe("Books")
+
+    const overlappingPreview = await preview(restarted, destination)
+    const overlappingResponse = await postRoot(restarted, {
+      operation_id: randomUUID(),
+      instance_id: overlappingPreview.data.instance_id,
+      epoch: overlappingPreview.data.epoch,
+      label: "Backup as collection",
+      path: destination,
+      preview_identity: overlappingPreview.data.preview_identity
+    })
+    expect(overlappingResponse.status).toBe(409)
+    expect((await overlappingResponse.json() as { code: string }).code).toBe("root_verification_failed")
+    expect((await listRoots(restarted)).data).toHaveLength(1)
   })
 })
