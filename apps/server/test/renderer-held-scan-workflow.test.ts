@@ -1,5 +1,6 @@
 import { Effect, Layer } from "effect"
 import type {
+  LibraryEntryPage,
   RootCommandIpcRequest,
   RootPreviewResult,
   ScanTask,
@@ -11,6 +12,7 @@ import { LibraryClient, LocalMappingClient, RootPreviewClient, ScanReviewClient,
 import {
   loadRootWorkspace,
   loadLibrary,
+  loadPendingReplacements,
   retryScanResults,
   releaseHeldDiscovery,
   startManualScan,
@@ -132,6 +134,11 @@ const resetView = () => {
     library_status: "idle",
     library_error: null,
     library_cover_generation: 0,
+    pending_replacement_entries: [],
+    pending_replacement_cursor: null,
+    pending_replacement_has_more: false,
+    pending_replacement_status: "idle",
+    pending_replacement_error: null,
     library_scan_status: "idle",
     library_scan_error: null,
     library_scan_task: null
@@ -752,6 +759,73 @@ describe("held scan renderer workflows", () => {
       library_has_more: false,
       library_cursor: null,
       library_cover_generation: 1
+    })
+  })
+
+  it("publishes only the newest pending refresh and preserves normal Library pages", async () => {
+    const normalEntry = {
+      entry_id: "99999999-9999-4999-8999-999999999999",
+      library_id: root.library_id,
+      root_id: root.root_id,
+      relative_path: "normal",
+      title: "Normal",
+      cover: null,
+      source_path: "/collections/normal",
+      kind: "image-directory" as const,
+      page_count: 1,
+      state: "accepted" as const,
+      content_version: "1",
+      location_revision: "1",
+      replacement: null
+    }
+    const oldPending = {
+      ...normalEntry,
+      entry_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      relative_path: "old-pending",
+      state: "replacement-pending" as const
+    }
+    const freshPending = {
+      ...oldPending,
+      entry_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      relative_path: "fresh-pending"
+    }
+    let firstResolve!: (value: Result<LibraryEntryPage>) => void
+    let secondResolve!: (value: Result<LibraryEntryPage>) => void
+    let calls = 0
+    const libraryClient = libraryClientWith({
+      search: (input) => {
+        expect(input.state).toBe("replacement-pending")
+        calls += 1
+        return Effect.promise(() => new Promise<Result<LibraryEntryPage>>((resolve) => {
+          if (calls === 1) firstResolve = resolve
+          else secondResolve = resolve
+        }))
+      }
+    })
+    viewStore.set({
+      library_entries: [normalEntry],
+      pending_replacement_entries: [oldPending],
+      pending_replacement_cursor: "next",
+      pending_replacement_has_more: true,
+      pending_replacement_status: "ready",
+      connection: { state: "connected", instance_id: instanceId, epoch, reason: null }
+    })
+
+    const first = run(loadPendingReplacements(true), rootClientWith(), scanClientWith(), libraryClient)
+    await Promise.resolve()
+    const second = run(loadPendingReplacements(), rootClientWith(), scanClientWith(), libraryClient)
+    await Promise.resolve()
+    secondResolve({ ok: true, data: { entries: [freshPending], has_more: false, next_cursor: null, library_change_revision: "2" } })
+    await second
+    firstResolve({ ok: true, data: { entries: [oldPending], has_more: true, next_cursor: "stale", library_change_revision: "1" } })
+    await first
+
+    expect(viewStore.getState()).toMatchObject({
+      library_entries: [normalEntry],
+      pending_replacement_entries: [freshPending],
+      pending_replacement_has_more: false,
+      pending_replacement_cursor: null,
+      pending_replacement_status: "ready"
     })
   })
 })

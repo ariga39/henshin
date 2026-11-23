@@ -119,6 +119,11 @@ export interface ViewState {
   readonly library_status: "idle" | "loading" | "ready" | "error"
   readonly library_error: string | null
   readonly library_cover_generation: number
+  readonly pending_replacement_entries: ReadonlyArray<LibraryEntry>
+  readonly pending_replacement_cursor: string | null
+  readonly pending_replacement_has_more: boolean
+  readonly pending_replacement_status: "idle" | "loading" | "ready" | "error"
+  readonly pending_replacement_error: string | null
   readonly library_scan_status: "idle" | "starting" | "started" | "error"
   readonly library_scan_error: string | null
   readonly library_scan_task: ScanTask | null
@@ -215,6 +220,11 @@ const initialState: ViewState = {
   library_status: "idle",
   library_error: null,
   library_cover_generation: 0,
+  pending_replacement_entries: [],
+  pending_replacement_cursor: null,
+  pending_replacement_has_more: false,
+  pending_replacement_status: "idle",
+  pending_replacement_error: null,
   library_scan_status: "idle",
   library_scan_error: null,
   library_scan_task: null

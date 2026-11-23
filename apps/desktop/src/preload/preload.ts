@@ -11,7 +11,8 @@ import type {
   RootCommandIpcRequest,
   RootPreviewRequest,
   RootRegistrationRequest,
-  RecoverOpenJournalIpcRequest
+  RecoverOpenJournalIpcRequest,
+  LibrarySearchIpcRequest
 } from "@henshin/contracts"
 import { IpcChannels } from "@henshin/contracts/channels"
 
@@ -48,7 +49,7 @@ contextBridge.exposeInMainWorld("henshinReaderProfiles", {
 })
 
 contextBridge.exposeInMainWorld("henshinLibrary", {
-  search: (input: { readonly page_size?: number; readonly cursor?: string }) =>
+  search: (input: LibrarySearchIpcRequest) =>
     ipcRenderer.invoke(IpcChannels.librarySearch, input),
   getThumbnail: (key: string) => ipcRenderer.invoke(IpcChannels.thumbnailGet, { key })
 })

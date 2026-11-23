@@ -311,7 +311,11 @@ export class ReaderProfileClient extends Context.Service<
 export class LibraryClient extends Context.Service<
   LibraryClient,
   {
-    readonly search: (input: { readonly page_size?: number; readonly cursor?: string }) => Effect.Effect<Result<LibraryEntryPage>>
+    readonly search: (input: {
+      readonly page_size?: number
+      readonly cursor?: string
+      readonly state?: "replacement-pending"
+    }) => Effect.Effect<Result<LibraryEntryPage>>
     readonly getThumbnail: (key: ThumbnailKey) => Effect.Effect<Result<Uint8Array>>
   }
 >()("henshin/desktop/renderer/LibraryClient") {

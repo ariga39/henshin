@@ -71,7 +71,8 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
           const context = yield* RequestContext
           const page = yield* library.page({
             pageSize: payload.page_size ?? 50,
-            cursor: payload.cursor ?? null
+            cursor: payload.cursor ?? null,
+            state: payload.state
           }).pipe(
             Effect.mapError(() => {
               return new InternalError({

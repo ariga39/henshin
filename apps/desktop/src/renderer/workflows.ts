@@ -416,6 +416,59 @@ const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(f
   return true
 })
 
+let pendingReplacementRequestGeneration = 0
+
+export const loadPendingReplacements = (append = false) =>
+  Effect.gen(function*() {
+    const requestGeneration = pendingReplacementRequestGeneration + 1
+    pendingReplacementRequestGeneration = requestGeneration
+    const client = yield* LibraryClient
+    const current = viewStore.getState()
+    const connectionGeneration = current.connection_generation
+    const ownerInstanceId = verifiedInstanceId(current)
+    const ownerEpoch = current.connection.epoch ?? current.epoch
+    const cursor = append ? current.pending_replacement_cursor : null
+    yield* Effect.sync(() => viewStore.set({
+      pending_replacement_status: "loading",
+      pending_replacement_error: null
+    }))
+    const result = yield* client.search(cursor === null
+      ? { page_size: 50, state: "replacement-pending" as const }
+      : { page_size: 50, cursor, state: "replacement-pending" as const })
+    const isCurrentRequest = (): boolean => {
+      const state = viewStore.getState()
+      return requestGeneration === pendingReplacementRequestGeneration &&
+        state.connection_generation === connectionGeneration &&
+        verifiedInstanceId(state) === ownerInstanceId &&
+        (state.connection.epoch ?? state.epoch) === ownerEpoch
+    }
+    if (!isCurrentRequest()) return false
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({
+        pending_replacement_status: "error",
+        pending_replacement_error: result.error.message
+      }))
+      return false
+    }
+    yield* Effect.sync(() => {
+      const state = viewStore.getState()
+      const existing = append ? state.pending_replacement_entries : []
+      const ids = new Set(existing.map((entry) => entry.entry_id))
+      const entries = [...existing]
+      for (const entry of result.data.entries) {
+        if (!ids.has(entry.entry_id)) entries.push(entry)
+      }
+      viewStore.set({
+        pending_replacement_entries: entries,
+        pending_replacement_cursor: result.data.next_cursor,
+        pending_replacement_has_more: result.data.has_more,
+        pending_replacement_status: "ready",
+        pending_replacement_error: null
+      })
+    })
+    return true
+  })
+
 export const loadScanResults = Effect.gen(function*() {
   const client = yield* ScanReviewClient
   return yield* loadScanResultsFor(client)
@@ -514,7 +567,7 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
     const client = yield* ScanReviewClient
     const state = viewStore.getState()
     const candidate = state.staged_discoveries.find((item) => item.candidate_id === candidateId)
-    const entry = state.library_entries.find((item) => item.entry_id === entryId)
+    const entry = state.pending_replacement_entries.find((item) => item.entry_id === entryId)
     const root = candidate === undefined
       ? undefined
       : state.root_saved_roots.find((item) => item.root_id === candidate.root_id)
@@ -584,7 +637,7 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
       if (result.error.code === "revision_conflict" || result.error.code === "not_found") {
         yield* loadRoots
         yield* loadScanResults
-        yield* loadLibrary()
+        yield* loadPendingReplacements()
       }
       const definiteFailure = result.error.code === "invalid_request" ||
         result.error.code === "not_found" ||
@@ -613,7 +666,19 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
     }
 
     yield* loadScanResults
-    yield* loadLibrary()
+    yield* loadPendingReplacements()
+    const resolution = result.data.resolution
+    if (resolution !== undefined) {
+      yield* Effect.sync(() => {
+        const current = viewStore.getState()
+        if (!current.library_entries.some((item) => item.entry_id === entry.entry_id)) return
+        viewStore.set({
+          library_entries: current.library_entries.map((item) =>
+            item.entry_id === entry.entry_id ? resolution.entry : item
+          )
+        })
+      })
+    }
     yield* Effect.sync(() => viewStore.set({
       scan_resolution_status: "idle",
       scan_resolution_candidate_id: null,
@@ -730,7 +795,10 @@ export const watchHeldScans = Effect.gen(function*() {
 
 export const retryScanResults = Effect.gen(function*() {
   const loaded = yield* loadScanResults
-  if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
+  if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) {
+    yield* watchHeldScans
+    yield* loadPendingReplacements()
+  }
 })
 
 export const loadRootWorkspace = Effect.gen(function*() {
@@ -738,7 +806,11 @@ export const loadRootWorkspace = Effect.gen(function*() {
   yield* loadLocalMappings
   const loaded = yield* loadScanResults
   yield* loadLibrary()
-  if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
+  yield* loadPendingReplacements()
+  if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) {
+    yield* watchHeldScans
+    yield* loadPendingReplacements()
+  }
 })
 
 const watchScanTask = (taskId: string) =>
@@ -932,6 +1004,7 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
     const watchedState = viewStore.getState()
     const terminal = watchedState.scan_tasks.find((task) => task.task_id === submittedTask.task_id)
     if (holdNewDiscoveries) {
+      yield* loadPendingReplacements()
       yield* Effect.sync(() => viewStore.set({ scan_start_status: "idle" }))
       return
     }
@@ -950,6 +1023,7 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
     }
 
     yield* loadLibrary()
+    yield* loadPendingReplacements()
     const error = taskError(terminal)
     yield* Effect.sync(() => viewStore.set({
       scan_start_status: terminal.status === "completed_with_errors" ? "idle" : error === null ? "idle" : "error",

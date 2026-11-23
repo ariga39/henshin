@@ -2,7 +2,7 @@ import type { LibraryEntry, RootPreviewResult, ScanTask, StagedDiscovery } from 
 import { useSyncExternalStore } from "react"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { releaseHeldDiscovery, resolveReplacement, retryScanResults, startManualScan } from "./workflows"
+import { loadPendingReplacements, releaseHeldDiscovery, resolveReplacement, retryScanResults, startManualScan } from "./workflows"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -100,7 +100,7 @@ const discoveryStatus = (candidate: StagedDiscovery): string =>
 
 export const HeldScanReview = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
-  const pendingEntries = state.library_entries.filter((entry) => entry.state === "replacement-pending")
+  const pendingEntries = state.pending_replacement_entries
   return (
     <section aria-labelledby="held-review-heading" data-testid="held-scan-review">
       <h2 id="held-review-heading">Review staged discoveries</h2>
@@ -112,6 +112,14 @@ export const HeldScanReview = () => {
             Retry
           </button>
         </>
+      )}
+      {state.pending_replacement_status === "error" && state.pending_replacement_error !== null && (
+        <p role="alert" data-testid="replacement-review-error">
+          Could not load replacement review: {state.pending_replacement_error}{" "}
+          <button data-testid="replacement-review-retry" onClick={() => void runtime.runPromise(loadPendingReplacements())}>
+            Retry
+          </button>
+        </p>
       )}
       {state.scan_release_status === "error" && state.scan_release_error !== null && (
         <p role="alert" data-testid="scan-release-error">
@@ -196,6 +204,11 @@ export const HeldScanReview = () => {
             )
           })}
         </section>
+      )}
+      {state.pending_replacement_has_more && (
+        <button data-testid="replacement-review-load-more" onClick={() => void runtime.runPromise(loadPendingReplacements(true))}>
+          Load more replacements
+        </button>
       )}
       {state.scan_status !== "error" && state.scan_tasks.length === 0 && state.staged_discoveries.length === 0 && (
         <p>No held scan results yet.</p>
