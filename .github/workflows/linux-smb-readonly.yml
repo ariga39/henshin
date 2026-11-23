@@ -18,9 +18,7 @@ jobs:
     name: Native Linux SMB read-only collection
     runs-on: ubuntu-22.04
     env:
-      HENSHIN_SMB_RUN_DIR: ${{ runner.temp }}/henshin-smb-run
       HENSHIN_SMB_SOURCE_ROOT: /tmp/henshin-smb-source-${{ github.run_id }}-${{ github.run_attempt }}
-      HENSHIN_SMB_MOUNT_ROOT: ${{ runner.temp }}/henshin-smb-mount
       HENSHIN_SMB_OWNER: henshin-smb-fixture-owner
       HENSHIN_SMB_READER: henshin-smb-collection-reader
     steps:
@@ -37,10 +35,37 @@ jobs:
         with:
           version: 11.22.0
 
+      - name: Initialize disposable runner paths
+        run: |
+          printf 'HENSHIN_SMB_RUN_DIR=%s\n' "$RUNNER_TEMP/henshin-smb-run" >> "$GITHUB_ENV"
+          printf 'HENSHIN_SMB_MOUNT_ROOT=%s\n' "$RUNNER_TEMP/henshin-smb-mount" >> "$GITHUB_ENV"
+
       - name: Install native SMB tooling
         run: |
+          set -euo pipefail
+          policy_path=/usr/sbin/policy-rc.d
+          policy_backup="$RUNNER_TEMP/henshin-policy-rc.d.backup"
+          restore_policy() {
+            if [ -f "$policy_backup" ]; then
+              sudo cp -p "$policy_backup" "$policy_path"
+            else
+              sudo rm -f "$policy_path"
+            fi
+          }
+          if sudo test -e "$policy_path"; then
+            sudo cp -p "$policy_path" "$policy_backup"
+          fi
+          printf '#!/bin/sh\nexit 101\n' | sudo tee "$policy_path" >/dev/null
+          sudo chmod 755 "$policy_path"
+          trap restore_policy EXIT
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends cifs-utils samba smbclient
+          restore_policy
+          trap - EXIT
+          for service in smbd nmbd samba samba-ad-dc winbind; do
+            sudo systemctl mask --runtime "$service.service" >/dev/null 2>&1 || true
+            sudo systemctl stop "$service.service" >/dev/null 2>&1 || true
+          done
 
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
@@ -83,8 +108,6 @@ jobs:
           credentials="$run_dir/credentials"
           umask 077
           printf 'username=%s\npassword=%s\ndomain=WORKGROUP\n' "$reader" "$smb_password" > "$credentials"
-          printf '%s\n%s\n' "$smb_password" "$smb_password" | sudo smbpasswd -a -s "$reader" >/dev/null
-          unset smb_password
 
           mkdir -p "$run_dir/private" "$run_dir/state" "$run_dir/cache" "$run_dir/lock"
           chmod 700 "$run_dir" "$run_dir/private" "$run_dir/state" "$run_dir/cache" "$run_dir/lock"
@@ -101,7 +124,6 @@ jobs:
             hosts deny = ALL
             smb ports = 1445
             disable netbios = yes
-            smb1 disabled = yes
             server min protocol = SMB2
             private dir = $run_dir/private
             state directory = $run_dir/state
@@ -124,6 +146,14 @@ jobs:
             read list = $reader
           EOF
           testparm -s "$config" >/dev/null
+          printf '%s\n%s\n' "$smb_password" "$smb_password" |
+            sudo smbpasswd -c "$config" -a -s "$reader" >/dev/null
+          unset smb_password
+
+          if sudo ss -ltnH '( sport = :139 or sport = :445 )' | grep -q .; then
+            echo 'a default Samba listener is active on port 139 or 445' >&2
+            exit 1
+          fi
 
           sudo smbd --foreground --no-process-group --configfile="$config" >"$run_dir/smbd.stdout" 2>"$run_dir/smbd.stderr" &
           smbd_pid=$!
@@ -138,6 +168,7 @@ jobs:
             fi
             sleep 1
           done
+          test "$(sudo ss -ltnH 'sport = :1445' | awk '{print $4}' | head -n 1)" = '127.0.0.1:1445'
 
           printf '%s\n' 'disposable write probe' > "$run_dir/write-probe.txt"
           set +e
@@ -223,7 +254,7 @@ jobs:
           set +e
           if mountpoint -q "$HENSHIN_SMB_MOUNT_ROOT"; then sudo umount "$HENSHIN_SMB_MOUNT_ROOT"; fi
           if [ -f "$HENSHIN_SMB_RUN_DIR/smbd.pid" ]; then sudo kill "$(cat "$HENSHIN_SMB_RUN_DIR/smbd.pid")"; fi
-          sudo smbpasswd -x "$HENSHIN_SMB_READER" >/dev/null 2>&1
+          sudo smbpasswd -c "$HENSHIN_SMB_RUN_DIR/smb.conf" -x "$HENSHIN_SMB_READER" >/dev/null 2>&1
           sudo userdel "$HENSHIN_SMB_READER" >/dev/null 2>&1
           sudo userdel "$HENSHIN_SMB_OWNER" >/dev/null 2>&1
           sudo rm -rf "$HENSHIN_SMB_SOURCE_ROOT" "$HENSHIN_SMB_RUN_DIR" "$HENSHIN_SMB_MOUNT_ROOT"
