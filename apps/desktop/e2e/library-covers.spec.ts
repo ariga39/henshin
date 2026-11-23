@@ -236,7 +236,11 @@ test("filters effective tags with the canonical picker after reopening the real 
     )
     for (const [index, entry] of entries.entries()) {
       const galleryId = randomUUID()
-      const tags = [...(index < 130 ? ["artist:alpha"] : []), ...(index < 70 ? ["genre:comic"] : [])]
+      const tags = [
+        ...(index < 130 ? ["artist:alpha"] : []),
+        ...(index < 70 ? ["genre:comic"] : []),
+        ...(index === 0 ? Array.from({ length: 300 }, (_, tagIndex) => `extra:tag-${tagIndex.toString().padStart(3, "0")}`) : [])
+      ]
       insertGallery.run(galleryId, String(index + 1), JSON.stringify(tags))
       insertBinding.run(entry.entry_id, galleryId)
     }
@@ -251,9 +255,19 @@ test("filters effective tags with the canonical picker after reopening the real 
     await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(50, { timeout: 30_000 })
 
     const picker = reopened.window.getByTestId("library-tag-picker")
-    await expect(picker.locator("option")).toContainText(["artist:alpha", "genre:comic"])
+    await expect(picker.locator("option").first()).toHaveText("Choose a tag…")
+    await expect(picker.locator("option").filter({ hasText: "artist:alpha" })).toHaveText("artist:alpha")
+    await expect(reopened.window.getByTestId("library-tag-options-truncated")).toContainText("first 256")
     await expect(reopened.window.getByLabel("Search available tags")).toHaveCount(1)
     await expect(reopened.window.getByLabel("Choose a canonical tag")).toHaveCount(1)
+    await reopened.window.getByLabel("Search available tags").fill("extra:tag-299")
+    await expect(picker.locator("option")).toHaveText(["Choose a tag…", "extra:tag-299"])
+    await picker.selectOption("extra:tag-299")
+    await reopened.window.getByTestId("library-include-tag").click()
+    await expect(reopened.window.getByTestId("library-include-chip")).toContainText("extra:tag-299")
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(1)
+    await reopened.window.getByTestId("library-clear-filters").click()
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(50)
     await reopened.window.getByTestId("library-search").fill("batch-")
     await reopened.window.getByTestId("library-search-submit").click()
     await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(50)
@@ -272,6 +286,8 @@ test("filters effective tags with the canonical picker after reopening the real 
     expect([...pageTwoNames]).toHaveLength(50)
     expect(new Set(loadedNames)).toEqual(new Set(orderedNames.slice(0, 100)))
 
+    await reopened.window.getByLabel("Search available tags").fill("genre:comic")
+    await expect(picker.locator("option")).toHaveText(["Choose a tag…", "genre:comic"])
     await picker.selectOption("genre:comic")
     await reopened.window.getByTestId("library-exclude-tag").click()
     await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(50)
@@ -290,6 +306,8 @@ test("filters effective tags with the canonical picker after reopening the real 
     expect(filteredNames.some((name) => untaggedNames.has(name))).toBe(false)
     await expect(reopened.window.getByTestId("library-load-more")).toHaveCount(0)
 
+    await reopened.window.getByLabel("Search available tags").fill("genre:comic")
+    await expect(picker.locator("option")).toHaveText(["Choose a tag…", "genre:comic"])
     await picker.selectOption("genre:comic")
     await reopened.window.getByTestId("library-include-tag").click()
     await expect(reopened.window.getByTestId("library-filter-error")).toContainText("cannot be both included and excluded")

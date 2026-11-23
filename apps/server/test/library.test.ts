@@ -1656,6 +1656,16 @@ describe("normal library scan", () => {
     expect(first.data.has_more).toBe(true)
     expect(first.data.next_cursor).not.toBeNull()
     expect(first.data.tag_options).toHaveLength(256)
+    expect(first.data.tag_options_truncated).toBe(true)
+    const searchedVocabulary = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({
+        payload: { page_size: 1, tag_query: "local:vocabulary-299" }
+      })
+    }))
+    expect(searchedVocabulary.data.tag_options).toEqual([
+      { id: "local:vocabulary-299", namespace: "local", name: "vocabulary-299", alias: null }
+    ])
+    expect(searchedVocabulary.data.tag_options_truncated).toBe(false)
     const cursor = first.data.next_cursor
     if (cursor === null) throw new Error("expected a maximum-filter cursor")
     expect(cursor.length).toBeLessThan(8192)

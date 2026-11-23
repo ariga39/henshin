@@ -82,6 +82,7 @@ export class LibraryStore extends Context.Service<
     readonly page: (input: {
       readonly pageSize: number
       readonly query: string
+      readonly tagQuery: string
       readonly cursor: string | null
       readonly state?: "replacement-pending"
       readonly includeTags: ReadonlyArray<string>
@@ -142,6 +143,7 @@ export class LibraryStore extends Context.Service<
       const page = (input: {
         readonly pageSize: number
         readonly query: string
+        readonly tagQuery: string
         readonly cursor: string | null
         readonly state?: "replacement-pending"
         readonly includeTags: ReadonlyArray<string>
@@ -151,6 +153,7 @@ export class LibraryStore extends Context.Service<
         op: "listLibraryEntries",
         pageSize: input.pageSize,
         query: input.query,
+        tagQuery: input.tagQuery,
         epoch: input.epoch,
         cursor: input.cursor,
         state: input.state ?? null,

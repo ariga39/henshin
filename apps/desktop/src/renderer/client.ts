@@ -329,6 +329,9 @@ export class LibraryClient extends Context.Service<
       readonly page_size?: number
       readonly cursor?: string
       readonly state?: "replacement-pending"
+      readonly include_tags?: ReadonlyArray<string>
+      readonly exclude_tags?: ReadonlyArray<string>
+      readonly tag_query?: string
     }) => Effect.Effect<Result<LibraryEntryPage>>
     readonly open: (input: OpenBookIpcRequest) => Effect.Effect<Result<OpenBookIpcResult>>
     readonly status: (input: OpenBookStatusIpcRequest) => Effect.Effect<Result<OpenBookIpcResult | null>>

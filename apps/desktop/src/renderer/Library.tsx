@@ -11,6 +11,7 @@ import {
   chooseLibraryOpenProfile,
   libraryOpenStateFor,
   loadLibrary,
+  loadLibraryTagOptions,
   loadActiveLibraryOpenState,
   loadReaderProfiles,
   openSelectedLibraryEntry,
@@ -269,9 +270,18 @@ export const LibraryScreen = () => {
             data-testid="library-tag-search"
             type="search"
             value={tagSearchText}
-            onChange={(event) => setTagSearchText(event.target.value)}
+            onChange={(event) => {
+              const value = event.target.value
+              setTagSearchText(value)
+              void runtime.runPromise(loadLibraryTagOptions(value))
+            }}
             placeholder="Search tags"
           />
+          {state.library_tag_options_truncated && (
+            <small data-testid="library-tag-options-truncated">
+              Showing the first 256 tags; search available tags to find more.
+            </small>
+          )}
           <label htmlFor="library-tag-picker">Choose a canonical tag</label>
           <select
             id="library-tag-picker"
@@ -293,6 +303,7 @@ export const LibraryScreen = () => {
             onClick={() => {
               void runtime.runPromise(setLibraryTagFilter(tagChoice, "include"))
               setTagChoice("")
+              setTagSearchText("")
             }}
           >
             Include tag
@@ -304,6 +315,7 @@ export const LibraryScreen = () => {
             onClick={() => {
               void runtime.runPromise(setLibraryTagFilter(tagChoice, "exclude"))
               setTagChoice("")
+              setTagSearchText("")
             }}
           >
             Exclude tag

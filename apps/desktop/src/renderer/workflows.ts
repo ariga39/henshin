@@ -1395,7 +1395,7 @@ export const openSelectedLibraryEntry = Effect.gen(function*() {
   }))
 })
 
-export const loadLibrary = (append = false, query = viewStore.getState().library_query) =>
+export const loadLibrary = (append = false, query = viewStore.getState().library_query, tagQuery = "") =>
   Effect.gen(function*() {
     const client = yield* LibraryClient
     const current = viewStore.getState()
@@ -1411,8 +1411,8 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
       exclude_tags: current.library_exclude_tags
     }
     const result = yield* client.search(cursor === null
-      ? { query, page_size: 50, ...filters }
-      : { query, page_size: 50, cursor, ...filters })
+      ? { query, page_size: 50, tag_query: tagQuery, ...filters }
+      : { query, page_size: 50, cursor, tag_query: tagQuery, ...filters })
     if (viewStore.getState().library_request_generation !== requestGeneration) return
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({ library_status: "error", library_error: result.error.message }))
@@ -1430,6 +1430,7 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
         library_entries: entries,
         library_query: query,
         library_tag_options: result.data.tag_options ?? state.library_tag_options,
+        library_tag_options_truncated: result.data.tag_options_truncated ?? false,
         library_filter_error: null,
         library_cursor: result.data.next_cursor,
         library_has_more: result.data.has_more,
@@ -1440,6 +1441,27 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
           : state.library_cover_generation + 1
       })
     })
+  })
+
+export const loadLibraryTagOptions = (tagQuery: string) =>
+  Effect.gen(function*() {
+    const client = yield* LibraryClient
+    const current = viewStore.getState()
+    const generation = current.library_tag_request_generation + 1
+    yield* Effect.sync(() => viewStore.set({ library_tag_request_generation: generation }))
+    const result = yield* client.search({
+      query: current.library_query,
+      page_size: 50,
+      tag_query: tagQuery,
+      include_tags: current.library_include_tags,
+      exclude_tags: current.library_exclude_tags
+    })
+    if (viewStore.getState().library_tag_request_generation !== generation) return
+    if (!result.ok) return
+    yield* Effect.sync(() => viewStore.set({
+      library_tag_options: result.data.tag_options ?? [],
+      library_tag_options_truncated: result.data.tag_options_truncated ?? false
+    }))
   })
 
 export const searchLibrary = (query: string) =>

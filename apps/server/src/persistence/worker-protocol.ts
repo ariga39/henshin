@@ -315,7 +315,8 @@ export const LibraryEntryPageRow = Schema.Struct({
   has_more: Schema.Boolean,
   next_cursor: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8192))),
   library_change_revision: Revision,
-  tag_options: Schema.optional(Schema.Array(LibraryTagOption))
+  tag_options: Schema.optional(Schema.Array(LibraryTagOption)),
+  tag_options_truncated: Schema.optional(Schema.Boolean)
 })
 export type LibraryEntryPageRow = typeof LibraryEntryPageRow.Type
 
@@ -580,6 +581,7 @@ export const WorkerRequest = Schema.Union([
     op: Schema.Literal("listLibraryEntries"),
     pageSize: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(200)),
     query: Schema.String.check(Schema.isMaxLength(1024)),
+    tagQuery: Schema.String.check(Schema.isMaxLength(512)),
     epoch: Uuid,
     cursor: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8192))),
     state: Schema.NullOr(Schema.Literal("replacement-pending")),

@@ -70,7 +70,8 @@ export const LibraryEntryPage = Schema.Struct({
   has_more: Schema.Boolean,
   next_cursor: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8192))),
   library_change_revision: Revision,
-  tag_options: Schema.optional(Schema.Array(LibraryTagOption))
+  tag_options: Schema.optional(Schema.Array(LibraryTagOption)),
+  tag_options_truncated: Schema.optional(Schema.Boolean)
 })
 export type LibraryEntryPage = typeof LibraryEntryPage.Type
 
@@ -93,7 +94,8 @@ export const LibrarySearchRequest = Schema.Struct({
   cursor: Schema.optional(searchCursor),
   state: Schema.optional(Schema.Literal("replacement-pending")),
   include_tags: Schema.optional(filterTags),
-  exclude_tags: Schema.optional(filterTags)
+  exclude_tags: Schema.optional(filterTags),
+  tag_query: Schema.optional(Schema.String.check(Schema.isMaxLength(512)))
 })
 export type LibrarySearchRequest = typeof LibrarySearchRequest.Type
 

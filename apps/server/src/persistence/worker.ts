@@ -1090,9 +1090,15 @@ const tagOption = (id: string): import("@henshin/contracts").LibraryTagOption =>
     : { id, namespace: "local", name: id, alias: null }
 }
 const selectLibraryTagOptions = (
-  state: "replacement-pending" | null
-): ReadonlyArray<import("@henshin/contracts").LibraryTagOption> => {
+  state: "replacement-pending" | null,
+  query: string
+): {
+  readonly options: ReadonlyArray<import("@henshin/contracts").LibraryTagOption>
+  readonly truncated: boolean
+} => {
   const stateClause = state === null ? "e.state IN ('accepted', 'replacement-pending')" : "e.state = 'replacement-pending'"
+  const normalizedQuery = normalizeSearchText(query.trim())
+  const queryClause = normalizedQuery.length === 0 ? "" : "AND instr(lower(tag), lower(?)) > 0"
   const rows = db.prepare(`
     SELECT tag FROM (
       SELECT DISTINCT source_tag.value AS tag
@@ -1117,10 +1123,14 @@ const selectLibraryTagOptions = (
         AND added.action = 'add'
     )
     WHERE typeof(tag) = 'text' AND length(tag) BETWEEN 1 AND 512
+      ${queryClause}
     ORDER BY tag ASC
     LIMIT ?
-  `).all(MAX_LIBRARY_TAG_OPTIONS) as unknown as ReadonlyArray<{ tag: string }>
-  return rows.map((row) => tagOption(row.tag))
+  `).all(...(normalizedQuery.length === 0 ? [] : [normalizedQuery]), MAX_LIBRARY_TAG_OPTIONS + 1) as unknown as ReadonlyArray<{ tag: string }>
+  return {
+    options: rows.slice(0, MAX_LIBRARY_TAG_OPTIONS).map((row) => tagOption(row.tag)),
+    truncated: rows.length > MAX_LIBRARY_TAG_OPTIONS
+  }
 }
 const libraryTagExists = (state: "replacement-pending" | null, tag: string): boolean => {
   const stateClause = state === null ? "e.state IN ('accepted', 'replacement-pending')" : "e.state = 'replacement-pending'"
@@ -2907,7 +2917,7 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
   db.exec("BEGIN")
   try {
   const library = librarySummary()
-  const tagOptions = request.cursor === null ? selectLibraryTagOptions(state) : undefined
+  const tagOptions = request.cursor === null ? selectLibraryTagOptions(state, request.tagQuery) : undefined
   const filterKey = libraryFilterKey(includeTags, excludeTags)
   const conflictingTag = includeTags.find((tag) => excludeTags.includes(tag))
   if (conflictingTag !== undefined) {
@@ -2991,7 +3001,10 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
       has_more: hasMore,
       next_cursor: nextCursor,
       library_change_revision: librarySummary().change_revision,
-      ...(tagOptions === undefined ? {} : { tag_options: tagOptions })
+      ...(tagOptions === undefined ? {} : {
+        tag_options: tagOptions.options,
+        tag_options_truncated: tagOptions.truncated
+      })
     }
   }
   db.exec("COMMIT")

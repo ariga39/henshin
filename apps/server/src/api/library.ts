@@ -86,6 +86,7 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
           const page = yield* library.page({
             pageSize: payload.page_size ?? 50,
             query: payload.query ?? "",
+            tagQuery: payload.tag_query ?? "",
             cursor: payload.cursor ?? null,
             state: payload.state,
             includeTags: payload.include_tags ?? [],
@@ -223,7 +224,7 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
               operationId: payload.operation_id,
               epoch: server.epoch,
               expectedDecisionVersion: payload.expected_decision_version,
-              command: payload.command
+              command: command as Extract<typeof command, { readonly type: "set-personal-tag" | "reset-personal-tag" }>
             }).pipe(
               Effect.mapError(() => new InternalError({
                 code: "internal_error",
