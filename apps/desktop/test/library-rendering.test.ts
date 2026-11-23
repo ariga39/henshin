@@ -80,6 +80,14 @@ describe("Library reader profile details", () => {
     expect(markup).toContain('<li data-testid="library-entry">')
     expect(markup).toContain(`<button type="button" class="library-entry-details" data-testid="library-entry-details-${entry.entry_id}"`)
     expect(markup).toContain('aria-label="Open details for Book"')
+    expect(markup).toContain('<section class="library-details"')
+  })
+
+  it("gives an explicitly empty title an accessible details name", () => {
+    setProfileState("ready")
+    viewStore.set({ library_entries: [{ ...entry, title: "" }] })
+    const markup = renderLibraryDetails()
+    expect(markup).toContain('aria-label="Open details for Untitled"')
   })
 
   it("renders a busy failure result instead of a successful launch", () => {

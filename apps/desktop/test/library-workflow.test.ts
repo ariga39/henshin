@@ -62,6 +62,18 @@ const accepted = (entryId: string, actionId = firstActionId): OpenBookIpcResult 
   event_durable: true
 })
 
+const details = (entryId: string, title: string, decisionVersion = "1"): LibraryEntryDetails => ({
+  ...entry(entryId, title),
+  title_override: title,
+  decision_version: decisionVersion,
+  binding: null
+})
+
+const commandResult = (entryValue: LibraryEntryDetails, operationId = firstActionId) => ({
+  operation_id: operationId,
+  entry: entryValue
+})
+
 const run = <A>(effect: Effect.Effect<A, unknown, LibraryClient>, client: LibraryClient["Service"]) =>
   Effect.runPromise(Effect.provide(effect, Layer.succeed(LibraryClient, client)))
 
@@ -82,6 +94,7 @@ const resetView = () => {
     connection_generation: 0,
     library_entries: [],
     library_selected_entry_id: null,
+    library_entry_request_generation: 0,
     library_open_profile_id: null,
     library_open_states: []
   })
@@ -125,6 +138,167 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_note_server_text).toBe("server text")
     expect(viewStore.getState().library_note_error).toContain("retained")
     expect(viewStore.getState().library_entry?.decision_version).toBe("2")
+  it("preserves a conflicted title draft and reapplies it after refreshing the revision", async () => {
+    const refreshed = details(entryAId, "Concurrent title", "2")
+    const applied = details(entryAId, "Draft title", "3")
+    const updateInputs: Array<{ readonly expected_decision_version: string; readonly title: string }> = []
+    let updateCount = 0
+    const client = LibraryClient.of({
+      entry: () => Effect.succeed({ ok: true as const, data: refreshed }),
+      updatePersonalTitle: (input) => {
+        updateInputs.push({
+          expected_decision_version: input.expected_decision_version,
+          title: input.command.type === "set-personal-title" ? input.command.title : ""
+        })
+        updateCount += 1
+        return updateCount === 1
+          ? Effect.succeed({
+            ok: false as const,
+            error: {
+              code: "revision_conflict" as const,
+              message: "the entry changed",
+              retryable: false,
+              details: { current_revision: "2" }
+            }
+          })
+          : Effect.succeed({ ok: true as const, data: commandResult(applied) })
+      },
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: () => Effect.succeed({ ok: true as const, data: accepted(entryAId) }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      library_entries: [entry(entryAId, "book-a")],
+      library_selected_entry_id: entryAId,
+      library_entry: details(entryAId, "Original title", "1"),
+      library_entry_status: "ready",
+      library_title_draft: "Draft title",
+      library_entry_request_generation: 4
+    })
+
+    await run(saveLibraryPersonalTitle("Draft title"), client)
+    expect(viewStore.getState().library_title_error).toBe("the entry changed")
+    expect(viewStore.getState().library_title_draft).toBe("Draft title")
+
+    await run(loadLibraryEntry(entryAId, { preserveTitleDraft: true }), client)
+    expect(viewStore.getState().library_entry?.decision_version).toBe("2")
+    expect(viewStore.getState().library_title_draft).toBe("Draft title")
+
+    await run(saveLibraryPersonalTitle("Draft title"), client)
+    expect(updateInputs).toEqual([
+      { expected_decision_version: "1", title: "Draft title" },
+      { expected_decision_version: "2", title: "Draft title" }
+    ])
+    expect(viewStore.getState().library_entry?.title).toBe("Draft title")
+    expect(viewStore.getState().library_entry?.decision_version).toBe("3")
+  })
+
+  it("drops late details, save, and removal results across A to B to A", async () => {
+    let resolveFirstEntry!: (value: Result<LibraryEntryDetails>) => void
+    let resolveSecondEntry!: (value: Result<LibraryEntryDetails>) => void
+    let resolveSave!: (value: Result<ReturnType<typeof commandResult>>) => void
+    let resolveRemoval!: (value: Result<ReturnType<typeof commandResult>>) => void
+    let aEntryCalls = 0
+    const client = LibraryClient.of({
+      entry: (input) => {
+        if (input.entry_id === entryBId) return Effect.succeed({ ok: true as const, data: details(entryBId, "Book B", "2") })
+        aEntryCalls += 1
+        if (aEntryCalls === 1) return Effect.promise(() => new Promise<Result<LibraryEntryDetails>>((resolve) => { resolveFirstEntry = resolve }))
+        if (aEntryCalls === 2) return Effect.promise(() => new Promise<Result<LibraryEntryDetails>>((resolve) => { resolveSecondEntry = resolve }))
+        return Effect.succeed({ ok: true as const, data: details(entryAId, "Reloaded A", "4") })
+      },
+      updatePersonalTitle: (input) => input.command.type === "set-personal-title"
+        ? Effect.promise(() => new Promise<Result<ReturnType<typeof commandResult>>>((resolve) => { resolveSave = resolve }))
+        : Effect.promise(() => new Promise<Result<ReturnType<typeof commandResult>>>((resolve) => { resolveRemoval = resolve })),
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: () => Effect.succeed({ ok: true as const, data: accepted(entryAId) }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      library_entries: [entry(entryAId, "book-a"), entry(entryBId, "book-b")],
+      library_selected_entry_id: entryAId,
+      library_entry: details(entryAId, "Initial A", "1"),
+      library_entry_status: "ready",
+      library_title_draft: "Initial A",
+      library_entry_request_generation: 0
+    })
+
+    const firstLoad = run(loadLibraryEntry(entryAId), client)
+    await Promise.resolve()
+    await run(selectLibraryEntry(entryBId), client)
+    const secondLoad = run(selectLibraryEntry(entryAId), client)
+    await Promise.resolve()
+    resolveFirstEntry({ ok: true, data: details(entryAId, "Stale A", "stale") })
+    await firstLoad
+    expect(viewStore.getState().library_entry).toBeNull()
+    resolveSecondEntry({ ok: true, data: details(entryAId, "Fresh A", "3") })
+    await secondLoad
+    expect(viewStore.getState().library_entry?.title).toBe("Fresh A")
+
+    const save = run(saveLibraryPersonalTitle("Late save"), client)
+    await Promise.resolve()
+    await run(selectLibraryEntry(entryBId), client)
+    await run(selectLibraryEntry(entryAId), client)
+    resolveSave({ ok: true, data: commandResult(details(entryAId, "Late save", "5")) })
+    await save
+    expect(viewStore.getState().library_entry?.title).toBe("Reloaded A")
+
+    const removal = run(removeLibraryPersonalTitle, client)
+    await Promise.resolve()
+    await run(selectLibraryEntry(entryBId), client)
+    await run(selectLibraryEntry(entryAId), client)
+    resolveRemoval({ ok: true, data: commandResult(details(entryAId, "Late removal", "6")) })
+    await removal
+    expect(viewStore.getState().library_entry?.title).toBe("Reloaded A")
+  })
+
+  it("drops late title failures after the selection changes", async () => {
+    let resolveSave!: (value: Result<ReturnType<typeof commandResult>>) => void
+    let resolveRemoval!: (value: Result<ReturnType<typeof commandResult>>) => void
+    const client = LibraryClient.of({
+      entry: (input) => Effect.succeed({ ok: true as const, data: details(input.entry_id, input.entry_id === entryAId ? "A" : "B", "1") }),
+      updatePersonalTitle: (input) => input.command.type === "set-personal-title"
+        ? Effect.promise(() => new Promise<Result<ReturnType<typeof commandResult>>>((resolve) => { resolveSave = resolve }))
+        : Effect.promise(() => new Promise<Result<ReturnType<typeof commandResult>>>((resolve) => { resolveRemoval = resolve })),
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: () => Effect.succeed({ ok: true as const, data: accepted(entryAId) }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      library_entries: [entry(entryAId, "book-a"), entry(entryBId, "book-b")],
+      library_selected_entry_id: entryAId,
+      library_entry: details(entryAId, "A", "1"),
+      library_entry_status: "ready",
+      library_title_draft: "A",
+      library_entry_request_generation: 0
+    })
+
+    const save = run(saveLibraryPersonalTitle("late save"), client)
+    await Promise.resolve()
+    await run(selectLibraryEntry(entryBId), client)
+    resolveSave({
+      ok: false,
+      error: { code: "transport", message: "save arrived late", retryable: true }
+    })
+    await save
+    expect(viewStore.getState().library_selected_entry_id).toBe(entryBId)
+    expect(viewStore.getState().library_title_error).toBeNull()
+
+    await run(selectLibraryEntry(entryAId), client)
+    const removal = run(removeLibraryPersonalTitle, client)
+    await Promise.resolve()
+    await run(selectLibraryEntry(entryBId), client)
+    resolveRemoval({
+      ok: false,
+      error: { code: "transport", message: "removal arrived late", retryable: true }
+    })
+    await removal
+    expect(viewStore.getState().library_selected_entry_id).toBe(entryBId)
+    expect(viewStore.getState().library_title_error).toBeNull()
+    expect(viewStore.getState().library_entry?.entry_id).toBe(entryBId)
   })
 
   it("does not open a replacement-pending entry", async () => {

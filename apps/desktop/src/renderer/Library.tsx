@@ -285,7 +285,7 @@ export const LibraryScreen = () => {
                 type="button"
                 className="library-entry-details"
                 data-testid={`library-entry-details-${entry.entry_id}`}
-                aria-label={`Open details for ${entry.title}`}
+                aria-label={`Open details for ${entry.title === "" ? "Untitled" : entry.title}`}
                 onClick={() => void runtime.runPromise(selectLibraryEntry(entry.entry_id))}
               >
                 <strong>{entry.title === "" ? "Untitled" : entry.title}</strong>
@@ -307,7 +307,7 @@ export const LibraryScreen = () => {
           </button>
         )}
         {selectedEntry !== null && (
-          <section aria-labelledby="library-entry-details-heading" data-testid="library-details">
+          <section className="library-details" aria-labelledby="library-entry-details-heading" data-testid="library-details">
             <h3 id="library-entry-details-heading">{selectedDetails?.title === "" ? "Untitled" : selectedDetails?.title}</h3>
             {state.library_entry_status === "loading" && (
               <p role="status" data-testid="entry-metadata-pending">Loading saved entry details…</p>
@@ -349,7 +349,7 @@ export const LibraryScreen = () => {
                 {state.library_title_error !== null && (
                   <p role="alert" data-testid="entry-personal-title-error">
                     {state.library_title_error}{" "}
-                    <button type="button" onClick={() => void runtime.runPromise(loadLibraryEntry(selectedEntry.entry_id))}>
+                    <button type="button" onClick={() => void runtime.runPromise(loadLibraryEntry(selectedEntry.entry_id, { preserveTitleDraft: true, preserveNoteDraft: true }))}>
                       Reload current value
                     </button>
                   </p>

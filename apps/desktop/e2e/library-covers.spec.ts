@@ -159,27 +159,50 @@ test("edits, rejects stale title saves, removes, and searches the personal title
     await details.getByTestId("entry-personal-title-save").click()
     await expect(details.getByTestId("entry-effective-title")).toContainText("Display title: Untitled")
 
-    const concurrent = await window.evaluate(async ({ entryId }) => {
+    const currentEntry = await window.evaluate(async ({ entryId }) => {
+      return await (globalThis as unknown as {
+        readonly henshinLibrary: {
+          readonly entry: (input: unknown) => Promise<{ readonly ok: boolean; readonly data?: { readonly decision_version: string } }>
+        }
+      }).henshinLibrary.entry({ entry_id: entryId })
+    }, { entryId })
+    if (!currentEntry.ok || currentEntry.data === undefined) throw new Error("expected current library entry")
+    const concurrent = await window.evaluate(async ({ entryId, decisionVersion }) => {
       return await (globalThis as unknown as {
         readonly henshinLibrary: {
           readonly updatePersonalTitle: (input: unknown) => Promise<{ readonly ok: boolean }>
         }
       }).henshinLibrary.updatePersonalTitle({
         entry_id: entryId,
-        expected_decision_version: "3",
+        expected_decision_version: decisionVersion,
         command: { type: "set-personal-title", title: "Concurrent title" }
       })
-    }, { entryId })
+    }, { entryId, decisionVersion: currentEntry.data.decision_version })
     expect(concurrent.ok).toBe(true)
 
     await title.fill("Stale title")
     await details.getByTestId("entry-personal-title-save").click()
     await expect(details.getByTestId("entry-personal-title-error")).toBeVisible()
     await details.getByTestId("entry-personal-title-error").getByRole("button", { name: "Reload current value" }).click()
-    await expect(title).toHaveValue("Concurrent title")
+    await expect(title).toHaveValue("Stale title")
+    await details.getByTestId("entry-personal-title-save").click()
+    await expect(details.getByTestId("entry-effective-title")).toContainText("Display title: Stale title")
 
-    await details.getByTestId("entry-personal-title-remove").click()
-    await expect(details.getByTestId("entry-effective-title")).toContainText("Display title: original-book")
+    await window.getByTestId("library-search").fill("Stale title")
+    await window.getByTestId("library-search-submit").click()
+    await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(1)
+    await expect(window.getByTestId("library-entry")).toContainText("Matched in book name")
+    await window.getByTestId("library-search").fill("original-book")
+    await window.getByTestId("library-search-submit").click()
+    await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(1)
+    await expect(window.getByTestId("library-entry")).toContainText("Stale title")
+
+    await window.getByTestId("library-entry").getByRole("button", { name: /Open details/ }).click()
+    await expect(window.getByTestId("library-details").getByTestId("entry-effective-title")).toContainText("Display title: Stale title")
+
+    const searchedDetails = window.getByTestId("library-details")
+    await searchedDetails.getByTestId("entry-personal-title-remove").click()
+    await expect(searchedDetails.getByTestId("entry-effective-title")).toContainText("Display title: original-book")
     await window.getByTestId("library-search").fill("original-book")
     await window.getByTestId("library-search-submit").click()
     await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(1)
