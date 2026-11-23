@@ -2,7 +2,12 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { afterEach, describe, expect, it } from "vitest"
 import type { LibraryEntry } from "@henshin/contracts"
-import { LibraryScreen } from "../src/renderer/Library"
+import {
+  LibraryScreen,
+  MAX_EXPORT_SELECTIONS,
+  reconcileSelectedEntryIds,
+  visibleSelectedEntryIds
+} from "../src/renderer/Library"
 import { viewStore } from "../src/renderer/store"
 
 const entry: LibraryEntry = {
@@ -80,6 +85,20 @@ describe("Library reader profile details", () => {
     expect(markup).toContain('<li data-testid="library-entry">')
     expect(markup).toContain(`<button type="button" class="library-entry-details" data-testid="library-entry-details-${entry.entry_id}"`)
     expect(markup).toContain('aria-label="Open details for Book"')
+  })
+
+  it("caps and reconciles export selection to visible entries", () => {
+    const entries = Array.from({ length: MAX_EXPORT_SELECTIONS + 1 }, (_, index) => ({
+      ...entry,
+      entry_id: `${index.toString().padStart(8, "0")}-1111-4111-8111-111111111111`
+    }))
+    const selected = new Set([entries[0]!.entry_id, entries[256]!.entry_id, "hidden-entry"])
+    expect(visibleSelectedEntryIds(selected, entries)).toEqual([entries[0]!.entry_id, entries[256]!.entry_id])
+    expect(reconcileSelectedEntryIds(selected, entries)).toEqual(new Set([entries[0]!.entry_id, entries[256]!.entry_id]))
+    setProfileState("ready")
+    const markup = renderLibraryDetails()
+    expect(markup).toContain("Export selected (0/256)")
+    expect(markup).toContain('data-testid="library-export-request" disabled')
   })
 
   it("renders a busy failure result instead of a successful launch", () => {

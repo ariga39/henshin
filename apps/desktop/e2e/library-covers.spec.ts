@@ -191,3 +191,46 @@ test("searches the real Library screen and shows field match evidence", async ()
     await rm(fixtureDirectory, { recursive: true, force: true })
   }
 })
+
+test("discloses private gallery locators before saving a selected metadata export", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-export-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-export-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+
+  try {
+    const book = path.join(fixtureDirectory, "selected-book")
+    await mkdir(book)
+    await writeFile(path.join(book, "001.png"), validPng)
+
+    const { window } = await launch(dbPath)
+    await expect(window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await window.getByTestId("root-preview-submit").click()
+    await window.getByTestId("root-label").fill("Export cases")
+    await window.getByTestId("root-save").click()
+    await window.getByTestId("root-saved-preview").click()
+    await window.getByTestId("scan-hold-new-discoveries").uncheck()
+    await window.getByTestId("start-held-scan").click()
+
+    await expect(window.getByTestId("library-entry")).toHaveCount(1, { timeout: 30_000 })
+    await window.getByTestId("library-entry-select").check()
+    await window.getByTestId("library-export-request").click()
+    await expect(window.getByTestId("library-export-disclosure")).toContainText("Gallery URLs contain private locators")
+    await expect(window.getByTestId("library-export-disclosure")).toContainText("Personal notes are not included")
+    await expect(window.getByTestId("library-export-confirm")).toBeVisible()
+
+    await window.getByTestId("library-export-cancel").click()
+    await expect(window.getByTestId("library-export-disclosure")).toHaveCount(0)
+    await window.getByTestId("library-search").fill("book-does-not-exist")
+    await window.getByTestId("library-search-submit").click()
+    await expect(window.getByTestId("library-no-matches")).toContainText("No books match")
+    await expect(window.getByTestId("library-export-request")).toBeDisabled()
+    await expect(window.getByTestId("library-export-request")).toContainText("0/256")
+    await window.getByTestId("library-clear-search").click()
+    await expect(window.getByTestId("library-entry")).toHaveCount(1)
+    await expect(window.getByTestId("library-export-request")).toBeDisabled()
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+  }
+})

@@ -16,6 +16,7 @@ import {
   selectLibraryEntry,
   showSetup
 } from "./workflows"
+import { exportSelectedLibrary } from "./workflows"
 
 type CoverState =
   | { readonly key: string | null; readonly request: number; readonly status: "loading" | "unavailable"; readonly src: null }
@@ -27,6 +28,21 @@ const availabilityText = (entry: LibraryEntry): string => {
     ? `Server availability: ${label}`
     : `Server availability: ${label}; observed ${new Date(entry.availability.observed_at_ms).toISOString()}`
 }
+
+export const MAX_EXPORT_SELECTIONS = 256
+
+export const visibleSelectedEntryIds = (
+  selectedEntryIds: ReadonlySet<string>,
+  entries: ReadonlyArray<LibraryEntry>
+): ReadonlyArray<string> => entries
+  .filter((entry) => selectedEntryIds.has(entry.entry_id))
+  .map((entry) => entry.entry_id)
+  .slice(0, MAX_EXPORT_SELECTIONS)
+
+export const reconcileSelectedEntryIds = (
+  selectedEntryIds: ReadonlySet<string>,
+  entries: ReadonlyArray<LibraryEntry>
+): ReadonlySet<string> => new Set(visibleSelectedEntryIds(selectedEntryIds, entries))
 
 const coverPlaceholder = (entry: LibraryEntry, loading: boolean) => (
   <div
@@ -164,7 +180,80 @@ const LibraryCover = ({
 export const LibraryScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState, viewStore.getState)
   const [searchText, setSearchText] = useState(state.library_query)
+  const [selectedEntryIds, setSelectedEntryIds] = useState<ReadonlySet<string>>(() => new Set())
+  const [includeNotes, setIncludeNotes] = useState(false)
+  const [showExportDisclosure, setShowExportDisclosure] = useState(false)
+  const [exportStatus, setExportStatus] = useState<"idle" | "saving" | "saved" | "canceled" | "error">("idle")
+  const [exportError, setExportError] = useState<string | null>(null)
+  const exportRequestRef = useRef<HTMLButtonElement>(null)
+  const exportDialogRef = useRef<HTMLElement>(null)
+  const exportDisclosureWasOpen = useRef(false)
   const hasLibraryQuery = state.library_query.trim().length > 0
+  const visibleSelectedIds = visibleSelectedEntryIds(selectedEntryIds, state.library_entries)
+
+  useEffect(() => {
+    setSelectedEntryIds((current) => reconcileSelectedEntryIds(current, state.library_entries))
+  }, [state.library_entries])
+
+  useEffect(() => {
+    if (showExportDisclosure) {
+      exportDisclosureWasOpen.current = true
+      const dialogElement = exportDialogRef.current
+      if (dialogElement === null) return
+      const focusable = Array.from(dialogElement.querySelectorAll<HTMLElement>(
+        "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])"
+      ))
+      ;(focusable[0] ?? dialogElement).focus()
+      const onKeyDown = (event: KeyboardEvent) => {
+        if (event.key === "Escape") {
+          event.preventDefault()
+          setShowExportDisclosure(false)
+          return
+        }
+        if (event.key !== "Tab" || focusable.length === 0) return
+        const first = focusable[0]!
+        const last = focusable[focusable.length - 1]!
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault()
+          last.focus()
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault()
+          first.focus()
+        }
+      }
+      dialogElement.addEventListener("keydown", onKeyDown)
+      return () => dialogElement.removeEventListener("keydown", onKeyDown)
+    }
+    if (exportDisclosureWasOpen.current) {
+      exportDisclosureWasOpen.current = false
+      exportRequestRef.current?.focus()
+    }
+  }, [showExportDisclosure])
+
+  const requestExport = () => {
+    if (visibleSelectedIds.length === 0) return
+    setExportError(null)
+    setShowExportDisclosure(true)
+  }
+
+  const confirmExport = () => {
+    const ids = visibleSelectedEntryIds(selectedEntryIds, viewStore.getState().library_entries)
+    if (ids.length === 0) {
+      setShowExportDisclosure(false)
+      return
+    }
+    setShowExportDisclosure(false)
+    setExportStatus("saving")
+    setExportError(null)
+    void runtime.runPromise(exportSelectedLibrary(ids, includeNotes)).then((result) => {
+      if (result.ok) {
+        setExportStatus(result.data.status)
+        return
+      }
+      setExportStatus("error")
+      setExportError(result.error.message)
+    })
+  }
 
   useEffect(() => {
     if (viewStore.getState().library_status === "idle") void runtime.runPromise(loadLibrary())
@@ -249,6 +338,53 @@ export const LibraryScreen = () => {
         <button data-testid="library-refresh" onClick={() => void runtime.runPromise(loadLibrary())}>
           Refresh
         </button>
+        <section aria-labelledby="library-export-heading">
+          <h3 id="library-export-heading">Export selected books</h3>
+          <label>
+            <input
+              data-testid="library-export-include-notes"
+              type="checkbox"
+              checked={includeNotes}
+              onChange={(event) => setIncludeNotes(event.target.checked)}
+            />
+            Include personal notes
+          </label>
+          <button
+            type="button"
+            data-testid="library-export-request"
+            ref={exportRequestRef}
+            disabled={visibleSelectedIds.length === 0 || exportStatus === "saving"}
+            onClick={requestExport}
+          >
+            Export selected ({visibleSelectedIds.length}/{MAX_EXPORT_SELECTIONS})
+          </button>
+          {exportStatus === "saving" && <p role="status">Preparing metadata export…</p>}
+          {exportStatus === "saved" && <p role="status" data-testid="library-export-status">Metadata export saved.</p>}
+          {exportStatus === "canceled" && <p role="status" data-testid="library-export-status">Metadata export canceled.</p>}
+          {exportStatus === "error" && <p role="alert" data-testid="library-export-error">Could not save metadata export: {exportError}</p>}
+        </section>
+        {showExportDisclosure && (
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="library-export-disclosure-heading"
+            data-testid="library-export-disclosure"
+            ref={exportDialogRef}
+            tabIndex={-1}
+          >
+            <h3 id="library-export-disclosure-heading">Private metadata export</h3>
+            <p>
+              Gallery URLs contain private locators. Treat this export as private before choosing where to save it.
+              {includeNotes ? " Personal notes are included because you selected them." : " Personal notes are not included."}
+            </p>
+            <button type="button" data-testid="library-export-confirm" onClick={confirmExport}>
+              I understand, choose a file
+            </button>
+            <button type="button" data-testid="library-export-cancel" onClick={() => setShowExportDisclosure(false)}>
+              Cancel
+            </button>
+          </section>
+        )}
         {state.library_status === "loading" && <p role="status">Loading library…</p>}
         {state.library_status === "error" && <p role="alert">Could not load library: {state.library_error}</p>}
         {state.library_status === "ready" && state.library_entries.length === 0 && hasLibraryQuery && (
@@ -272,6 +408,24 @@ export const LibraryScreen = () => {
         <ul data-testid="library-entries">
           {state.library_entries.map((entry) => (
             <li key={entry.entry_id} data-testid="library-entry">
+              <label>
+                <input
+                  type="checkbox"
+                  data-testid="library-entry-select"
+                  aria-label={`Select ${entry.title}`}
+                  checked={selectedEntryIds.has(entry.entry_id)}
+                  disabled={!selectedEntryIds.has(entry.entry_id) && visibleSelectedIds.length >= MAX_EXPORT_SELECTIONS}
+                  onChange={(event) => {
+                    setSelectedEntryIds((current) => {
+                      const next = new Set(current)
+                      if (event.target.checked && next.size < MAX_EXPORT_SELECTIONS) next.add(entry.entry_id)
+                      else next.delete(entry.entry_id)
+                      return next
+                    })
+                  }}
+                />
+                Select
+              </label>
               <LibraryCover entry={entry} refreshGeneration={state.library_cover_generation} />
               <button
                 type="button"

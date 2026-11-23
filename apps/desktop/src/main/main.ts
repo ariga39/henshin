@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEve
 import { Cause, Duration, Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
+import { rename, unlink, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import {
@@ -24,6 +25,7 @@ import {
   LibrarySearchIpcRequest,
   OpenBookIpcRequest,
   OpenBookStatusIpcRequest,
+  LibraryExportIpcRequest,
   ThumbnailGetIpcRequest,
   ThumbnailHttpClient,
   LoadDraftIpcRequest,
@@ -112,6 +114,26 @@ const LOCAL_MAPPING_REQUEST_TIMEOUT = Duration.seconds(12)
 // The server gives one thumbnail request a 30-second aggregate producer
 // budget; keep a small allowance for HTTP and IPC teardown.
 const THUMBNAIL_NETWORK_DEADLINE = Duration.seconds(32)
+
+const saveMetadataExport = async (senderWindow: BrowserWindow, document: import("@henshin/contracts").MetadataExportDocument): Promise<IpcOk<{ readonly status: "saved" | "canceled" }> | IpcErr> => {
+  if (senderWindow.isDestroyed()) return { ok: false, error: opaqueError }
+  const selected = await dialog.showSaveDialog(senderWindow, {
+    title: "Save private metadata export",
+    defaultPath: "henshin-metadata-export.json",
+    filters: [{ name: "Henshin metadata JSON", extensions: ["json"] }]
+  })
+  if (selected.canceled || selected.filePath === undefined) return { ok: true, data: { status: "canceled" } }
+
+  const temporaryPath = `${selected.filePath}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(document, null, 2)}\n`, { encoding: "utf8", mode: 0o600 })
+    await rename(temporaryPath, selected.filePath)
+    return { ok: true, data: { status: "saved" } }
+  } catch {
+    await unlink(temporaryPath).catch(() => undefined)
+    return { ok: false, error: opaqueError }
+  }
+}
 
 interface Session {
   readonly instanceId: string
@@ -1219,6 +1241,22 @@ const registerIpc = (): void => {
     } catch (error) {
       return Promise.resolve({ ok: false as const, error: toPublicError(error) })
     }
+  })
+
+  ipcMain.handle(IpcChannels.libraryExport, async (event, raw: unknown) => {
+    const senderWindow = assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(LibraryExportIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    const result = await runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* LibraryHttpClient
+          return yield* client.export({ payload: decoded.value })
+        })
+      )
+    )
+    if (!result.ok) return result
+    return saveMetadataExport(senderWindow, result.data)
   })
 
   ipcMain.handle(IpcChannels.thumbnailGet, (event, raw: unknown) => {

@@ -10,6 +10,8 @@ import type {
   OpenBookIpcRequest,
   OpenBookIpcResult,
   OpenBookStatusIpcRequest,
+  LibraryExportIpcRequest,
+  LibraryExportIpcResult,
   LocalMappingActivateIpcRequest,
   LocalMappingPreviewIpcResult,
   NoteView,
@@ -162,6 +164,7 @@ export interface LibraryBridge {
   open(input: OpenBookIpcRequest): Promise<Result<OpenBookIpcResult>>
   status(input: OpenBookStatusIpcRequest): Promise<Result<OpenBookIpcResult | null>>
   onOpenStateChanged(listener: () => void): () => void
+  exportSelected(input: LibraryExportIpcRequest): Promise<Result<LibraryExportIpcResult>>
   getThumbnail(key: ThumbnailKey): Promise<Result<Uint8Array>>
 }
 
@@ -330,6 +333,7 @@ export class LibraryClient extends Context.Service<
     }) => Effect.Effect<Result<LibraryEntryPage>>
     readonly open: (input: OpenBookIpcRequest) => Effect.Effect<Result<OpenBookIpcResult>>
     readonly status: (input: OpenBookStatusIpcRequest) => Effect.Effect<Result<OpenBookIpcResult | null>>
+    readonly exportSelected: (input: LibraryExportIpcRequest) => Effect.Effect<Result<LibraryExportIpcResult>>
     readonly getThumbnail: (key: ThumbnailKey) => Effect.Effect<Result<Uint8Array>>
   }
 >()("henshin/desktop/renderer/LibraryClient") {
@@ -339,6 +343,7 @@ export class LibraryClient extends Context.Service<
       search: (input) => callIpc(() => window.henshinLibrary.search(input)),
       open: (input) => callIpc(() => window.henshinLibrary.open(input)),
       status: (input) => callIpc(() => window.henshinLibrary.status(input)),
+      exportSelected: (input) => callIpc(() => window.henshinLibrary.exportSelected(input)),
       getThumbnail: (key) => callIpc(() => window.henshinLibrary.getThumbnail(key))
     })
   )

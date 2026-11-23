@@ -85,6 +85,7 @@ describe("library renderer workflow", () => {
         return Effect.succeed({ ok: true as const, data: accepted(entryAId) })
       },
       status: () => Effect.succeed({ ok: true as const, data: null }),
+      exportSelected: () => Effect.succeed({ ok: true as const, data: { status: "canceled" as const } }),
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     viewStore.set({
@@ -112,6 +113,7 @@ describe("library renderer workflow", () => {
       },
       open: () => Effect.succeed({ ok: true as const, data: accepted(entryAId) }),
       status: () => Effect.succeed({ ok: true as const, data: null }),
+      exportSelected: () => Effect.succeed({ ok: true as const, data: { status: "canceled" as const } }),
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     viewStore.set({
@@ -164,6 +166,7 @@ describe("library renderer workflow", () => {
         statusRequests.push(input)
         return Effect.succeed({ ok: true as const, data: statusRequests.length === 1 ? activeC : acceptedC })
       },
+      exportSelected: () => Effect.succeed({ ok: true as const, data: { status: "canceled" as const } }),
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     viewStore.set({
@@ -233,6 +236,7 @@ describe("library renderer workflow", () => {
         return Effect.promise(() => delayed)
       },
       status: () => Effect.succeed({ ok: true as const, data: null }),
+      exportSelected: () => Effect.succeed({ ok: true as const, data: { status: "canceled" as const } }),
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     viewStore.set({
@@ -304,6 +308,7 @@ describe("library renderer workflow", () => {
         statusCalls.push(input)
         return Effect.promise(() => statusResult)
       },
+      exportSelected: () => Effect.succeed({ ok: true as const, data: { status: "canceled" as const } }),
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     viewStore.set({
@@ -377,6 +382,7 @@ describe("library renderer workflow", () => {
           error: { code: "transport", message: "status lookup interrupted", retryable: true }
         })
       },
+      exportSelected: () => Effect.succeed({ ok: true as const, data: { status: "canceled" as const } }),
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     viewStore.set({
@@ -411,6 +417,7 @@ describe("library renderer workflow", () => {
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
       open: () => Effect.promise(() => delayed),
       status: () => Effect.succeed({ ok: true as const, data: null }),
+      exportSelected: () => Effect.succeed({ ok: true as const, data: { status: "canceled" as const } }),
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     viewStore.set({
@@ -448,6 +455,7 @@ describe("library renderer workflow", () => {
           ? Effect.promise(() => delayedStatus)
           : Effect.succeed(currentStatusResult)
       },
+      exportSelected: () => Effect.succeed({ ok: true as const, data: { status: "canceled" as const } }),
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     const oldResult = accepted(entryAId)
@@ -529,6 +537,7 @@ describe("library renderer workflow", () => {
         statusRequests.push(input)
         return Effect.succeed(lookup)
       },
+      exportSelected: () => Effect.succeed({ ok: true as const, data: { status: "canceled" as const } }),
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     viewStore.set({
@@ -641,6 +650,7 @@ describe("library renderer workflow", () => {
           ? Effect.promise(() => late)
           : Effect.succeed({ ok: false as const, error: { code: "transport", message: "status lookup interrupted", retryable: true } })
       },
+      exportSelected: () => Effect.succeed({ ok: true as const, data: { status: "canceled" as const } }),
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     viewStore.set({

@@ -1454,6 +1454,12 @@ export const searchLibrary = (query: string) =>
     yield* loadLibrary(false, query)
   })
 
+export const exportSelectedLibrary = (entryIds: ReadonlyArray<string>, includeNotes: boolean) =>
+  Effect.gen(function*() {
+    const client = yield* LibraryClient
+    return yield* client.exportSelected({ entry_ids: entryIds, include_notes: includeNotes })
+  })
+
 export const saveRoot = Effect.gen(function*() {
   const client = yield* RootPreviewClient
   const state = viewStore.getState()

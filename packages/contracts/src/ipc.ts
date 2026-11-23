@@ -9,6 +9,7 @@ import {
   LocalMappingPreview
 } from "./root"
 import { LibrarySearchRequest, ReplacementResolutionCommand } from "./library"
+import { MetadataExportDocument, MetadataExportRequest } from "./export"
 import { ThumbnailKey } from "./thumbnail"
 import { ReleaseHoldCommand } from "./review"
 import type {
@@ -193,6 +194,16 @@ export type RootCommandIpcRequest = typeof RootCommandIpcRequest.Type
 
 export const LibrarySearchIpcRequest = LibrarySearchRequest
 export type LibrarySearchIpcRequest = typeof LibrarySearchIpcRequest.Type
+
+export const LibraryExportIpcRequest = MetadataExportRequest
+export type LibraryExportIpcRequest = typeof LibraryExportIpcRequest.Type
+
+export const LibraryExportIpcResult = Schema.Struct({
+  status: Schema.Literals(["saved", "canceled"])
+})
+export type LibraryExportIpcResult = typeof LibraryExportIpcResult.Type
+
+export type LibraryExportDocument = typeof MetadataExportDocument.Type
 
 export const ThumbnailGetIpcRequest = Schema.Struct({ key: ThumbnailKey })
 export type ThumbnailGetIpcRequest = typeof ThumbnailGetIpcRequest.Type

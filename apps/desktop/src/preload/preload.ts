@@ -14,7 +14,8 @@ import type {
   RootPreviewRequest,
   RootRegistrationRequest,
   RecoverOpenJournalIpcRequest,
-  LibrarySearchIpcRequest
+  LibrarySearchIpcRequest,
+  LibraryExportIpcRequest
 } from "@henshin/contracts"
 import { IpcChannels } from "@henshin/contracts/channels"
 
@@ -60,6 +61,8 @@ contextBridge.exposeInMainWorld("henshinLibrary", {
     ipcRenderer.on(IpcChannels.openStateChanged, handler)
     return () => ipcRenderer.removeListener(IpcChannels.openStateChanged, handler)
   },
+  exportSelected: (input: LibraryExportIpcRequest) =>
+    ipcRenderer.invoke(IpcChannels.libraryExport, input),
   getThumbnail: (key: string) => ipcRenderer.invoke(IpcChannels.thumbnailGet, { key })
 })
 

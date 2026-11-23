@@ -19,6 +19,7 @@ export const IpcChannels = {
   openBook: "henshin:open-book",
   openBookStatus: "henshin:open-book-status",
   openStateChanged: "henshin:open-state-changed",
+  libraryExport: "henshin:library-export",
   thumbnailGet: "henshin:thumbnail-get",
   taskList: "henshin:task-list",
   reviewCandidates: "henshin:review-candidates",
