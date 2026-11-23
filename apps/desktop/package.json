@@ -6,6 +6,7 @@
   "main": "dist/main.cjs",
   "scripts": {
     "build": "node build.mjs",
+    "package:mac": "node package.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "electron ."
   },
