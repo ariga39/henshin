@@ -441,3 +441,127 @@ test("delivers distinct accepted Library handoffs on the existing native connect
     await rm(clientFixtureB, { recursive: true, force: true })
   }
 })
+
+test("opens through the device mapping after the server loses its root", async () => {
+  test.skip(process.platform === "win32", "the fixture compiler command is scoped to Unix development platforms")
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-device-only-root-db-"))
+  const serverFixture = await mkdtemp(path.join(os.tmpdir(), "henshin-device-only-root-server-"))
+  const clientFixture = await mkdtemp(path.join(os.tmpdir(), "henshin-device-only-root-client-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+  const markerPath = path.join(dbDirectory, "handoffs.log")
+  const sourcePath = path.join(dbDirectory, "fixture-reader.c")
+  const readerPath = path.join(dbDirectory, "fixture-reader")
+  try {
+    const serverBook = await makeBook(serverFixture, "accepted-book")
+    const clientBook = await makeBook(clientFixture, "accepted-book")
+    const observedAt = new Date("2025-02-03T04:05:06.000Z")
+    await utimes(serverBook, observedAt, observedAt)
+    await utimes(clientBook, observedAt, observedAt)
+    const sourceBytes = new Uint8Array(await readFile(path.join(serverBook, "001.png")))
+    await writeFile(sourcePath, fixtureReaderSource)
+    await execFileAsync("cc", ["-O2", "-o", readerPath, sourcePath])
+
+    const { app, window } = await launch(dbPath)
+    await expect(window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await window.getByTestId("root-preview-path").fill(serverFixture)
+    await window.getByTestId("root-preview-submit").click()
+    await window.getByTestId("root-label").fill("Server unavailable release fixture")
+    await window.getByTestId("root-save").click()
+    const savedRoot = window.getByTestId("root-saved").filter({ hasText: "Server unavailable release fixture" })
+    await expect(savedRoot).toBeVisible()
+    await savedRoot.getByTestId("root-saved-preview").click()
+    await window.getByTestId("scan-hold-new-discoveries").uncheck()
+    await window.getByRole("button", { name: "Start manual scan" }).click()
+    await expect(window.getByTestId("library-entry")).toHaveCount(1, { timeout: 30_000 })
+
+    await window.getByTestId("library-setup").click()
+    await app.evaluate(({ dialog }, selected) => {
+      Object.defineProperty(dialog, "showOpenDialog", {
+        configurable: true,
+        value: async () => ({ canceled: false, filePaths: [selected] })
+      })
+    }, readerPath)
+    await window.getByTestId("reader-profile-name").fill("Native fixture reader")
+    await window.getByTestId("reader-select-executable").click()
+    await expect(window.getByTestId("reader-selected-executable")).toHaveText("fixture-reader")
+    await window.getByTestId("reader-format-image-directory").check()
+    await window.getByTestId("reader-profile-arguments").fill(`${markerPath}\n{target}`)
+    await window.getByTestId("reader-profile-save").click()
+    const savedProfiles = window.getByTestId("reader-profile-list")
+    await expect(savedProfiles).toContainText("Native fixture reader")
+    const profile = await window.evaluate(() => (globalThis as unknown as {
+      readonly henshinReaderProfiles: {
+        readonly list: () => Promise<{
+          readonly ok: boolean
+          readonly data?: ReadonlyArray<{ readonly profile_id: string; readonly name: string }>
+        }>
+      }
+    }).henshinReaderProfiles.list())
+    if (!profile.ok || profile.data === undefined) throw new Error("fixture reader profile was not saved")
+    const profileId = profile.data.find((item) => item.name === "Native fixture reader")?.profile_id
+    if (profileId === undefined) throw new Error("expected fixture reader profile")
+
+    await app.evaluate(({ dialog }, selected) => {
+      Object.defineProperty(dialog, "showOpenDialog", {
+        configurable: true,
+        value: async () => ({ canceled: false, filePaths: [selected] })
+      })
+    }, clientFixture)
+    await savedRoot.getByTestId("root-local-mapping").click()
+    await expect(window.getByTestId("local-mapping-preview")).toBeVisible()
+    await savedRoot.getByTestId("local-mapping-activate").click()
+    await expect(savedRoot.getByTestId("local-mapping-effective")).toContainText(clientFixture)
+
+    await window.getByTestId("open-library").click()
+    const acceptedEntry = window.getByTestId("library-entry").filter({ has: window.getByText("accepted-book", { exact: true }) })
+    await expect(acceptedEntry.getByTestId("library-availability")).toContainText("Server availability: present")
+    const entryId = (await acceptedEntry.getByTestId("library-entry-id").textContent())?.trim()
+    if (!entryId) throw new Error("accepted entry id was not rendered")
+
+    await window.getByTestId("library-setup").click()
+    await expect(window.getByTestId("held-scan-controls")).toBeVisible()
+    await expect(window.getByTestId("scan-hold-new-discoveries")).not.toBeChecked()
+    await rm(serverFixture, { recursive: true, force: true })
+    await window.getByTestId("start-held-scan").click()
+    await expect(window.getByTestId("library-scan-error")).toContainText("saved root is unavailable or changed", { timeout: 30_000 })
+    await expect(window.getByTestId("library-entry")).toHaveCount(1)
+    await expect(acceptedEntry.getByTestId("library-availability")).toContainText("Server availability: present")
+
+    await acceptedEntry.getByTestId(/library-entry-details-/).click()
+    await window.getByTestId("library-open-profile").selectOption(profileId)
+    await window.getByTestId("library-open").click()
+    await expect(window.getByTestId("library-open-result")).toHaveText(/^accepted:/)
+    const expectedTarget = await realpath(clientBook)
+    await expect.poll(async () => {
+      try { return await readFile(markerPath, "utf8") } catch { return "" }
+    }).toBe(`${expectedTarget}\n`)
+    expect(new Uint8Array(await readFile(path.join(clientBook, "001.png")))).toEqual(sourceBytes)
+
+    const serverRows = (): Array<{ readonly event_id: string; readonly entry_id: string; readonly relative_path: string; readonly open_count: number }> => {
+      const db = new DatabaseSync(dbPath)
+      try {
+        return db.prepare(`
+          SELECT open_events.event_id, open_events.entry_id, library_entries.relative_path, entry_statistics.open_count
+          FROM open_events
+          JOIN library_entries ON library_entries.entry_id = open_events.entry_id
+          JOIN entry_statistics ON entry_statistics.entry_id = open_events.entry_id
+        `).all() as Array<{ event_id: string; entry_id: string; relative_path: string; open_count: number }>
+      } finally {
+        db.close()
+      }
+    }
+    await expect.poll(() => serverRows()).toEqual([expect.objectContaining({ entry_id: entryId, relative_path: "accepted-book", open_count: 1 })])
+
+    await rm(clientBook, { recursive: true, force: true })
+    await window.getByTestId("library-open").click()
+    await expect(window.getByTestId("library-open-result")).toHaveText(/^failed: .*?(?:missing|unavailable) on this device/)
+    await expect.poll(async () => {
+      try { return await readFile(markerPath, "utf8") } catch { return "" }
+    }).toBe(`${expectedTarget}\n`)
+    expect(serverRows()).toHaveLength(1)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(serverFixture, { recursive: true, force: true })
+    await rm(clientFixture, { recursive: true, force: true })
+  }
+})
