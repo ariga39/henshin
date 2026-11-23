@@ -469,9 +469,6 @@ const requireConnection = (): ConnectionLifecycle => {
 
 const startAndConnectManagedService = async (): Promise<ConnectionStatusView> => {
   if (serverChild === null) {
-    if (process.env.HENSHIN_PROTOTYPE_MANAGED_SERVER_UNAVAILABLE === "1") {
-      throw new Error("managed service is unavailable")
-    }
     const child = await startServerChild(managedServerDbPath)
     serverChild = child
     const previousCachedSession = connection?.getCachedSession() ?? null

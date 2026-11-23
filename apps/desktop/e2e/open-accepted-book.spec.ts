@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
 }
 `
 
-const launch = async (dbPath: string, managedServerAvailable = true): Promise<{ readonly app: ElectronApplication; readonly window: Page }> => {
+const launch = async (dbPath: string): Promise<{ readonly app: ElectronApplication; readonly window: Page }> => {
   const app = await electron.launch({
     executablePath: electronPath as unknown as string,
     args: ["."],
@@ -35,8 +35,7 @@ const launch = async (dbPath: string, managedServerAvailable = true): Promise<{ 
     env: {
       ...process.env,
       HENSHIN_PROTOTYPE_DB: dbPath,
-      HENSHIN_PROTOTYPE_CLIENT_DB: `${dbPath}.client`,
-      HENSHIN_PROTOTYPE_MANAGED_SERVER_UNAVAILABLE: managedServerAvailable ? "0" : "1"
+      HENSHIN_PROTOTYPE_CLIENT_DB: `${dbPath}.client`
     }
   })
   launched.push(app)
@@ -65,11 +64,13 @@ test("opens an accepted Library entry through one native fixture handoff", async
   const readerPath = path.join(dbDirectory, "fixture-reader")
   const collectionPath = serverFixture
   try {
-    await makeBook(serverFixture, "failed-book")
+    const failedBook = await makeBook(serverFixture, "failed-book")
     const acceptedBook = await makeBook(serverFixture, "accepted-book")
     const failedClientBook = await makeBook(clientFixture, "failed-book")
     const acceptedClientBook = await makeBook(clientFixture, "accepted-book")
     const observedAt = new Date("2025-02-03T04:05:06.000Z")
+    await utimes(failedBook, observedAt, observedAt)
+    await utimes(failedClientBook, observedAt, observedAt)
     await utimes(acceptedBook, observedAt, observedAt)
     await utimes(acceptedClientBook, observedAt, observedAt)
     const expectedTarget = await realpath(acceptedClientBook)
@@ -139,6 +140,11 @@ test("opens an accepted Library entry through one native fixture handoff", async
     await expect(window.getByTestId("library-entry")).toHaveCount(2, { timeout: 30_000 })
     const failedEntry = window.getByTestId("library-entry").filter({ has: window.getByText("failed-book", { exact: true }) })
     await failedEntry.getByTestId(/library-entry-details-/).click()
+    await window.getByTestId("library-open-profile").selectOption(explicitProfileId)
+    await window.getByTestId("library-prepare-local").click()
+    await expect(window.getByTestId("library-local-access-result")).toHaveText(/Eligible local copy verified/)
+    const acceptedToPrepare = window.getByTestId("library-entry").filter({ has: window.getByText("accepted-book", { exact: true }) })
+    await acceptedToPrepare.getByTestId(/library-entry-details-/).click()
     await window.getByTestId("library-open-profile").selectOption(explicitProfileId)
     await window.getByTestId("library-prepare-local").click()
     await expect(window.getByTestId("library-local-access-result")).toHaveText(/Eligible local copy verified/)
@@ -259,6 +265,7 @@ test("reopens the cached Library after a cold managed-service outage and deliver
   const markerPath = path.join(dbDirectory, "handoffs.log")
   const sourcePath = path.join(dbDirectory, "fixture-reader.c")
   const readerPath = path.join(dbDirectory, "fixture-reader")
+  let ownerLock: DatabaseSync | null = null
   try {
     const serverBook = await makeBook(serverFixture, "cold-book")
     const clientBook = await makeBook(clientFixture, "cold-book")
@@ -333,7 +340,9 @@ test("reopens the cached Library after a cold managed-service outage and deliver
     }).toBe(`${expectedTarget}\n`)
     await first.app.close()
 
-    const cold = await launch(dbPath, false)
+    ownerLock = new DatabaseSync(path.join(dbDirectory, ".henshin-server-owner.sqlite"))
+    ownerLock.exec("BEGIN IMMEDIATE")
+    const cold = await launch(dbPath)
     await expect(cold.window.getByRole("heading", { name: "Library" })).toBeVisible()
     await expect(cold.window.getByTestId("cached-namespace-picker")).toBeVisible()
     const namespaceOptions = cold.window.getByTestId("cached-namespace-select").locator("option")
@@ -349,11 +358,11 @@ test("reopens the cached Library after a cold managed-service outage and deliver
     await cold.window.getByTestId("cached-namespace-select").selectOption(namespaceId)
     await cold.window.getByTestId("cached-namespace-select-button").click()
     await expect(cold.window.getByTestId("library-cache-status")).toContainText("partial and stale")
-    await expect(cold.window.getByText("cold-book", { exact: true })).toBeVisible()
+    await expect(cold.window.getByTestId("library-entry").filter({ hasText: "cold-book" })).toBeVisible()
 
-    await cold.app.evaluate(() => {
-      process.env.HENSHIN_PROTOTYPE_MANAGED_SERVER_UNAVAILABLE = "0"
-    })
+    ownerLock.exec("ROLLBACK")
+    ownerLock.close()
+    ownerLock = null
     await cold.window.getByTestId("library-reconnect").click()
     await expect(cold.window.getByTestId("library-connection-status")).toHaveText("connected", { timeout: 30_000 })
     await expect(cold.window.getByTestId("library-cache-status")).toHaveCount(0)
@@ -374,6 +383,10 @@ test("reopens the cached Library after a cold managed-service outage and deliver
     expect(serverRows()[0]?.open_count).toBe(1)
     expect(await readFile(markerPath, "utf8")).toBe(`${expectedTarget}\n`)
   } finally {
+    if (ownerLock !== null) {
+      try { ownerLock.exec("ROLLBACK") } catch { /* no active transaction */ }
+      ownerLock.close()
+    }
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(serverFixture, { recursive: true, force: true })
     await rm(clientFixture, { recursive: true, force: true })
