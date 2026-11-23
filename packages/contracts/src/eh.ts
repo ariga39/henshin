@@ -1,5 +1,5 @@
 import { Effect, Schema } from "effect"
-import { Revision, Uuid } from "./ids"
+import { Revision, Text, Uuid } from "./ids"
 import { ReplacementComparison } from "./library"
 import { ThumbnailReference } from "./thumbnail"
 
@@ -34,12 +34,38 @@ export const RemovePersonalTitleCommand = Schema.Struct({
 })
 export type RemovePersonalTitleCommand = typeof RemovePersonalTitleCommand.Type
 
+export const SetEntryNoteCommand = Schema.Struct({
+  type: Schema.Literal("set-note"),
+  text: Text
+})
+export type SetEntryNoteCommand = typeof SetEntryNoteCommand.Type
+
+export const ClearEntryNoteCommand = Schema.Struct({
+  type: Schema.Literal("clear-note")
+})
+export type ClearEntryNoteCommand = typeof ClearEntryNoteCommand.Type
+
+export const EntryNote = Schema.Struct({
+  text: Text,
+  revision: Revision
+})
+export type EntryNote = typeof EntryNote.Type
+
+export const EntryCommand = Schema.Union([
+  BindEntryCommand,
+  SetPersonalTitleCommand,
+  RemovePersonalTitleCommand,
+  SetEntryNoteCommand,
+  ClearEntryNoteCommand
+])
+export type EntryCommand = typeof EntryCommand.Type
+
 export const EntryCommandRequest = Schema.Struct({
   operation_id: Uuid,
   instance_id: Uuid,
   epoch: Uuid,
   expected_decision_version: Revision,
-  command: Schema.Union([BindEntryCommand, SetPersonalTitleCommand, RemovePersonalTitleCommand])
+  command: EntryCommand
 })
 export type EntryCommandRequest = typeof EntryCommandRequest.Type
 
@@ -61,7 +87,10 @@ export const LibraryEntryDetails = Schema.Struct({
   location_revision: Revision,
   cover: Schema.NullOr(ThumbnailReference),
   replacement: Schema.NullOr(ReplacementComparison),
-  binding: Schema.NullOr(EhGalleryBinding)
+  binding: Schema.NullOr(EhGalleryBinding),
+  note: Schema.NullOr(EntryNote).pipe(
+    Schema.withDecodingDefaultType(Effect.succeed(null))
+  )
 })
 export type LibraryEntryDetails = typeof LibraryEntryDetails.Type
 
