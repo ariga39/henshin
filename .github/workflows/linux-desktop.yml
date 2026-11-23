@@ -71,6 +71,7 @@ jobs:
 
       - name: Exercise AppImage through its normal entrypoint
         env:
+          DEBUG: pw:browser
           HENSHIN_DESKTOP_ARTIFACT_DIR: ${{ runner.temp }}/henshin-desktop-output
           HENSHIN_PACKAGED_PROFILE: ${{ runner.temp }}/henshin packaged profile
           HENSHIN_PACKAGED_COLLECTION: ${{ runner.temp }}/henshin packaged collection
