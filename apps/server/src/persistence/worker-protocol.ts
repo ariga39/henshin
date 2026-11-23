@@ -282,9 +282,11 @@ export const NormalPublishOutcome = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("allocation_deferred"),
     missingPaths: Schema.Array(Schema.String),
+    unidentifiedPaths: Schema.Array(Schema.String),
     changedPaths: Schema.Array(Schema.String),
     excludedPaths: Schema.Array(Schema.String),
     missingPathCount: Schema.Natural,
+    unidentifiedPathCount: Schema.Natural,
     changedPathCount: Schema.Natural,
     excludedPathCount: Schema.Natural,
     reviewNeededCount: Schema.Natural

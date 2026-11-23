@@ -1900,6 +1900,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
     }>
     const existingPaths = existingEntries.map((row) => row.relative_path)
     const missingPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && !isExcluded(relativePath))
+    const unidentifiedPaths = existingPaths.filter((relativePath) => observed.has(relativePath) && !observedCandidates.has(relativePath) && !isExcluded(relativePath))
     const excludedPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && isExcluded(relativePath))
     const observedAtMs = Date.now()
     let availabilityChanged = false
@@ -2014,16 +2015,19 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
     if (changed || availabilityChanged) bumpLibraryRevision.run()
     const stagedPaths = (selectStagedPathsForRoot.all(request.rootId) as unknown as ReadonlyArray<{ relative_path: string }>)
       .map((row) => row.relative_path)
-    const allocationDeferred = missingPaths.length > 0 && stagedPaths.length > 0 || changedPaths.length > 0
+    const allocationMissingPaths = [...missingPaths, ...unidentifiedPaths]
+    const allocationDeferred = allocationMissingPaths.length > 0 || changedPaths.length > 0
     if (allocationDeferred) {
-      const reviewPaths = new Set([...stagedPaths, ...missingPaths, ...changedPaths])
+      const reviewPaths = new Set([...stagedPaths, ...allocationMissingPaths, ...changedPaths])
       db.exec("COMMIT")
       return {
         kind: "allocation_deferred",
         missingPaths: missingPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
+        unidentifiedPaths: unidentifiedPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
         changedPaths: changedPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
         excludedPaths: excludedPaths.slice(0, MAX_REPORTED_DEFERRED_PATHS),
         missingPathCount: missingPaths.length,
+        unidentifiedPathCount: unidentifiedPaths.length,
         changedPathCount: changedPaths.length,
         excludedPathCount: excludedPaths.length,
         reviewNeededCount: reviewPaths.size

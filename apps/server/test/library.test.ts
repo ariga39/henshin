@@ -672,7 +672,9 @@ describe("normal library scan", () => {
       await rename(path.join(fixture, "book"), hiddenBook)
       const disappeared = await scan(restarted)
       if (!("task" in disappeared.data)) throw new Error("expected disappearance scan")
-      expect((await waitForTerminal(restarted, disappeared.data.task.task_id)).status).toBe("succeeded")
+      const disappearanceTerminal = await waitForTerminal(restarted, disappeared.data.task.task_id)
+      expect(disappearanceTerminal.status).toBe("completed_with_errors")
+      expect(disappearanceTerminal.readiness_error?.code).toBe("allocation_deferred")
       const missing = await withLibraryClient(restarted, Effect.gen(function*() {
         return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
       }))
@@ -716,7 +718,9 @@ describe("normal library scan", () => {
       await rename(hiddenBook, path.join(fixture, "book"))
       const reappeared = await scan(persisted)
       if (!("task" in reappeared.data)) throw new Error("expected reappearance scan")
-      expect((await waitForTerminal(persisted, reappeared.data.task.task_id)).status).toBe("succeeded")
+      const reappearanceTerminal = await waitForTerminal(persisted, reappeared.data.task.task_id)
+      expect(reappearanceTerminal.status).toBe("completed_with_errors")
+      expect(reappearanceTerminal.readiness_error?.code).toBe("allocation_deferred")
       const restored = await withLibraryClient(persisted, Effect.gen(function*() {
         return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
       }))
