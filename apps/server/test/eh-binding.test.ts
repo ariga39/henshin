@@ -160,6 +160,18 @@ describe("durable EH binding", () => {
     })
     expect(bound.data.entry.decision_version).toBe("2")
 
+    const persistedBindResult = new DatabaseSync(server.dbPath)
+    const storedBind = persistedBindResult.prepare(
+      "SELECT result FROM entry_operations WHERE epoch = ? AND operation_id = ?"
+    ).get(server.epoch, operationId) as { result: string } | undefined
+    if (storedBind === undefined) throw new Error("expected persisted bind result")
+    const legacyBindResult = JSON.parse(storedBind.result) as { entry: { title_override?: unknown } }
+    delete legacyBindResult.entry.title_override
+    persistedBindResult.prepare(
+      "UPDATE entry_operations SET result = ? WHERE epoch = ? AND operation_id = ?"
+    ).run(JSON.stringify(legacyBindResult), server.epoch, operationId)
+    persistedBindResult.close()
+
     const replay = await withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).entryCommand({
         params: { id: indexed.entry_id },
@@ -177,6 +189,106 @@ describe("durable EH binding", () => {
     expect(stale._tag).toBe("RevisionConflict")
     if (stale._tag === "RevisionConflict") expect(stale.details.current_revision).toBe("2")
 
+    const statsBeforeDb = new DatabaseSync(server.dbPath)
+    const readingStatsBefore = statsBeforeDb.prepare("SELECT entry_id, open_count FROM entry_statistics WHERE entry_id = ?").get(indexed.entry_id)
+    statsBeforeDb.close()
+    const identity = {
+      relative_path: bound.data.entry.relative_path,
+      source_path: bound.data.entry.source_path,
+      content_version: bound.data.entry.content_version,
+      location_revision: bound.data.entry.location_revision
+    }
+    const setTitlePayload = {
+      operation_id: randomUUID(),
+      instance_id: server.instanceId,
+      epoch: server.epoch,
+      expected_decision_version: "2",
+      command: { type: "set-personal-title" as const, title: "Personal title" }
+    }
+    const titled = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: setTitlePayload
+      })
+    }))
+    expect(titled.data.entry.title).toBe("Personal title")
+    expect(titled.data.entry.title_override).toBe("Personal title")
+    expect(titled.data.entry.decision_version).toBe("3")
+    expect(titled.data.entry).toMatchObject(identity)
+
+    const titleReplay = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: setTitlePayload
+      })
+    }))
+    expect(titleReplay.data).toEqual(titled.data)
+
+    const emptyTitle = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: {
+          ...setTitlePayload,
+          operation_id: randomUUID(),
+          expected_decision_version: "3",
+          command: { type: "set-personal-title" as const, title: "" }
+        }
+      })
+    }))
+    expect(emptyTitle.data.entry.title).toBe("")
+    expect(emptyTitle.data.entry.title_override).toBe("")
+    expect(emptyTitle.data.entry.decision_version).toBe("4")
+    expect(emptyTitle.data.entry).toMatchObject(identity)
+    const emptyPage = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 10 } })
+    }))
+    expect(emptyPage.data.entries.find((entry) => entry.entry_id === indexed.entry_id)).toMatchObject({
+      title: "",
+      title_override: ""
+    })
+
+    const removedTitle = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: {
+          ...setTitlePayload,
+          operation_id: randomUUID(),
+          expected_decision_version: "4",
+          command: { type: "remove-personal-title" as const }
+        }
+      })
+    }))
+    expect(removedTitle.data.entry.title).toBe(bound.data.entry.title)
+    expect(removedTitle.data.entry.title_override).toBeNull()
+    expect(removedTitle.data.entry.decision_version).toBe("5")
+    expect(removedTitle.data.entry).toMatchObject(identity)
+
+    const staleTitle = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: {
+          ...setTitlePayload,
+          operation_id: randomUUID(),
+          expected_decision_version: "4",
+          command: { type: "set-personal-title" as const, title: "stale" }
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(staleTitle._tag).toBe("RevisionConflict")
+    if (staleTitle._tag === "RevisionConflict") expect(staleTitle.details.current_revision).toBe("5")
+
+    const crossCommandCollision = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: {
+          ...setTitlePayload,
+          expected_decision_version: "5",
+          command: { type: "set-personal-title" as const, title: "collision" }
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(crossCommandCollision._tag).toBe("OperationConflict")
+
     const db = new DatabaseSync(server.dbPath)
     expect(db.prepare("SELECT source, gid, token, preferred_domain FROM galleries").all()).toEqual([{
       source: "EH",
@@ -185,6 +297,8 @@ describe("durable EH binding", () => {
       preferred_domain: "exhentai.org"
     }])
     expect(db.prepare("SELECT entry_id FROM bindings").get()).toEqual({ entry_id: indexed.entry_id })
+    expect(db.prepare("SELECT entry_id, open_count FROM entry_statistics WHERE entry_id = ?").get(indexed.entry_id)).toEqual(readingStatsBefore)
+    expect(db.prepare("SELECT entry_id FROM entry_overrides WHERE entry_id = ?").get(indexed.entry_id)).toBeUndefined()
     db.close()
 
     await server.stop()
@@ -194,7 +308,10 @@ describe("durable EH binding", () => {
       return yield* (yield* LibraryHttpClient).entry({ params: { id: indexed.entry_id } })
     }))
     expect(afterRestart.data.binding).toEqual(bound.data.entry.binding)
-    expect(afterRestart.data.decision_version).toBe("2")
+    expect(afterRestart.data.title).toBe(bound.data.entry.title)
+    expect(afterRestart.data.title_override).toBeNull()
+    expect(afterRestart.data.decision_version).toBe("5")
+    expect(afterRestart.data).toMatchObject(identity)
   })
 
   it("expires retained bind results, isolates preferred domains, and reports conflicts", async () => {
@@ -284,5 +401,81 @@ describe("durable EH binding", () => {
       }).pipe(Effect.flip)
     }))
     expect(locatorConflict._tag).toBe("InvalidRequest")
+  })
+
+  it("migrates legacy personal title search data", async () => {
+    const server = await start()
+    const entries = await indexEntries(server)
+    const entry = entries[0]
+    if (entry === undefined) throw new Error("expected an indexed entry")
+
+    await server.stop()
+    const legacy = new DatabaseSync(server.dbPath)
+    legacy.exec("DROP TABLE entry_overrides")
+    legacy.exec(`
+      CREATE TABLE entry_overrides (
+        entry_id TEXT PRIMARY KEY REFERENCES library_entries(entry_id) ON DELETE CASCADE,
+        title_present INTEGER NOT NULL CHECK (title_present IN (0, 1)),
+        title TEXT,
+        CHECK ((title_present = 0 AND title IS NULL) OR (title_present = 1 AND title IS NOT NULL))
+      )
+    `)
+    legacy.prepare("INSERT INTO entry_overrides(entry_id, title_present, title) VALUES(?, 1, ?)")
+      .run(entry.entry_id, "Legacy Straße")
+    legacy.close()
+
+    const migrated = await startServer(server.dbPath)
+    servers.push(migrated)
+    const columns = new DatabaseSync(server.dbPath)
+    expect(columns.prepare("PRAGMA table_info(entry_overrides)").all()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "title_search" })])
+    )
+    expect(columns.prepare("SELECT title_search FROM entry_overrides WHERE entry_id = ?").get(entry.entry_id))
+      .toEqual({ title_search: "legacy straße" })
+    columns.close()
+
+    const search = await withLibraryClient(migrated, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "legacy straße" } })
+    }))
+    expect(search.data.entries).toEqual([
+      expect.objectContaining({ entry_id: entry.entry_id, title: "Legacy Straße", title_override: "Legacy Straße", match_fields: ["title"] })
+    ])
+  })
+
+  it("repairs a personal title search backfill left after the column was added", async () => {
+    const server = await start()
+    const entries = await indexEntries(server)
+    const entry = entries[0]
+    if (entry === undefined) throw new Error("expected an indexed entry")
+
+    await server.stop()
+    const interrupted = new DatabaseSync(server.dbPath)
+    interrupted.exec("DROP TABLE entry_overrides")
+    interrupted.exec(`
+      CREATE TABLE entry_overrides (
+        entry_id TEXT PRIMARY KEY REFERENCES library_entries(entry_id) ON DELETE CASCADE,
+        title_present INTEGER NOT NULL CHECK (title_present IN (0, 1)),
+        title TEXT,
+        CHECK ((title_present = 0 AND title IS NULL) OR (title_present = 1 AND title IS NOT NULL))
+      )
+    `)
+    interrupted.prepare("INSERT INTO entry_overrides(entry_id, title_present, title) VALUES(?, 1, ?)")
+      .run(entry.entry_id, "Interrupted Title")
+    interrupted.exec("ALTER TABLE entry_overrides ADD COLUMN title_search TEXT")
+    interrupted.close()
+
+    const repaired = await startServer(server.dbPath)
+    servers.push(repaired)
+    const columns = new DatabaseSync(server.dbPath)
+    expect(columns.prepare("SELECT title_search FROM entry_overrides WHERE entry_id = ?").get(entry.entry_id))
+      .toEqual({ title_search: "interrupted title" })
+    columns.close()
+
+    const search = await withLibraryClient(repaired, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "interrupted title" } })
+    }))
+    expect(search.data.entries).toEqual([
+      expect.objectContaining({ entry_id: entry.entry_id, title: "Interrupted Title", title_override: "Interrupted Title", match_fields: ["title"] })
+    ])
   })
 })
