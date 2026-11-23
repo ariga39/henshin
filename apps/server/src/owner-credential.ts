@@ -1,10 +1,46 @@
+import { execFile } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
-import { chmod, lstat } from "node:fs/promises"
+import { chmod, lstat, rm } from "node:fs/promises"
 import path from "node:path"
+import { promisify } from "node:util"
 import { DatabaseSync } from "node:sqlite"
 
 const OWNER_AUTH_DATABASE_NAME = ".henshin-server-auth.sqlite"
 const OWNER_TOKEN_BYTES = 32
+const execFileAsync = promisify(execFile)
+
+const WINDOWS_PROTECT_AUTH_FILE_SCRIPT = `$ErrorActionPreference = 'Stop'
+$path = $env:HENSHIN_AUTH_PATH
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl = New-Object System.Security.AccessControl.FileSecurity
+$acl.SetAccessRuleProtection($true, $false)
+$acl.SetOwner($currentSid)
+$rules = @(
+  $currentSid
+  [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+  [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+)
+foreach ($sid in $rules) {
+  $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+    $sid,
+    [System.Security.AccessControl.FileSystemRights]::FullControl,
+    [System.Security.AccessControl.AccessControlType]::Allow
+  ))
+}
+if ($env:HENSHIN_AUTH_CREATE -eq '1') {
+  $stream = [System.IO.FileStream]::new(
+    $path,
+    [System.IO.FileMode]::CreateNew,
+    [System.Security.AccessControl.FileSystemRights]::FullControl,
+    [System.IO.FileShare]::ReadWrite,
+    4096,
+    [System.IO.FileOptions]::None,
+    $acl
+  )
+  $stream.Dispose()
+} else {
+  [System.IO.File]::SetAccessControl($path, $acl)
+}`
 
 export class OwnerCredentialError extends Error {
   readonly name = "OwnerCredentialError"
@@ -29,9 +65,36 @@ const verifyPath = async (filePath: string, create: boolean): Promise<void> => {
     if (!create) throw new OwnerCredentialError("owner credential is not initialized; run --initialize-owner")
   }
 }
+
+const protectWindowsAuthFile = async (filePath: string, create: boolean): Promise<void> => {
+  if (process.platform !== "win32") return
+
+  let createFile = false
+  try {
+    try {
+      await lstat(filePath)
+    } catch (error) {
+      if (!isMissingPath(error) || !create) throw error
+      createFile = true
+    }
+    await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_PROTECT_AUTH_FILE_SCRIPT],
+      {
+        windowsHide: true,
+        env: { ...process.env, HENSHIN_AUTH_PATH: filePath, HENSHIN_AUTH_CREATE: createFile ? "1" : "0" }
+      }
+    )
+  } catch (error) {
+    if (createFile) await rm(filePath, { force: true })
+    throw error
+  }
+}
+
 const openAuthDatabase = async (dbPath: string, create: boolean): Promise<DatabaseSync> => {
   const filePath = ownerCredentialDatabasePath(dbPath)
   await verifyPath(filePath, create)
+  await protectWindowsAuthFile(filePath, create)
   const database = new DatabaseSync(filePath, { timeout: 0 })
   try {
     await chmod(filePath, 0o600)

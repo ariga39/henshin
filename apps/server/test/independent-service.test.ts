@@ -170,6 +170,8 @@ interface WindowsAclRule {
 interface WindowsAclSnapshot {
   readonly ownerSid: string
   readonly currentSid: string
+  readonly currentGroupSids: ReadonlyArray<string>
+  readonly accessRulesProtected: boolean
   readonly rules: ReadonlyArray<WindowsAclRule>
 }
 
@@ -177,7 +179,11 @@ const WINDOWS_ACL_SCRIPT = `$ErrorActionPreference = 'Stop'
 $sidType = [System.Security.Principal.SecurityIdentifier]
 $acl = [System.IO.File]::GetAccessControl($env:HENSHIN_AUTH_PATH)
 $ownerSid = $acl.GetOwner($sidType).Value
-$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$currentSid = $identity.User.Value
+$currentGroupSids = @($identity.Groups | ForEach-Object {
+  $_.Translate($sidType).Value
+})
 $rules = @($acl.GetAccessRules($true, $true, $sidType) | ForEach-Object {
   [pscustomobject]@{
     sid = $_.IdentityReference.Value
@@ -185,7 +191,13 @@ $rules = @($acl.GetAccessRules($true, $true, $sidType) | ForEach-Object {
     rightsValue = [int64]$_.FileSystemRights
   }
 })
-[pscustomobject]@{ ownerSid = $ownerSid; currentSid = $currentSid; rules = $rules } |
+[pscustomobject]@{
+  ownerSid = $ownerSid
+  currentSid = $currentSid
+  currentGroupSids = $currentGroupSids
+  accessRulesProtected = $acl.AreAccessRulesProtected
+  rules = $rules
+} |
   ConvertTo-Json -Compress -Depth 5`
 
 const expectProtectedOwnerState = async (authPath: string): Promise<void> => {
@@ -202,26 +214,37 @@ const expectProtectedOwnerState = async (authPath: string): Promise<void> => {
   const snapshot = JSON.parse(stdout) as WindowsAclSnapshot
   const readData = 1
   const writeData = 2
-  const hasReadWriteAllow = (sid: string): boolean =>
+  const currentPrincipalSids = new Set([snapshot.currentSid, ...snapshot.currentGroupSids])
+  const hasReadWriteAllow = (sids: ReadonlySet<string>): boolean =>
     snapshot.rules.some(
       (rule) =>
-        rule.sid === sid &&
+        sids.has(rule.sid) &&
         rule.type === "Allow" &&
         (rule.rightsValue & readData) !== 0 &&
         (rule.rightsValue & writeData) !== 0
     )
 
-  expect(hasReadWriteAllow(snapshot.ownerSid)).toBe(true)
-  expect(hasReadWriteAllow(snapshot.currentSid)).toBe(true)
+  const principalDiagnostic = snapshot.rules
+    .filter((rule) => currentPrincipalSids.has(rule.sid) || rule.sid === snapshot.ownerSid)
+    .map(({ sid, type, rightsValue }) => ({ sid, type, rightsValue }))
+  expect(
+    snapshot.accessRulesProtected,
+    `Windows auth DACL was not protected: ${JSON.stringify(principalDiagnostic)}`
+  ).toBe(true)
+  expect(
+    hasReadWriteAllow(currentPrincipalSids),
+    `Windows auth DACL has no effective read/write Allow ACE: ${JSON.stringify(principalDiagnostic)}`
+  ).toBe(true)
 
   const broadGroupSids = new Set([
     "S-1-1-0", // Everyone
     "S-1-5-11", // Authenticated Users
     "S-1-5-32-545" // BUILTIN\\Users
   ])
-  expect(
-    snapshot.rules.filter((rule) => rule.type === "Allow" && broadGroupSids.has(rule.sid))
-  ).toEqual([])
+  const broadAllows = snapshot.rules
+    .filter((rule) => rule.type === "Allow" && broadGroupSids.has(rule.sid))
+    .map(({ sid, rightsValue }) => ({ sid, rightsValue }))
+  expect(broadAllows, `Windows auth DACL broad Allow ACEs: ${JSON.stringify(broadAllows)}`).toEqual([])
 }
 
 const expectUsageFailure = async (args: ReadonlyArray<string>): Promise<void> => {
