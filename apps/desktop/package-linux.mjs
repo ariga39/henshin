@@ -23,6 +23,30 @@ const run = (executable, argumentsList, options = {}) => {
   execFileSync(executable, argumentsList, { cwd: repositoryDirectory, stdio: "inherit", ...options })
 }
 
+const appRun = `#!/bin/bash
+set -u
+
+APPDIR="\${APPDIR:-\$(CDPATH= cd -- "\$(dirname -- "\$(readlink -f -- "\$0")")" && pwd)}"
+export APPDIR
+export PATH="\$APPDIR:\$APPDIR/usr/bin\${PATH:+:\$PATH}"
+export LD_LIBRARY_PATH="\$APPDIR/usr/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+export XDG_DATA_DIRS="\$APPDIR/usr/share\${XDG_DATA_DIRS:+:\$XDG_DATA_DIRS}"
+export GSETTINGS_SCHEMA_DIR="\$APPDIR/usr/share/glib-2.0/schemas\${GSETTINGS_SCHEMA_DIR:+:\$GSETTINGS_SCHEMA_DIR}"
+
+CHROME_DEVEL_SANDBOX="\${CHROME_DEVEL_SANDBOX:-\$APPDIR/chrome-sandbox}"
+export CHROME_DEVEL_SANDBOX
+if [ ! -f "\$CHROME_DEVEL_SANDBOX" ] || [ ! -x "\$CHROME_DEVEL_SANDBOX" ]; then
+  echo "Henshin cannot start: the Electron sandbox helper is missing or not executable: \$CHROME_DEVEL_SANDBOX" >&2
+  exit 1
+fi
+if [ "\$(stat -c '%u' -- "\$CHROME_DEVEL_SANDBOX" 2>/dev/null)" != 0 ] || [ "\$(stat -c '%a' -- "\$CHROME_DEVEL_SANDBOX" 2>/dev/null)" != 4755 ]; then
+  echo "Henshin cannot start: the Electron sandbox helper must be root-owned with mode 04755: \$CHROME_DEVEL_SANDBOX" >&2
+  exit 1
+fi
+
+exec "\$APPDIR/henshin" "\$@"
+`
+
 const emptyDirectory = async (directory) => {
   await mkdir(directory, { recursive: true })
   for (const entry of await readdir(directory)) {
@@ -80,6 +104,8 @@ try {
         target: [{ target: "AppImage", arch: ["arm64"] }]
       },
       afterPack: async (context) => {
+        await writeFile(path.join(context.appOutDir, "AppRun"), appRun, { mode: 0o755 })
+        await chmod(path.join(context.appOutDir, "AppRun"), 0o755)
         await chmod(path.join(context.appOutDir, "chrome-sandbox"), 0o4755)
       }
     }
