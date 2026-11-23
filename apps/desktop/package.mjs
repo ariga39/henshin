@@ -5,6 +5,8 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
+if (process.platform !== "darwin") throw new Error("Build the macOS desktop package on a Mac.")
+
 const desktopDirectory = path.dirname(fileURLToPath(import.meta.url))
 const repositoryDirectory = path.resolve(desktopDirectory, "../..")
 const desktopPackage = JSON.parse(await readFile(path.join(desktopDirectory, "package.json"), "utf8"))

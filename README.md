@@ -24,6 +24,22 @@ The bounded native source-boundary precursor is recorded in
 [docs/validation/native-source-boundaries-prototype.md](docs/validation/native-source-boundaries-prototype.md);
 it is not a G3 completion claim.
 
+## Build and install the macOS desktop development package
+
+On an Apple Silicon Mac with Node.js 24.19.0 and the repository's pinned pnpm,
+run these commands from the checkout.
+
+```sh
+pnpm install --frozen-lockfile
+pnpm --filter @henshin/desktop package:mac
+```
+
+Extract the tarball from `dist/desktop/`, move `Henshin.app` to your
+Applications folder, and launch it. The app includes its managed server.
+Choose a collection directory, confirm the preview, and start a scan to
+populate Library. The development build uses an ad hoc signature. Public
+distribution requires Developer ID signing and notarization.
+
 ## Build the standalone server archive
 
 The repository build produces a platform-specific archive under
