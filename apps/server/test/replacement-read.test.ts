@@ -8,6 +8,8 @@ import { BlobWriter, Uint8ArrayReader, ZipWriter } from "@zip.js/zip.js"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   LibraryHttpClient,
+  OpenEventHttpClient,
+  ReviewHttpClient,
   ServerHttpClient,
   TaskHttpClient,
   type LibraryEntryPage,
@@ -25,6 +27,12 @@ const withServerClient = <A, E>(server: RunningServer, program: Effect.Effect<A,
 
 const withLibraryClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, LibraryHttpClient>): Promise<A> =>
   Effect.runPromise(Effect.provide(program, LibraryHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
+
+const withReviewClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, ReviewHttpClient>): Promise<A> =>
+  Effect.runPromise(Effect.provide(program, ReviewHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
+
+const withOpenEventClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, OpenEventHttpClient>): Promise<A> =>
+  Effect.runPromise(Effect.provide(program, OpenEventHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
 
 const withTaskClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, TaskHttpClient>): Promise<A> =>
   Effect.runPromise(Effect.provide(program, TaskHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
@@ -519,5 +527,129 @@ describe("replacement comparison read model", () => {
       analysis_status: "error"
     })
     expect(entry?.replacement?.candidate_observation.analysis_error).toMatchObject({ code: "structural-corruption" })
+  })
+
+  it("keeps the original entry after fresh validation and replays after the source changes", async () => {
+    const { server, fixture, root } = await makeScenario(
+      "henshin-replacement-keep-",
+      "Keep replacement",
+      async (fixture) => {
+        await mkdir(path.join(fixture, "book"))
+        await writeFile(path.join(fixture, "book", "001.jpg"), "Book A")
+      }
+    )
+    const book = path.join(fixture, "book")
+    const page = path.join(book, "001.jpg")
+
+    expect((await scan(server, root)).status).toBe("succeeded")
+    const accepted = await listLibrary(server)
+    const initial = accepted.entries[0]
+    if (initial === undefined) throw new Error("expected accepted entry")
+    const resolution = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: initial.entry_id }, query: {} })
+    }))
+    const historyEvent = {
+      event_id: randomUUID(),
+      instance_id: server.instanceId,
+      entry_id: initial.entry_id,
+      device_id: randomUUID(),
+      observed_location_revision: initial.location_revision,
+      observed_content_version: initial.content_version,
+      occurred_at_ms: 1_700_000_000_000
+    }
+    const history = await withOpenEventClient(server, Effect.gen(function*() {
+      return yield* (yield* OpenEventHttpClient).batch({
+        payload: { epoch: server.epoch, events: [historyEvent] }
+      })
+    }))
+    expect(history.data.results[0]?.outcome).toBe("accepted")
+
+    await writeFile(page, "Book B")
+    await writeFile(path.join(book, "002.jpg"), "Book B second page")
+    expect((await scan(server, root)).readiness_error?.code).toBe("allocation_deferred")
+    const candidate = (await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).candidates()
+    }))).data[0]
+    if (candidate === undefined) throw new Error("expected replacement candidate")
+
+    const command = {
+      root_id: root.root_id,
+      instance_id: server.instanceId,
+      epoch: server.epoch,
+      expected_candidate_version: candidate.candidate_version,
+      expected_mapping_revision: root.mapping_revision,
+      expected_policy_revision: root.policy_revision,
+      expected_decision_version: resolution.data.decision_version,
+      expected_location_revision: resolution.data.location_revision,
+      command: { type: "resolve-replacement" as const, entry_id: initial.entry_id, decision: "keep" as const }
+    }
+
+    await writeFile(page, "Book C")
+    const stale = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).command({
+        params: { id: candidate.candidate_id },
+        payload: { ...command, operation_id: randomUUID() }
+      }).pipe(Effect.flip)
+    }))
+    expect(stale._tag).toBe("RevisionConflict")
+    expect(stale.message).toContain("source changed since Review")
+    expect((await listLibrary(server)).entries[0]).toMatchObject({
+      entry_id: initial.entry_id,
+      state: "replacement-pending",
+      content_version: initial.content_version
+    })
+
+    await writeFile(page, "Book B")
+    expect((await scan(server, root)).readiness_error?.code).toBe("allocation_deferred")
+    const refreshedCandidate = (await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).candidates()
+    }))).data.find((item) => item.candidate_id === candidate.candidate_id)
+    if (refreshedCandidate === undefined) throw new Error("expected refreshed replacement candidate")
+    const operationId = randomUUID()
+    const resolved = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).command({
+        params: { id: refreshedCandidate.candidate_id },
+        payload: { ...command, operation_id: operationId, expected_candidate_version: refreshedCandidate.candidate_version }
+      })
+    }))
+    expect(resolved.data.resolution).toMatchObject({
+      entry: { entry_id: initial.entry_id, state: "accepted", content_version: "2" },
+      detached_entry_id: null
+    })
+    const usable = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: initial.entry_id }, query: {} })
+    }))
+    expect(usable.data).toMatchObject({
+      entry_id: initial.entry_id,
+      status: "usable",
+      content_version: "2"
+    })
+    const historyReplay = await withOpenEventClient(server, Effect.gen(function*() {
+      return yield* (yield* OpenEventHttpClient).batch({
+        payload: { epoch: server.epoch, events: [historyEvent] }
+      })
+    }))
+    expect(historyReplay.data.results[0]?.outcome).toBe("already_accepted")
+
+    await writeFile(page, "Book D")
+    const replay = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).command({
+        params: { id: refreshedCandidate.candidate_id },
+        payload: { ...command, operation_id: operationId, expected_candidate_version: refreshedCandidate.candidate_version }
+      })
+    }))
+    expect(replay.data.resolution).toEqual(resolved.data.resolution)
+
+    const secondScan = await scan(server, root)
+    expect(secondScan.readiness_error?.code).toBe("allocation_deferred")
+    const secondListed = await listLibrary(server)
+    expect(secondListed.entries[0]).toMatchObject({
+      entry_id: initial.entry_id,
+      state: "replacement-pending",
+      replacement: {
+        old_observation: { page_count: 2, entry_count: 2 },
+        candidate_observation: { page_count: 2, entry_count: 2 }
+      }
+    })
   })
 })

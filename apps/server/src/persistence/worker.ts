@@ -710,7 +710,7 @@ const selectStagedById = db.prepare(
 )
 selectStagedById.setReadBigInts(true)
 const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
-const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path, state FROM library_entries WHERE root_id = ? AND relative_path = ? AND state IN ('accepted', 'replacement-pending')")
+const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path, state, decision_version, location_revision, content_version, page_count FROM library_entries WHERE root_id = ? AND relative_path = ? AND state IN ('accepted', 'replacement-pending')")
 const selectEntryResolution = db.prepare(
   "SELECT entry_id, root_id, relative_path, kind, state, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
 )
@@ -718,6 +718,8 @@ selectEntryResolution.setReadBigInts(true)
 const selectStagedForResolution = db.prepare(
   "SELECT kind, analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
+const selectEntryForResolution = db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, decision_version, content_version, location_revision, accepted_observation_json, NULL AS candidate_id, NULL AS candidate_version, NULL AS candidate_kind, NULL AS candidate_analysis_status, NULL AS candidate_observation_json FROM library_entries WHERE entry_id = ? AND root_id = ?")
+selectEntryForResolution.setReadBigInts(true)
 const selectResolutionSiblingClaims = db.prepare(
   "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
 )
@@ -748,13 +750,16 @@ const insertEntry = db.prepare(
 const markEntryPending = db.prepare(
   "UPDATE library_entries SET state = 'replacement-pending', updated_at_ms = ? WHERE entry_id = ? AND state = 'accepted'"
 )
+const acceptReplacement = db.prepare(
+  "UPDATE library_entries SET kind = ?, title = ?, page_count = ?, state = 'accepted', decision_version = decision_version + 1, content_version = content_version + 1, manifest_json = ?, accepted_observation_json = ?, updated_at_ms = ? WHERE entry_id = ? AND state = 'replacement-pending'"
+)
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
 const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
 const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
 const selectLibraryEntries = (cursor: string | null, limit: number) => {
   const statement = db.prepare(cursor === null
     ? `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
-         e.page_count, e.state, e.content_version, e.location_revision,
+         e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
          CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
          s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
          s.candidate_observation_json
@@ -763,7 +768,7 @@ const selectLibraryEntries = (cursor: string | null, limit: number) => {
        WHERE e.state IN ('accepted', 'replacement-pending')
        ORDER BY e.entry_id ASC LIMIT ?`
     : `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
-         e.page_count, e.state, e.content_version, e.location_revision,
+         e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
          CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
          s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
          s.candidate_observation_json
@@ -1478,6 +1483,178 @@ const releaseHeldDiscovery = (
   }
 }
 
+type EntryResolutionRequest = Extract<WorkerRequest, { op: "lookupEntryResolution" | "resolveReplacement" }>
+
+const replacementResolutionPayload = (request: EntryResolutionRequest): string => JSON.stringify({
+  command: { type: "resolve-replacement", decision: request.decision, entry_id: request.entryId },
+  candidate_id: request.candidateId,
+  root_id: request.rootId,
+  expected_candidate_version: request.expectedCandidateVersion,
+  expected_decision_version: request.expectedDecisionVersion,
+  expected_location_revision: request.expectedLocationRevision,
+  expected_mapping_revision: request.expectedMappingRevision,
+  expected_policy_revision: request.expectedPolicyRevision
+})
+
+const lookupEntryResolution = (
+  request: Extract<WorkerRequest, { op: "lookupEntryResolution" }>
+): import("./worker-protocol").EntryResolutionLookupOutcome => {
+  const existing = selectReviewOperation.get(request.epoch, request.operationId) as
+    | { payload: string; result: string; created_at_ms: number }
+    | undefined
+  if (existing === undefined) return { kind: "not_found" }
+  if (existing.payload !== replacementResolutionPayload(request)) return { kind: "operation_conflict" }
+  if (existing.created_at_ms <= Date.now() - RESULT_RETENTION_MS) return { kind: "operation_expired" }
+  return { kind: "replayed", ...JSON.parse(existing.result) }
+}
+
+const resolveReplacement = (
+  request: Extract<WorkerRequest, { op: "resolveReplacement" }>
+): import("./worker-protocol").ResolveReplacementOutcome => {
+  const payload = replacementResolutionPayload(request)
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const now = Date.now()
+    const existing = selectReviewOperation.get(request.epoch, request.operationId) as
+      | { payload: string; result: string; created_at_ms: number }
+      | undefined
+    if (existing !== undefined) {
+      if (existing.payload !== payload) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_conflict" }
+      }
+      if (existing.created_at_ms <= now - RESULT_RETENTION_MS) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_expired" }
+      }
+      const result = JSON.parse(existing.result) as {
+        decision: "keep"
+        candidate: import("./worker-protocol").StagedDiscoveryRow
+        entry: import("./worker-protocol").LibraryEntryRow
+        detachedEntryId: string | null
+      }
+      db.exec("COMMIT")
+      return { kind: "replayed", ...result }
+    }
+
+    const root = rootById(request.rootId)
+    if (root === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "root_not_found" }
+    }
+    if (root.mappingRevision !== request.expectedMappingRevision) {
+      db.exec("ROLLBACK")
+      return { kind: "mapping_revision_conflict", currentMappingRevision: root.mappingRevision }
+    }
+    if (root.policyRevision !== request.expectedPolicyRevision) {
+      db.exec("ROLLBACK")
+      return { kind: "policy_revision_conflict", currentPolicyRevision: root.policyRevision }
+    }
+
+    const candidate = selectStagedById.get(request.candidateId, request.rootId) as
+      | Parameters<typeof stagedDiscoveryRow>[0]
+      | undefined
+    if (candidate === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "candidate_not_found" }
+    }
+    const currentCandidateVersion = Number(candidate.candidate_version)
+    if (currentCandidateVersion !== request.expectedCandidateVersion) {
+      db.exec("ROLLBACK")
+      return { kind: "candidate_version_conflict", currentCandidateVersion }
+    }
+    const entry = selectEntryForResolution.get(request.entryId, request.rootId) as {
+      entry_id: string
+      library_id: string
+      root_id: string
+      relative_path: string
+      source_path: string
+      kind: "archive" | "image-directory"
+      title: string
+      page_count: bigint
+      state: "accepted" | "replacement-pending"
+      decision_version: bigint
+      content_version: bigint
+      location_revision: bigint
+      accepted_observation_json: string
+    } | undefined
+    if (entry === undefined || entry.relative_path !== candidate.relative_path) {
+      db.exec("ROLLBACK")
+      return { kind: "entry_not_found" }
+    }
+    if (entry.state !== "replacement-pending") {
+      db.exec("ROLLBACK")
+      return { kind: "entry_not_pending" }
+    }
+    if (
+      entry.decision_version.toString() !== request.expectedDecisionVersion ||
+      entry.location_revision.toString() !== request.expectedLocationRevision
+    ) {
+      db.exec("ROLLBACK")
+      return {
+        kind: "entry_revision_conflict",
+        currentDecisionVersion: entry.decision_version.toString(),
+        currentLocationRevision: entry.location_revision.toString()
+      }
+    }
+    if (candidate.analysis_status !== "ready" || candidate.manifest_json === null) {
+      db.exec("ROLLBACK")
+      return { kind: "candidate_not_ready" }
+    }
+    if (request.freshManifestJson === null || !manifestsEquivalent(candidate.manifest_json, request.freshManifestJson)) {
+      db.exec("ROLLBACK")
+      return { kind: "fresh_observation_conflict" }
+    }
+    const manifest = JSON.parse(candidate.manifest_json) as { pages?: ReadonlyArray<unknown> }
+    const pageCount = Array.isArray(manifest.pages) ? manifest.pages.length : 0
+    if (pageCount === 0) {
+      db.exec("ROLLBACK")
+      return { kind: "candidate_not_ready" }
+    }
+
+    compactReviewOperations.run(request.epoch, now - RESULT_RETENTION_MS, COMPACTION_BATCH)
+    if (Number(countReviewOperations.get()?.count) >= MAX_POLICY_OPERATION_RESULTS) {
+      db.exec("COMMIT")
+      return { kind: "storage_full" }
+    }
+
+    const updated = acceptReplacement.run(
+      candidate.kind,
+      titleForCandidate(candidate.relative_path, candidate.kind),
+      BigInt(pageCount),
+      candidate.manifest_json,
+      JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind)),
+      now,
+      entry.entry_id
+    )
+    if (Number(updated.changes) !== 1) throw new Error("replacement entry is no longer pending")
+    const candidateView = stagedDiscoveryRow(candidate)
+    deleteStaged.run(candidate.candidate_id)
+    bumpLibraryRevision.run()
+    const resolved = selectEntryForResolution.get(entry.entry_id, request.rootId) as Parameters<typeof entryRow>[0]
+    if (resolved === undefined) throw new Error("resolved entry is missing")
+    const result = {
+      decision: request.decision,
+      candidate: candidateView,
+      entry: entryRow(resolved),
+      detachedEntryId: null
+    }
+    insertReviewOperation.run(
+      request.epoch,
+      request.operationId,
+      request.candidateId,
+      payload,
+      JSON.stringify(result),
+      now
+    )
+    db.exec("COMMIT")
+    return { kind: "committed", ...result }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
 const entryRow = (row: {
   entry_id: string
   library_id: string
@@ -1488,6 +1665,7 @@ const entryRow = (row: {
   title: string
   page_count: bigint
   state: "accepted" | "replacement-pending"
+  decision_version: bigint
   content_version: bigint
   location_revision: bigint
   accepted_observation_json: string | null
@@ -1710,6 +1888,7 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
     title: string
     page_count: bigint
     state: "accepted" | "replacement-pending"
+    decision_version: bigint
     content_version: bigint
     location_revision: bigint
     accepted_observation_json: string | null
@@ -2163,6 +2342,10 @@ const handle = (request: WorkerRequest): unknown => {
       return publishNormalScan(request)
     case "releaseHeldDiscovery":
       return releaseHeldDiscovery(request)
+    case "lookupEntryResolution":
+      return lookupEntryResolution(request)
+    case "resolveReplacement":
+      return resolveReplacement(request)
     case "readLibrary":
       return librarySummary()
     case "listLibraryEntries":

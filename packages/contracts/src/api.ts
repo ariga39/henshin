@@ -182,6 +182,7 @@ export const ReviewApi = HttpApi.make("henshin-review").add(
         error: [
           AuthenticationRequired,
           CandidateNotFound,
+          EntryNotFound,
           InvalidRequest,
           OperationConflict,
           OperationExpired,

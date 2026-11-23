@@ -25,7 +25,7 @@ const emptyDiagnostics = () => ({
   directory_records: 0
 })
 
-const manifestView = (manifest: SourceManifest) => ({
+export const sourceManifestView = (manifest: SourceManifest) => ({
   source_kind: manifest.sourceKind,
   pages: manifest.pages.map((page) => ({
     name: page.name,
@@ -263,7 +263,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
       const result = yield* Effect.result(analyzeSourceManifest({ sourcePath: resolved.value.nativePath }))
       if (Result.isSuccess(result)) {
         const manifest = result.success
-        firstObservations.set(candidate.relativePath, JSON.stringify(manifestView(manifest)))
+        firstObservations.set(candidate.relativePath, JSON.stringify(sourceManifestView(manifest)))
         yield* store.stage({
           candidateId: randomUUID(),
           taskId: task.task_id,
@@ -272,7 +272,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
           kind: candidate.kind,
           holdState: task.hold_new_discoveries ? "held" : "eligible",
           analysisStatus: "ready",
-          manifest: manifestView(manifest),
+          manifest: sourceManifestView(manifest),
           analysisError: null
         })
         progress = {
@@ -332,7 +332,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
         const result = yield* Effect.result(analyzeSourceManifest({ sourcePath: resolved.value.nativePath }))
         if (Result.isSuccess(result)) {
           verifiedAnalyzed += 1
-          const observedManifest = JSON.stringify(manifestView(result.success))
+          const observedManifest = JSON.stringify(sourceManifestView(result.success))
           if (firstObservations.get(candidate.relativePath) === observedManifest) {
             verifiedCandidatePaths.push(candidate.relativePath)
           } else {
@@ -346,7 +346,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
             kind: candidate.kind,
             holdState: "eligible",
             analysisStatus: "ready",
-            manifest: manifestView(result.success),
+            manifest: sourceManifestView(result.success),
             analysisError: null
           })
         } else {

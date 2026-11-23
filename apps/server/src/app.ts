@@ -195,7 +195,9 @@ export const makeAppLayer = (
   )
   const TaskHandlersLayer = TaskHandlers.pipe(Layer.provide(Layer.mergeAll(AuthenticationLayer, ScanStore.layer)))
   const TaskRoutesLayer = HttpApiBuilder.layer(TaskApi).pipe(Layer.provide(TaskHandlersLayer))
-  const ReviewHandlersLayer = ReviewHandlers.pipe(Layer.provide(Layer.mergeAll(AuthenticationLayer, ScanStore.layer)))
+  const ReviewHandlersLayer = ReviewHandlers.pipe(
+    Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer, ScanStore.layer, LibraryStore.layer))
+  )
   const ReviewRoutesLayer = HttpApiBuilder.layer(ReviewApi).pipe(Layer.provide(ReviewHandlersLayer))
   const LibraryHandlersLayer = LibraryHandlers.pipe(
     Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer, LibraryStore.layer))
