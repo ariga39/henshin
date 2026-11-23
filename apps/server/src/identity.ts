@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { Context, Effect, Layer, Option, Redacted, Schema } from "effect"
 import { Uuid } from "@henshin/contracts/ids"
 import { DatabaseWorker, DatabaseWorkerError } from "./persistence/DatabaseWorker"
+import { hashBearerToken } from "./owner-credential"
 
 const decodeInstanceId = Schema.decodeUnknownOption(Uuid)
 
@@ -36,6 +37,14 @@ export class ServerState extends Context.Service<
 export class AuthConfig extends Context.Service<AuthConfig, { readonly token: Redacted.Redacted<string> }>()(
   "henshin/server/AuthConfig"
 ) {
-  static readonly layer = (token: string): Layer.Layer<AuthConfig> =>
-    Layer.succeed(AuthConfig, AuthConfig.of({ token: Redacted.make(token) }))
+  static readonly layer = (input: { readonly kind: "bootstrap"; readonly token: string } | {
+    readonly kind: "owner"
+    readonly verifier: string
+  }): Layer.Layer<AuthConfig> =>
+    Layer.succeed(
+      AuthConfig,
+      AuthConfig.of({
+        token: Redacted.make(input.kind === "bootstrap" ? hashBearerToken(input.token) : input.verifier)
+      })
+    )
 }

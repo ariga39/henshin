@@ -113,13 +113,23 @@ const acquire = (dbPath: string): Effect.Effect<DatabaseSync, ServerOwnershipErr
     )
   )
 
+/** Acquires the same data-directory guard for local maintenance commands. */
+export const acquireServerOwnership = (dbPath: string): Promise<DatabaseSync> =>
+  Effect.runPromise(acquire(dbPath))
+
 /**
  * Prototype server ownership covers the real directory containing `dbPath`.
  * The guard is a separate SQLite database in that existing directory. The
  * directory must already exist; this layer never creates directories or
  * removes the guard database, including during release.
  */
-export const ServerOwnershipLayer = (dbPath: string): Layer.Layer<never, ServerOwnershipError> =>
+export const ServerOwnershipLayer = (
+  dbPath: string,
+  existingGuard?: DatabaseSync
+): Layer.Layer<never, ServerOwnershipError> =>
   Layer.effectDiscard(
-    Effect.acquireRelease(acquire(dbPath), (guard) => Effect.sync(() => guard.close()))
+    Effect.acquireRelease(
+      existingGuard === undefined ? acquire(dbPath) : Effect.succeed(existingGuard),
+      (guard) => Effect.sync(() => guard.close())
+    )
   )

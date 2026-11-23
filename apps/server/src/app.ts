@@ -30,6 +30,7 @@ import { OpenEventStore } from "./persistence/OpenEventStore"
 import { ServerOwnershipLayer, type ServerOwnershipError } from "./persistence/ServerOwnership"
 import { ThumbnailCache } from "./thumbnails/ThumbnailCache"
 import { ThumbnailProducer } from "./thumbnails/ThumbnailProducer"
+import type { DatabaseSync } from "node:sqlite"
 
 const MAX_BODY_BYTES = 1024 * 1024
 const BODIED_METHODS = new Set<string>(["PUT", "POST", "PATCH"])
@@ -170,7 +171,11 @@ const bodyLimit = <E, R>(
 
 export interface AppOptions {
   readonly dbPath: string
-  readonly bearerToken: string
+  readonly auth:
+    | { readonly kind: "bootstrap"; readonly token: string }
+    | { readonly kind: "owner"; readonly verifier: string }
+  readonly port: number
+  readonly ownershipGuard?: DatabaseSync
 }
 
 /**
@@ -251,16 +256,18 @@ export const makeAppLayer = (
   )
 
   return Layer.mergeAll(HttpRouter.serve(AllRoutes, { middleware: bodyLimit }), ReadyLayer).pipe(
-    Layer.provide(NodeHttpServer.layer(createServer, { host: "127.0.0.1", port: 0 })),
+    Layer.provide(NodeHttpServer.layer(createServer, { host: "127.0.0.1", port: options.port })),
     // Second line of defense for any body read that bypasses the middleware.
     Layer.provide(Layer.succeed(HttpIncomingMessage.MaxBodySize, ByteSize.mebibytes(1))),
     Layer.provide(ServerState.layer),
     Layer.provide(ScanStore.layer),
     Layer.provide(LibraryStore.layer),
     Layer.provide(OpenEventStore.layer),
-    Layer.provide(AuthConfig.layer(options.bearerToken)),
+    Layer.provide(AuthConfig.layer(options.auth)),
     Layer.provide(
-      DatabaseWorker.layer(options.dbPath).pipe(Layer.provide(ServerOwnershipLayer(options.dbPath)))
+      DatabaseWorker.layer(options.dbPath).pipe(
+        Layer.provide(ServerOwnershipLayer(options.dbPath, options.ownershipGuard))
+      )
     )
   )
 }

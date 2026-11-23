@@ -1,8 +1,19 @@
+import path from "node:path"
+import { readdir } from "node:fs/promises"
 import { NodeRuntime } from "@effect/platform-node"
 import { Effect, Layer } from "effect"
 import { makeAppLayer } from "./app"
+import {
+  writeOwnerCredential,
+  OwnerCredentialError,
+  readOwnerCredential
+} from "./owner-credential"
 import { DatabaseWorkerError } from "./persistence/DatabaseWorker"
-import { canonicalizeDatabasePath, ServerOwnershipError } from "./persistence/ServerOwnership"
+import {
+  acquireServerOwnership,
+  canonicalizeDatabasePath,
+  ServerOwnershipError
+} from "./persistence/ServerOwnership"
 
 interface Bootstrap {
   readonly bearerToken: string
@@ -11,6 +22,7 @@ interface Bootstrap {
 
 const startupDiagnostic = (error: unknown): string | undefined => {
   if (error instanceof ServerOwnershipError) return error.message
+  if (error instanceof OwnerCredentialError) return error.message
   if (error instanceof DatabaseWorkerError) {
     return "server startup failed at database: database initialization failed"
   }
@@ -18,6 +30,95 @@ const startupDiagnostic = (error: unknown): string | undefined => {
     return "server startup failed at readiness: server is unavailable"
   }
   return undefined
+}
+
+interface IndependentOptions {
+  readonly dataDir?: string
+  readonly database?: string
+  readonly port: number
+  readonly ownerCommand?: "initialize" | "rotate"
+}
+
+const usage = (): string =>
+  "usage: server.mjs (--data-dir <directory> | --database <path>) [--port <1-65535>] [--initialize-owner | --rotate-owner]"
+
+const parseIndependentOptions = (args: ReadonlyArray<string>): IndependentOptions => {
+  let dataDir: string | undefined
+  let database: string | undefined
+  let port = 4317
+  let ownerCommand: IndependentOptions["ownerCommand"]
+
+  for (let index = 0; index < args.length; index += 1) {
+    switch (args[index]) {
+      case "--data-dir":
+        dataDir = args[++index]
+        if (dataDir === undefined || dataDir.length === 0 || dataDir.startsWith("--")) {
+          throw new Error(usage())
+        }
+        break
+      case "--database":
+        database = args[++index]
+        if (database === undefined || database.length === 0 || database.startsWith("--")) {
+          throw new Error(usage())
+        }
+        break
+      case "--port": {
+        const value = args[++index]
+        if (value === undefined || !/^[0-9]+$/u.test(value)) throw new Error(usage())
+        port = Number(value)
+        if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(usage())
+        break
+      }
+      case "--initialize-owner":
+      case "--rotate-owner":
+        if (ownerCommand !== undefined) throw new Error(usage())
+        ownerCommand = args[index] === "--rotate-owner" ? "rotate" : "initialize"
+        break
+      case "--help":
+        throw new Error(usage())
+      default:
+        throw new Error(usage())
+    }
+  }
+
+  if ((dataDir === undefined) === (database === undefined)) throw new Error(usage())
+  return { dataDir, database, port, ownerCommand }
+}
+
+const isMissingPath = (error: unknown): boolean =>
+  typeof error === "object" &&
+  error !== null &&
+  "code" in error &&
+  error.code === "ENOENT"
+
+const resolveIndependentDatabasePath = async (options: IndependentOptions): Promise<string> => {
+  if (options.database !== undefined) return canonicalizeDatabasePath(options.database)
+  const dataDir = options.dataDir
+  if (dataDir === undefined) throw new Error(usage())
+
+  const defaultPath = path.join(dataDir, "server.sqlite")
+  let candidates: ReadonlyArray<string>
+  try {
+    candidates = (await readdir(dataDir, { withFileTypes: true }))
+      .filter(
+        (entry) =>
+          entry.name !== "server.sqlite" &&
+          entry.name !== ".henshin-server-auth.sqlite" &&
+          entry.name !== ".henshin-server-owner.sqlite" &&
+          (entry.isFile() || entry.isSymbolicLink()) &&
+          /\.(?:db|sqlite|sqlite3)$/iu.test(entry.name)
+      )
+      .map((entry) => entry.name)
+  } catch (error) {
+    if (isMissingPath(error)) return canonicalizeDatabasePath(defaultPath)
+    throw error
+  }
+  if (candidates.length > 0) {
+    throw new Error(
+      "server startup failed at data-directory: existing database requires explicit --database selection"
+    )
+  }
+  return canonicalizeDatabasePath(defaultPath)
 }
 
 /**
@@ -42,7 +143,7 @@ const readBootstrap = (): Promise<Bootstrap> =>
     process.stdin.once("error", reject)
   })
 
-const main = async () => {
+const runManaged = async () => {
   const bootstrap = await readBootstrap()
 
   // Closing the private parent channel is a shutdown request, so a crashed
@@ -74,7 +175,11 @@ const main = async () => {
     return
   }
 
-  const appLayer = makeAppLayer({ dbPath, bearerToken: bootstrap.bearerToken })
+  const appLayer = makeAppLayer({
+    dbPath,
+    auth: { kind: "bootstrap", token: bootstrap.bearerToken },
+    port: 0
+  })
   NodeRuntime.runMain(
     Layer.launch(appLayer).pipe(
       Effect.tapError((error) =>
@@ -85,6 +190,101 @@ const main = async () => {
     ),
     { disableErrorReporting: true }
   )
+}
+
+const runIndependent = async (options: IndependentOptions): Promise<void> => {
+  let dbPath: string
+  try {
+    dbPath = await resolveIndependentDatabasePath(options)
+  } catch (error) {
+    console.error(
+      startupDiagnostic(error) ??
+        (error instanceof Error
+          ? error.message
+          : "server startup failed at data-directory: data directory is unavailable")
+    )
+    process.exitCode = 1
+    return
+  }
+
+  if (options.ownerCommand !== undefined) {
+    let guard
+    try {
+      guard = await acquireServerOwnership(dbPath)
+      const token = await writeOwnerCredential(dbPath, options.ownerCommand)
+      process.stdout.write(`owner_token=${token}\n`)
+    } catch (error) {
+      console.error(startupDiagnostic(error) ?? "server initialization failed")
+      process.exitCode = 1
+    } finally {
+      guard?.close()
+    }
+    return
+  }
+
+  let guard: Awaited<ReturnType<typeof acquireServerOwnership>> | undefined
+  let handedOff = false
+  try {
+    // Read the verifier only after the existing directory guard is held. A
+    // stopped rotation command cannot replace the credential between these
+    // two operations.
+    guard = await acquireServerOwnership(dbPath)
+    const credential = await readOwnerCredential(dbPath)
+    if (credential.databaseName !== path.basename(dbPath)) {
+      throw new OwnerCredentialError(
+        "server startup failed at authentication: owner credential belongs to another database; select it with --database"
+      )
+    }
+    const verifier = credential.verifier
+
+    const appLayer = makeAppLayer({
+      dbPath,
+      auth: { kind: "owner", verifier },
+      port: options.port,
+      ownershipGuard: guard
+    })
+    NodeRuntime.runMain(
+      Layer.launch(appLayer).pipe(
+        Effect.tapError((error) =>
+          Effect.sync(() => {
+            const diagnostic = startupDiagnostic(error)
+            if (diagnostic !== undefined) {
+              console.error(diagnostic)
+              process.exitCode = 1
+            }
+          })
+        )
+      ),
+      { disableErrorReporting: true }
+    )
+    handedOff = true
+  } catch (error) {
+    console.error(
+      startupDiagnostic(error) ??
+        "server startup failed at authentication: owner credential is unavailable"
+    )
+    process.exitCode = 1
+  } finally {
+    if (!handedOff) guard?.close()
+  }
+}
+
+const main = async () => {
+  const args = process.argv.slice(2)
+  if (args.length === 0) {
+    await runManaged()
+    return
+  }
+
+  let options: IndependentOptions
+  try {
+    options = parseIndependentOptions(args)
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : usage())
+    process.exitCode = 2
+    return
+  }
+  await runIndependent(options)
 }
 
 void main().catch(() => {
