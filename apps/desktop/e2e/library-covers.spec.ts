@@ -200,7 +200,8 @@ test("filters effective tags with the canonical picker after reopening the real 
   const dbPath = path.join(dbDirectory, "prototype.db")
 
   try {
-    for (const name of ["alpha-one", "alpha-two", "alpha-three", "beta"]) {
+    const bookNames = Array.from({ length: 140 }, (_, index) => `batch-${index.toString().padStart(3, "0")}`)
+    for (const name of bookNames) {
       const book = path.join(fixtureDirectory, name)
       await mkdir(book)
       await writeFile(path.join(book, "001.png"), validPng)
@@ -215,20 +216,17 @@ test("filters effective tags with the canonical picker after reopening the real 
     await first.window.getByTestId("root-saved-preview").click()
     await first.window.getByTestId("scan-hold-new-discoveries").uncheck()
     await first.window.getByTestId("start-held-scan").click()
-    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(4, { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(50, { timeout: 30_000 })
 
     const serverPid = await bundledServerPid(first.app)
     if (serverPid === null) throw new Error("bundled server process was not found")
     process.kill(serverPid, "SIGTERM")
     await expect.poll(() => bundledServerPid(first.app), { timeout: 5_000 }).toBeNull()
     const db = new DatabaseSync(dbPath)
-    const entries = db.prepare("SELECT entry_id, relative_path FROM library_entries WHERE state = 'accepted'").all() as unknown as ReadonlyArray<{ entry_id: string; relative_path: string }>
-    const tagsByPath: Record<string, ReadonlyArray<string>> = {
-      "alpha-one": ["artist:alpha", "genre:comic"],
-      "alpha-two": ["artist:alpha", "genre:comic"],
-      "alpha-three": ["artist:alpha", "genre:other", "group:alpha"],
-      beta: ["artist:beta"]
-    }
+    const entries = (db.prepare("SELECT entry_id, relative_path FROM library_entries WHERE state = 'accepted'").all() as unknown as Array<{ entry_id: string; relative_path: string }>)
+      .sort((left, right) => left.entry_id < right.entry_id ? -1 : left.entry_id > right.entry_id ? 1 : 0)
+    const orderedNames = entries.map((entry) => entry.relative_path)
+    const excludedNames = new Set(orderedNames.slice(0, 70))
     const insertGallery = db.prepare(
       "INSERT INTO galleries(gallery_id, source, gid, token, preferred_domain, metadata_tags_json, created_at_ms, updated_at_ms) VALUES(?, 'EH', ?, 'token', 'e-hentai.org', ?, 0, 0)"
     )
@@ -237,7 +235,8 @@ test("filters effective tags with the canonical picker after reopening the real 
     )
     for (const [index, entry] of entries.entries()) {
       const galleryId = randomUUID()
-      insertGallery.run(galleryId, String(index + 1), JSON.stringify(tagsByPath[entry.relative_path] ?? []))
+      const tags = ["artist:alpha", ...(index < 70 ? ["genre:comic"] : [])]
+      insertGallery.run(galleryId, String(index + 1), JSON.stringify(tags))
       insertBinding.run(entry.entry_id, galleryId)
     }
     db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1").run()
@@ -248,22 +247,54 @@ test("filters effective tags with the canonical picker after reopening the real 
     await expect(reopened.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
     await expect(reopened.window.getByTestId("root-saved")).toContainText("Tag cases", { timeout: 30_000 })
     await reopened.window.getByRole("button", { name: "Library" }).click()
-    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(4, { timeout: 30_000 })
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(50, { timeout: 30_000 })
 
     const picker = reopened.window.getByTestId("library-tag-picker")
-    await expect(picker.locator("option")).toContainText(["artist:alpha", "group:alpha"])
+    await expect(picker.locator("option")).toContainText(["artist:alpha", "genre:comic"])
+    await reopened.window.getByTestId("library-search").fill("batch-")
+    await reopened.window.getByTestId("library-search-submit").click()
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(50)
     await picker.selectOption("artist:alpha")
     await reopened.window.getByTestId("library-include-tag").click()
-    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(3)
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(50)
     await expect(reopened.window.getByTestId("library-include-chip")).toContainText("artist:alpha")
+    await expect(reopened.window.getByTestId("library-search")).toHaveValue("batch-")
+    await expect(reopened.window.getByTestId("library-load-more")).toBeVisible()
+
+    const firstPageNames = new Set(await reopened.window.getByTestId("library-entry").locator(".library-entry-details > strong").allTextContents())
+    await reopened.window.getByTestId("library-load-more").click()
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(100)
+    const loadedNames = await reopened.window.getByTestId("library-entry").locator(".library-entry-details > strong").allTextContents()
+    const pageTwoNames = new Set(loadedNames.filter((name) => !firstPageNames.has(name)))
+    expect([...pageTwoNames]).toHaveLength(50)
+    expect(new Set(loadedNames)).toEqual(new Set(orderedNames.slice(0, 100)))
 
     await picker.selectOption("genre:comic")
     await reopened.window.getByTestId("library-exclude-tag").click()
-    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(1)
-    await expect(reopened.window.getByTestId("library-entry")).toContainText("alpha-three")
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(50)
+    await expect(reopened.window.getByTestId("library-search")).toHaveValue("batch-")
+    await expect(reopened.window.getByTestId("library-load-more")).toBeVisible()
+    const firstFilteredPageNames = new Set(await reopened.window.getByTestId("library-entry").locator(".library-entry-details > strong").allTextContents())
+    const excludedPageTwoNames = [...pageTwoNames].filter((name) => excludedNames.has(name))
+    expect(excludedPageTwoNames).toHaveLength(20)
+    expect(excludedPageTwoNames.every((name) => !firstFilteredPageNames.has(name))).toBe(true)
+
+    await reopened.window.getByTestId("library-load-more").click()
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(70)
+    const filteredNames = await reopened.window.getByTestId("library-entry").locator(".library-entry-details > strong").allTextContents()
+    expect(new Set(filteredNames)).toEqual(new Set(orderedNames.slice(70)))
+    expect(new Set(filteredNames).size).toBe(filteredNames.length)
+    await expect(reopened.window.getByTestId("library-load-more")).toHaveCount(0)
 
     await reopened.window.getByTestId("library-clear-filters").click()
-    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(4)
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(50)
+    await reopened.window.getByTestId("library-load-more").click()
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(100)
+    await reopened.window.getByTestId("library-load-more").click()
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(140)
+    expect(new Set(await reopened.window.getByTestId("library-entry").locator(".library-entry-details > strong").allTextContents())).toEqual(new Set(bookNames))
+    await expect(reopened.window.getByTestId("library-load-more")).toHaveCount(0)
+    await expect(reopened.window.getByTestId("library-search")).toHaveValue("batch-")
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })
