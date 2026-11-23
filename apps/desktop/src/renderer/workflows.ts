@@ -462,12 +462,13 @@ export const loadPendingReplacements = (append = false, preserveLoadedDepth = fa
         return false
       }
 
+      const pendingPage = "page" in result.data ? result.data.page : result.data
       const ids = new Set(entries.map((entry) => entry.entry_id))
-      for (const entry of result.data.entries) {
+      for (const entry of pendingPage.entries) {
         if (!ids.has(entry.entry_id)) entries.push(entry)
       }
-      cursor = result.data.next_cursor
-      hasMore = result.data.has_more
+      cursor = pendingPage.next_cursor
+      hasMore = pendingPage.has_more
       if (!hasMore || cursor === null) break
     }
     if (!isCurrentRequest()) return false

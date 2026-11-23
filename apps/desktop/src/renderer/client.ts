@@ -91,6 +91,12 @@ export interface PrototypeBridge {
   dismissCommand(operationId: string): Promise<Result<CommandAttempt>>
 }
 
+export interface ConnectionBridge {
+  connect(): Promise<Result<ConnectionStatusView>>
+  disconnect(): Promise<Result<ConnectionStatusView>>
+  connectionStatus(): Promise<Result<ConnectionStatusView>>
+}
+
 export interface OpenJournalBridge {
   onChanged(listener: () => void): () => void
   list(): Promise<Result<ReadonlyArray<OpenJournalView>>>
@@ -120,6 +126,7 @@ export interface DiscardDraftInput {
 declare global {
   interface Window {
     readonly henshinPrototype: PrototypeBridge
+    readonly henshinConnection: ConnectionBridge
     readonly henshinOpenJournal: OpenJournalBridge
     readonly henshinRootPreview: RootPreviewBridge
     readonly henshinLocalMapping: LocalMappingBridge
@@ -225,6 +232,24 @@ export class PrototypeClient extends Context.Service<
       listCommandAttempts: () => callIpc(() => window.henshinPrototype.listCommandAttempts()),
       reconcileCommand: (operationId) => callIpc(() => window.henshinPrototype.reconcileCommand(operationId)),
       dismissCommand: (operationId) => callIpc(() => window.henshinPrototype.dismissCommand(operationId))
+    })
+  )
+}
+
+export class ConnectionClient extends Context.Service<
+  ConnectionClient,
+  {
+    readonly connect: () => Effect.Effect<Result<ConnectionStatusView>>
+    readonly disconnect: () => Effect.Effect<Result<ConnectionStatusView>>
+    readonly connectionStatus: () => Effect.Effect<Result<ConnectionStatusView>>
+  }
+>()("henshin/desktop/renderer/ConnectionClient") {
+  static readonly layer = Layer.succeed(
+    ConnectionClient,
+    ConnectionClient.of({
+      connect: () => callIpc(() => window.henshinConnection.connect()),
+      disconnect: () => callIpc(() => window.henshinConnection.disconnect()),
+      connectionStatus: () => callIpc(() => window.henshinConnection.connectionStatus())
     })
   )
 }
