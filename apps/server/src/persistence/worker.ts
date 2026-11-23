@@ -6,6 +6,7 @@ import { Option, Schema } from "effect"
 import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contracts/canonical"
 import {
   INDEXED_ROOT_SAMPLE_LIMIT,
+  EntryCommandResult,
   ReplacementCandidateObservation,
   ReplacementObservation,
   ScanManifest,
@@ -428,6 +429,31 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS library_entries_current_location_unique
     ON library_entries(root_id, relative_path)
     WHERE state IN ('accepted', 'replacement-pending');
+  CREATE TABLE IF NOT EXISTS galleries (
+    gallery_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL CHECK (source = 'EH'),
+    gid TEXT NOT NULL,
+    token TEXT NOT NULL,
+    preferred_domain TEXT NOT NULL CHECK (preferred_domain IN ('e-hentai.org', 'exhentai.org')),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE (source, gid)
+  );
+  CREATE TABLE IF NOT EXISTS bindings (
+    entry_id TEXT PRIMARY KEY REFERENCES library_entries(entry_id) ON DELETE CASCADE,
+    gallery_id TEXT NOT NULL REFERENCES galleries(gallery_id),
+    bound_at_ms INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS bindings_gallery_id ON bindings(gallery_id);
+  CREATE TABLE IF NOT EXISTS entry_operations (
+    epoch TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL REFERENCES library_entries(entry_id) ON DELETE CASCADE,
+    payload TEXT NOT NULL,
+    result TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (epoch, operation_id)
+  );
   CREATE TABLE IF NOT EXISTS open_events (
     event_id TEXT PRIMARY KEY,
     instance_id TEXT NOT NULL,
@@ -797,6 +823,38 @@ const selectResolutionSiblingCursor = db.prepare(
 )
 const MAX_RESOLUTION_SIBLINGS = 128
 const selectEntryById = db.prepare("SELECT entry_id FROM library_entries WHERE entry_id = ?")
+const selectEntryDetails = db.prepare(`
+  SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
+    e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
+    b.gallery_id, g.source AS binding_source, g.gid AS binding_gid, g.token AS binding_token,
+    g.preferred_domain AS binding_preferred_domain
+  FROM library_entries e
+  LEFT JOIN bindings b ON b.entry_id = e.entry_id
+  LEFT JOIN galleries g ON g.gallery_id = b.gallery_id
+  WHERE e.entry_id = ? AND e.state IN ('accepted', 'replacement-pending')
+`)
+selectEntryDetails.setReadBigInts(true)
+const selectEntryOperation = db.prepare(
+  "SELECT entry_id, payload, result FROM entry_operations WHERE epoch = ? AND operation_id = ?"
+)
+const insertEntryOperation = db.prepare(
+  "INSERT INTO entry_operations(epoch, operation_id, entry_id, payload, result, created_at_ms) VALUES(?, ?, ?, ?, ?, ?)"
+)
+const selectGallery = db.prepare(
+  "SELECT gallery_id, token, preferred_domain FROM galleries WHERE source = ? AND gid = ?"
+)
+const insertGallery = db.prepare(
+  "INSERT INTO galleries(gallery_id, source, gid, token, preferred_domain, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?)"
+)
+const updateGalleryDomain = db.prepare(
+  "UPDATE galleries SET preferred_domain = ?, updated_at_ms = ? WHERE gallery_id = ?"
+)
+const upsertBinding = db.prepare(
+  "INSERT INTO bindings(entry_id, gallery_id, bound_at_ms) VALUES(?, ?, ?) ON CONFLICT(entry_id) DO UPDATE SET gallery_id = excluded.gallery_id, bound_at_ms = excluded.bound_at_ms"
+)
+const advanceEntryDecision = db.prepare(
+  "UPDATE library_entries SET decision_version = decision_version + 1, updated_at_ms = ? WHERE entry_id = ?"
+)
 const selectOpenEvent = db.prepare(
   "SELECT event_id, instance_id, entry_id, device_id, observed_location_revision, observed_content_version, occurred_at_ms, receipt_at_ms FROM open_events WHERE event_id = ?"
 )
@@ -1822,6 +1880,144 @@ const entryRow = (row: {
   }
 })
 
+const entryDetailsRow = (row: {
+  entry_id: string
+  library_id: string
+  root_id: string
+  relative_path: string
+  source_path: string
+  kind: "archive" | "image-directory"
+  title: string
+  page_count: bigint
+  state: "accepted" | "replacement-pending"
+  decision_version: bigint
+  content_version: bigint
+  location_revision: bigint
+  binding_source: "EH" | null
+  binding_gid: string | null
+  binding_token: string | null
+  binding_preferred_domain: "e-hentai.org" | "exhentai.org" | null
+}): import("./worker-protocol").LibraryEntryDetailsRow => ({
+  entry_id: row.entry_id,
+  library_id: row.library_id,
+  root_id: row.root_id,
+  relative_path: row.relative_path,
+  source_path: row.source_path,
+  kind: row.kind,
+  title: row.title,
+  page_count: Number(row.page_count),
+  state: row.state,
+  decision_version: row.decision_version.toString(),
+  content_version: row.content_version.toString(),
+  location_revision: row.location_revision.toString(),
+  cover: {
+    key: `default-v1.${row.entry_id}.${row.content_version.toString()}`,
+    profile: "default-cover-v1"
+  },
+  replacement: null,
+  binding: row.binding_source === null || row.binding_gid === null || row.binding_token === null || row.binding_preferred_domain === null
+    ? null
+    : {
+        source: row.binding_source,
+        gid: row.binding_gid,
+        canonical_url: `https://${row.binding_preferred_domain}/g/${row.binding_gid}/${row.binding_token}/`,
+        preferred_domain: row.binding_preferred_domain
+      }
+})
+
+const readEntryDetails = (entryId: string): import("./worker-protocol").LibraryEntryDetailsRow | null => {
+  const row = selectEntryDetails.get(entryId) as Parameters<typeof entryDetailsRow>[0] | undefined
+  return row === undefined ? null : entryDetailsRow(row)
+}
+
+const bindEntry = (
+  request: Extract<WorkerRequest, { op: "bindEntry" }>
+): import("./worker-protocol").BindEntryOutcome => {
+  const canonicalPayload = JSON.stringify({
+    entry_id: request.entryId,
+    expected_decision_version: request.expectedDecisionVersion,
+    command: {
+      type: "bind",
+      source: request.source,
+      gid: request.gid,
+      token: request.token,
+      preferred_domain: request.preferredDomain,
+      canonical_url: request.canonicalUrl
+    }
+  })
+
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const previous = selectEntryOperation.get(request.epoch, request.operationId) as {
+      entry_id: string
+      payload: string
+      result: string
+    } | undefined
+    if (previous !== undefined) {
+      if (previous.entry_id !== request.entryId || previous.payload !== canonicalPayload) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_conflict" }
+      }
+      const replay = Schema.decodeUnknownOption(EntryCommandResult)(JSON.parse(previous.result))
+      if (Option.isNone(replay)) throw new Error("invalid persisted bind result")
+      db.exec("COMMIT")
+      return { kind: "replayed", result: replay.value }
+    }
+
+    const current = selectEntryDetails.get(request.entryId) as Parameters<typeof entryDetailsRow>[0] | undefined
+    if (current === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "entry_not_found" }
+    }
+    if (current.decision_version.toString() !== request.expectedDecisionVersion) {
+      db.exec("ROLLBACK")
+      return { kind: "revision_conflict", currentDecisionVersion: current.decision_version.toString() }
+    }
+
+    const existingGallery = selectGallery.get(request.source, request.gid) as {
+      gallery_id: string
+      token: string
+      preferred_domain: "e-hentai.org" | "exhentai.org"
+    } | undefined
+    let galleryId: string
+    if (existingGallery === undefined) {
+      galleryId = randomUUID()
+      insertGallery.run(
+        galleryId,
+        request.source,
+        request.gid,
+        request.token,
+        request.preferredDomain,
+        Date.now(),
+        Date.now()
+      )
+    } else {
+      if (existingGallery.token !== request.token) {
+        db.exec("ROLLBACK")
+        return { kind: "locator_conflict" }
+      }
+      galleryId = existingGallery.gallery_id
+      if (existingGallery.preferred_domain !== request.preferredDomain) {
+        updateGalleryDomain.run(request.preferredDomain, Date.now(), galleryId)
+      }
+    }
+
+    const now = Date.now()
+    upsertBinding.run(request.entryId, galleryId, now)
+    advanceEntryDecision.run(now, request.entryId)
+    bumpLibraryRevision.run()
+    const entry = readEntryDetails(request.entryId)
+    if (entry === null) throw new Error("bound entry disappeared")
+    const result = { operation_id: request.operationId, entry }
+    insertEntryOperation.run(request.epoch, request.operationId, request.entryId, canonicalPayload, JSON.stringify(result), now)
+    db.exec("COMMIT")
+    return { kind: "committed", result }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
 const acceptedThumbnailEntryRow = (row: {
   entry_id: string
   root_id: string
@@ -2525,6 +2721,10 @@ const handle = (request: WorkerRequest): unknown => {
       return indexedRootSamples(request)
     case "readEntryResolution":
       return entryResolution(request)
+    case "readEntry":
+      return readEntryDetails(request.entryId)
+    case "bindEntry":
+      return bindEntry(request)
     case "acceptOpenEvents":
       return acceptOpenEvents(request)
     case "recordDiscovery":

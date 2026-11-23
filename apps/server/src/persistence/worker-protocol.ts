@@ -5,6 +5,7 @@ import { OpenEvent, OpenEventOutcome } from "@henshin/contracts/event"
 import { RootExclusions, RootPolicyCommand, RootRelativePath, ScanManifestObservation, ScanManifestPage } from "@henshin/contracts/root"
 import { ThumbnailReference } from "@henshin/contracts/thumbnail"
 import { ReplacementComparison } from "@henshin/contracts"
+import { EntryCommandResult, LibraryEntryDetails } from "@henshin/contracts"
 
 /** A persisted prototype note row, always with a canonical decimal revision. */
 export const NoteRow = Schema.Struct({
@@ -260,6 +261,18 @@ export const LibraryEntryPageResult = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("invalid_cursor") })
 ])
 export type LibraryEntryPageResult = typeof LibraryEntryPageResult.Type
+export const LibraryEntryDetailsRow = LibraryEntryDetails
+export type LibraryEntryDetailsRow = typeof LibraryEntryDetailsRow.Type
+
+export const BindEntryOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("committed"), result: EntryCommandResult }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), result: EntryCommandResult }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("entry_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("revision_conflict"), currentDecisionVersion: Revision }),
+  Schema.Struct({ kind: Schema.Literal("locator_conflict") })
+])
+export type BindEntryOutcome = typeof BindEntryOutcome.Type
 
 export const IndexedRootSampleRow = Schema.Struct({
   relative_path: RootRelativePath,
@@ -456,6 +469,19 @@ export const WorkerRequest = Schema.Union([
     entryId: Uuid,
     siblingCursor: Schema.optional(Schema.String),
     siblingClaimsRevision: Schema.optional(Revision)
+  }),
+  Schema.Struct({ op: Schema.Literal("readEntry"), entryId: Uuid }),
+  Schema.Struct({
+    op: Schema.Literal("bindEntry"),
+    entryId: Uuid,
+    operationId: Uuid,
+    epoch: Uuid,
+    expectedDecisionVersion: Revision,
+    source: Schema.Literal("EH"),
+    gid: Schema.String.check(Schema.isPattern(/^[0-9]{1,20}$/)),
+    token: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{1,64}$/)),
+    preferredDomain: Schema.Union([Schema.Literal("e-hentai.org"), Schema.Literal("exhentai.org")]),
+    canonicalUrl: Schema.String.check(Schema.isMaxLength(2048))
   }),
   Schema.Struct({ op: Schema.Literal("readAcceptedThumbnailEntry"), entryId: Uuid }),
   Schema.Struct({ op: Schema.Literal("acceptOpenEvents"), events: Schema.Array(OpenEvent) }),

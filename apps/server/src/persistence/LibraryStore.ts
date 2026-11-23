@@ -6,6 +6,8 @@ import {
   IndexedRootSamplePageRow,
   LibraryEntryPageResult,
   LibraryEntryResolutionResult,
+  LibraryEntryDetailsRow,
+  BindEntryOutcome,
   LibrarySummaryRow,
   EntryResolutionLookupOutcome,
   ResolveReplacementOutcome
@@ -42,6 +44,8 @@ const decodeAcceptedThumbnailEntry = Schema.decodeUnknownOption(Schema.NullOr(Ac
 const decodeIndexedRootSamples = Schema.decodeUnknownOption(IndexedRootSamplePageRow)
 const decodeReplacement = Schema.decodeUnknownOption(ResolveReplacementOutcome)
 const decodeEntryResolutionLookup = Schema.decodeUnknownOption(EntryResolutionLookupOutcome)
+const decodeEntryDetailsResult = Schema.decodeUnknownOption(Schema.NullOr(LibraryEntryDetailsRow))
+const decodeBindEntry = Schema.decodeUnknownOption(BindEntryOutcome)
 const decodeStaged = Schema.decodeUnknownOption(StagedDiscovery)
 
 const jsonValue = (value: string | null): unknown => {
@@ -74,6 +78,18 @@ export class LibraryStore extends Context.Service<
       readonly state?: "replacement-pending"
       readonly epoch: string
     }) => Effect.Effect<LibraryEntryPage, DatabaseWorkerError | InvalidLibrarySearchCursor>
+    readonly entry: (entryId: string) => Effect.Effect<import("@henshin/contracts").LibraryEntryDetails | null, DatabaseWorkerError>
+    readonly bindEntry: (input: {
+      readonly entryId: string
+      readonly operationId: string
+      readonly epoch: string
+      readonly expectedDecisionVersion: string
+      readonly source: "EH"
+      readonly gid: string
+      readonly token: string
+      readonly preferredDomain: "e-hentai.org" | "exhentai.org"
+      readonly canonicalUrl: string
+    }) => Effect.Effect<typeof BindEntryOutcome.Type, DatabaseWorkerError>
     readonly indexedRootSamples: (rootId: string) => Effect.Effect<IndexedRootSamplePage, DatabaseWorkerError>
     readonly resolution: (input: {
       readonly entryId: string
@@ -117,6 +133,15 @@ export class LibraryStore extends Context.Service<
             ? Effect.fail(new InvalidLibrarySearchCursor())
             : Effect.succeed(result.page)
         )
+      )
+      const entry = (entryId: string) => worker.call({ op: "readEntry", entryId }).pipe(
+        Effect.flatMap((value) => decodeOrFail(decodeEntryDetailsResult, value, "invalid library entry details"))
+      )
+      const bindEntry = (input: Parameters<LibraryStore["Service"]["bindEntry"]>[0]) => worker.call({
+        op: "bindEntry",
+        ...input
+      }).pipe(
+        Effect.flatMap((value) => decodeOrFail(decodeBindEntry, value, "invalid bind entry result"))
       )
       const resolution = (input: {
         readonly entryId: string
@@ -203,6 +228,8 @@ export class LibraryStore extends Context.Service<
         lookupReplacementOperation,
         resolution,
         resolveReplacement,
+        bindEntry,
+        entry,
         summary,
         page
       })

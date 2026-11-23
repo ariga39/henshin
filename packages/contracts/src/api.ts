@@ -23,6 +23,7 @@ import {
   ThumbnailMissing,
   ThumbnailUpdating
 } from "./errors"
+import { EntryCommandRequest, EntryCommandResult, LibraryEntryDetails } from "./eh"
 import { NoteId, Uuid } from "./ids"
 import { EditNotePayload, HandshakeData, Note, OperationResult } from "./note"
 import {
@@ -209,6 +210,26 @@ export const LibraryApi = HttpApi.make("henshin-library").add(
         payload: LibrarySearchRequest,
         success: SuccessEnvelope(LibraryEntryPage),
         error: [AuthenticationRequired, InvalidRequest, InternalError]
+      }),
+      HttpApiEndpoint.get("entry", "/entries/:id", {
+        params: { id: Uuid },
+        success: SuccessEnvelope(LibraryEntryDetails),
+        error: [AuthenticationRequired, EntryNotFound, InternalError]
+      }),
+      HttpApiEndpoint.post("entryCommand", "/entries/:id/commands", {
+        params: { id: Uuid },
+        payload: EntryCommandRequest,
+        success: SuccessEnvelope(EntryCommandResult),
+        error: [
+          AuthenticationRequired,
+          EntryNotFound,
+          InvalidRequest,
+          RevisionConflict,
+          OperationConflict,
+          EpochChanged,
+          InstanceMismatch,
+          InternalError
+        ]
       }),
       HttpApiEndpoint.get("indexedSamples", "/roots/:id/indexed-samples", {
         params: { id: Uuid },
