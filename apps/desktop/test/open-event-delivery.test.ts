@@ -2,6 +2,7 @@ import { Effect } from "effect"
 import { randomUUID } from "node:crypto"
 import { describe, expect, it } from "vitest"
 import { OpenEventHttpClient } from "@henshin/contracts"
+import type { OpenEvent } from "@henshin/contracts/event"
 import { OpenJournalStore } from "../src/main/persistence/OpenJournalStore"
 import type { OpenJournalRow } from "../src/main/persistence/draft-worker-protocol"
 import { deliverOpenEvents, drainOpenEvents } from "../src/main/OpenEventDelivery"
@@ -56,8 +57,9 @@ const makeStore = (rows: ReadonlyArray<OpenJournalRow>) => {
   return { store, acknowledged, held }
 }
 
-const clientFor = (batch: OpenEventHttpClient["Service"]["batch"]): OpenEventHttpClient["Service"] =>
-  ({ batch } as OpenEventHttpClient["Service"])
+const clientFor = (
+  batch: (request: { readonly payload: { readonly epoch: string; readonly events: ReadonlyArray<OpenEvent> } }) => Effect.Effect<unknown, unknown>
+): OpenEventHttpClient["Service"] => ({ batch } as unknown as OpenEventHttpClient["Service"])
 
 describe("accepted open event delivery", () => {
   it("retries a lost acknowledgment with the same event and counts it once", async () => {

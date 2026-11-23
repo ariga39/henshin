@@ -78,7 +78,6 @@ import {
   OpenJournalStore,
   OpenJournalStoreFullError
 } from "./persistence/OpenJournalStore"
-import { drainOpenEvents } from "./OpenEventDelivery"
 import { LocalMappingStore, type LocalMappingActivationOutcome } from "./persistence/LocalMappingStore"
 import {
   ReaderProfileConflictError,
@@ -98,6 +97,8 @@ import {
   validateReaderProfile,
   resolveReaderTestTarget
 } from "./reader-profile-validation"
+import { drainOpenEvents } from "./OpenEventDelivery"
+import { OpenEventDeliveryScheduler } from "./OpenEventDeliveryScheduler"
 import {
   ConnectionInstanceMismatchError,
   ConnectionLifecycle,
@@ -488,6 +489,8 @@ const deliverPendingOpenEvents = async (): Promise<void> => {
   }
 }
 
+const openEventDeliveryScheduler = new OpenEventDeliveryScheduler(deliverPendingOpenEvents)
+
 const runNetworkResult = <A>(
   effect: Effect.Effect<
     IpcOk<A> | IpcErr,
@@ -613,9 +616,7 @@ const createOpenCoordinator = (): OpenCoordinator => {
         throw new ConnectionPausedError({ state: requireConnection().getStatus().state })
       }
     },
-    onAcceptedEventDurable: () => {
-      void deliverPendingOpenEvents()
-    },
+    onAcceptedEventDurable: () => openEventDeliveryScheduler.schedule(),
     onActiveChanged: notifyOpenStateChanged
   }
   return new OpenCoordinator(ports)
@@ -1194,7 +1195,10 @@ const registerIpc = (): void => {
         profileId: decoded.value.profile_id,
         actionId: decoded.value.action_id,
         offline
-      }).then((data) => ({ ok: true as const, data })).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+      }).then((data) => {
+        if (data.status === "accepted" && data.event_durable) openEventDeliveryScheduler.schedule()
+        return { ok: true as const, data }
+      }).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
     } catch (error) {
       return Promise.resolve({ ok: false as const, error: toPublicError(error) })
     }
@@ -1368,7 +1372,7 @@ const registerIpc = (): void => {
     return requireConnection()
       .connect()
       .then((status) => {
-        void deliverPendingOpenEvents()
+        openEventDeliveryScheduler.schedule()
         return connectionStatusResult(status)
       })
       .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
@@ -1742,8 +1746,8 @@ const bootstrap = async (): Promise<void> => {
     bearerToken: serverChild.bearerToken
   })
   await connection.connect()
-  void deliverPendingOpenEvents()
   openCoordinator = createOpenCoordinator()
+  openEventDeliveryScheduler.schedule()
 
   registerIpc()
   installApplicationMenu()
