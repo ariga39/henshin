@@ -1,5 +1,5 @@
 import path from "node:path"
-import { lstat, readdir } from "node:fs/promises"
+import { readdir } from "node:fs/promises"
 import { NodeRuntime } from "@effect/platform-node"
 import { Effect, Layer } from "effect"
 import { makeAppLayer } from "./app"
@@ -95,20 +95,12 @@ const resolveIndependentDatabasePath = async (options: IndependentOptions): Prom
   if (dataDir === undefined) throw new Error(usage())
 
   const defaultPath = path.join(dataDir, "server.sqlite")
-  let defaultExists = true
-  try {
-    await lstat(defaultPath)
-  } catch (error) {
-    if (!isMissingPath(error)) throw error
-    defaultExists = false
-  }
-  if (defaultExists) return canonicalizeDatabasePath(defaultPath)
-
   let candidates: ReadonlyArray<string>
   try {
     candidates = (await readdir(dataDir, { withFileTypes: true }))
       .filter(
         (entry) =>
+          entry.name !== "server.sqlite" &&
           entry.name !== ".henshin-server-auth.sqlite" &&
           entry.name !== ".henshin-server-owner.sqlite" &&
           (entry.isFile() || entry.isSymbolicLink()) &&

@@ -262,6 +262,14 @@ describe("independent foreground service", () => {
     await expect(waitForExit(attempt.child, EXIT_TIMEOUT_MS)).resolves.toEqual({ code: 1, signal: null })
     expect(attempt.stderr()).toContain("existing database requires explicit --database selection")
     await expect(access(path.join(dataDir, "server.sqlite"))).rejects.toMatchObject({ code: "ENOENT" })
+
+    const defaultPath = path.join(dataDir, "server.sqlite")
+    await writeFile(defaultPath, "existing default")
+    const initialization = launch(["--data-dir", dataDir, "--initialize-owner"])
+    expect((await waitForExit(initialization.child, EXIT_TIMEOUT_MS)).code).toBe(1)
+    expect(initialization.stdout()).not.toContain("owner_token=")
+    expect(initialization.stderr()).toContain("existing database requires explicit --database selection")
+    expect(await readFile(defaultPath, "utf8")).toBe("existing default")
   })
 
   it("does not turn a dangling database symlink into a new default library", async () => {

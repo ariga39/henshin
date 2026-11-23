@@ -122,3 +122,7 @@ explicitly on both commands, for example
 with any recognized non-default database requires explicit `--database`
 selection and is never silently paired with a new empty `server.sqlite`
 library.
+
+Each data directory has one independent owner credential bound to the selected
+database. Reuse that explicit database path on subsequent starts. To operate
+a second independent library, initialize it in a separate data directory.
