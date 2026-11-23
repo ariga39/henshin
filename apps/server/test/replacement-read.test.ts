@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rename, rm, stat, utimes, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, open, rename, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { DatabaseSync } from "node:sqlite"
 import os from "node:os"
 import path from "node:path"
@@ -72,6 +72,19 @@ const makeScenario = async (
   fixturePaths.add(fixture)
   await prepare(fixture)
   return { dbPath, server, fixture, root: await registerRoot(server, fixture, label) }
+}
+
+const makeOversizedImageBook = async (rootPath: string, name: string): Promise<void> => {
+  const book = path.join(rootPath, name)
+  await mkdir(book)
+  for (let index = 1; index <= 5; index += 1) {
+    const page = await open(path.join(book, `${String(index).padStart(3, "0")}.jpg`), "w")
+    try {
+      await page.truncate(1024 ** 3)
+    } finally {
+      await page.close()
+    }
+  }
 }
 
 const waitForTerminal = async (server: RunningServer, taskId: string): Promise<ScanTask> => {
@@ -644,6 +657,59 @@ describe("replacement comparison read model", () => {
       analysis_status: "error"
     })
     expect(entry?.replacement?.candidate_observation.analysis_error).toMatchObject({ code: "structural-corruption" })
+  })
+
+  it("keeps an oversized replacement resolvable through lightweight fresh evidence", async () => {
+    const { server, fixture, root } = await makeScenario(
+      "henshin-replacement-oversized-",
+      "Oversized replacement",
+      async (fixture) => {
+        await mkdir(path.join(fixture, "book"))
+        await writeFile(path.join(fixture, "book", "001.jpg"), "Book A")
+      }
+    )
+    const book = path.join(fixture, "book")
+
+    expect((await scan(server, root)).status).toBe("succeeded")
+    const accepted = await listLibrary(server)
+    const initial = accepted.entries[0]
+    if (initial === undefined) throw new Error("expected accepted entry")
+    const resolution = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: initial.entry_id }, query: {} })
+    }))
+
+    await rm(book, { recursive: true, force: true })
+    await makeOversizedImageBook(fixture, "book")
+    const replacementScan = await scan(server, root)
+    expect(replacementScan.status).toBe("completed_with_errors")
+    expect(replacementScan.error?.code).toBe("allocation_deferred")
+    const candidate = (await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).candidates()
+    }))).data[0]
+    if (candidate === undefined) throw new Error("expected oversized replacement candidate")
+    expect(candidate.manifest?.fingerprint).toBeUndefined()
+
+    const resolved = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).command({
+        params: { id: candidate.candidate_id },
+        payload: {
+          root_id: root.root_id,
+          operation_id: randomUUID(),
+          instance_id: server.instanceId,
+          epoch: server.epoch,
+          expected_candidate_version: candidate.candidate_version,
+          expected_mapping_revision: root.mapping_revision,
+          expected_policy_revision: root.policy_revision,
+          expected_decision_version: resolution.data.decision_version,
+          expected_location_revision: resolution.data.location_revision,
+          command: { type: "resolve-replacement" as const, entry_id: initial.entry_id, decision: "keep" as const }
+        }
+      })
+    }))
+    expect(resolved.data.resolution).toMatchObject({
+      entry: { entry_id: initial.entry_id, state: "accepted", content_version: "2" },
+      detached_entry_id: null
+    })
   })
 
   it("keeps the original entry after fresh validation and replays after the source changes", async () => {

@@ -14,7 +14,13 @@ import {
   resolveSourceCandidate,
   type SourceRootObservation,
 } from "../analysis/NativeSourceBoundary"
-import { FINGERPRINT_DEADLINE_MS, FINGERPRINT_MAX_BYTES, fingerprintSource } from "../analysis/SourceFingerprint"
+import {
+  FINGERPRINT_DEADLINE_MS,
+  FINGERPRINT_MAX_BYTES,
+  FINGERPRINT_SCAN_DEADLINE_MS,
+  FINGERPRINT_SCAN_MAX_BYTES,
+  fingerprintSource
+} from "../analysis/SourceFingerprint"
 import { ScanStore, type FinishScanInput } from "../persistence/ScanStore"
 import { ScanManifest, type ScanTask } from "@henshin/contracts"
 import type { ServerRootRow } from "../persistence/worker-protocol"
@@ -314,6 +320,8 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
       let verifiedAnalyzed = 0
       let verifiedErrors = 0
       const verifiedCandidatePaths: Array<string> = []
+      const fingerprintDeadlineAt = Date.now() + FINGERPRINT_SCAN_DEADLINE_MS
+      let fingerprintBytes = 0
       yield* Effect.sleep(Duration.millis(normalScanQuietIntervalMs()))
       for (const candidate of discovered.value.candidates) {
         const resolved = yield* Effect.tryPromise({
@@ -343,18 +351,28 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
           const stable = firstObservations.get(candidate.relativePath) === observedManifest
           let stagedManifest: typeof ScanManifest.Type = manifestView
           if (stable && fingerprintPaths.has(candidate.relativePath)) {
-            const fingerprintResult = yield* Effect.result(Effect.tryPromise({
-              try: (signal) => fingerprintSource(resolved.value.nativePath, result.success, {
-                signal,
-                maxBytes: FINGERPRINT_MAX_BYTES,
-                deadlineMs: FINGERPRINT_DEADLINE_MS
-              }),
-              catch: (error) => error
-            }))
-            if (Result.isSuccess(fingerprintResult)) {
-              stagedManifest = { ...manifestView, fingerprint: fingerprintResult.success }
-            } else {
+            const estimatedBytes = result.success.sourceKind === "archive"
+              ? result.success.after.bytes
+              : result.success.pages.reduce((total, page) => total + page.declaredBytes, 0)
+            const remainingBytes = FINGERPRINT_SCAN_MAX_BYTES - fingerprintBytes
+            const remainingMs = fingerprintDeadlineAt - Date.now()
+            if (estimatedBytes > remainingBytes || remainingMs <= 0) {
               fingerprintFailureCount += 1
+            } else {
+              fingerprintBytes += estimatedBytes
+              const fingerprintResult = yield* Effect.result(Effect.tryPromise({
+                try: (signal) => fingerprintSource(resolved.value.nativePath, result.success, {
+                  signal,
+                  maxBytes: FINGERPRINT_MAX_BYTES,
+                  deadlineMs: Math.min(FINGERPRINT_DEADLINE_MS, Math.max(1, remainingMs))
+                }),
+                catch: (error) => error
+              }))
+              if (Result.isSuccess(fingerprintResult)) {
+                stagedManifest = { ...manifestView, fingerprint: fingerprintResult.success }
+              } else {
+                fingerprintFailureCount += 1
+              }
             }
           }
           if (stable) {

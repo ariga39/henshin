@@ -22,7 +22,7 @@ import { LibraryStore, type EntryResolutionLookupResult, type ReplacementResolut
 import { RootStore } from "../persistence/RootStore"
 import { analyzeSourceManifest } from "../analysis/SourceManifestAnalysis"
 import { resolveSourceCandidate, type SourceRootObservation } from "../analysis/NativeSourceBoundary"
-import { FINGERPRINT_DEADLINE_MS, FINGERPRINT_MAX_BYTES, fingerprintSource } from "../analysis/SourceFingerprint"
+import { FINGERPRINT_DEADLINE_MS, FINGERPRINT_MAX_BYTES, fingerprintSource, isFingerprintBudgetFailure } from "../analysis/SourceFingerprint"
 import { sourceManifestView } from "../scan/ManualScanCoordinator"
 import type { ServerRootRow } from "../persistence/worker-protocol"
 import type { StagedDiscovery } from "@henshin/contracts"
@@ -58,11 +58,16 @@ const freshReplacementManifest = (
               maxBytes: FINGERPRINT_MAX_BYTES,
               deadlineMs: FINGERPRINT_DEADLINE_MS
             }),
-            catch: () => undefined
+            catch: (error) => error
           })).pipe(
-            Effect.map((fingerprint) => Result.isSuccess(fingerprint)
-              ? JSON.stringify({ ...sourceManifestView(result.success), fingerprint: fingerprint.success })
-              : null)
+            Effect.map((fingerprint) => {
+              if (Result.isSuccess(fingerprint)) {
+                return JSON.stringify({ ...sourceManifestView(result.success), fingerprint: fingerprint.success })
+              }
+              return isFingerprintBudgetFailure(fingerprint.failure)
+                ? JSON.stringify(sourceManifestView(result.success))
+                : null
+            })
           )
         })
       )

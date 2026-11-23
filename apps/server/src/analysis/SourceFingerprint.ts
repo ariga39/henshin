@@ -8,6 +8,8 @@ import { recheckSourceObservation, type SourceManifest } from "./SourceManifestA
 const MAX_READ_BYTES = 1024 * 1024
 export const FINGERPRINT_MAX_BYTES = 4 * 1024 ** 3
 export const FINGERPRINT_DEADLINE_MS = 30_000
+export const FINGERPRINT_SCAN_MAX_BYTES = FINGERPRINT_MAX_BYTES
+export const FINGERPRINT_SCAN_DEADLINE_MS = FINGERPRINT_DEADLINE_MS
 const FINGERPRINT_MAX_FILES = 20_000
 
 export interface FingerprintOptions {
@@ -36,6 +38,8 @@ class FingerprintLimitExceeded extends Error {
     this.name = "FingerprintLimitExceeded"
   }
 }
+
+export const isFingerprintBudgetFailure = (error: unknown): boolean => error instanceof FingerprintLimitExceeded
 
 const checkBudget = (budget: FingerprintBudget): void => {
   budget.signal?.throwIfAborted()
@@ -157,6 +161,10 @@ export const fingerprintSource = async (
     bytesRead: 0,
     filesRead: 0
   }
+  const declaredBytes = manifest.sourceKind === "archive"
+    ? manifest.after.bytes
+    : manifest.pages.reduce((total, page) => total + page.declaredBytes, 0)
+  if (declaredBytes > budget.maxBytes) throw new FingerprintLimitExceeded("fingerprint byte limit exceeded")
   return manifest.sourceKind === "archive"
     ? archiveFingerprint(sourcePath, manifest, budget)
     : directoryFingerprint(sourcePath, manifest, budget)

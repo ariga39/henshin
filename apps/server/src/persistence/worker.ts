@@ -134,26 +134,38 @@ const persistedReplacementCandidateObservation = (value: string, field: string):
   return decoded.value
 }
 
-const comparableManifest = (value: string): {
+type DecodedScanManifest = typeof ScanManifest.Type
+
+type ComparableManifest = {
   readonly value: string
   readonly beforeToken?: string
   readonly afterToken?: string
   readonly fingerprint?: { readonly profile: string; readonly digest: string }
-} | null => {
+} | null
+
+const decodeScanManifest = (value: string): DecodedScanManifest | null => {
   try {
     const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
-    if (Option.isNone(decoded)) return null
-    const { observation_token: beforeToken, ...before } = decoded.value.before
-    const { observation_token: afterToken, ...after } = decoded.value.after
-    return {
-      value: JSON.stringify({ ...decoded.value, fingerprint: undefined, before, after }),
-      beforeToken,
-      afterToken,
-      ...(decoded.value.fingerprint === undefined ? {} : { fingerprint: decoded.value.fingerprint })
-    }
+    return Option.isNone(decoded) ? null : decoded.value
   } catch {
     return null
   }
+}
+
+const comparableManifestFromDecoded = (decoded: DecodedScanManifest): NonNullable<ComparableManifest> => {
+  const { observation_token: beforeToken, ...before } = decoded.before
+  const { observation_token: afterToken, ...after } = decoded.after
+  return {
+    value: JSON.stringify({ ...decoded, fingerprint: undefined, before, after }),
+    beforeToken,
+    afterToken,
+    ...(decoded.fingerprint === undefined ? {} : { fingerprint: decoded.fingerprint })
+  }
+}
+
+const comparableManifest = (value: string): ComparableManifest => {
+  const decoded = decodeScanManifest(value)
+  return decoded === null ? null : comparableManifestFromDecoded(decoded)
 }
 
 const observationsEquivalent = (left: string | undefined, right: string | undefined): boolean =>
@@ -171,46 +183,27 @@ const manifestsEquivalent = (left: string, right: string): boolean => {
         comparableLeft.fingerprint.digest === comparableRight.fingerprint.digest))
 }
 
-const manifestsEquivalentWithFingerprint = (left: string, right: string): boolean => {
-  const comparableLeft = comparableManifest(left)
-  const comparableRight = comparableManifest(right)
-  return comparableLeft !== null && comparableRight !== null &&
-    comparableLeft.fingerprint !== undefined && comparableRight.fingerprint !== undefined &&
-    comparableLeft.value === comparableRight.value &&
-    observationsEquivalent(comparableLeft.beforeToken, comparableRight.beforeToken) &&
-    observationsEquivalent(comparableLeft.afterToken, comparableRight.afterToken) &&
-    comparableLeft.fingerprint.profile === comparableRight.fingerprint.profile &&
-    comparableLeft.fingerprint.digest === comparableRight.fingerprint.digest
-}
-
 const fingerprintFromManifest = (value: string): { readonly profile: string; readonly digest: string } | null => {
-  try {
-    const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
-    if (Option.isNone(decoded) || decoded.value.fingerprint === undefined) return null
-    return decoded.value.fingerprint
-  } catch {
-    return null
-  }
+  return decodeScanManifest(value)?.fingerprint ?? null
 }
 
 const fingerprintKey = (fingerprint: { readonly profile: string; readonly digest: string }): string =>
   `${fingerprint.profile}:${fingerprint.digest}`
 
+const fingerprintPrefilterFromDecoded = (decoded: DecodedScanManifest): string => {
+  const pages = [...decoded.pages]
+    .sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)))
+    .map((page) => [page.name, page.declared_bytes] as const)
+  return JSON.stringify({
+    source_kind: decoded.source_kind,
+    bytes: decoded.after.bytes,
+    pages
+  })
+}
+
 const fingerprintPrefilterFromManifest = (value: string): string | null => {
-  try {
-    const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
-    if (Option.isNone(decoded)) return null
-    const pages = [...decoded.value.pages]
-      .sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)))
-      .map((page) => [page.name, page.declared_bytes] as const)
-    return JSON.stringify({
-      source_kind: decoded.value.source_kind,
-      bytes: decoded.value.after.bytes,
-      pages
-    })
-  } catch {
-    return null
-  }
+  const decoded = decodeScanManifest(value)
+  return decoded === null ? null : fingerprintPrefilterFromDecoded(decoded)
 }
 
 type ManifestMetadata = {
@@ -219,13 +212,16 @@ type ManifestMetadata = {
   readonly prefilter: string | null
 }
 
-const manifestMetadata = (value: string | null): ManifestMetadata => value === null
-  ? { comparable: null, fingerprint: null, prefilter: null }
-  : {
-      comparable: comparableManifest(value),
-      fingerprint: fingerprintFromManifest(value),
-      prefilter: fingerprintPrefilterFromManifest(value)
-    }
+const manifestMetadata = (value: string | null): ManifestMetadata => {
+  if (value === null) return { comparable: null, fingerprint: null, prefilter: null }
+  const decoded = decodeScanManifest(value)
+  if (decoded === null) return { comparable: null, fingerprint: null, prefilter: null }
+  return {
+    comparable: comparableManifestFromDecoded(decoded),
+    fingerprint: decoded.fingerprint ?? null,
+    prefilter: fingerprintPrefilterFromDecoded(decoded)
+  }
+}
 
 const manifestsEquivalentMetadata = (left: ManifestMetadata, right: ManifestMetadata): boolean =>
   left.comparable !== null && right.comparable !== null &&
@@ -1067,7 +1063,13 @@ const selectStagedById = db.prepare(
   "SELECT candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms FROM staged_discoveries WHERE candidate_id = ? AND root_id = ?"
 )
 selectStagedById.setReadBigInts(true)
-const selectEntriesForRoot = db.prepare("SELECT entry_id, relative_path, kind, state, decision_version, location_revision, manifest_json, availability_status, availability_observed_at_ms FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
+const selectEntriesForRoot = db.prepare("SELECT entry_id, relative_path, kind, state, decision_version, location_revision, availability_status, availability_observed_at_ms FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
+const selectMissingAcceptedManifestsForFingerprintPlan = db.prepare(
+  `SELECT e.relative_path, e.manifest_json
+   FROM library_entries e
+   LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path AND s.task_id = ?
+   WHERE e.root_id = ? AND e.state = 'accepted' AND s.candidate_id IS NULL`
+)
 const selectNormalScanFingerprintPlan = db.prepare(
   `SELECT s.relative_path, s.manifest_json, e.manifest_json AS accepted_manifest_json, e.state AS accepted_state
    FROM staged_discoveries s
@@ -2413,7 +2415,7 @@ const resolveReplacement = (
     }
     if (
       request.freshManifestJson === null ||
-      !manifestsEquivalentWithFingerprint(candidate.manifest_json, request.freshManifestJson)
+      !manifestsEquivalent(candidate.manifest_json, request.freshManifestJson)
     ) {
       db.exec("ROLLBACK")
       return { kind: "fresh_observation_conflict" }
@@ -2870,7 +2872,6 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       state: "accepted" | "replacement-pending"
       decision_version: bigint
       location_revision: bigint
-      manifest_json: string
       availability_status: "present" | "missing" | "inaccessible" | "unknown"
       availability_observed_at_ms: number | null
     }>
@@ -2899,8 +2900,27 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       analysis_status: "ready" | "error"
       manifest_json: string | null
     }>
-    const existingMetadata = new Map(existingEntries.map((entry) => [entry.entry_id, manifestMetadata(entry.manifest_json)]))
-    const stagedMetadata = new Map(staged.map((candidate) => [candidate.candidate_id, manifestMetadata(candidate.manifest_json)]))
+    const existingManifestJson = new Map<string, string>()
+    const existingMetadata = new Map<string, ManifestMetadata>()
+    const stagedMetadata = new Map<string, ManifestMetadata>()
+    const metadataForCandidate = (candidate: (typeof staged)[number]): ManifestMetadata => {
+      const cached = stagedMetadata.get(candidate.candidate_id)
+      if (cached !== undefined) return cached
+      const metadata = manifestMetadata(candidate.manifest_json)
+      stagedMetadata.set(candidate.candidate_id, metadata)
+      return metadata
+    }
+    const metadataForEntry = (entry: (typeof existingEntries)[number]): ManifestMetadata => {
+      const cached = existingMetadata.get(entry.entry_id)
+      if (cached !== undefined) return cached
+      if (!existingManifestJson.has(entry.entry_id)) {
+        const row = selectEntry.get(request.rootId, entry.relative_path) as { entry_id: string; manifest_json: string } | undefined
+        if (row !== undefined) existingManifestJson.set(row.entry_id, row.manifest_json)
+      }
+      const metadata = manifestMetadata(existingManifestJson.get(entry.entry_id) ?? null)
+      existingMetadata.set(entry.entry_id, metadata)
+      return metadata
+    }
     const sourcePathFor = (relativePath: string): string => join(root.selectedPath, ...relativePath.split("/"))
     const changedPaths: Array<string> = []
     const existingForCandidate = new Map<string, {
@@ -2933,8 +2953,10 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       } | undefined
       if (existing !== undefined) {
         existingForCandidate.set(candidate.relative_path, existing)
-        const existingManifest = existingMetadata.get(existing.entry_id)
-        const candidateManifest = stagedMetadata.get(candidate.candidate_id)
+        existingManifestJson.set(existing.entry_id, existing.manifest_json)
+        const existingManifest = manifestMetadata(existing.manifest_json)
+        existingMetadata.set(existing.entry_id, existingManifest)
+        const candidateManifest = metadataForCandidate(candidate)
         if (
           existingManifest === undefined || candidateManifest === undefined ||
           !manifestsEquivalentMetadata(existingManifest, candidateManifest) ||
@@ -2954,34 +2976,70 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       if (candidate.hold_state !== "eligible" || candidate.analysis_status !== "ready") continue
       if (!observedCandidates.has(candidate.relative_path) || candidate.manifest_json === null) continue
       if (existingForCandidate.has(candidate.relative_path)) continue
-      const fingerprint = stagedMetadata.get(candidate.candidate_id)?.fingerprint ?? null
+      const fingerprint = metadataForCandidate(candidate).fingerprint
       if (fingerprint === null) continue
-      const key = `${fingerprint.profile}:${fingerprint.digest}`
+      const key = fingerprintKey(fingerprint)
       const matches = candidatesByFingerprint.get(key) ?? []
       matches.push(candidate)
       candidatesByFingerprint.set(key, matches)
     }
     const existingPathSet = new Set(existingEntries.map((entry) => entry.relative_path))
-    if (missingPaths.length > 0) {
+    if (missingPaths.length > 0 && candidatesByFingerprint.size > 0) {
       const missingPathSet = new Set(missingPaths)
+      const stagedByPath = new Map(staged.map((candidate) => [candidate.relative_path, candidate]))
       const stagedFingerprintByPath = new Map<string, { readonly profile: string; readonly digest: string }>()
       for (const candidate of staged) {
-        const fingerprint = stagedMetadata.get(candidate.candidate_id)?.fingerprint
+        const fingerprint = metadataForCandidate(candidate).fingerprint
         if (fingerprint !== null && fingerprint !== undefined) stagedFingerprintByPath.set(candidate.relative_path, fingerprint)
       }
-      const activeClaimsByFingerprint = new Map<string, Array<(typeof existingEntries)[number]>>()
+      const missingSourcePrefilters = new Set<string>()
       for (const entry of existingEntries) {
-        const fingerprint = stagedFingerprintByPath.get(entry.relative_path) ?? existingMetadata.get(entry.entry_id)?.fingerprint
-        if (fingerprint === null || fingerprint === undefined) continue
-        const claims = activeClaimsByFingerprint.get(fingerprintKey(fingerprint)) ?? []
-        claims.push(entry)
-        activeClaimsByFingerprint.set(fingerprintKey(fingerprint), claims)
+        if (!missingPathSet.has(entry.relative_path)) continue
+        const metadata = metadataForEntry(entry)
+        if (entry.state === "accepted" && metadata.prefilter !== null) missingSourcePrefilters.add(metadata.prefilter)
+      }
+      const activeClaimsByFingerprint = new Map<string, Array<(typeof existingEntries)[number]>>()
+      const presentUnresolvedPrefilters = new Set<string>()
+      let presentUnresolvedWithoutPrefilter = false
+      for (const entry of existingEntries) {
+        const stagedCandidate = stagedByPath.get(entry.relative_path)
+        const stagedMetadata = stagedCandidate === undefined ? null : metadataForCandidate(stagedCandidate)
+        const stagedFingerprint = stagedFingerprintByPath.get(entry.relative_path)
+        if (stagedFingerprint !== undefined) {
+          const key = fingerprintKey(stagedFingerprint)
+          const claims = activeClaimsByFingerprint.get(key) ?? []
+          claims.push(entry)
+          activeClaimsByFingerprint.set(key, claims)
+          continue
+        }
+        if (missingPathSet.has(entry.relative_path) || isExcluded(entry.relative_path)) {
+          const fingerprint = metadataForEntry(entry).fingerprint
+          if (fingerprint === null || fingerprint === undefined) continue
+          const key = fingerprintKey(fingerprint)
+          const claims = activeClaimsByFingerprint.get(key) ?? []
+          claims.push(entry)
+          activeClaimsByFingerprint.set(key, claims)
+          continue
+        }
+        if (stagedMetadata === null || stagedMetadata.prefilter === null) {
+          presentUnresolvedWithoutPrefilter = true
+          continue
+        }
+        if (!missingSourcePrefilters.has(stagedMetadata.prefilter)) continue
+        const metadata = metadataForEntry(entry)
+        if (metadata.fingerprint === null) presentUnresolvedPrefilters.add(stagedMetadata.prefilter)
+        else {
+          const key = fingerprintKey(metadata.fingerprint)
+          const claims = activeClaimsByFingerprint.get(key) ?? []
+          claims.push(entry)
+          activeClaimsByFingerprint.set(key, claims)
+        }
       }
       const unresolvedPrefilters = new Set<string>()
       let unresolvedWithoutPrefilter = false
       for (const candidate of staged) {
         if (!observed.has(candidate.relative_path) || existingPathSet.has(candidate.relative_path)) continue
-        const metadata = stagedMetadata.get(candidate.candidate_id)
+        const metadata = metadataForCandidate(candidate)
         const unresolved = candidate.hold_state !== "eligible" ||
           candidate.analysis_status !== "ready" ||
           !observedCandidates.has(candidate.relative_path) ||
@@ -3002,12 +3060,16 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
         if (sourceMatches.length !== 1 || claims.length !== 1) continue
         const source = sourceMatches[0]
         if (source === undefined || source.state !== "accepted") continue
-        const sourceMetadata = existingMetadata.get(source.entry_id)
+        const sourceMetadata = metadataForEntry(source)
         const hasUnresolvedCandidate = unresolvedWithoutPrefilter ||
           sourceMetadata?.prefilter === null ||
           sourceMetadata === undefined ||
           unresolvedPrefilters.has(sourceMetadata.prefilter)
-        if (hasUnresolvedCandidate || hasPresentPending) continue
+        const hasUnresolvedPresentClaim = presentUnresolvedWithoutPrefilter ||
+          sourceMetadata?.prefilter === null ||
+          sourceMetadata === undefined ||
+          presentUnresolvedPrefilters.has(sourceMetadata.prefilter)
+        if (hasUnresolvedCandidate || hasUnresolvedPresentClaim || hasPresentPending) continue
         const target = targets[0]
         if (target === undefined || target.manifest_json === null || target.kind !== source.kind) continue
         const targetManifest = persistedManifest(target.manifest_json, "relocation target manifest")
@@ -3249,30 +3311,38 @@ const normalScanFingerprintPlan = (
     accepted_manifest_json: string | null
     accepted_state: "accepted" | "replacement-pending" | null
   }>
-  const activeEntries = selectEntriesForRoot.all(request.rootId) as unknown as ReadonlyArray<{
+  const missingAcceptedManifests = selectMissingAcceptedManifestsForFingerprintPlan.all(request.taskId, request.rootId) as unknown as ReadonlyArray<{
     relative_path: string
-    state: "accepted" | "replacement-pending"
     manifest_json: string
   }>
-  const stagedPaths = new Set(rows.map((row) => row.relative_path))
   const isExcluded = (relativePath: string): boolean => root.exclusions.some(
     (exclusion) => exclusion.scope === "exact"
       ? exclusion.path === relativePath
       : relativePath === exclusion.path || relativePath.startsWith(`${exclusion.path}/`)
   )
+  const metadataByManifest = new Map<string, ManifestMetadata>()
+  const metadataForManifest = (value: string): ManifestMetadata => {
+    const cached = metadataByManifest.get(value)
+    if (cached !== undefined) return cached
+    const metadata = manifestMetadata(value)
+    metadataByManifest.set(value, metadata)
+    return metadata
+  }
   const missingPrefilters = new Set(
-    activeEntries
-      .filter((entry) => entry.state === "accepted" && !stagedPaths.has(entry.relative_path) && !isExcluded(entry.relative_path))
-      .map((entry) => fingerprintPrefilterFromManifest(entry.manifest_json))
+    missingAcceptedManifests
+      .filter((entry) => !isExcluded(entry.relative_path) && metadataForManifest(entry.manifest_json).fingerprint !== null)
+      .map((entry) => metadataForManifest(entry.manifest_json).prefilter)
       .filter((prefilter): prefilter is string => prefilter !== null)
   )
   return rows
     .filter((row) => {
+      const candidateMetadata = metadataForManifest(row.manifest_json)
       if (row.accepted_manifest_json !== null) {
+        const acceptedMetadata = metadataForManifest(row.accepted_manifest_json)
         return (row.accepted_state === "accepted" || row.accepted_state === "replacement-pending") &&
-          !manifestsEquivalent(row.accepted_manifest_json, row.manifest_json)
+          !manifestsEquivalentMetadata(acceptedMetadata, candidateMetadata)
       }
-      const prefilter = fingerprintPrefilterFromManifest(row.manifest_json)
+      const prefilter = candidateMetadata.prefilter
       return prefilter !== null && missingPrefilters.has(prefilter)
     })
     .map((row) => row.relative_path)
