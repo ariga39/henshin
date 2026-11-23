@@ -1448,7 +1448,6 @@ const handle = (request: DraftWorkerRequest): unknown => {
             db.exec("COMMIT")
             return { kind: "existing", attempt: pending }
           }
-          supersedeGalleryBindAttempt.run(Date.now(), pending.instanceId, pending.operationId)
         }
 
         const now = Date.now()
@@ -1457,6 +1456,9 @@ const handle = (request: DraftWorkerRequest): unknown => {
         if (count >= BigInt(MAX_GALLERY_BIND_ATTEMPTS)) {
           db.exec("COMMIT")
           return { kind: "full" }
+        }
+        if (pending !== undefined) {
+          supersedeGalleryBindAttempt.run(now, pending.instanceId, pending.operationId)
         }
         insertGalleryBindAttempt.run(
           request.instanceId,

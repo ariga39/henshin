@@ -1376,9 +1376,6 @@ export const updateLibraryNote = (text: string) =>
       library_note_status: "idle",
       library_note_error: null,
       library_note_server_text: null,
-      library_bind_url: result.data.entry.binding?.canonical_url ?? "",
-      library_bind_status: "idle",
-      library_bind_error: null
     }))
   })
 

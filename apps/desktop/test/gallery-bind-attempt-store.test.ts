@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
-import { GalleryBindAttemptStore } from "../src/main/persistence/GalleryBindAttemptStore"
+import { GalleryBindAttemptStore, GalleryBindAttemptStoreFullError } from "../src/main/persistence/GalleryBindAttemptStore"
 import { LocalDatabaseWorker } from "../src/main/persistence/LocalDatabaseWorker"
 
 const instanceId = "11111111-1111-4111-8111-111111111111"
@@ -103,5 +103,41 @@ describe("gallery bind attempt persistence", () => {
       const store = yield* GalleryBindAttemptStore
       return yield* store.markSubmitted({ instanceId, operationId: operationB, epoch: nextEpoch })
     }))).toMatchObject({ status: "submitted", epoch: nextEpoch })
+
+    for (let index = 0; index < 62; index += 1) {
+      const suffix = (index + 1).toString(16).padStart(12, "0")
+      await runtime.runPromise(Effect.gen(function*() {
+        const store = yield* GalleryBindAttemptStore
+        return yield* store.prepare({
+          instanceId,
+          operationId: `00000000-0000-4000-8000-${suffix}`,
+          entryId: `00000000-0000-4000-9000-${suffix}`,
+          url: `https://e-hentai.org/g/${index + 1}/capacity/`,
+          expectedDecisionVersion: "1",
+          epoch
+        })
+      }))
+    }
+
+    await expect(runtime.runPromise(Effect.gen(function*() {
+      const store = yield* GalleryBindAttemptStore
+      return yield* store.prepare({
+        instanceId,
+        operationId: "77777777-7777-4777-8777-777777777777",
+        entryId,
+        url: "https://e-hentai.org/g/999/capacity-rejected/",
+        expectedDecisionVersion: "7",
+        epoch: nextEpoch
+      })
+    }))).rejects.toBeInstanceOf(GalleryBindAttemptStoreFullError)
+
+    expect(await runtime.runPromise(Effect.gen(function*() {
+      const store = yield* GalleryBindAttemptStore
+      return yield* store.listPending(instanceId)
+    }))).toContainEqual(expect.objectContaining({
+      operationId: operationB,
+      status: "submitted",
+      url: "https://e-hentai.org/g/456/new-token/"
+    }))
   })
 })

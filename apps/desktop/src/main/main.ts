@@ -568,6 +568,15 @@ const updateGalleryBindAttempt = (
     )
   )
 
+const galleryBindResultIsIndeterminate = (error: PublicError): boolean =>
+  error.retryable || error.code === "internal_error" || error.code === "ipc_failed"
+
+const galleryBindSupersededError: PublicError = {
+  code: "operation_conflict",
+  message: "gallery binding was superseded by a newer intent",
+  retryable: false
+}
+
 const dispatchGalleryBindAttempt = async (
   attempt: import("./persistence/draft-worker-protocol").GalleryBindAttemptRow,
   session: Session
@@ -585,6 +594,9 @@ const dispatchGalleryBindAttempt = async (
     )
   )
   if (!submitted.ok) return submitted as IpcErr
+  if (submitted.data.status !== "submitted") {
+    return { ok: false, error: galleryBindSupersededError }
+  }
 
   const result = await runNetworkResult(
     toResult(
@@ -606,7 +618,7 @@ const dispatchGalleryBindAttempt = async (
   if (result.ok && galleryBindTestResponseDelayMs > 0) await delay(galleryBindTestResponseDelayMs)
   if (result.ok) {
     await updateGalleryBindAttempt(attempt, "completed")
-  } else if (result.error.retryable) {
+  } else if (galleryBindResultIsIndeterminate(result.error)) {
     await updateGalleryBindAttempt(attempt, "unresolved")
   } else {
     await updateGalleryBindAttempt(attempt, "rejected")
@@ -638,7 +650,8 @@ const reconcilePendingGalleryBinds = async (): Promise<void> => {
       )
     )
     if (!current.ok) {
-      if (!current.error.retryable) await updateGalleryBindAttempt(attempt, "rejected")
+      if (galleryBindResultIsIndeterminate(current.error)) await updateGalleryBindAttempt(attempt, "unresolved")
+      else await updateGalleryBindAttempt(attempt, "rejected")
       continue
     }
     if (current.data.binding !== null && comparableGalleryUrl(current.data.binding.canonical_url) === comparableGalleryUrl(attempt.url)) {

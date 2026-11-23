@@ -149,6 +149,36 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_note_error).toContain("retained")
     expect(viewStore.getState().library_entry?.decision_version).toBe("2")
   })
+  it("does not clear a binding draft or in-flight fence when a note save succeeds", async () => {
+    const currentEntry = entryDetails(entryAId, "1")
+    const client = makeLibraryClient({
+      note: () => Effect.succeed({ ok: true as const, data: {
+        operation_id: firstActionId,
+        entry: { ...currentEntry, note: { text: "saved note", revision: "2" } }
+      } satisfies EntryCommandResult })
+    })
+    const bindUrl = "https://e-hentai.org/g/12345/typed-token/"
+    viewStore.set({
+      library_selected_entry_id: entryAId,
+      library_entry: currentEntry,
+      library_note_text: "saved note",
+      library_bind_url: bindUrl,
+      library_bind_status: "loading",
+      library_bind_error: "binding is still pending",
+      library_bind_operation_id: firstActionId,
+      library_bind_operation_url: bindUrl
+    })
+
+    await run(updateLibraryNote("saved note"), client)
+
+    expect(viewStore.getState()).toMatchObject({
+      library_bind_url: bindUrl,
+      library_bind_status: "loading",
+      library_bind_error: "binding is still pending",
+      library_bind_operation_id: firstActionId,
+      library_bind_operation_url: bindUrl
+    })
+  })
   it("binds the selected entry with its revision and stores the canonical binding", async () => {
     const bindRequests: Array<{ readonly entry_id: string; readonly operation_id: string; readonly url: string; readonly expected_decision_version: string }> = []
     const bound = entryDetails(entryAId, "1", {
