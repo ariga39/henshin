@@ -15,7 +15,8 @@ const entry: LibraryEntry = {
   title: "Book",
   page_count: 1,
   state: "accepted",
-  decision_revision: "1",
+  replacement: null,
+  match_fields: [],
   content_version: "1",
   location_revision: "1",
   cover: null
