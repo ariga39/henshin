@@ -27,6 +27,9 @@ import {
   DESKTOP_IDENTITY_NAME
 } from "./maintenance/DesktopBackupArchive"
 import {
+  previewDesktopRecovery
+} from "./maintenance/DesktopBackupRecovery"
+import {
   NEWER_DATABASE_SCHEMA,
   BackupArtifactRow,
   BackupArtifactCompletionOutcome,
@@ -76,6 +79,7 @@ const usage = (): string =>
   "       server.mjs backup create (--data-dir <directory> | --database <path>) --destination-id <destination-id> [--label <label>]\n" +
   "       server.mjs backup drill [list] (--data-dir <directory> | --database <path>) [--artifact-id <artifact-id>]"
   + "\n       server.mjs backup desktop --data-dir <directory> --output <archive> [--label <label>]"
+  + "\n       server.mjs backup desktop restore --data-dir <directory> --input <archive> [--confirm]"
 
 interface BackupDestinationOptions {
   readonly command: "list" | "register" | "replace"
@@ -105,6 +109,12 @@ interface DesktopBackupOptions {
   readonly dataDirectory: string
   readonly outputPath: string
   readonly label: string | null
+}
+
+interface DesktopRestoreOptions {
+  readonly dataDirectory: string
+  readonly inputPath: string
+  readonly confirmed: boolean
 }
 
 const parseBackupCreateOptions = (args: ReadonlyArray<string>): BackupCreateOptions => {
@@ -201,6 +211,38 @@ const parseDesktopBackupOptions = (args: ReadonlyArray<string>): DesktopBackupOp
   }
   if (dataDirectory === undefined || outputPath === undefined) throw new Error(usage())
   return { dataDirectory, outputPath, label }
+}
+
+const parseDesktopRestoreOptions = (args: ReadonlyArray<string>): DesktopRestoreOptions => {
+  if (args[1] !== "desktop" || args[2] !== "restore") throw new Error(usage())
+  let dataDirectory: string | undefined
+  let inputPath: string | undefined
+  let confirmed = false
+  for (let index = 3; index < args.length; index += 1) {
+    switch (args[index]) {
+      case "--data-dir":
+        dataDirectory = args[++index]
+        if (dataDirectory === undefined || dataDirectory.startsWith("--")) throw new Error(usage())
+        break
+      case "--input":
+      case "--archive":
+        inputPath = args[++index]
+        if (inputPath === undefined || inputPath.startsWith("--")) throw new Error(usage())
+        break
+      case "--confirm":
+        confirmed = true
+        break
+      case "--preview":
+        if (confirmed) throw new Error(usage())
+        break
+      case "--help":
+        throw new Error(usage())
+      default:
+        throw new Error(usage())
+    }
+  }
+  if (dataDirectory === undefined || inputPath === undefined) throw new Error(usage())
+  return { dataDirectory, inputPath, confirmed }
 }
 
 const parseBackupDestinationOptions = (args: ReadonlyArray<string>): BackupDestinationOptions => {
@@ -790,6 +832,18 @@ const runDesktopBackupCommand = async (options: DesktopBackupOptions): Promise<v
   }
 }
 
+const runDesktopRestoreCommand = async (options: DesktopRestoreOptions): Promise<void> => {
+  const dataDirectory = await canonicalizeDesktopDataDirectory(options.dataDirectory)
+  let guard: Awaited<ReturnType<typeof acquireDesktopOwnership>> | undefined
+  try {
+    guard = await acquireDesktopOwnership(dataDirectory)
+    if (options.confirmed) throw new Error("desktop recovery apply is not available in the preview change")
+    process.stdout.write(JSON.stringify(await previewDesktopRecovery(dataDirectory, options.inputPath)) + "\n")
+  } finally {
+    guard?.close()
+  }
+}
+
 const main = async () => {
   const args = process.argv.slice(2)
   if (args.length === 0) {
@@ -817,6 +871,23 @@ const main = async () => {
 
   if (args[0] === "backup") {
     if (args[1] === "desktop") {
+      if (args[2] === "restore") {
+        let options: DesktopRestoreOptions
+        try {
+          options = parseDesktopRestoreOptions(args)
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : usage())
+          process.exitCode = 2
+          return
+        }
+        try {
+          await runDesktopRestoreCommand(options)
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : "desktop recovery failed")
+          process.exitCode = 1
+        }
+        return
+      }
       let options: DesktopBackupOptions
       try {
         options = parseDesktopBackupOptions(args)
