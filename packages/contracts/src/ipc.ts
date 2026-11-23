@@ -203,6 +203,12 @@ export const LibraryNoteIpcRequest = Schema.Struct({
   expected_decision_version: Revision
 })
 export type LibraryNoteIpcRequest = typeof LibraryNoteIpcRequest.Type
+export const LibraryBindIpcRequest = Schema.Struct({
+  entry_id: Uuid,
+  url: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)),
+  expected_decision_version: Revision
+})
+export type LibraryBindIpcRequest = typeof LibraryBindIpcRequest.Type
 
 export const ThumbnailGetIpcRequest = Schema.Struct({ key: ThumbnailKey })
 export type ThumbnailGetIpcRequest = typeof ThumbnailGetIpcRequest.Type

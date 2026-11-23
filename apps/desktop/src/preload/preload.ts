@@ -58,6 +58,8 @@ contextBridge.exposeInMainWorld("henshinLibrary", {
     ipcRenderer.invoke(IpcChannels.libraryEntry, input),
   note: (input: LibraryNoteIpcRequest) =>
     ipcRenderer.invoke(IpcChannels.libraryNote, input),
+  bind: (input: { readonly entry_id: string; readonly url: string; readonly expected_decision_version: string }) =>
+    ipcRenderer.invoke(IpcChannels.libraryBind, input),
   open: (input: OpenBookIpcRequest) => ipcRenderer.invoke(IpcChannels.openBook, input),
   status: (input: OpenBookStatusIpcRequest) => ipcRenderer.invoke(IpcChannels.openBookStatus, input),
   onOpenStateChanged: (listener: () => void) => {

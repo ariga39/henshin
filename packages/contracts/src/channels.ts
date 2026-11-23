@@ -18,6 +18,7 @@ export const IpcChannels = {
   librarySearch: "henshin:library-search",
   libraryEntry: "henshin:library-entry",
   libraryNote: "henshin:library-note",
+  libraryBind: "henshin:library-bind",
   openBook: "henshin:open-book",
   openBookStatus: "henshin:open-book-status",
   openStateChanged: "henshin:open-state-changed",

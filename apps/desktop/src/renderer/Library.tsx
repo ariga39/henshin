@@ -14,6 +14,7 @@ import {
   openSelectedLibraryEntry,
   searchLibrary,
   updateLibraryNote,
+  bindLibraryEntry,
   selectLibraryEntry,
   showSetup
 } from "./workflows"
@@ -309,6 +310,7 @@ export const LibraryScreen = () => {
               <p role="alert">Could not load entry details: {state.library_entry_error}</p>
             )}
             {state.library_entry_status === "ready" && state.library_entry?.entry_id === selectedEntry.entry_id && (
+              <>
               <form
                 data-testid="entry-note-form"
                 onSubmit={(event) => {
@@ -349,6 +351,34 @@ export const LibraryScreen = () => {
                   </p>
                 )}
               </form>
+              <p>Indexed {selectedEntry.kind}; gallery binding is independent of upstream metadata refresh.</p>
+              {state.library_entry.binding === null ? (
+                <p data-testid="entry-binding">Unbound</p>
+              ) : (
+                <p data-testid="entry-binding">
+                  {state.library_entry.binding.source} / {state.library_entry.binding.gid} · {state.library_entry.binding.canonical_url}
+                </p>
+              )}
+              <p data-testid="entry-metadata-pending">Metadata pending: source metadata has not been refreshed.</p>
+              <form onSubmit={(event) => {
+                event.preventDefault()
+                void runtime.runPromise(bindLibraryEntry(state.library_bind_url))
+              }}>
+                <label htmlFor={`gallery-url-${selectedEntry.entry_id}`}>Gallery URL</label>
+                <input
+                  id={`gallery-url-${selectedEntry.entry_id}`}
+                  data-testid="entry-binding-url"
+                  value={state.library_bind_url}
+                  onChange={(event) => viewStore.set({ library_bind_url: event.target.value })}
+                  placeholder="https://e-hentai.org/g/12345/token/"
+                  disabled={state.library_bind_status === "loading"}
+                />
+                <button type="submit" data-testid="entry-bind" disabled={state.library_bind_status === "loading" || state.library_bind_url.trim().length === 0}>
+                  {state.library_bind_status === "loading" ? "Binding…" : "Bind gallery"}
+                </button>
+              </form>
+              {state.library_bind_error !== null && <p role="alert">Could not bind gallery: {state.library_bind_error}</p>}
+              </>
             )}
             {selectedEntryCanOpen ? (
               <>

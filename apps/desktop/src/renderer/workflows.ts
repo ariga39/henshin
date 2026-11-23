@@ -1260,10 +1260,13 @@ export const loadLibraryEntry = (entryId: string) =>
       library_entry_error: null,
       library_note_status: "loading",
       library_note_error: null,
-      library_note_server_text: null
+      library_note_server_text: null,
+      library_bind_status: "idle",
+      library_bind_error: null
     }))
     const result = yield* client.entry({ entry_id: entryId })
-    if (viewStore.getState().library_selected_entry_id !== entryId) return
+    const current = viewStore.getState()
+    if (current.library_selected_entry_id !== entryId) return
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({
         library_entry_status: "error",
@@ -1280,7 +1283,10 @@ export const loadLibraryEntry = (entryId: string) =>
       library_note_text: result.data.note?.text ?? "",
       library_note_status: "idle",
       library_note_error: null,
-      library_note_server_text: null
+      library_note_server_text: null,
+      library_bind_url: result.data.binding?.canonical_url ?? "",
+      library_bind_status: "idle",
+      library_bind_error: null
     }))
   })
 
@@ -1300,7 +1306,9 @@ export const selectLibraryEntry = (entryId: string) =>
       library_note_text: "",
       library_note_status: "idle",
       library_note_error: null,
-      library_note_server_text: null
+      library_note_server_text: null,
+      library_bind_status: "idle",
+      library_bind_error: null
     }))
     yield* loadLibraryEntry(entryId)
   })
@@ -1345,7 +1353,35 @@ export const updateLibraryNote = (text: string) =>
       library_note_text: result.data.entry.note?.text ?? "",
       library_note_status: "idle",
       library_note_error: null,
-      library_note_server_text: null
+      library_note_server_text: null,
+      library_bind_url: result.data.entry.binding?.canonical_url ?? "",
+      library_bind_status: "idle",
+      library_bind_error: null
+    }))
+  })
+
+export const bindLibraryEntry = (url: string) =>
+  Effect.gen(function*() {
+    const client = yield* LibraryClient
+    const state = viewStore.getState()
+    const entry = state.library_entry
+    const entryId = state.library_selected_entry_id
+    if (entry === null || entryId === null) return
+    yield* Effect.sync(() => viewStore.set({ library_bind_status: "loading", library_bind_error: null }))
+    const result = yield* client.bind({
+      entry_id: entryId,
+      url,
+      expected_decision_version: entry.decision_version
+    })
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({ library_bind_status: "error", library_bind_error: result.error.message }))
+      return
+    }
+    yield* Effect.sync(() => viewStore.set({
+      library_entry: result.data.entry,
+      library_bind_url: result.data.entry.binding?.canonical_url ?? "",
+      library_bind_status: "idle",
+      library_bind_error: null
     }))
   })
 
