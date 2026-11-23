@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process"
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { createRequire } from "node:module"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -34,10 +35,6 @@ const resolveServerArchive = async () => {
   return path.join(temporaryDirectory, `henshin-server-${serverPackage.version}-${platform}.tar.gz`)
 }
 
-const electronApp = path.join(
-  desktopDirectory,
-  "node_modules/electron/dist/Electron.app"
-)
 const resourcesDirectory = path.join(appPath, "Contents/Resources")
 const appResourcesDirectory = path.join(resourcesDirectory, "app")
 
@@ -46,13 +43,19 @@ await rm(appPath, { recursive: true, force: true })
 
 run(process.execPath, [path.join(repositoryDirectory, "apps/server/build.mjs")])
 run(process.execPath, [path.join(desktopDirectory, "build.mjs")])
-const serverArchive = await resolveServerArchive()
 
+// Requiring Electron uses its pinned package resolver and materializes the
+// platform runtime when the package install omitted its postinstall binary.
+const electronExecutable = createRequire(import.meta.url)("electron")
+const electronApp = path.dirname(path.dirname(path.dirname(electronExecutable)))
 await cp(electronApp, appPath, { recursive: true, verbatimSymlinks: true })
 await mkdir(appResourcesDirectory, { recursive: true })
 await cp(path.join(desktopDirectory, "dist"), path.join(appResourcesDirectory, "dist"), {
   recursive: true
 })
+
+const serverArchive = await resolveServerArchive()
+
 const packagedServerDirectory = path.join(appResourcesDirectory, "dist/server")
 await rm(packagedServerDirectory, { recursive: true, force: true })
 await mkdir(packagedServerDirectory, { recursive: true })
