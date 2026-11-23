@@ -5,6 +5,7 @@ import { Schema } from "effect"
 import * as HttpClientError from "effect/http/HttpClientError"
 import {
   classifyConnectionFailure,
+  CONNECTION_IDENTITY_CHANGED_MESSAGE,
   ConnectionEndpointError,
   ConnectionInstanceMismatchError,
   ConnectionLifecycle
@@ -71,7 +72,7 @@ describe("remote connection endpoint validation", () => {
     })
     try {
       await expect(lifecycle.connect()).rejects.toBeInstanceOf(ConnectionInstanceMismatchError)
-      expect(lifecycle.getStatus()).toMatchObject({ state: "blocked", reason: "instance_mismatch" })
+      expect(lifecycle.getStatus()).toMatchObject({ state: "blocked", reason: CONNECTION_IDENTITY_CHANGED_MESSAGE })
     } finally {
       await lifecycle.close()
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)))
@@ -95,6 +96,11 @@ describe("remote connection failure diagnostics", () => {
     expect(actual.retryable).toBe(false)
   })
 
+  it("keeps a TLS handshake timeout retryable instead of calling it an untrusted certificate", () => {
+    const failure = classifyConnectionFailure(transportFailure("ERR_TLS_HANDSHAKE_TIMEOUT", "TLS handshake timeout"))
+    expect(failure).toMatchObject({ code: "connection_failed", retryable: true })
+  })
+
   it.each([
     [404, "connection_endpoint_failed", false, "Henshin HTTPS endpoint"],
     [500, "connection_server_failed", true, "server health and logs"],
@@ -108,11 +114,6 @@ describe("remote connection failure diagnostics", () => {
     const failure = classifyConnectionFailure(decodeFailure(200))
     expect(failure).toMatchObject({ code: "connection_response_invalid", retryable: false })
     expect(failure.message).toContain("compatible Henshin server")
-  })
-
-  it("keeps a TLS handshake timeout retryable instead of calling it an untrusted certificate", () => {
-    const failure = classifyConnectionFailure(transportFailure("ERR_TLS_HANDSHAKE_TIMEOUT", "TLS handshake timeout"))
-    expect(failure).toMatchObject({ code: "connection_failed", retryable: true })
   })
 
   it("uses the response status when the API client reports an unknown status as a decode failure", () => {

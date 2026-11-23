@@ -110,6 +110,7 @@ import { drainOpenEvents } from "./OpenEventDelivery"
 import { OpenEventDeliveryScheduler } from "./OpenEventDeliveryScheduler"
 import {
   ConnectionInstanceMismatchError,
+  CONNECTION_IDENTITY_CHANGED_MESSAGE,
   ConnectionCompatibilityError,
   ConnectionFailureError,
   ConnectionEndpointError,
@@ -302,7 +303,7 @@ const toPublicError = (error: unknown): PublicError => {
   if (error instanceof ConnectionInstanceMismatchError) {
     return {
       code: "instance_mismatch",
-      message: "managed endpoint identity changed; reconnect requires endpoint recovery",
+      message: CONNECTION_IDENTITY_CHANGED_MESSAGE,
       retryable: false
     }
   }

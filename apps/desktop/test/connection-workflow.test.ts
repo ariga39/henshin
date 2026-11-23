@@ -93,7 +93,7 @@ describe("connection-scoped root workflow", () => {
 
     const pending = run(saveRoot, client)
     await saveStarted
-    viewStore.resetConnectionTarget({ mode: "remote", base_url: "https://new.example.test", instance_id: otherInstanceId })
+    viewStore.resetConnectionTarget({ mode: "remote", base_url: "https://new.example.test", instance_id: otherInstanceId, saved: false })
     resolveSave({ ok: true, data: savedRoot })
     await pending
 

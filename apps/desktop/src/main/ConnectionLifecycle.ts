@@ -26,6 +26,9 @@ export class ConnectionInstanceMismatchError extends Data.TaggedError("Connectio
   readonly actualInstanceId: string
 }> {}
 
+export const CONNECTION_IDENTITY_CHANGED_MESSAGE =
+  "The saved server identity changed; confirm the current server to re-enroll this endpoint."
+
 export type ConnectionFailureCode =
   | "connection_authentication_failed"
   | "connection_tls_expired"
@@ -416,7 +419,7 @@ export class ConnectionLifecycle {
         instance_id: this.expectedInstanceId,
         epoch: null,
         reason: failure instanceof ConnectionInstanceMismatchError
-          ? "instance_mismatch"
+          ? CONNECTION_IDENTITY_CHANGED_MESSAGE
           : failure.message
       }
       throw failure

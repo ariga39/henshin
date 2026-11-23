@@ -23,7 +23,9 @@ export const ConnectionSetup = () => {
       <p data-testid="connection-target">
         {state.connection_target.mode === "managed"
           ? "Using this desktop's managed local service."
-          : `Remote server: ${state.connection_target.base_url ?? "not configured"}${state.connection_target.saved ? "" : " (session only; re-enter the credential after restart)"}`}
+          : state.connection_target.base_url === null
+            ? "Saved remote profile needs recovery; enter a new trusted endpoint and credential."
+            : `Remote server: ${state.connection_target.base_url}${state.connection_target.saved ? "" : " (session only; re-enter the credential after restart)"}`}
       </p>
       <p data-testid="connection-status">Connection: {state.connection.state}</p>
       {state.connection.state === "blocked" && state.connection.reason !== null && state.outcome?.kind !== "error" && (

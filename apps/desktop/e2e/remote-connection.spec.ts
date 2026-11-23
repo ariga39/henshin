@@ -378,6 +378,14 @@ test("connects the normal desktop to the correct TLS library and rejects redirec
     await expect(first.window.getByTestId("connection-target")).toContainText("managed local service")
     await expect(first.window.getByTestId("remote-confirmation")).toContainText(remote.instanceId)
     const sessionOnly = await first.window.getByTestId("remote-session-only-warning").count() === 1
+    const expectRemoteTarget = async (page: Page): Promise<void> => {
+      if (sessionOnly) {
+        await expect(page.getByTestId("connection-target")).toContainText("session only")
+      } else {
+        await expect(page.getByTestId("connection-target")).toContainText(proxy.baseUrl)
+        await expect(page.getByTestId("connection-target")).not.toContainText("session only")
+      }
+    }
     test.info().annotations.push({
       type: "credential-storage",
       description: sessionOnly ? "session-only; protected storage unavailable" : "protected persistence via functional Electron storage"
@@ -397,7 +405,7 @@ test("connects the normal desktop to the correct TLS library and rejects redirec
     if (follower === undefined) throw new Error("second Library window was not created")
     await expect(follower.getByRole("heading", { name: "Library" })).toBeVisible()
     await follower.getByTestId("library-setup").click()
-    await expect(follower.getByTestId("connection-target")).toContainText("session only")
+    await expectRemoteTarget(follower)
     await follower.getByTestId("open-library").click()
     await expect(follower.getByTestId("library-entry")).toContainText("remote-book")
 
@@ -417,7 +425,7 @@ test("connects the normal desktop to the correct TLS library and rejects redirec
     await first.window.getByTestId("remote-confirm").click()
     await expect(first.window.getByTestId("library-entry")).toContainText("remote-book", { timeout: 30_000 })
     await follower.getByTestId("library-setup").click()
-    await expect(follower.getByTestId("connection-target")).toContainText("session only")
+    await expectRemoteTarget(follower)
     await follower.getByTestId("open-library").click()
     await expect(follower.getByTestId("library-entry")).toContainText("remote-book", { timeout: 30_000 })
 
@@ -449,10 +457,8 @@ test("connects the normal desktop to the correct TLS library and rejects redirec
     await expect(first.window.getByTestId("library-screen")).toBeVisible({ timeout: 30_000 })
     await expect(follower.getByTestId("connection-status")).toContainText("connected")
     await expect(first.window.getByTestId("connection-outcome")).toHaveCount(0)
-    if (sessionOnly) {
-      await first.window.getByTestId("library-setup").click()
-      await expect(first.window.getByTestId("connection-target")).toContainText("session only")
-    }
+    await first.window.getByTestId("library-setup").click()
+    await expectRemoteTarget(first.window)
     await first.app.close()
     launchedApps.splice(launchedApps.indexOf(first.app), 1)
 
@@ -755,6 +761,7 @@ test("recovers a corrupt saved profile through managed mode and restart", async 
   await expect(first.window.getByTestId("connection-status")).toContainText("blocked")
   await expect(first.window.getByText("Connection issue: saved connection profile is unreadable")).toBeVisible()
   await expect(first.window.getByTestId("connection-target")).not.toContainText("invalid.invalid")
+  await expect(first.window.getByTestId("connection-target")).not.toContainText("session only")
 
   await first.window.getByTestId("connection-reconnect").click()
   await expect(first.window.getByTestId("connection-outcome")).toContainText("saved connection profile is unreadable")
