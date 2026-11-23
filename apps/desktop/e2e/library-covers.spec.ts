@@ -180,8 +180,11 @@ test("searches the real Library screen and shows field match evidence", async ()
     await expect(window.getByTestId("library-entry")).toContainText("book-beta")
     await expect(window.getByTestId("library-match-evidence")).toContainText("Matched in book name and filename")
 
-    await window.getByTestId("library-search").fill("")
+    await window.getByTestId("library-search").fill("book-does-not-exist")
     await window.getByTestId("library-search-submit").click()
+    await expect(window.getByTestId("library-no-matches")).toContainText("No books match")
+    await expect(window.getByTestId("library-empty")).toHaveCount(0)
+    await window.getByTestId("library-clear-search").click()
     await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(3)
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })

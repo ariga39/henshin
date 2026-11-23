@@ -1466,25 +1466,46 @@ describe("literal library search", () => {
     }))
     expect(empty.data.entries).toHaveLength(fixtureEntries.length)
 
-    const first = await client(Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).search({ payload: { query: "  ＢＯＯＫ  ", page_size: 1 } })
-    }))
-    expect(first.data.entries).toHaveLength(1)
-    expect(first.data.entries[0]?.match_fields).toEqual(["title", "basename"])
-    expect(first.data.has_more).toBe(true)
+    const searchAllPages = async (query: string) => {
+      const pages = []
+      let cursor: string | undefined
+      for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
+        const page = await client(Effect.gen(function*() {
+          return yield* (yield* LibraryHttpClient).search({
+            payload: { query, page_size: 1, ...(cursor === undefined ? {} : { cursor }) }
+          })
+        }))
+        pages.push(page.data)
+        if (!page.data.has_more) return pages
+        expect(page.data.next_cursor).not.toBeNull()
+        cursor = page.data.next_cursor ?? undefined
+      }
+      throw new Error("search did not finish within the page bound")
+    }
 
-    const later = await client(Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).search({
-        payload: { query: "book", page_size: 1, cursor: first.data.next_cursor ?? undefined }
-      })
-    }))
-    expect(later.data.entries).toHaveLength(1)
-    expect(later.data.entries[0]?.title).not.toBe(first.data.entries[0]?.title)
-    expect(later.data.entries[0]?.title).toMatch(/book/i)
+    const bookPages = await searchAllPages("  ＢＯＯＫ  ")
+    const bookEntries = bookPages.flatMap((page) => page.entries)
+    expect(bookPages.length).toBe(6)
+    expect(new Set(bookEntries.map((entry) => entry.title))).toEqual(new Set([
+      "Book 0", "Book 1", "Book 2", "Book 3", "literal%_book", "Straße"
+    ]))
+    expect(Object.fromEntries(bookEntries.map((entry) => [entry.title, entry.match_fields]))).toEqual({
+      "Book 0": ["title", "basename"],
+      "Book 1": ["title", "basename"],
+      "Book 2": ["title", "basename"],
+      "Book 3": ["title", "basename"],
+      "literal%_book": ["title", "basename"],
+      "Straße": ["basename"]
+    })
+    expect(bookPages.at(-1)?.has_more).toBe(false)
+
+    const first = bookPages[0]
+    if (first === undefined || first.next_cursor === null) throw new Error("expected a paged search cursor")
+    const firstCursor = first.next_cursor
 
     const fenced = await client(Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).search({
-        payload: { query: "archive", page_size: 1, cursor: first.data.next_cursor ?? undefined }
+        payload: { query: "archive", page_size: 1, cursor: firstCursor }
       }).pipe(Effect.flip)
     }))
     expect(fenced._tag).toBe("InvalidRequest")

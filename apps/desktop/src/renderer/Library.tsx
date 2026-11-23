@@ -147,6 +147,7 @@ const LibraryCover = ({
 export const LibraryScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   const [searchText, setSearchText] = useState(state.library_query)
+  const hasLibraryQuery = state.library_query.trim().length > 0
 
   useEffect(() => {
     if (viewStore.getState().library_status === "idle") void runtime.runPromise(loadLibrary())
@@ -206,7 +207,22 @@ export const LibraryScreen = () => {
         </button>
         {state.library_status === "loading" && <p role="status">Loading library…</p>}
         {state.library_status === "error" && <p role="alert">Could not load library: {state.library_error}</p>}
-        {state.library_status === "ready" && state.library_entries.length === 0 && (
+        {state.library_status === "ready" && state.library_entries.length === 0 && hasLibraryQuery && (
+          <>
+            <p data-testid="library-no-matches">No books match “{state.library_query}”.</p>
+            <button
+              type="button"
+              data-testid="library-clear-search"
+              onClick={() => {
+                setSearchText("")
+                void runtime.runPromise(searchLibrary(""))
+              }}
+            >
+              Clear search
+            </button>
+          </>
+        )}
+        {state.library_status === "ready" && state.library_entries.length === 0 && !hasLibraryQuery && (
           <p data-testid="library-empty">No accepted books yet. Start a normal scan from a saved root.</p>
         )}
         <ul data-testid="library-entries">
