@@ -66,6 +66,11 @@ describe("backup destination administration", () => {
     const saved = registered.destination
     if (saved === undefined) throw new Error("expected a registered destination")
 
+    const retry = await runAdmin([
+      "register", "--data-dir", dataDirectory, "--name", "primary", "--path", destination
+    ])
+    expect(retry.destination).toEqual(saved)
+
     const inspected = await list(dataDirectory)
     expect(inspected.destinations).toEqual([saved])
 

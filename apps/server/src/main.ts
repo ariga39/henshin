@@ -424,9 +424,10 @@ const runBackupDestinationCommand = async (options: BackupDestinationOptions): P
       const selected = yield* Effect.promise(() => selectWritableLocation(destinationPath))
       if (!selected.ok) return yield* Effect.fail(new DatabaseWorkerError({ message: selected.message }))
 
-      const excludedDestinationId = options.command === "replace" ? options.destinationId : undefined
       const peerDestinations = storedDestinations.filter(
-        (destination) => destination.destinationId !== excludedDestinationId
+        (destination) => options.command === "register"
+          ? destination.name !== options.name
+          : destination.destinationId !== options.destinationId
       )
 
       const separation = yield* Effect.promise(() => validateWritableLocationSeparation({
@@ -461,7 +462,7 @@ const runBackupDestinationCommand = async (options: BackupDestinationOptions): P
           case "name_conflict":
             return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination name already exists; use replace with --confirm" }))
           case "destination_overlap":
-            return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination overlaps a registered collection root" }))
+            return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination overlaps a registered collection root or another backup destination" }))
           case "destination_not_found":
             return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination was not found" }))
         }
@@ -484,7 +485,7 @@ const runBackupDestinationCommand = async (options: BackupDestinationOptions): P
         case "destination_not_found":
           return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination was not found" }))
         case "destination_overlap":
-          return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination overlaps a registered collection root" }))
+          return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination overlaps a registered collection root or another backup destination" }))
         case "name_conflict":
           return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination name already exists" }))
       }
