@@ -272,6 +272,7 @@ const LibrarySearchCursor = Schema.Struct({
   library_id: Uuid,
   epoch: Uuid,
   state: Schema.NullOr(Schema.Literal("replacement-pending")),
+  view: Schema.Literals(["normal", "detached"]),
   last_entry_id: Uuid
 })
 
@@ -652,6 +653,12 @@ if (!serverLibraryColumns.some((column) => column.name === "change_revision")) {
 }
 
 const libraryEntryColumns = db.prepare("PRAGMA table_info(library_entries)").all() as unknown as ReadonlyArray<{ name: string }>
+const legacyAvailabilityStatus = libraryEntryColumns.some((column) => column.name === "availability_status")
+  ? "availability_status"
+  : "'unknown'"
+const legacyAvailabilityObservedAtMs = libraryEntryColumns.some((column) => column.name === "availability_observed_at_ms")
+  ? "availability_observed_at_ms"
+  : "NULL"
 if (!libraryEntryColumns.some((column) => column.name === "decision_version")) {
   db.exec("ALTER TABLE library_entries ADD COLUMN decision_version INTEGER NOT NULL DEFAULT 1")
 }
@@ -784,16 +791,18 @@ if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("deta
         manifest_json TEXT NOT NULL,
         created_at_ms INTEGER NOT NULL,
         updated_at_ms INTEGER NOT NULL,
-        accepted_observation_json TEXT
+        accepted_observation_json TEXT,
+        availability_status TEXT NOT NULL DEFAULT 'unknown' CHECK (availability_status IN ('present', 'missing', 'inaccessible', 'unknown')),
+        availability_observed_at_ms INTEGER
       );
       INSERT INTO library_entries_v7(
         entry_id, library_id, root_id, relative_path, source_path, kind, title, title_search, basename_search, page_count,
         state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms,
-        accepted_observation_json
+        accepted_observation_json, availability_status, availability_observed_at_ms
       )
       SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, title_search, basename_search, page_count,
         state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms,
-        accepted_observation_json
+        accepted_observation_json, ${legacyAvailabilityStatus}, ${legacyAvailabilityObservedAtMs}
       FROM library_entries;
       DROP TABLE library_entries;
       ALTER TABLE library_entries_v7 RENAME TO library_entries;
@@ -1127,7 +1136,7 @@ const selectStagedById = db.prepare(
 )
 selectStagedById.setReadBigInts(true)
 const selectEntriesForRoot = db.prepare("SELECT entry_id, relative_path, availability_status, availability_observed_at_ms FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
-const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path, state, decision_version, location_revision, content_version, page_count FROM library_entries WHERE root_id = ? AND relative_path = ? AND state IN ('accepted', 'replacement-pending')")
+const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path, state, decision_version, location_revision, content_version, page_count, availability_status FROM library_entries WHERE root_id = ? AND relative_path = ? AND state IN ('accepted', 'replacement-pending')")
 const selectEntryResolution = db.prepare(
   "SELECT entry_id, root_id, relative_path, kind, state, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
 )
@@ -1162,10 +1171,20 @@ const selectEntryDetails = db.prepare(`
   LEFT JOIN entry_overrides o ON o.entry_id = e.entry_id
   LEFT JOIN bindings b ON b.entry_id = e.entry_id
   LEFT JOIN galleries g ON g.gallery_id = b.gallery_id
-  LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
-  WHERE e.entry_id = ? AND e.state IN ('accepted', 'replacement-pending')
+  LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path AND e.state = 'replacement-pending'
+  WHERE e.entry_id = ? AND e.state IN ('accepted', 'replacement-pending', 'detached')
 `)
 selectEntryDetails.setReadBigInts(true)
+const selectEntryForDetach = db.prepare(
+  "SELECT entry_id, root_id, relative_path, state, decision_version, location_revision, availability_status FROM library_entries WHERE entry_id = ?"
+)
+selectEntryForDetach.setReadBigInts(true)
+const selectActiveScanForRoot = db.prepare(
+  "SELECT task_id, json_extract(command_payload, '$.expected_policy_revision') AS policy_revision FROM scan_tasks WHERE root_id = ? AND status IN ('queued', 'running') ORDER BY created_at_ms ASC, rowid ASC LIMIT 1"
+)
+const selectActiveStagedAtPath = db.prepare(
+  "SELECT s.candidate_id FROM staged_discoveries s JOIN scan_tasks t ON t.task_id = s.task_id WHERE s.root_id = ? AND s.relative_path = ? AND t.status IN ('queued', 'running') LIMIT 1"
+)
 const selectEntryOperation = db.prepare(
   "SELECT entry_id, payload, result, created_at_ms FROM entry_operations WHERE epoch = ? AND operation_id = ?"
 )
@@ -1235,18 +1254,22 @@ const detachEntry = db.prepare(
   "UPDATE library_entries SET state = 'detached', decision_version = decision_version + 1, location_revision = location_revision + 1, updated_at_ms = ? WHERE entry_id = ? AND state = 'replacement-pending'"
 )
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
+const deleteStagedAtPath = db.prepare("DELETE FROM staged_discoveries WHERE root_id = ? AND relative_path = ?")
 const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
 const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
 const selectLibraryEntries = (
   query: string,
   lastEntryId: string | null,
   state: "replacement-pending" | null,
+  view: "normal" | "detached",
   limit: number
 ) => {
   const queryClause = query.length === 0
     ? ""
     : " AND (instr(CASE WHEN o.title_present = 1 THEN o.title_search ELSE e.title_search END, ?) > 0 OR instr(e.basename_search, ?) > 0)"
-  const stateClause = state === null ? "e.state IN ('accepted', 'replacement-pending')" : "e.state = 'replacement-pending'"
+  const stateClause = view === "detached"
+    ? "e.state = 'detached'"
+    : state === null ? "e.state IN ('accepted', 'replacement-pending')" : "e.state = 'replacement-pending'"
   const statement = db.prepare(lastEntryId === null
     ? `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title AS fallback_title,
          CASE WHEN o.title_present = 1 THEN o.title ELSE NULL END AS title_override,
@@ -2348,6 +2371,7 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
       title: string
       source_path: string
       state: "accepted" | "replacement-pending"
+      availability_status: "present" | "missing" | "inaccessible" | "unknown"
     } | undefined
     const sameAcceptedObservation = request.holdState === "held" && request.analysisStatus === "ready" && request.manifestJson !== null && accepted !== undefined &&
       accepted.state === "accepted" && accepted.kind === request.kind && accepted.manifest_json === request.manifestJson
@@ -2360,6 +2384,9 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
         request.manifestJson,
         request.analysisErrorJson
       ) === 1
+    const observedAtMs = Date.now()
+    const observedPresence = accepted !== undefined
+    const availabilityChanged = observedPresence && Number(updateEntryAvailability.run("present", observedAtMs, observedAtMs, accepted.entry_id).changes) === 1
     const candidateObservationJson = JSON.stringify(replacementCandidateObservation(
       request.kind,
       request.analysisStatus,
@@ -2381,17 +2408,20 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
         request.analysisStatus,
         request.manifestJson,
         request.analysisErrorJson,
-        Date.now(),
+        observedAtMs,
         candidateObservationJson
       )
       if (
         knownReplacement
       ) {
-        if (Number(markEntryPending.run(Date.now(), accepted.entry_id).changes) === 1) bumpLibraryRevision.run()
+        if (Number(markEntryPending.run(Date.now(), accepted.entry_id).changes) === 1) {
+          bumpLibraryRevision.run()
+        }
       } else if (accepted?.state === "replacement-pending" && existing !== undefined) {
         bumpLibraryRevision.run()
       }
     }
+    if (availabilityChanged) bumpLibraryRevision.run()
     const priorStatus = existing?.task_id === request.taskId ? existing.analysis_status : undefined
     requireScanTransition(db.prepare(`UPDATE scan_tasks SET
       candidates_analyzed = candidates_analyzed + ?, analysis_error_count = analysis_error_count + ?,
@@ -2717,7 +2747,7 @@ const entryRow = (row: {
   title_search: string
   basename_search: string
   page_count: bigint
-  state: "accepted" | "replacement-pending"
+  state: "accepted" | "replacement-pending" | "detached"
   decision_version: bigint
   content_version: bigint
   location_revision: bigint
@@ -2741,6 +2771,7 @@ const entryRow = (row: {
   page_count: Number(row.page_count),
   state: row.state,
   content_version: row.content_version.toString(),
+  decision_version: row.decision_version.toString(),
   location_revision: row.location_revision.toString(),
   match_fields: query.length === 0
     ? []
@@ -2777,7 +2808,7 @@ const entryDetailsRow = (row: {
   fallback_title: string
   title_override: string | null
   page_count: bigint
-  state: "accepted" | "replacement-pending"
+  state: "accepted" | "replacement-pending" | "detached"
   decision_version: bigint
   content_version: bigint
   location_revision: bigint
@@ -2841,6 +2872,106 @@ const readEntryDetails = (entryId: string): import("./worker-protocol").LibraryE
   return row === undefined ? null : entryDetailsRow(row)
 }
 
+const detachMissing = (
+  request: Extract<WorkerRequest, { op: "detachMissing" }>
+): import("./worker-protocol").DetachMissingOutcome => {
+  const payload = JSON.stringify({
+    entry_id: request.entryId,
+    expected_decision_version: request.expectedDecisionVersion,
+    expected_location_revision: request.expectedLocationRevision,
+    command: { type: "detach-missing" }
+  })
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const previous = selectEntryOperation.get(request.epoch, request.operationId) as {
+      entry_id: string
+      payload: string
+      result: string
+      created_at_ms: number
+    } | undefined
+    if (previous !== undefined) {
+      if (previous.entry_id !== request.entryId || previous.payload !== payload) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_conflict" }
+      }
+      if (previous.created_at_ms <= Date.now() - RESULT_RETENTION_MS) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_expired" }
+      }
+      const replay = Schema.decodeUnknownOption(EntryCommandResult)(JSON.parse(previous.result))
+      if (Option.isNone(replay)) throw new Error("invalid persisted detach result")
+      db.exec("COMMIT")
+      return { kind: "replayed", result: replay.value }
+    }
+
+    const current = selectEntryForDetach.get(request.entryId) as {
+      entry_id: string
+      root_id: string
+      relative_path: string
+      state: "accepted" | "replacement-pending" | "detached"
+      decision_version: bigint
+      location_revision: bigint
+      availability_status: "present" | "missing" | "inaccessible" | "unknown"
+    } | undefined
+    if (current === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "entry_not_found" }
+    }
+    if (
+      current.decision_version.toString() !== request.expectedDecisionVersion ||
+      current.location_revision.toString() !== request.expectedLocationRevision
+    ) {
+      db.exec("ROLLBACK")
+      return {
+        kind: "entry_revision_conflict",
+        currentDecisionVersion: current.decision_version.toString(),
+        currentLocationRevision: current.location_revision.toString()
+      }
+    }
+    const activeScan = selectActiveScanForRoot.get(current.root_id) as { task_id: string; policy_revision: string | null } | undefined
+    if (activeScan !== undefined && activeScan.policy_revision !== null) {
+      db.exec("ROLLBACK")
+      return { kind: "scan_in_progress", taskId: activeScan.task_id, policyRevision: activeScan.policy_revision }
+    }
+    if (current.state === "detached") {
+      db.exec("ROLLBACK")
+      return { kind: "entry_not_active" }
+    }
+    if (selectActiveStagedAtPath.get(current.root_id, current.relative_path) !== undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "entry_not_missing" }
+    }
+    if (current.availability_status !== "missing") {
+      db.exec("ROLLBACK")
+      return { kind: "entry_not_missing" }
+    }
+
+    const now = Date.now()
+    compactEntryOperations.run(now - RESULT_RETENTION_MS, request.epoch, COMPACTION_BATCH)
+    if (Number(countEntryOperations.get()?.count) >= MAX_OPERATION_RESULTS) {
+      db.exec("COMMIT")
+      return { kind: "storage_full" }
+    }
+    const updated = db.prepare(
+      "UPDATE library_entries SET state = 'detached', decision_version = decision_version + 1, location_revision = location_revision + 1, updated_at_ms = ? WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending') AND availability_status = 'missing' AND decision_version = ? AND location_revision = ?"
+    ).run(now, request.entryId, BigInt(request.expectedDecisionVersion), BigInt(request.expectedLocationRevision))
+    if (Number(updated.changes) !== 1) throw new Error("missing entry is no longer detachable")
+    if (current.state === "replacement-pending") {
+      deleteStagedAtPath.run(current.root_id, current.relative_path)
+    }
+    bumpLibraryRevision.run()
+    const entry = readEntryDetails(request.entryId)
+    if (entry === null) throw new Error("detached entry disappeared")
+    const result = { operation_id: request.operationId, entry }
+    insertEntryOperation.run(request.epoch, request.operationId, request.entryId, payload, JSON.stringify(result), now)
+    db.exec("COMMIT")
+    return { kind: "committed", result }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
 const bindEntry = (
   request: Extract<WorkerRequest, { op: "bindEntry" }>
 ): import("./worker-protocol").BindEntryOutcome => {
@@ -2882,6 +3013,10 @@ const bindEntry = (
 
     const current = selectEntryDetails.get(request.entryId) as Parameters<typeof entryDetailsRow>[0] | undefined
     if (current === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "entry_not_found" }
+    }
+    if (current.state === "detached") {
       db.exec("ROLLBACK")
       return { kind: "entry_not_found" }
     }
@@ -3221,6 +3356,7 @@ const librarySummary = (): import("./worker-protocol").LibrarySummaryRow => {
 const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntries" }>): import("./worker-protocol").LibraryEntryPageResult => {
   const normalizedQuery = normalizeSearchText(request.query.trim())
   const state = request.state
+  const view = request.view
   db.exec("BEGIN")
   try {
   const library = librarySummary()
@@ -3234,7 +3370,8 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
       cursor.page_size !== request.pageSize ||
       cursor.library_id !== library.library_id ||
       cursor.epoch !== request.epoch ||
-      cursor.state !== (state ?? null)
+      cursor.state !== (state ?? null) ||
+      cursor.view !== view
     ) {
       db.exec("ROLLBACK")
       return { kind: "invalid_cursor" }
@@ -3242,7 +3379,7 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
     lastEntryId = cursor.last_entry_id
   }
 
-  const pageRows = selectLibraryEntries(normalizedQuery, lastEntryId, state ?? null, request.pageSize + 1) as unknown as ReadonlyArray<{
+  const pageRows = selectLibraryEntries(normalizedQuery, lastEntryId, state ?? null, view, request.pageSize + 1) as unknown as ReadonlyArray<{
     entry_id: string
     library_id: string
     root_id: string
@@ -3254,7 +3391,7 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
     title_search: string
     basename_search: string
     page_count: bigint
-    state: "accepted" | "replacement-pending"
+    state: "accepted" | "replacement-pending" | "detached"
     decision_version: bigint
     content_version: bigint
     location_revision: bigint
@@ -3279,6 +3416,7 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
         library_id: library.library_id,
         epoch: request.epoch,
         state: state ?? null,
+        view,
         last_entry_id: last.entry_id
       })
     : null
@@ -3802,6 +3940,8 @@ const handle = (request: WorkerRequest): unknown => {
       return bindEntry(request)
     case "updateEntryCommand":
       return updateEntryCommand(request)
+    case "detachMissing":
+      return detachMissing(request)
     case "acceptOpenEvents":
       return acceptOpenEvents(request)
     case "recordDiscovery":

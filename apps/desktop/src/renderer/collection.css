@@ -37,10 +37,15 @@
   padding: .45rem 0;
   border-bottom: 1px solid #dce2df;
 }
-.library-entry-details {
+.library-entry-body {
   display: grid;
   flex: 1;
   min-width: 0;
+  gap: .15rem;
+  align-content: center;
+}
+.library-entry-details {
+  display: grid;
   gap: .15rem;
   align-content: center;
   border: 0 !important;

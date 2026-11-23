@@ -242,6 +242,7 @@ function libraryClientWith(overrides: Partial<LibraryClient["Service"]> = {}): L
     search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "0" } }),
     open: () => Effect.succeed({ ok: false as const, error: { code: "open_not_used", message: "not used", retryable: false } }),
     status: () => Effect.succeed({ ok: true as const, data: null }),
+    command: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
     getThumbnail: () => Effect.succeed({ ok: false as const, error: { code: "thumbnail_missing", message: "not used", retryable: false } }),
     ...overrides
   })
@@ -1045,7 +1046,7 @@ describe("held scan renderer workflows", () => {
 
   it("refreshes pending replacements after terminal scan-result loading failure", async () => {
     const submitted = { ...task("succeeded"), hold_new_discoveries: false }
-    const searchInputs: Array<{ readonly query?: string; readonly state?: "replacement-pending" }> = []
+    const searchInputs: Array<{ readonly query?: string; readonly page_size?: number; readonly view?: "normal" | "detached"; readonly state?: "replacement-pending" }> = []
     const libraryClient = libraryClientWith({
       search: (input) => {
         searchInputs.push(input)
@@ -1071,7 +1072,7 @@ describe("held scan renderer workflows", () => {
     await run(startManualScan(root.root_id), rootClient, scanClient, libraryClient)
 
     expect(searchInputs).toEqual([
-      { query: "", page_size: 50 },
+      { query: "", page_size: 50, view: "normal" },
       { page_size: 50, state: "replacement-pending" }
     ])
     expect(viewStore.getState()).toMatchObject({

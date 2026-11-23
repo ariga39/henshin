@@ -47,8 +47,9 @@ export const LibraryEntry = Schema.Struct({
   title: Schema.String,
   title_override: Schema.optional(Schema.NullOr(Schema.String.check(Schema.isMaxLength(1024)))),
   page_count: Schema.Natural,
-  state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending")]),
+  state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending"), Schema.Literal("detached")]),
   content_version: Revision,
+  decision_version: Schema.optional(Revision),
   location_revision: Revision,
   match_fields: Schema.Array(Schema.Literals(["title", "basename"])),
   availability: ServerAvailability,
@@ -80,7 +81,8 @@ export const LibrarySearchRequest = Schema.Struct({
   query: Schema.optional(searchQuery),
   page_size: Schema.optional(pageSize),
   cursor: Schema.optional(searchCursor),
-  state: Schema.optional(Schema.Literal("replacement-pending"))
+  state: Schema.optional(Schema.Literal("replacement-pending")),
+  view: Schema.optional(Schema.Literals(["normal", "detached"]))
 })
 export type LibrarySearchRequest = typeof LibrarySearchRequest.Type
 
@@ -117,6 +119,11 @@ export const ReplacementResolutionResult = Schema.Struct({
   detached_entry_id: Schema.NullOr(Uuid)
 })
 export type ReplacementResolutionResult = typeof ReplacementResolutionResult.Type
+
+export const DetachMissingCommand = Schema.Struct({
+  type: Schema.Literal("detach-missing")
+})
+export type DetachMissingCommand = typeof DetachMissingCommand.Type
 export const EntryResolutionSiblingClaim = Schema.Struct({
   entry_id: Uuid,
   relative_path: Schema.String

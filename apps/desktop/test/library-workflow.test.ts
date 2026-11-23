@@ -152,7 +152,7 @@ describe("library renderer workflow", () => {
   it("clears the selected entry and profile when the Library query changes", async () => {
     const client = makeLibraryClient({
       search: (input) => {
-        expect(input).toEqual({ query: "new query", page_size: 50 })
+        expect(input).toEqual({ query: "new query", page_size: 50, view: "normal" })
         return Effect.succeed({
           ok: true as const,
           data: { entries: [entry(entryBId, "book-b")], has_more: false, next_cursor: null, library_change_revision: "2" }

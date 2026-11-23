@@ -2,6 +2,7 @@ import { Deferred, Effect, Fiber, Option } from "effect"
 import { localMappingPreviewCanActivate } from "@henshin/contracts"
 import type {
   ConnectionStatusView,
+  LibraryEntry,
   RootPreviewRequest,
   RootPreviewResult,
   ScanTask,
@@ -1491,9 +1492,10 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
       library_error: null,
       library_request_generation: requestGeneration
     }))
+    const view = current.library_view
     const result = yield* client.search(cursor === null
-      ? { query, page_size: 50 }
-      : { query, page_size: 50, cursor })
+      ? { query, page_size: 50, view }
+      : { query, page_size: 50, cursor, view })
     if (viewStore.getState().library_request_generation !== requestGeneration) return
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({ library_status: "error", library_error: result.error.message }))
@@ -1537,6 +1539,40 @@ export const searchLibrary = (query: string) =>
           })
     }))
     yield* loadLibrary(false, query)
+  })
+
+export const setLibraryView = (view: "normal" | "detached") =>
+  Effect.gen(function*() {
+    yield* Effect.sync(() => viewStore.set({
+      library_view: view,
+      library_entries: [],
+      library_cursor: null,
+      library_has_more: false,
+      library_status: "idle",
+      library_error: null,
+      library_command_error: null
+    }))
+    yield* loadLibrary()
+  })
+
+export const detachMissingEntry = (entry: LibraryEntry) =>
+  Effect.gen(function*() {
+    if (entry.state === "detached" || entry.availability.status !== "missing" || entry.decision_version === undefined) return
+    const client = yield* LibraryClient
+    yield* Effect.sync(() => viewStore.set({ library_command_status: "loading", library_command_error: null }))
+    const result = yield* client.command({
+      entry_id: entry.entry_id,
+      operation_id: newOperationId(),
+      expected_decision_version: entry.decision_version,
+      expected_location_revision: entry.location_revision,
+      command: { type: "detach-missing" }
+    })
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({ library_command_status: "idle", library_command_error: result.error.message }))
+      return
+    }
+    yield* Effect.sync(() => viewStore.set({ library_command_status: "idle", library_command_error: null }))
+    yield* loadLibrary()
   })
 
 export const saveRoot = Effect.gen(function*() {

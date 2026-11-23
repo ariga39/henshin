@@ -40,7 +40,11 @@ const start = async (): Promise<RunningServer> => {
   return server
 }
 
-const indexEntries = async (server: RunningServer): Promise<ReadonlyArray<{ readonly entry_id: string }>> => {
+const indexEntries = async (server: RunningServer): Promise<ReadonlyArray<{
+  readonly entry_id: string
+  readonly decision_version?: string
+  readonly location_revision: string
+}>> => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-eh-binding-multi-"))
   fixturePaths.add(fixture)
   for (const name of ["book-a", "book-b"]) {
@@ -477,5 +481,73 @@ describe("durable EH binding", () => {
     expect(search.data.entries).toEqual([
       expect.objectContaining({ entry_id: entry.entry_id, title: "Interrupted Title", title_override: "Interrupted Title", match_fields: ["title"] })
     ])
+  })
+
+  it("keeps detached records readable, rejects fresh binds, and replays an earlier bind", async () => {
+    const server = await start()
+    const entries = await indexEntries(server)
+    const entry = entries[0]
+    if (entry === undefined || entry.decision_version === undefined) throw new Error("expected indexed entry revisions")
+
+    const bindPayload = {
+      operation_id: randomUUID(),
+      instance_id: server.instanceId,
+      epoch: server.epoch,
+      expected_decision_version: entry.decision_version,
+      command: { type: "bind" as const, url: "https://e-hentai.org/g/54321/detached-token/" }
+    }
+    const bound = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({ params: { id: entry.entry_id }, payload: bindPayload })
+    }))
+
+    const db = new DatabaseSync(server.dbPath)
+    db.prepare("UPDATE library_entries SET availability_status = 'missing', availability_observed_at_ms = ? WHERE entry_id = ?")
+      .run(123456789, entry.entry_id)
+    db.close()
+
+    const detached = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: entry.entry_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: server.instanceId,
+          epoch: server.epoch,
+          expected_decision_version: bound.data.entry.decision_version,
+          expected_location_revision: bound.data.entry.location_revision,
+          command: { type: "detach-missing" }
+        }
+      })
+    }))
+    expect(detached.data.entry).toMatchObject({ entry_id: entry.entry_id, state: "detached" })
+
+    const replay = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({ params: { id: entry.entry_id }, payload: bindPayload })
+    }))
+    expect(replay.data).toEqual(bound.data)
+
+    const operationConflict = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: entry.entry_id },
+        payload: { ...bindPayload, command: { type: "bind" as const, url: "https://e-hentai.org/g/54321/other-token/" } }
+      }).pipe(Effect.flip)
+    }))
+    expect(operationConflict._tag).toBe("OperationConflict")
+
+    const freshBind = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: entry.entry_id },
+        payload: {
+          ...bindPayload,
+          operation_id: randomUUID(),
+          expected_decision_version: "0"
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(freshBind._tag).toBe("EntryNotFound")
+
+    const details = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entry({ params: { id: entry.entry_id } })
+    }))
+    expect(details.data).toMatchObject({ entry_id: entry.entry_id, state: "detached", binding: bound.data.entry.binding })
   })
 })

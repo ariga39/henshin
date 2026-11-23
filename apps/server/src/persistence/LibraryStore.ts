@@ -12,7 +12,8 @@ import {
   EntryCommandOutcome,
   LibrarySummaryRow,
   EntryResolutionLookupOutcome,
-  ResolveReplacementOutcome
+  ResolveReplacementOutcome,
+  DetachMissingOutcome
 } from "./worker-protocol"
 
 export interface ReplacementResolutionInput {
@@ -50,6 +51,7 @@ const decodeEntryDetailsResult = Schema.decodeUnknownOption(Schema.NullOr(Librar
 const decodeBindEntry = Schema.decodeUnknownOption(BindEntryOutcome)
 const decodePersonalTitle = Schema.decodeUnknownOption(PersonalTitleOutcome)
 const decodeEntryCommand = Schema.decodeUnknownOption(EntryCommandOutcome)
+const decodeDetachMissing = Schema.decodeUnknownOption(DetachMissingOutcome)
 const decodeStaged = Schema.decodeUnknownOption(StagedDiscovery)
 
 const jsonValue = (value: string | null): unknown => {
@@ -81,6 +83,7 @@ export class LibraryStore extends Context.Service<
       readonly cursor: string | null
       readonly state?: "replacement-pending"
       readonly epoch: string
+      readonly view: "normal" | "detached"
     }) => Effect.Effect<LibraryEntryPage, DatabaseWorkerError | InvalidLibrarySearchCursor>
     readonly entry: (entryId: string) => Effect.Effect<import("@henshin/contracts").LibraryEntryDetails | null, DatabaseWorkerError>
     readonly bindEntry: (input: {
@@ -110,6 +113,13 @@ export class LibraryStore extends Context.Service<
       readonly expectedDecisionVersion: string
       readonly command: { readonly type: "set-note"; readonly text: string } | { readonly type: "clear-note" }
     }) => Effect.Effect<typeof EntryCommandOutcome.Type, DatabaseWorkerError>
+    readonly detachMissing: (input: {
+      readonly entryId: string
+      readonly operationId: string
+      readonly epoch: string
+      readonly expectedDecisionVersion: string
+      readonly expectedLocationRevision: string
+    }) => Effect.Effect<typeof DetachMissingOutcome.Type, DatabaseWorkerError>
     readonly indexedRootSamples: (rootId: string) => Effect.Effect<IndexedRootSamplePage, DatabaseWorkerError>
     readonly resolution: (input: {
       readonly entryId: string
@@ -139,13 +149,15 @@ export class LibraryStore extends Context.Service<
         readonly cursor: string | null
         readonly state?: "replacement-pending"
         readonly epoch: string
+        readonly view: "normal" | "detached"
       }) => worker.call({
         op: "listLibraryEntries",
         pageSize: input.pageSize,
         query: input.query,
         epoch: input.epoch,
         cursor: input.cursor,
-        state: input.state ?? null
+        state: input.state ?? null,
+        view: input.view
       }).pipe(
         Effect.flatMap((value) => decodeOrFail(decodePage, value, "invalid library entry page")),
         Effect.flatMap((result): Effect.Effect<LibraryEntryPage, DatabaseWorkerError | InvalidLibrarySearchCursor> =>
@@ -174,6 +186,12 @@ export class LibraryStore extends Context.Service<
         ...input
       }).pipe(
         Effect.flatMap((value) => decodeOrFail(decodeEntryCommand, value, "invalid entry note result"))
+      )
+      const detachMissing = (input: Parameters<LibraryStore["Service"]["detachMissing"]>[0]) => worker.call({
+        op: "detachMissing",
+        ...input
+      }).pipe(
+        Effect.flatMap((value) => decodeOrFail(decodeDetachMissing, value, "invalid detach missing result"))
       )
       const resolution = (input: {
         readonly entryId: string
@@ -260,6 +278,7 @@ export class LibraryStore extends Context.Service<
         lookupReplacementOperation,
         resolution,
         resolveReplacement,
+        detachMissing,
         bindEntry,
         updatePersonalTitle,
         updateEntryNote,
