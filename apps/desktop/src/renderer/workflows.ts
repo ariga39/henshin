@@ -418,7 +418,9 @@ const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(f
 
 let pendingReplacementRequestGeneration = 0
 
-export const loadPendingReplacements = (append = false) =>
+const pendingReplacementPageSize = 50
+
+export const loadPendingReplacements = (append = false, preserveLoadedDepth = false) =>
   Effect.gen(function*() {
     const requestGeneration = pendingReplacementRequestGeneration + 1
     pendingReplacementRequestGeneration = requestGeneration
@@ -427,14 +429,18 @@ export const loadPendingReplacements = (append = false) =>
     const connectionGeneration = current.connection_generation
     const ownerInstanceId = verifiedInstanceId(current)
     const ownerEpoch = current.connection.epoch ?? current.epoch
-    const cursor = append ? current.pending_replacement_cursor : null
+    const pagesToLoad = append
+      ? 1
+      : preserveLoadedDepth
+        ? Math.max(1, Math.ceil(current.pending_replacement_entries.length / pendingReplacementPageSize))
+        : 1
+    let cursor = append ? current.pending_replacement_cursor : null
+    let entries = append ? [...current.pending_replacement_entries] : []
+    let hasMore = false
     yield* Effect.sync(() => viewStore.set({
       pending_replacement_status: "loading",
       pending_replacement_error: null
     }))
-    const result = yield* client.search(cursor === null
-      ? { page_size: 50, state: "replacement-pending" as const }
-      : { page_size: 50, cursor, state: "replacement-pending" as const })
     const isCurrentRequest = (): boolean => {
       const state = viewStore.getState()
       return requestGeneration === pendingReplacementRequestGeneration &&
@@ -442,30 +448,35 @@ export const loadPendingReplacements = (append = false) =>
         verifiedInstanceId(state) === ownerInstanceId &&
         (state.connection.epoch ?? state.epoch) === ownerEpoch
     }
-    if (!isCurrentRequest()) return false
-    if (!result.ok) {
-      yield* Effect.sync(() => viewStore.set({
-        pending_replacement_status: "error",
-        pending_replacement_error: result.error.message
-      }))
-      return false
-    }
-    yield* Effect.sync(() => {
-      const state = viewStore.getState()
-      const existing = append ? state.pending_replacement_entries : []
-      const ids = new Set(existing.map((entry) => entry.entry_id))
-      const entries = [...existing]
+    for (let page = 0; page < pagesToLoad; page += 1) {
+      const result = yield* client.search(cursor === null
+        ? { page_size: pendingReplacementPageSize, state: "replacement-pending" as const }
+        : { page_size: pendingReplacementPageSize, cursor, state: "replacement-pending" as const })
+      if (!isCurrentRequest()) return false
+      if (!result.ok) {
+        yield* Effect.sync(() => viewStore.set({
+          pending_replacement_status: "error",
+          pending_replacement_error: result.error.message
+        }))
+        return false
+      }
+
+      const ids = new Set(entries.map((entry) => entry.entry_id))
       for (const entry of result.data.entries) {
         if (!ids.has(entry.entry_id)) entries.push(entry)
       }
-      viewStore.set({
-        pending_replacement_entries: entries,
-        pending_replacement_cursor: result.data.next_cursor,
-        pending_replacement_has_more: result.data.has_more,
-        pending_replacement_status: "ready",
-        pending_replacement_error: null
-      })
-    })
+      cursor = result.data.next_cursor
+      hasMore = result.data.has_more
+      if (!hasMore || cursor === null) break
+    }
+    if (!isCurrentRequest()) return false
+    yield* Effect.sync(() => viewStore.set({
+      pending_replacement_entries: entries,
+      pending_replacement_cursor: cursor,
+      pending_replacement_has_more: hasMore,
+      pending_replacement_status: "ready",
+      pending_replacement_error: null
+    }))
     return true
   })
 
@@ -496,19 +507,56 @@ const clearReplacementResolutionFeedback = (): void => {
   })
 }
 
+const replacementEvidenceKey = (
+  state: ReturnType<typeof viewStore.getState>,
+  entryId: string
+): string | null => {
+  const entry = state.pending_replacement_entries.find((item) => item.entry_id === entryId)
+  if (entry === undefined) return null
+  const candidate = state.staged_discoveries.find((item) =>
+    item.root_id === entry.root_id && item.relative_path === entry.relative_path)
+  return JSON.stringify({
+    entry_id: entry.entry_id,
+    root_id: entry.root_id,
+    relative_path: entry.relative_path,
+    entry_state: entry.state,
+    location_revision: entry.location_revision,
+    replacement: entry.replacement === null
+      ? null
+      : {
+          candidate_id: entry.replacement.candidate_id,
+          candidate_version: entry.replacement.candidate_version,
+          decision_version: entry.replacement.decision_version
+        },
+    candidate: candidate === undefined
+      ? null
+      : {
+          candidate_id: candidate.candidate_id,
+          root_id: candidate.root_id,
+          relative_path: candidate.relative_path,
+          candidate_version: candidate.candidate_version,
+          analysis_status: candidate.analysis_status
+        }
+  })
+}
+
 export const refreshReplacementReview = Effect.gen(function*() {
+  const initialState = viewStore.getState()
+  const entryId = initialState.scan_resolution_entry_id
+  const beforeEvidence = entryId === null ? null : replacementEvidenceKey(initialState, entryId)
   const stagedLoaded = yield* loadScanResults
-  const pendingLoaded = yield* loadPendingReplacements()
+  const pendingLoaded = yield* loadPendingReplacements(false, true)
   const state = viewStore.getState()
-  const entry = state.scan_resolution_entry_id === null
+  const refreshedEntryId = state.scan_resolution_entry_id === null
     ? undefined
     : state.pending_replacement_entries.find((item) => item.entry_id === state.scan_resolution_entry_id)
-  const candidate = entry === undefined
+  const candidate = refreshedEntryId === undefined
     ? undefined
-    : state.staged_discoveries.find((item) => item.root_id === entry.root_id && item.relative_path === entry.relative_path)
-  const matched = stagedLoaded && pendingLoaded && replacementEvidenceMatches(entry, candidate)
-  if (matched) clearReplacementResolutionFeedback()
-  return matched
+    : state.staged_discoveries.find((item) => item.root_id === refreshedEntryId.root_id && item.relative_path === refreshedEntryId.relative_path)
+  const matched = stagedLoaded && pendingLoaded && replacementEvidenceMatches(refreshedEntryId, candidate)
+  const changed = entryId !== null && beforeEvidence !== replacementEvidenceKey(state, entryId)
+  if (matched && changed) clearReplacementResolutionFeedback()
+  return { matched, changed }
 })
 
 export const loadScanResults = Effect.gen(function*() {
@@ -677,7 +725,8 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
       let refreshed = false
       if (result.error.code === "revision_conflict" || result.error.code === "not_found") {
         yield* loadRoots
-        refreshed = yield* refreshReplacementReview
+        const refreshedReview = yield* refreshReplacementReview
+        refreshed = refreshedReview.matched && refreshedReview.changed
       }
       if (refreshed) return
       const definiteFailure = result.error.code === "invalid_request" ||
@@ -707,7 +756,7 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
     }
 
     yield* loadScanResults
-    yield* loadPendingReplacements()
+    yield* loadPendingReplacements(false, true)
     const resolution = result.data.resolution
     if (resolution !== undefined) {
       yield* Effect.sync(() => {
