@@ -155,18 +155,21 @@ test("opens an accepted Library entry through one native fixture handoff", async
 
     await app.evaluate(({ shell }) => {
       let release!: (error: string) => void
+      let signalStarted!: () => void
       const calls: string[] = []
       const held = new Promise<string>((resolve) => { release = resolve })
+      const started = new Promise<void>((resolve) => { signalStarted = resolve })
       Object.defineProperty(shell, "openPath", {
         configurable: true,
         value: (target: string) => {
           calls.push(target)
+          signalStarted()
           return held
         }
       })
       Object.defineProperty(globalThis, "__henshinOpenPathTest", {
         configurable: true,
-        value: { calls, release }
+        value: { calls, release, started }
       })
     })
     await app.evaluate(({ Menu, BrowserWindow }) => {
@@ -183,7 +186,10 @@ test("opens an accepted Library entry through one native fixture handoff", async
     await acceptedEntry.getByTestId(/library-entry-details-/).click()
     await window.getByTestId("library-open-profile").selectOption(systemProfileId)
     await window.getByTestId("library-open").click()
-    await expect.poll(() => app.evaluate(() => (globalThis as unknown as {
+    await app.evaluate(() => (globalThis as unknown as {
+      readonly __henshinOpenPathTest: { readonly started: Promise<void> }
+    }).__henshinOpenPathTest.started)
+    expect(await app.evaluate(() => (globalThis as unknown as {
       readonly __henshinOpenPathTest: { readonly calls: ReadonlyArray<string> }
     }).__henshinOpenPathTest.calls)).toEqual([expectedTarget])
 

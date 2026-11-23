@@ -98,6 +98,91 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_open_states).toEqual([])
   })
 
+  it("keeps the latest terminal action through reselection and follows a newer active action", async () => {
+    const actionA = firstActionId
+    const actionB = "99999999-9999-4999-8999-999999999999"
+    const actionC = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    const acceptedB = accepted(entryAId, actionB)
+    const activeC: OpenBookIpcResult = {
+      ...acceptedB,
+      action_id: actionC,
+      profile_id: otherProfileId,
+      status: "in-flight",
+      message: "another reader handoff is already opening this entry; follow the active action",
+      event_durable: false
+    }
+    const acceptedC: OpenBookIpcResult = {
+      ...activeC,
+      status: "accepted",
+      message: "The operating system accepted the reader handoff.",
+      event_durable: true
+    }
+    const statusRequests: Array<{ readonly entry_id?: string; readonly action_id?: string }> = []
+    const client = LibraryClient.of({
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: () => Effect.succeed({ ok: true as const, data: acceptedB }),
+      status: (input) => {
+        statusRequests.push(input)
+        return Effect.succeed({ ok: true as const, data: statusRequests.length === 1 ? activeC : acceptedC })
+      },
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      connection: { state: "connected", instance_id: namespaceId, epoch: "99999999-9999-4999-8999-999999999999", reason: null },
+      connection_generation: 7,
+      library_entries: [entry(entryAId, "book-a")],
+      library_selected_entry_id: entryAId,
+      library_open_profile_id: profileId,
+      library_open_states: [{
+        namespace_id: namespaceId,
+        entry_id: entryAId,
+        profile_id: profileId,
+        connection_generation: 7,
+        status: "unknown",
+        result: {
+          action_id: actionA,
+          entry_id: entryAId,
+          profile_id: profileId,
+          status: "unknown",
+          message: "The reader handoff has no available terminal result; it may have opened.",
+          event_durable: false
+        }
+      }]
+    })
+
+    await run(openSelectedLibraryEntry, client)
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
+      status: "accepted",
+      result: { action_id: actionB }
+    })
+
+    await run(chooseLibraryOpenProfile(otherProfileId), client)
+    await run(selectLibraryEntry(entryAId), client)
+    expect(viewStore.getState().library_open_profile_id).toBe(otherProfileId)
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
+      status: "accepted",
+      result: { action_id: actionB }
+    })
+
+    viewStore.set({ library_entries: [entry(entryAId, "book-a")] })
+    await run(selectLibraryEntry(entryAId), client)
+    await run(loadActiveLibraryOpenState(entryAId), client)
+    expect(statusRequests).toEqual([{ entry_id: entryAId }])
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
+      status: "loading",
+      profile_id: otherProfileId,
+      result: { action_id: actionC, status: "in-flight" }
+    })
+
+    await run(loadActiveLibraryOpenState(entryAId), client)
+    expect(statusRequests).toEqual([{ entry_id: entryAId }, { action_id: actionC }])
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
+      status: "accepted",
+      profile_id: otherProfileId,
+      result: { action_id: actionC, status: "accepted" }
+    })
+  })
+
   it("keeps a delayed result scoped to its pending entry and blocks a duplicate launch", async () => {
     let resolveOpen!: (value: Result<OpenBookIpcResult>) => void
     const delayed = new Promise<Result<OpenBookIpcResult>>((resolve) => { resolveOpen = resolve })

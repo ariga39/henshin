@@ -1255,9 +1255,12 @@ const replaceLibraryOpenState = (
 export const selectLibraryEntry = (entryId: string) => Effect.sync(() => {
   const state = viewStore.getState()
   const openState = libraryOpenStateFor(state, entryId)
+  const preserveManualProfile = state.library_selected_entry_id === entryId
+    ? state.library_open_profile_id
+    : null
   viewStore.set({
     library_selected_entry_id: entryId,
-    library_open_profile_id: openState?.profile_id ?? null
+    library_open_profile_id: preserveManualProfile ?? openState?.profile_id ?? null
   })
 })
 
@@ -1267,12 +1270,8 @@ export const chooseLibraryOpenProfile = (profileId: string) => Effect.sync(() =>
   if (entryId === null) return
   const openState = libraryOpenStateFor(state, entryId)
   if (openState?.status === "loading") return
-  const namespaceId = libraryNamespace(state, entryId)
   viewStore.set({
-    library_open_profile_id: profileId,
-    ...(namespaceId === null
-      ? {}
-      : { library_open_states: state.library_open_states.filter((item) => !sameLibraryOpenState(item, namespaceId, entryId)) })
+    library_open_profile_id: profileId
   })
 })
 
