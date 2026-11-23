@@ -23,6 +23,8 @@ import {
   type OperationLookupOutcome,
   type OperationResultRow,
   type ServerRootRow,
+  BackupDestinationRegistrationOutcome,
+  BackupDestinationRow,
   RootRegistrationOutcome,
   RootReplayLookup,
   type WorkerRequest
@@ -337,6 +339,15 @@ db.exec(`
     mapping_revision INTEGER NOT NULL,
     policy_revision INTEGER NOT NULL DEFAULT 0,
     exclusions TEXT NOT NULL DEFAULT '[]',
+    state TEXT NOT NULL CHECK (state = 'active')
+  );
+  CREATE TABLE IF NOT EXISTS backup_destinations (
+    destination_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    selected_path TEXT NOT NULL,
+    canonical_path TEXT NOT NULL,
+    device TEXT NOT NULL,
+    inode TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state = 'active')
   );
   CREATE TABLE IF NOT EXISTS root_operations (
@@ -787,6 +798,21 @@ const selectRoot = db.prepare(
   "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, state FROM server_roots WHERE root_id = ?"
 )
 selectRoot.setReadBigInts(true)
+const selectBackupDestinations = db.prepare(
+  "SELECT destination_id, name, selected_path, canonical_path, device, inode, state FROM backup_destinations ORDER BY rowid ASC"
+)
+const selectBackupDestination = db.prepare(
+  "SELECT destination_id, name, selected_path, canonical_path, device, inode, state FROM backup_destinations WHERE destination_id = ?"
+)
+const selectBackupDestinationByName = db.prepare(
+  "SELECT destination_id, name, selected_path, canonical_path, device, inode, state FROM backup_destinations WHERE name = ?"
+)
+const insertBackupDestination = db.prepare(
+  "INSERT INTO backup_destinations(destination_id, name, selected_path, canonical_path, device, inode, state) VALUES(?, ?, ?, ?, ?, ?, 'active')"
+)
+const updateBackupDestination = db.prepare(
+  "UPDATE backup_destinations SET selected_path = ?, canonical_path = ?, device = ?, inode = ?, state = 'active' WHERE destination_id = ?"
+)
 const selectLibrary = db.prepare("SELECT library_id FROM server_library WHERE id = 1")
 const selectLibraryState = db.prepare("SELECT library_id, change_revision FROM server_library WHERE id = 1")
 const selectRootOperation = db.prepare("SELECT payload, result FROM root_operations WHERE operation_id = ?")
@@ -1090,6 +1116,34 @@ const rootById = (rootId: string): ServerRootRow | undefined => {
   return row === undefined ? undefined : rootRow(row)
 }
 
+const backupDestinationRow = (row: {
+  destination_id: string
+  name: string
+  selected_path: string
+  canonical_path: string
+  device: string
+  inode: string
+  state: "active"
+}): BackupDestinationRow => ({
+  destinationId: row.destination_id,
+  name: row.name,
+  selectedPath: row.selected_path,
+  canonicalPath: row.canonical_path,
+  device: row.device,
+  inode: row.inode,
+  state: row.state
+})
+
+const backupDestinationRows = (): ReadonlyArray<BackupDestinationRow> =>
+  (selectBackupDestinations.all() as unknown as ReadonlyArray<Parameters<typeof backupDestinationRow>[0]>).map(
+    backupDestinationRow
+  )
+
+const backupDestinationById = (destinationId: string): BackupDestinationRow | undefined => {
+  const row = selectBackupDestination.get(destinationId) as Parameters<typeof backupDestinationRow>[0] | undefined
+  return row === undefined ? undefined : backupDestinationRow(row)
+}
+
 const containsPath = (ancestor: string, descendant: string): boolean => {
   const child = relative(ancestor, descendant)
   return child === "" || (child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child))
@@ -1102,6 +1156,105 @@ const rootsOverlap = (
   (left.device === right.device && left.inode === right.inode) ||
   containsPath(left.canonicalPath, right.canonicalPath) ||
   containsPath(right.canonicalPath, left.canonicalPath)
+
+const registerBackupDestination = (
+  request: Extract<WorkerRequest, { op: "registerBackupDestination" }>
+): BackupDestinationRegistrationOutcome => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const existing = selectBackupDestinationByName.get(request.name) as Parameters<typeof backupDestinationRow>[0] | undefined
+    if (existing !== undefined) {
+      const current = backupDestinationRow(existing)
+      const same = current.selectedPath === request.selectedPath &&
+        current.canonicalPath === request.canonicalPath &&
+        current.device === request.device &&
+        current.inode === request.inode
+      db.exec("COMMIT")
+      return same
+        ? { kind: "replayed", destination: current }
+        : { kind: "name_conflict" }
+    }
+
+    const candidate = {
+      canonicalPath: request.canonicalPath,
+      device: request.device,
+      inode: request.inode
+    }
+    if (rootRows().some((root) => rootsOverlap(candidate, root)) ||
+      backupDestinationRows().some((destination) => rootsOverlap(candidate, destination))) {
+      db.exec("ROLLBACK")
+      return { kind: "destination_overlap" }
+    }
+
+    const destination: BackupDestinationRow = {
+      destinationId: randomUUID(),
+      name: request.name,
+      selectedPath: request.selectedPath,
+      canonicalPath: request.canonicalPath,
+      device: request.device,
+      inode: request.inode,
+      state: "active"
+    }
+    insertBackupDestination.run(
+      destination.destinationId,
+      destination.name,
+      destination.selectedPath,
+      destination.canonicalPath,
+      destination.device,
+      destination.inode
+    )
+    db.exec("COMMIT")
+    return { kind: "registered", destination }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const replaceBackupDestination = (
+  request: Extract<WorkerRequest, { op: "replaceBackupDestination" }>
+): BackupDestinationRegistrationOutcome => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const existing = backupDestinationById(request.destinationId)
+    if (existing === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "destination_not_found" }
+    }
+    const candidate = {
+      canonicalPath: request.canonicalPath,
+      device: request.device,
+      inode: request.inode
+    }
+    if (rootRows().some((root) => rootsOverlap(candidate, root)) ||
+      backupDestinationRows().some((destination) =>
+        destination.destinationId !== request.destinationId && rootsOverlap(candidate, destination)
+      )) {
+      db.exec("ROLLBACK")
+      return { kind: "destination_overlap" }
+    }
+    const destination: BackupDestinationRow = {
+      ...existing,
+      selectedPath: request.selectedPath,
+      canonicalPath: request.canonicalPath,
+      device: request.device,
+      inode: request.inode,
+      state: "active"
+    }
+    updateBackupDestination.run(
+      destination.selectedPath,
+      destination.canonicalPath,
+      destination.device,
+      destination.inode,
+      destination.destinationId
+    )
+    db.exec("COMMIT")
+    return { kind: "registered", destination }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
 
 const registerRoot = (
   request: Extract<WorkerRequest, { op: "registerRoot" }>
@@ -1137,7 +1290,8 @@ const registerRoot = (
       device: request.device,
       inode: request.inode
     }
-    if (existingRoots.some((root) => rootsOverlap(candidate, root))) {
+    if (existingRoots.some((root) => rootsOverlap(candidate, root)) ||
+      backupDestinationRows().some((destination) => rootsOverlap(candidate, destination))) {
       db.exec("ROLLBACK")
       return { kind: "root_overlap" }
     }
@@ -2782,6 +2936,12 @@ const handle = (request: WorkerRequest): unknown => {
       return readNoteRow(request.noteId) ?? null
     case "listRoots":
       return rootRows()
+    case "listBackupDestinations":
+      return backupDestinationRows()
+    case "registerBackupDestination":
+      return registerBackupDestination(request)
+    case "replaceBackupDestination":
+      return replaceBackupDestination(request)
     case "lookupRootOperation":
       return lookupRootOperation(request)
     case "readOperation":

@@ -1,19 +1,29 @@
 import path from "node:path"
 import { readdir } from "node:fs/promises"
 import { NodeRuntime } from "@effect/platform-node"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Option, Schema } from "effect"
 import { makeAppLayer } from "./app"
 import {
   writeOwnerCredential,
   OwnerCredentialError,
   readOwnerCredential
 } from "./owner-credential"
-import { DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import {
   acquireServerOwnership,
   canonicalizeDatabasePath,
   ServerOwnershipError
 } from "./persistence/ServerOwnership"
+import { DatabaseWorker, DatabaseWorkerError } from "./persistence/DatabaseWorker"
+import {
+  BackupDestinationRegistrationOutcome,
+  BackupDestinationRow,
+  ServerRootRow,
+} from "./persistence/worker-protocol"
+import {
+  selectWritableLocation,
+  validateWritableLocationSeparation,
+  type SourceRootObservation
+} from "./analysis/NativeSourceBoundary"
 
 interface Bootstrap {
   readonly bearerToken: string
@@ -40,7 +50,71 @@ interface IndependentOptions {
 }
 
 const usage = (): string =>
-  "usage: server.mjs (--data-dir <directory> | --database <path>) [--port <1-65535>] [--initialize-owner | --rotate-owner]"
+  "usage: server.mjs (--data-dir <directory> | --database <path>) [--port <1-65535>] [--initialize-owner | --rotate-owner]\n" +
+  "       server.mjs backup-destination <list|register|replace> (--data-dir <directory> | --database <path>) [--name <name>] [--path <directory>] [--id <destination-id>] [--confirm]"
+
+interface BackupDestinationOptions {
+  readonly command: "list" | "register" | "replace"
+  readonly dataDir?: string
+  readonly database?: string
+  readonly name?: string
+  readonly destinationPath?: string
+  readonly destinationId?: string
+  readonly confirmed: boolean
+}
+
+const parseBackupDestinationOptions = (args: ReadonlyArray<string>): BackupDestinationOptions => {
+  const command = args[1]
+  if (command !== "list" && command !== "register" && command !== "replace") throw new Error(usage())
+
+  let dataDir: string | undefined
+  let database: string | undefined
+  let name: string | undefined
+  let destinationPath: string | undefined
+  let destinationId: string | undefined
+  let confirmed = false
+  for (let index = 2; index < args.length; index += 1) {
+    switch (args[index]) {
+      case "--data-dir":
+        dataDir = args[++index]
+        if (dataDir === undefined || dataDir.startsWith("--")) throw new Error(usage())
+        break
+      case "--database":
+        database = args[++index]
+        if (database === undefined || database.startsWith("--")) throw new Error(usage())
+        break
+      case "--name":
+        name = args[++index]
+        if (name === undefined || name.startsWith("--")) throw new Error(usage())
+        break
+      case "--path":
+        destinationPath = args[++index]
+        if (destinationPath === undefined || destinationPath.startsWith("--")) throw new Error(usage())
+        break
+      case "--id":
+        destinationId = args[++index]
+        if (destinationId === undefined || destinationId.startsWith("--")) throw new Error(usage())
+        break
+      case "--confirm":
+        confirmed = true
+        break
+      case "--help":
+        throw new Error(usage())
+      default:
+        throw new Error(usage())
+    }
+  }
+
+  if ((dataDir === undefined) === (database === undefined)) throw new Error(usage())
+  if (command === "register" && (name === undefined || destinationPath === undefined)) throw new Error(usage())
+  if (command === "replace" && (destinationId === undefined || destinationPath === undefined || !confirmed)) {
+    throw new Error(usage())
+  }
+  if (command === "list" && (name !== undefined || destinationPath !== undefined || destinationId !== undefined || confirmed)) {
+    throw new Error(usage())
+  }
+  return { command, dataDir, database, name, destinationPath, destinationId, confirmed }
+}
 
 const parseIndependentOptions = (args: ReadonlyArray<string>): IndependentOptions => {
   let dataDir: string | undefined
@@ -91,7 +165,7 @@ const isMissingPath = (error: unknown): boolean =>
   "code" in error &&
   error.code === "ENOENT"
 
-const resolveIndependentDatabasePath = async (options: IndependentOptions): Promise<string> => {
+const resolveIndependentDatabasePath = async (options: Pick<IndependentOptions, "dataDir" | "database">): Promise<string> => {
   if (options.database !== undefined) return canonicalizeDatabasePath(options.database)
   const dataDir = options.dataDir
   if (dataDir === undefined) throw new Error(usage())
@@ -269,10 +343,179 @@ const runIndependent = async (options: IndependentOptions): Promise<void> => {
   }
 }
 
+type BackupDestination = typeof BackupDestinationRow.Type
+type ServerRoot = typeof ServerRootRow.Type
+
+const decodeBackupDestinations = (value: unknown): ReadonlyArray<BackupDestination> => {
+  const decoded = Schema.decodeUnknownOption(Schema.Array(BackupDestinationRow))(value)
+  if (Option.isNone(decoded)) throw new Error("database returned invalid backup destinations")
+  return decoded.value
+}
+
+const decodeServerRoots = (value: unknown): ReadonlyArray<ServerRoot> => {
+  const decoded = Schema.decodeUnknownOption(Schema.Array(ServerRootRow))(value)
+  if (Option.isNone(decoded)) throw new Error("database returned invalid collection roots")
+  return decoded.value
+}
+
+const decodeBackupDestinationOutcome = (value: unknown): typeof BackupDestinationRegistrationOutcome.Type => {
+  const decoded = Schema.decodeUnknownOption(BackupDestinationRegistrationOutcome)(value)
+  if (Option.isNone(decoded)) throw new Error("database returned invalid backup destination result")
+  return decoded.value
+}
+
+const runDestinationWorker = async <A>(
+  dbPath: string,
+  program: (worker: DatabaseWorker["Service"]) => Effect.Effect<A, DatabaseWorkerError>
+): Promise<A> => {
+  let guard: Awaited<ReturnType<typeof acquireServerOwnership>> | undefined
+  try {
+    guard = await acquireServerOwnership(dbPath)
+    return await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function*() {
+          const worker = yield* DatabaseWorker
+          yield* worker.call({ op: "init" })
+          return yield* program(worker)
+        }).pipe(Effect.provide(DatabaseWorker.layer(dbPath)))
+      )
+    )
+  } finally {
+    guard?.close()
+  }
+}
+
+const sourceRootObservation = (root: ServerRoot): SourceRootObservation => ({
+  selectedPath: root.selectedPath,
+  canonicalPath: root.canonicalPath,
+  identity: { device: root.device, inode: root.inode }
+})
+
+const destinationView = (destination: BackupDestination, state: "active" | "needs-reconfirmation" = destination.state) => ({
+  destination_id: destination.destinationId,
+  name: destination.name,
+  selected_path: destination.selectedPath,
+  canonical_path: destination.canonicalPath,
+  device: destination.device,
+  inode: destination.inode,
+  state
+})
+
+const runBackupDestinationCommand = async (options: BackupDestinationOptions): Promise<void> => {
+  const dbPath = await resolveIndependentDatabasePath(options)
+  const result = await runDestinationWorker(dbPath, (worker) =>
+    Effect.gen(function*() {
+      const storedDestinations = decodeBackupDestinations(yield* worker.call({ op: "listBackupDestinations" }))
+      if (options.command === "list") {
+        const destinations = yield* Effect.promise(() => Promise.all(storedDestinations.map(async (destination) => {
+          const current = await selectWritableLocation(destination.selectedPath)
+          const unchanged = current.ok &&
+            current.value.canonicalPath === destination.canonicalPath &&
+            current.value.identity.device === destination.device &&
+            current.value.identity.inode === destination.inode
+          return destinationView(destination, unchanged ? "active" : "needs-reconfirmation")
+        })))
+        return { destinations }
+      }
+
+      const roots = decodeServerRoots(yield* worker.call({ op: "listRoots" }))
+      const destinationPath = options.destinationPath
+      if (destinationPath === undefined) return yield* Effect.fail(new DatabaseWorkerError({ message: "destination path is required" }))
+      const selected = yield* Effect.promise(() => selectWritableLocation(destinationPath))
+      if (!selected.ok) return yield* Effect.fail(new DatabaseWorkerError({ message: selected.message }))
+
+      const peerDestinations = storedDestinations.filter(
+        (destination) => options.command === "register"
+          ? destination.name !== options.name
+          : destination.destinationId !== options.destinationId
+      )
+
+      const separation = yield* Effect.promise(() => validateWritableLocationSeparation({
+        sourceRoots: roots.map(sourceRootObservation),
+        writableLocations: [
+          path.dirname(dbPath),
+          selected.value,
+          ...peerDestinations.map((destination) => ({
+            selectedPath: destination.selectedPath,
+            canonicalPath: destination.canonicalPath,
+            identity: { device: destination.device, inode: destination.inode }
+          }))
+        ]
+      }))
+      if (!separation.ok) return yield* Effect.fail(new DatabaseWorkerError({ message: separation.message }))
+
+      if (options.command === "register") {
+        const name = options.name
+        if (name === undefined) return yield* Effect.fail(new DatabaseWorkerError({ message: "destination name is required" }))
+        const outcome = decodeBackupDestinationOutcome(yield* worker.call({
+          op: "registerBackupDestination",
+          name,
+          selectedPath: selected.value.selectedPath,
+          canonicalPath: selected.value.canonicalPath,
+          device: selected.value.identity.device,
+          inode: selected.value.identity.inode
+        }))
+        switch (outcome.kind) {
+          case "registered":
+          case "replayed":
+            return { destination: destinationView(outcome.destination) }
+          case "name_conflict":
+            return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination name already exists; use replace with --confirm" }))
+          case "destination_overlap":
+            return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination overlaps a registered collection root or another backup destination" }))
+          case "destination_not_found":
+            return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination was not found" }))
+        }
+      }
+
+      const destinationId = options.destinationId
+      if (destinationId === undefined) return yield* Effect.fail(new DatabaseWorkerError({ message: "destination id is required" }))
+      const outcome = decodeBackupDestinationOutcome(yield* worker.call({
+        op: "replaceBackupDestination",
+        destinationId,
+        selectedPath: selected.value.selectedPath,
+        canonicalPath: selected.value.canonicalPath,
+        device: selected.value.identity.device,
+        inode: selected.value.identity.inode
+      }))
+      switch (outcome.kind) {
+        case "registered":
+        case "replayed":
+          return { destination: destinationView(outcome.destination) }
+        case "destination_not_found":
+          return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination was not found" }))
+        case "destination_overlap":
+          return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination overlaps a registered collection root or another backup destination" }))
+        case "name_conflict":
+          return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination name already exists" }))
+      }
+    })
+  )
+  process.stdout.write(JSON.stringify(result) + "\n")
+}
+
 const main = async () => {
   const args = process.argv.slice(2)
   if (args.length === 0) {
     await runManaged()
+    return
+  }
+
+  if (args[0] === "backup-destination") {
+    let options: BackupDestinationOptions
+    try {
+      options = parseBackupDestinationOptions(args)
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : usage())
+      process.exitCode = 2
+      return
+    }
+    try {
+      await runBackupDestinationCommand(options)
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "backup destination administration failed")
+      process.exitCode = 1
+    }
     return
   }
 

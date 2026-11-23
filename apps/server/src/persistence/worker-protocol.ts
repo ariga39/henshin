@@ -33,6 +33,26 @@ export const ServerRootRow = Schema.Struct({
 })
 export type ServerRootRow = typeof ServerRootRow.Type
 
+export const BackupDestinationRow = Schema.Struct({
+  destinationId: Uuid,
+  name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
+  selectedPath: Schema.String,
+  canonicalPath: Schema.String,
+  device: Schema.String,
+  inode: Schema.String,
+  state: Schema.Literal("active")
+})
+export type BackupDestinationRow = typeof BackupDestinationRow.Type
+
+export const BackupDestinationRegistrationOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("registered"), destination: BackupDestinationRow }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), destination: BackupDestinationRow }),
+  Schema.Struct({ kind: Schema.Literal("name_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("destination_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("destination_overlap") })
+])
+export type BackupDestinationRegistrationOutcome = typeof BackupDestinationRegistrationOutcome.Type
+
 export const RootRegistrationOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("registered"), root: ServerRootRow }),
   Schema.Struct({ kind: Schema.Literal("replayed"), root: ServerRootRow }),
@@ -347,6 +367,23 @@ export const WorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("init") }),
   Schema.Struct({ op: Schema.Literal("readNote"), noteId: NoteId }),
   Schema.Struct({ op: Schema.Literal("listRoots") }),
+  Schema.Struct({ op: Schema.Literal("listBackupDestinations") }),
+  Schema.Struct({
+    op: Schema.Literal("registerBackupDestination"),
+    name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
+    selectedPath: Schema.String,
+    canonicalPath: Schema.String,
+    device: Schema.String,
+    inode: Schema.String
+  }),
+  Schema.Struct({
+    op: Schema.Literal("replaceBackupDestination"),
+    destinationId: Uuid,
+    selectedPath: Schema.String,
+    canonicalPath: Schema.String,
+    device: Schema.String,
+    inode: Schema.String
+  }),
   Schema.Struct({
     op: Schema.Literal("lookupRootOperation"),
     operationId: Uuid,

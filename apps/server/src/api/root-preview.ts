@@ -28,10 +28,12 @@ import {
   discoverSourceRoot,
   selectSourceRoot,
   validateLocationSeparation,
+  type WritableLocationObservation,
   type SourceRootObservation
 } from "../analysis/NativeSourceBoundary"
 import { ServerState } from "../identity"
 import { RootStore } from "../persistence/RootStore"
+import { BackupDestinationStore } from "../persistence/BackupDestinationStore"
 import { ScanStore } from "../persistence/ScanStore"
 import { runManualHeldScan } from "../scan/ManualScanCoordinator"
 
@@ -150,6 +152,7 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
   Effect.gen(function*() {
     const server = yield* ServerState
     const roots = yield* RootStore
+    const backupDestinations = yield* BackupDestinationStore
     const scans = yield* ScanStore
 
     const base = (requestId: string) => ({
@@ -361,8 +364,22 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
             return yield* verificationFailed(context.request_id, "preview is stale; preview the directory again")
           }
 
+          const destinations = yield* backupDestinations.list().pipe(
+            Effect.mapError(() => new InternalError({
+              code: "internal_error",
+              message: "internal error",
+              retryable: false,
+              ...errorBase
+            }))
+          )
+          const writableLocations: Array<string | WritableLocationObservation> = [dataDirectory,
+            ...destinations.map((destination) => ({
+              selectedPath: destination.selectedPath,
+              canonicalPath: destination.canonicalPath,
+              identity: { device: destination.device, inode: destination.inode }
+            }))]
           const separation = yield* Effect.tryPromise({
-            try: () => validateLocationSeparation({ sourceRoots: [selected], writableLocations: [dataDirectory] }),
+            try: () => validateLocationSeparation({ sourceRoots: [selected], writableLocations }),
             catch: () => undefined
           }).pipe(
             Effect.mapError(() => verificationFailed(context.request_id, "selected directory could not be verified"))

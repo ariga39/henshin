@@ -68,6 +68,13 @@ export interface SourceRootObservation {
   readonly identity: NativeIdentityToken
 }
 
+/** The canonical identity captured when a writable native boundary is confirmed. */
+export interface WritableLocationObservation {
+  readonly selectedPath: string
+  readonly canonicalPath: string
+  readonly identity: NativeIdentityToken
+}
+
 export interface ResolvedSourceCandidate {
   readonly kind: "archive" | "image-directory"
   readonly requestedRelativePath: string
@@ -1011,6 +1018,32 @@ const canonicalizeOutputLocation = async (
   }
 }
 
+/** Selects an existing writable directory and records its native identity. */
+export const selectWritableLocation = async (
+  selectedPath: string
+): Promise<NativeBoundaryResult<WritableLocationObservation>> => {
+  const location = await canonicalizeOutputLocation(selectedPath)
+  if (!location.ok || location.value.identity === undefined) return failure("location-unavailable")
+  return success({
+    selectedPath,
+    canonicalPath: location.value.canonicalPath,
+    identity: location.value.identity
+  })
+}
+
+/** Revalidates a previously confirmed writable directory without accepting a remount. */
+export const revalidateWritableLocation = async (
+  location: WritableLocationObservation
+): Promise<NativeBoundaryResult<WritableLocationObservation>> => {
+  const current = await selectWritableLocation(location.selectedPath)
+  if (!current.ok) return current
+  if (
+    current.value.canonicalPath !== location.canonicalPath ||
+    !sameIdentity(current.value.identity, location.identity)
+  ) return failure("root-changed")
+  return success(location)
+}
+
 const locationPath = async (
   location: KnownSourceRoot
 ): Promise<NativeBoundaryResult<CanonicalLocation>> => {
@@ -1020,10 +1053,17 @@ const locationPath = async (
       ? success({ canonicalPath: root.value.canonicalPath, kind: "source", identity: root.value.identity })
       : root
   }
-  const root = await revalidateSourceRoot(location)
-  return root.ok
-    ? success({ canonicalPath: root.value.canonicalPath, kind: "source", identity: root.value.identity })
-    : root
+  const current = await selectSourceRoot(location.selectedPath)
+  if (current.ok) {
+    return success({ canonicalPath: current.value.canonicalPath, kind: "source", identity: current.value.identity })
+  }
+
+  // A saved peer can be temporarily unmounted. Its last confirmed native
+  // boundary remains authoritative for disjointness; a reachable peer above
+  // is always re-observed so a remount or alias change cannot be hidden.
+  return isAbsolute(location.canonicalPath) && !location.canonicalPath.includes("\u0000")
+    ? success({ canonicalPath: location.canonicalPath, kind: "source", identity: location.identity })
+    : failure("location-unavailable")
 }
 
 const overlaps = (left: CanonicalLocation, right: CanonicalLocation): boolean =>
@@ -1035,15 +1075,12 @@ const overlaps = (left: CanonicalLocation, right: CanonicalLocation): boolean =>
 
 export interface LocationSeparationInput {
   readonly sourceRoots: ReadonlyArray<KnownSourceRoot>
-  readonly writableLocations: ReadonlyArray<string>
+  readonly writableLocations: ReadonlyArray<string | WritableLocationObservation>
 }
 
-/**
- * Canonicalizes all supplied locations, including missing output leaves, and
- * rejects equality/ancestor/descendant overlap in either configuration order.
- */
-export const validateLocationSeparation = async (
-  input: LocationSeparationInput
+const validateLocations = async (
+  input: LocationSeparationInput,
+  rejectWritableOverlaps: boolean
 ): Promise<NativeBoundaryResult<void>> => {
   const locations: Array<CanonicalLocation> = []
   for (const sourceRoot of input.sourceRoots) {
@@ -1052,14 +1089,31 @@ export const validateLocationSeparation = async (
     locations.push(location.value)
   }
   for (const writableLocation of input.writableLocations) {
-    const location = await canonicalizeOutputLocation(writableLocation)
-    if (!location.ok) return location
-    locations.push(location.value)
+    if (typeof writableLocation === "string") {
+      const location = await canonicalizeOutputLocation(writableLocation)
+      if (!location.ok) return location
+      locations.push(location.value)
+    } else {
+      const current = await selectWritableLocation(writableLocation.selectedPath)
+      if (current.ok) {
+        locations.push({ canonicalPath: current.value.canonicalPath, kind: "writable", identity: current.value.identity })
+      } else if (isAbsolute(writableLocation.canonicalPath) && !writableLocation.canonicalPath.includes("\u0000")) {
+        // As with saved source roots, an unavailable saved output still has
+        // usable last-confirmed evidence for rejecting lexical overlap.
+        locations.push({
+          canonicalPath: writableLocation.canonicalPath,
+          kind: "writable",
+          identity: writableLocation.identity
+        })
+      } else {
+        return failure("location-unavailable")
+      }
+    }
   }
 
   for (let leftIndex = 0; leftIndex < locations.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < locations.length; rightIndex += 1) {
-      if (locations[leftIndex].kind === "writable" && locations[rightIndex].kind === "writable") {
+      if (!rejectWritableOverlaps && locations[leftIndex].kind === "writable" && locations[rightIndex].kind === "writable") {
         continue
       }
       if (overlaps(locations[leftIndex], locations[rightIndex])) {
@@ -1069,3 +1123,16 @@ export const validateLocationSeparation = async (
   }
   return success(undefined)
 }
+
+/**
+ * Canonicalizes all supplied locations, including missing output leaves, and
+ * rejects equality/ancestor/descendant overlap in either configuration order.
+ */
+export const validateLocationSeparation = async (
+  input: LocationSeparationInput
+): Promise<NativeBoundaryResult<void>> => validateLocations(input, false)
+
+/** Validates source roots plus writable boundaries, including writable overlap. */
+export const validateWritableLocationSeparation = async (
+  input: LocationSeparationInput
+): Promise<NativeBoundaryResult<void>> => validateLocations(input, true)
