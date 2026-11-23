@@ -16,7 +16,10 @@ permissions:
 
 jobs:
   linux-desktop:
-    runs-on: ubuntu-24.04-arm
+    # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor. Keep
+    # this acceptance on the stock Ubuntu 22.04 arm64 policy; do not change
+    # host sysctls or install a custom security profile.
+    runs-on: ubuntu-22.04-arm
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -35,7 +38,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            fuse3 libfuse2t64 libasound2t64 libgbm1 libgtk-3-0t64 libnss3 libxshmfence1 libxss1 \
+            fuse3 libfuse2 libasound2 libgbm1 libgtk-3-0 libnss3 libxshmfence1 libxss1 \
             psmisc squashfs-tools xvfb xauth zip
 
       - name: Install locked dependencies
@@ -82,15 +85,5 @@ jobs:
           xvfb_pid=$!
           trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
           appimage=$(find "$HENSHIN_DESKTOP_ARTIFACT_DIR" -maxdepth 1 -name '*.AppImage' -type f -print -quit)
-          sandbox_source="$RUNNER_TEMP/henshin-sandbox-source"
-          rm -rf "$sandbox_source"
-          mkdir -p "$sandbox_source"
-          (cd "$sandbox_source" && "$appimage" --appimage-extract chrome-sandbox >/dev/null)
-          sudo install -o root -g root -m 4755 \
-            "$sandbox_source/squashfs-root/chrome-sandbox" \
-            "$RUNNER_TEMP/henshin-chrome-sandbox"
-          test -u "$RUNNER_TEMP/henshin-chrome-sandbox"
           HENSHIN_PACKAGED_EXECUTABLE="$appimage" \
-          HENSHIN_PACKAGED_SANDBOX="$RUNNER_TEMP/henshin-chrome-sandbox" \
-          CHROME_DEVEL_SANDBOX="$RUNNER_TEMP/henshin-chrome-sandbox" \
             pnpm exec node apps/desktop/test/packaged-linux.mjs

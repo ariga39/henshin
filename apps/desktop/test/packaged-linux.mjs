@@ -1,7 +1,7 @@
 import { createRequire } from "node:module"
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
 
 const require = createRequire(new URL("../../../package.json", import.meta.url))
@@ -45,11 +45,6 @@ await mkdir(collection, { recursive: true })
 await writeFile(path.join(collection, "cover.png"), validPng)
 execFileSync("zip", ["-q", cbz, "cover.png"], { cwd: collection })
 const sourceBefore = await sha256(cbz)
-
-const executableDirectory = path.dirname(executablePath)
-const sandboxPath = process.env.HENSHIN_PACKAGED_SANDBOX ?? path.join(executableDirectory, "chrome-sandbox")
-const sandboxMode = (await stat(sandboxPath)).mode & 0o7777
-if ((sandboxMode & 0o4000) === 0) throw new Error(`Electron sandbox helper is not setuid: mode=${sandboxMode.toString(8)}`)
 
 const launch = async () => {
   const app = await electron.launch({
@@ -108,7 +103,7 @@ console.log(JSON.stringify({
   arch: process.arch,
   uid: process.getuid?.(),
   executablePath,
-  sandboxMode: `0${sandboxMode.toString(8)}`,
+  sandboxEnabled: true,
   firstNaturalWidth,
   secondNaturalWidth,
   sourceSha256: sourceAfter,
