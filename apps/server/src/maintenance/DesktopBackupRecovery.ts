@@ -120,6 +120,13 @@ export interface DesktopRecoveryResult {
   readonly recovery_state_path: string
 }
 
+interface PreparedDesktopRecovery {
+  readonly targetDirectory: string
+  readonly stagingDirectory: string
+  readonly bundle: LoadedDesktopBundle
+  readonly preview: DesktopRecoveryPreview
+}
+
 export const isMissing = (error: unknown): boolean =>
   typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
 
@@ -322,7 +329,7 @@ export const readDesktopRecoveryTarget = async (dataDirectory: string, stagingDi
   }
 }
 
-export const previewDesktopRecovery = async (dataDirectory: string, archivePath: string): Promise<DesktopRecoveryPreview> => {
+const prepareDesktopRecovery = async (dataDirectory: string, archivePath: string): Promise<PreparedDesktopRecovery> => {
   const targetDirectory = await realpath(dataDirectory)
   const selectedArchive = await realpath(path.resolve(archivePath))
   if (isWithin(selectedArchive, targetDirectory)) throw new Error("desktop backup archive must be outside the desktop data directory")
@@ -337,6 +344,10 @@ export const previewDesktopRecovery = async (dataDirectory: string, archivePath:
     const latestTargetMs = target.latestUpdatedAtMs ?? recoveryPointMs
     const lostToMs = Math.max(recoveryPointMs, latestTargetMs, target.mappingsChanged ? Date.now() : recoveryPointMs)
     return {
+      targetDirectory,
+      stagingDirectory,
+      bundle,
+      preview: {
       store_kind: "desktop",
       applied: false,
       mappings_changed_since_backup: target.mappingsChanged,
@@ -361,8 +372,21 @@ export const previewDesktopRecovery = async (dataDirectory: string, archivePath:
       automatic_reader_launch_disabled: true,
       source_files_untouched: true,
       selected_backup_untouched: true
+      }
     }
-  } finally {
+  } catch (error) {
     await rm(stagingDirectory, { recursive: true, force: true })
+    throw error
   }
 }
+
+export const previewDesktopRecovery = async (dataDirectory: string, archivePath: string): Promise<DesktopRecoveryPreview> => {
+  const prepared = await prepareDesktopRecovery(dataDirectory, archivePath)
+  try {
+    return prepared.preview
+  } finally {
+    await rm(prepared.stagingDirectory, { recursive: true, force: true })
+  }
+}
+
+export const prepareDesktopRecoveryForApply = prepareDesktopRecovery

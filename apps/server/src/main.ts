@@ -29,6 +29,7 @@ import {
 import {
   previewDesktopRecovery
 } from "./maintenance/DesktopBackupRecovery"
+import { applyDesktopRecovery } from "./maintenance/DesktopBackupRecoveryApply"
 import {
   NEWER_DATABASE_SCHEMA,
   BackupArtifactRow,
@@ -830,7 +831,11 @@ const runDesktopRestoreCommand = async (options: DesktopRestoreOptions): Promise
   let guard: Awaited<ReturnType<typeof acquireDesktopOwnership>> | undefined
   try {
     guard = await acquireDesktopOwnership(dataDirectory)
-    process.stdout.write(JSON.stringify(await previewDesktopRecovery(dataDirectory, options.inputPath)) + "\n")
+    if (!options.confirmed) {
+      process.stdout.write(JSON.stringify(await previewDesktopRecovery(dataDirectory, options.inputPath)) + "\n")
+      return
+    }
+    process.stdout.write(JSON.stringify(await applyDesktopRecovery(dataDirectory, options.inputPath)) + "\n")
   } finally {
     guard?.close()
   }
