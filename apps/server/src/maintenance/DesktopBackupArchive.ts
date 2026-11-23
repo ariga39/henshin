@@ -130,12 +130,7 @@ const retainDurableSchema = (snapshot: DatabaseSync): void => {
   for (const object of objects) {
     if (object.type === "table" && DISPOSABLE_TABLES.has(object.name)) {
       snapshot.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(object.name)}`)
-    } else if (
-      (object.type === "table" && !DURABLE_TABLES.has(object.name)) ||
-      object.type === "view" ||
-      object.type === "trigger" ||
-      (object.type === "index" && !DURABLE_TABLES.has(object.tbl_name))
-    ) {
+    } else if (object.type !== "table" || !DURABLE_TABLES.has(object.name)) {
       throw new Error(`desktop client database contains an unrecognized schema object: ${object.name}`)
     }
   }

@@ -206,7 +206,10 @@ describe("stopped desktop backup", () => {
     expect((await readdir(dataDirectory)).filter((name) => name.startsWith(".desktop-backup-staging-"))).toEqual([])
   })
 
-  it("refuses an unrecognized client schema instead of silently omitting durable work", async () => {
+  it.each([
+    "CREATE TABLE sqliteXfoo(id TEXT PRIMARY KEY, payload TEXT NOT NULL)",
+    "CREATE INDEX foreign_draft_idx ON unsent_drafts(note_id)"
+  ])("refuses to archive an unrecognized schema object from %s", async (ddl) => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-backup-schema-"))
     workspaces.push(workspace)
     const dataDirectory = path.join(workspace, "desktop-data")
@@ -216,7 +219,7 @@ describe("stopped desktop backup", () => {
     await mkdir(outputDirectory)
     await createDesktopStore(dataDirectory)
     const database = new DatabaseSync(path.join(dataDirectory, "prototype-client.db"))
-    database.exec("CREATE TABLE sqliteXfoo(id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+    database.exec(ddl)
     database.close()
 
     await expect(createDesktopBackupArchive({
