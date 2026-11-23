@@ -40,12 +40,25 @@ interface ReadyLine {
   readonly epoch: string
 }
 
+const attemptDiagnostic = (attempt: Attempt): string =>
+  [
+    `pid=${attempt.child.pid ?? "unknown"}`,
+    `exitCode=${attempt.child.exitCode ?? "null"}`,
+    `signal=${attempt.child.signalCode ?? "null"}`,
+    `killed=${attempt.child.killed}`,
+    `spawnfile=${JSON.stringify(attempt.child.spawnfile)}`,
+    `spawnargs=${JSON.stringify(attempt.child.spawnargs)}`,
+    `stdout=${JSON.stringify(attempt.stdout())}`,
+    `stderr=${JSON.stringify(attempt.stderr())}`
+  ].join(" ")
+
 const attempts = new Set<Attempt>()
 const dataDirectories = new Set<string>()
 
 const waitForExit = (
   child: ChildProcessWithoutNullStreams,
-  timeoutMs: number
+  timeoutMs: number,
+  diagnostic?: () => string
 ): Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null }> => {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve({ code: child.exitCode, signal: child.signalCode })
@@ -53,7 +66,13 @@ const waitForExit = (
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       child.off("exit", onExit)
-      reject(new Error("independent server did not exit before the test deadline"))
+      reject(
+        new Error(
+          `independent server did not exit before the test deadline${
+            diagnostic === undefined ? "" : `; ${diagnostic()}`
+          }`
+        )
+      )
     }, timeoutMs)
     const onExit = () => {
       clearTimeout(timer)
@@ -293,7 +312,7 @@ describe("independent foreground service", () => {
     }
     const before = await readFile(dbPath)
     const refused = launch(["--data-dir", dataDir, "--port", String(await freeLoopbackPort())])
-    expect((await waitForExit(refused.child, EXIT_TIMEOUT_MS)).code).toBe(1)
+    expect((await waitForExit(refused.child, EXIT_TIMEOUT_MS, () => attemptDiagnostic(refused))).code).toBe(1)
     expect((await readFile(dbPath)).equals(before)).toBe(true)
     expect(refused.stdout()).not.toContain('"event":"ready"')
     expect(refused.stderr()).toContain("newer database schema")
