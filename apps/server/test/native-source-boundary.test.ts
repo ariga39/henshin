@@ -174,6 +174,21 @@ describe("native source boundary precursor", () => {
     if (!result.ok) expect(result.message).not.toContain(root)
   })
 
+  it("rejects nested source roots in either order and accepts disjoint siblings", async () => {
+    const parent = await makeTempRoot()
+    const child = join(parent, "books")
+    const sibling = join(parent, "magazines")
+    await mkdir(child)
+    await mkdir(sibling)
+
+    for (const sourceRoots of [[parent, child], [child, parent]]) {
+      expect(await validateLocationSeparation({ sourceRoots, writableLocations: [] }))
+        .toMatchObject({ ok: false, code: "location-overlap" })
+    }
+    expect(await validateLocationSeparation({ sourceRoots: [child, sibling], writableLocations: [] }))
+      .toMatchObject({ ok: true })
+  })
+
   it("checks source/output overlap in both setup orders, including aliases and missing output leaves", async () => {
     const root = await makeTempRoot()
     const collection = join(root, "books")
