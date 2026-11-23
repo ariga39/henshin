@@ -13,7 +13,10 @@ if (container === null) throw new Error("missing #root container")
 
 const prototype = new URLSearchParams(location.search).get("mode") === "prototype"
 if (!prototype && new URLSearchParams(location.search).get("screen") === "library") {
-  viewStore.set({ screen: "library" })
+  viewStore.set({
+    screen: "library",
+    connection: { ...viewStore.getState().connection, state: "connecting" }
+  })
 }
 
 const Root = () => {

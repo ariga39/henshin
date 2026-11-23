@@ -172,14 +172,16 @@ export const LibraryScreen = () => {
   const hasLibraryQuery = state.library_query.trim().length > 0
 
   useEffect(() => {
-    if (viewStore.getState().library_status === "idle") void runtime.runPromise(loadLibrary())
+    if (state.connection.state !== "connecting" && state.connection.instance_id !== null && state.library_status === "idle") {
+      void runtime.runPromise(loadLibrary())
+    }
     if (viewStore.getState().reader_profiles_status === "idle") void runtime.runPromise(loadReaderProfiles)
     const unsubscribe = window.henshinLibrary.onOpenStateChanged(() => {
       const entryId = viewStore.getState().library_selected_entry_id
       if (entryId !== null) void runtime.runPromise(loadActiveLibraryOpenState(entryId))
     })
     return unsubscribe
-  }, [])
+  }, [state.connection.state, state.connection.instance_id, state.library_status])
 
   useEffect(() => {
     if (state.library_status === "ready" && state.library_selected_entry_id !== null) {

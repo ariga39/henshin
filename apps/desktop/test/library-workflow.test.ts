@@ -228,6 +228,50 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_has_more).toBe(false)
   })
 
+  it("recovers an initial Library load fenced by delayed connection identity", async () => {
+    let resolveInitial!: (value: Result<LibraryEntryPage>) => void
+    let calls = 0
+    const client = makeLibraryClient({
+      search: () => {
+        calls += 1
+        return calls === 1
+          ? Effect.promise(() => new Promise<Result<LibraryEntryPage>>((resolve) => { resolveInitial = resolve }))
+          : Effect.succeed({
+              ok: true as const,
+              data: { entries: [entry(entryAId, "book-a")], has_more: false, next_cursor: null, library_change_revision: "2" }
+            })
+      }
+    })
+    viewStore.set({
+      connection: { state: "connecting", instance_id: null, epoch: null, reason: null },
+      connection_generation: 0,
+      library_entries: [],
+      library_status: "idle",
+      library_request_generation: 0
+    })
+
+    const initialLoad = run(loadLibrary(false), client)
+    await Promise.resolve()
+    expect(viewStore.getState().library_status).toBe("loading")
+
+    viewStore.publishConnection({
+      state: "connected",
+      instance_id: namespaceId,
+      epoch: "99999999-9999-4999-8999-999999999999",
+      reason: null
+    }, 0)
+    resolveInitial({
+      ok: true,
+      data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" }
+    })
+    await initialLoad
+
+    expect(viewStore.getState().library_status).toBe("idle")
+    await run(loadLibrary(false), client)
+    expect(viewStore.getState().library_status).toBe("ready")
+    expect(viewStore.getState().library_entries).toEqual([entry(entryAId, "book-a")])
+  })
+
   it("ignores a late page from the previous connection epoch after reconnect", async () => {
     let resolveOld!: (value: Result<LibraryEntryPage>) => void
     let calls = 0

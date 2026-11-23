@@ -303,6 +303,7 @@ const createViewStore = () => {
         connection,
         connection_generation: state.connection_generation + 1,
         library_request_generation: state.library_request_generation + 1,
+        library_status: state.library_status === "loading" ? "idle" : state.library_status,
         library_cursor: null,
         library_has_more: false
       }

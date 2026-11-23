@@ -1507,7 +1507,15 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
         verifiedInstanceId(state) === ownerInstanceId &&
         (state.connection.epoch ?? state.epoch) === ownerEpoch
     }
-    if (!isCurrentRequest()) return
+    if (!isCurrentRequest()) {
+      yield* Effect.sync(() => {
+        const state = viewStore.getState()
+        if (state.library_status === "loading" && state.library_request_generation === requestGeneration) {
+          viewStore.set({ library_status: "idle" })
+        }
+      })
+      return
+    }
     if (!result.ok) {
       yield* Effect.sync(() => {
         const state = viewStore.getState()
