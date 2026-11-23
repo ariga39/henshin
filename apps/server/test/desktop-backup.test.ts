@@ -231,6 +231,38 @@ describe("stopped desktop backup", () => {
     snapshot.close()
   })
 
+  it("previews the selected backup only for a matching live database identity and schema", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-preview-"))
+    workspaces.push(workspace)
+    const dataDirectory = path.join(workspace, "client")
+    const outputDirectory = path.join(workspace, "backups")
+    const archive = path.join(outputDirectory, "point.zip")
+    await Promise.all([mkdir(dataDirectory), mkdir(outputDirectory)])
+    await createDesktopStore(dataDirectory)
+    await execFile(process.execPath, [SERVER_PATH, "backup", "desktop", "--data-dir", dataDirectory, "--output", archive])
+    const preview = () => execFile(process.execPath, [SERVER_PATH, "backup", "desktop", "restore", "--data-dir", dataDirectory, "--input", archive])
+    expect(JSON.parse((await preview()).stdout)).toMatchObject({
+      pending_work: { drafts: 1, command_attempts: 1, launch_journal: 1 },
+      requires_confirmation: true
+    })
+    const dbPath = path.join(dataDirectory, "prototype-client.db")
+    const originalId = (await readFile(path.join(dataDirectory, "device-id"), "utf8")).trim()
+    for (const [id, version, diagnostic] of [
+      ["22222222-2222-4222-8222-222222222222", 1, "identity disagree"],
+      [originalId, 2, "unsupported schema version"]
+    ] as const) {
+      const db = new DatabaseSync(dbPath)
+      try {
+        db.prepare("UPDATE desktop_store_metadata SET installation_id = ?, schema_version = ? WHERE id = 1").run(id, version)
+      } finally {
+        db.close()
+      }
+      const before = await readFile(dbPath)
+      await expect(preview()).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining(diagnostic) })
+      expect((await readFile(dbPath)).equals(before)).toBe(true)
+    }
+  })
+
   it("removes a failed publication without leaving a private partial artifact", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-backup-failure-"))
     workspaces.push(workspace)

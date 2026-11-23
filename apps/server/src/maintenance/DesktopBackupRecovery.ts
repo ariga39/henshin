@@ -1,18 +1,13 @@
 import { DatabaseSync } from "node:sqlite"
-import { createHash, randomUUID } from "node:crypto"
+import { createHash } from "node:crypto"
 import {
   chmod,
-  copyFile,
   lstat,
-  mkdir,
   mkdtemp,
   open,
   readFile,
   realpath,
-  rename,
-  rm,
-  stat,
-  writeFile
+  rm
 } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import path from "node:path"
@@ -28,7 +23,6 @@ import {
 export const DESKTOP_DATABASE_NAME = "prototype-client.db"
 export const DESKTOP_IDENTITY_NAME = "device-id"
 export const DESKTOP_RECOVERY_STATE_NAME = "desktop-recovery-state.json"
-const DESKTOP_RECOVERY_MARKER_NAME = ".desktop-recovery-in-progress.json"
 const DESKTOP_STORE_SCHEMA_VERSION = 1
 const INSTALLATION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const DURABLE_TABLES = new Set([
@@ -123,11 +117,6 @@ export interface DesktopRecoveryResult {
 
 export const isMissing = (error: unknown): boolean =>
   typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
-
-const errorCode = (error: unknown): string | undefined =>
-  typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
-    ? error.code
-    : undefined
 
 export const isWithin = (child: string, parent: string): boolean => {
   const relativePath = path.relative(parent, child)
@@ -301,8 +290,11 @@ export const readDesktopRecoveryTarget = async (dataDirectory: string): Promise<
   if (!INSTALLATION_ID_PATTERN.test(installationId)) throw new Error("desktop maintenance failed at data-directory: installation identity is unavailable")
   const database = new DatabaseSync(path.join(dataDirectory, DESKTOP_DATABASE_NAME), { readOnly: true, timeout: 0 })
   try {
-    const objects = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as unknown as ReadonlyArray<{ name: string }>
-    if (!objects.some((object) => object.name === "desktop_store_metadata")) throw new Error("desktop target store identity is unavailable")
+    const identity = database.prepare(
+      "SELECT installation_id, schema_version FROM desktop_store_metadata WHERE id = 1"
+    ).get()
+    if (identity?.installation_id !== installationId) throw new Error("desktop target database and installation identity disagree")
+    if (identity.schema_version !== DESKTOP_STORE_SCHEMA_VERSION) throw new Error("desktop target has an unsupported schema version")
     const latest = database.prepare(`
       SELECT MAX(updated_at_ms) AS updated_at_ms FROM (
         SELECT updated_at_ms FROM unsent_drafts
@@ -317,7 +309,7 @@ export const readDesktopRecoveryTarget = async (dataDirectory: string): Promise<
   }
 }
 
-const validateArchiveForTarget = async (dataDirectory: string, archivePath: string): Promise<{ bundle: LoadedDesktopBundle; target: DesktopTarget; preview: DesktopRecoveryPreview }> => {
+export const previewDesktopRecovery = async (dataDirectory: string, archivePath: string): Promise<DesktopRecoveryPreview> => {
   const targetDirectory = await realpath(dataDirectory)
   const selectedArchive = await realpath(path.resolve(archivePath))
   if (isWithin(selectedArchive, targetDirectory)) throw new Error("desktop backup archive must be outside the desktop data directory")
@@ -332,37 +324,30 @@ const validateArchiveForTarget = async (dataDirectory: string, archivePath: stri
     const latestTargetMs = target.latestUpdatedAtMs ?? recoveryPointMs
     const lostToMs = Math.max(recoveryPointMs, latestTargetMs)
     return {
-      bundle,
-      target,
-      preview: {
-        store_kind: "desktop",
-        target_installation_id: target.installationId,
-        recovery_installation_id: bundle.manifest.installation_id,
-        recovery_point: {
-          started_at: bundle.manifest.snapshot_started_at,
-          completed_at: bundle.manifest.snapshot_completed_at,
-          schema_version: bundle.manifest.schema_version,
-          application_version: bundle.manifest.application_version
-        },
-        lost_interval: {
-          from: bundle.manifest.snapshot_completed_at,
-          to: new Date(lostToMs).toISOString(),
-          estimated_milliseconds: Math.max(0, lostToMs - recoveryPointMs)
-        },
-        pending_work: pending,
-        requires_confirmation: true,
-        requires_fresh_authentication: true,
-        mappings_require_review: true,
-        reader_profiles_require_review: true,
-        automatic_reader_launch_disabled: true,
-        source_files_untouched: true,
-        selected_backup_untouched: true
-      }
+      store_kind: "desktop",
+      target_installation_id: target.installationId,
+      recovery_installation_id: bundle.manifest.installation_id,
+      recovery_point: {
+        started_at: bundle.manifest.snapshot_started_at,
+        completed_at: bundle.manifest.snapshot_completed_at,
+        schema_version: bundle.manifest.schema_version,
+        application_version: bundle.manifest.application_version
+      },
+      lost_interval: {
+        from: bundle.manifest.snapshot_completed_at,
+        to: new Date(lostToMs).toISOString(),
+        estimated_milliseconds: Math.max(0, lostToMs - recoveryPointMs)
+      },
+      pending_work: pending,
+      requires_confirmation: true,
+      requires_fresh_authentication: true,
+      mappings_require_review: true,
+      reader_profiles_require_review: true,
+      automatic_reader_launch_disabled: true,
+      source_files_untouched: true,
+      selected_backup_untouched: true
     }
   } finally {
     await rm(stagingDirectory, { recursive: true, force: true })
   }
 }
-
-export const previewDesktopRecovery = async (dataDirectory: string, archivePath: string): Promise<DesktopRecoveryPreview> =>
-  (await validateArchiveForTarget(dataDirectory, archivePath)).preview
