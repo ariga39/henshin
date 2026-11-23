@@ -506,10 +506,7 @@ describe("library renderer workflow", () => {
     await run(chooseLibraryOpenProfile(otherProfileId), client)
     await run(selectLibraryEntry(entryAId), client)
     expect(viewStore.getState().library_open_profile_id).toBe(otherProfileId)
-    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
-      status: "accepted",
-      result: { action_id: actionB }
-    })
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toBeNull()
 
     viewStore.set({ library_entries: [entry(entryAId, "book-a")] })
     await run(selectLibraryEntry(entryAId), client)
