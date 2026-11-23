@@ -442,7 +442,7 @@ test("pages the Library and reviews an off-page replacement after a held scan", 
 
     const lastBook = first.window.getByTestId("library-entry").last()
     const lastTitle = await lastBook.locator(".library-entry-details > strong").innerText()
-    const lastId = await lastBook.locator("small").innerText()
+    const lastId = await lastBook.getByTestId("library-entry-id").innerText()
     await first.window.getByTestId("library-refresh").click()
     await expect(first.window.getByTestId("library-entry")).toHaveCount(50)
     await expect(first.window.getByText(lastId, { exact: true })).toHaveCount(0)
@@ -573,7 +573,7 @@ test("reviews a changed occupied path before keeping or replacing its entry", as
     await expect(first.window.getByTestId("library-screen")).toBeVisible()
     await expect(first.window.getByTestId("library-scan-status")).toHaveText("Scan task succeeded.", { timeout: 30_000 })
     await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(1, { timeout: 30_000 })
-    const originalId = await first.window.getByTestId("library-entry").locator("small").textContent()
+    const originalId = await first.window.getByTestId("library-entry").getByTestId("library-entry-id").textContent()
 
     await first.window.getByTestId("library-setup").click()
     await writeFile(path.join(bookDirectory, "001.jpg"), "Book B")
@@ -595,7 +595,7 @@ test("reviews a changed occupied path before keeping or replacing its entry", as
     await expect(first.window.getByTestId("replacement-review")).toHaveCount(0, { timeout: 30_000 })
     await first.window.getByTestId("open-library").click()
     await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(1)
-    await expect(first.window.getByTestId("library-entry").locator("small")).toHaveText(originalId ?? "")
+    await expect(first.window.getByTestId("library-entry").getByTestId("library-entry-id")).toHaveText(originalId ?? "")
 
     await first.window.getByTestId("library-setup").click()
     await writeFile(path.join(bookDirectory, "001.jpg"), "Book C")
@@ -610,7 +610,7 @@ test("reviews a changed occupied path before keeping or replacing its entry", as
     await expect(first.window.getByTestId("replacement-review")).toHaveCount(0, { timeout: 30_000 })
     await first.window.getByTestId("open-library").click()
     await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(1)
-    const replacementId = await first.window.getByTestId("library-entry").locator("small").textContent()
+    const replacementId = await first.window.getByTestId("library-entry").getByTestId("library-entry-id").textContent()
     expect(replacementId).not.toBe(originalId)
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
