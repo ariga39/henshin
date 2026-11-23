@@ -1,6 +1,7 @@
 import { createRequire } from "node:module"
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
+import { readFileSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
 
@@ -12,6 +13,7 @@ const collection = process.env.HENSHIN_PACKAGED_COLLECTION
 if (executablePath === undefined || profile === undefined || collection === undefined) {
   throw new Error("HENSHIN_PACKAGED_EXECUTABLE, HENSHIN_PACKAGED_PROFILE, and HENSHIN_PACKAGED_COLLECTION are required")
 }
+if (process.platform !== "linux") throw new Error("packaged-linux.mjs requires Linux process observations")
 
 const cbz = path.join(collection, "relocation-proof.cbz")
 const validPng = Buffer.from(
@@ -28,16 +30,86 @@ const waitFor = async (check, label, timeout = 30_000) => {
   throw new Error(`timed out waiting for ${label}`)
 }
 const sha256 = async (file) => createHash("sha256").update(await readFile(file)).digest("hex")
-const childProcesses = (parentPid) => {
+const linuxProcessObservation = (pid) => {
+  let stat
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+  } catch (error) {
+    if (error.code === "ENOENT") return undefined
+    throw error
+  }
+  const commandEnd = stat.lastIndexOf(")")
+  if (commandEnd < 0) throw new Error(`invalid Linux process stat for pid ${pid}`)
+  const fields = stat.slice(commandEnd + 2).trim().split(/\s+/u)
+  const state = fields[0]
+  const linuxStartTimeTicks = fields[19]
+  if (state === undefined || linuxStartTimeTicks === undefined) {
+    throw new Error(`incomplete Linux process stat for pid ${pid}`)
+  }
+  return { state, linuxStartTimeTicks }
+}
+const managedServerProcesses = (parentPid) => {
   const output = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" })
-  return output.split("\n").map((line) => line.trim()).filter((line) => {
+  return output.split("\n").map((line) => line.trim()).flatMap((line) => {
     const match = line.match(/^(\d+)\s+(\d+)\s+(.+)$/)
-    return match !== null && Number(match[2]) === parentPid && match[3].includes("dist/server/server.mjs")
+    if (match === null || Number(match[2]) !== parentPid || !match[3].includes("dist/server/server.mjs")) return []
+    const observation = linuxProcessObservation(Number(match[1]))
+    return observation === undefined ? [] : [{
+      pid: Number(match[1]),
+      command: match[3],
+      ...observation
+    }]
   })
 }
 const processCommand = (pid) => {
   const output = execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" })
   return output.trim()
+}
+const waitForManagedServer = async (parentPid, label) => {
+  let observation
+  await waitFor(() => {
+    const processes = managedServerProcesses(parentPid)
+    if (processes.length !== 1) return false
+    observation = processes[0]
+    return true
+  }, `${label} managed server`)
+  return observation
+}
+const managedServerExitObservation = (observation) => {
+  try {
+    process.kill(observation.pid, 0)
+  } catch (error) {
+    if (error.code === "ESRCH") return { exited: true, reason: "esrch" }
+    throw error
+  }
+  const current = linuxProcessObservation(observation.pid)
+  if (current === undefined) return { exited: true, reason: "proc-missing" }
+  if (current.linuxStartTimeTicks !== observation.linuxStartTimeTicks) {
+    return { exited: true, reason: "pid-reused", replacementLinuxStartTimeTicks: current.linuxStartTimeTicks }
+  }
+  return { exited: false }
+}
+const waitForManagedServerExit = async (observation, label) => {
+  let exitObservation
+  await waitFor(() => {
+    exitObservation = managedServerExitObservation(observation)
+    return exitObservation.exited
+  }, `${label} managed server shutdown`)
+  return exitObservation
+}
+const sandboxObservation = (pid) => {
+  const command = processCommand(pid)
+  const noSandboxFlag = /(?:^|\s)--no-sandbox(?:\s|$)/u.test(command)
+  if (noSandboxFlag) throw new Error(`packaged launch disabled the Electron sandbox: ${command}`)
+  return { pid, command, noSandboxFlag }
+}
+const waitForDecodedCover = async (cover, label) => {
+  await cover.waitFor({ state: "visible", timeout: 30_000 })
+  await waitFor(
+    () => cover.evaluate((image) => image.complete && image.naturalWidth > 0),
+    `${label} cover decode`
+  )
+  return cover.evaluate((image) => image.naturalWidth)
 }
 
 await mkdir(profile, { recursive: true })
@@ -59,8 +131,8 @@ const launch = async () => {
       XDG_DATA_HOME: path.join(profile, ".local", "share")
     }
   })
-  if (processCommand(app.process().pid).includes("--no-sandbox")) throw new Error("packaged launch disabled the Electron sandbox")
-  return { app, window: await app.firstWindow() }
+  const pid = app.process().pid
+  return { app, window: await app.firstWindow(), sandbox: sandboxObservation(pid) }
 }
 
 const first = await launch()
@@ -77,36 +149,43 @@ await firstWindow.getByTestId("scan-hold-new-discoveries").uncheck()
 await firstWindow.getByTestId("start-held-scan").click()
 await waitFor(() => firstWindow.getByTestId("library-entries").locator("li").count().then((count) => count === 1), "indexed book")
 const firstCover = firstWindow.getByTestId("library-entry").first().getByTestId("library-cover-image")
-await firstCover.waitFor({ state: "visible", timeout: 30_000 })
-const firstNaturalWidth = await firstCover.evaluate((image) => image.naturalWidth)
-if (firstNaturalWidth <= 0) throw new Error("first-run cover did not decode")
-if (childProcesses(firstPid).length !== 1) throw new Error("first managed server child was not observed")
+const firstNaturalWidth = await waitForDecodedCover(firstCover, "first-run")
+const firstManagedServer = await waitForManagedServer(firstPid, "first")
 await first.app.close()
-await waitFor(() => childProcesses(firstPid).length === 0, "first managed server shutdown")
+const firstShutdown = await waitForManagedServerExit(firstManagedServer, "first")
 
 const second = await launch()
 const secondPid = second.app.process().pid
 await second.window.getByTestId("open-library").click()
 await waitFor(() => second.window.getByTestId("library-entries").locator("li").count().then((count) => count === 1), "relaunch retained book")
 const secondCover = second.window.getByTestId("library-entry").first().getByTestId("library-cover-image")
-await secondCover.waitFor({ state: "visible", timeout: 30_000 })
-const secondNaturalWidth = await secondCover.evaluate((image) => image.naturalWidth)
-if (secondNaturalWidth <= 0) throw new Error("relaunch cover did not decode")
-if (childProcesses(secondPid).length !== 1) throw new Error("relaunched managed server child was not observed")
+const secondNaturalWidth = await waitForDecodedCover(secondCover, "relaunch")
+const secondManagedServer = await waitForManagedServer(secondPid, "relaunch")
 await second.app.close()
-await waitFor(() => childProcesses(secondPid).length === 0, "second managed server shutdown")
+const secondShutdown = await waitForManagedServerExit(secondManagedServer, "relaunch")
 
 const sourceAfter = await sha256(cbz)
-if (sourceAfter !== sourceBefore) throw new Error("source CBZ bytes changed")
+const sourceBytesUnchanged = sourceAfter === sourceBefore
+if (!sourceBytesUnchanged) throw new Error("source CBZ bytes changed")
+const managedServiceShutdown = firstShutdown.exited && secondShutdown.exited
+const sandboxEnabled = !first.sandbox.noSandboxFlag && !second.sandbox.noSandboxFlag
 console.log(JSON.stringify({
   platform: process.platform,
   arch: process.arch,
   uid: process.getuid?.(),
   executablePath,
-  sandboxEnabled: true,
+  sandboxEnabled,
+  sandboxEvidence: {
+    first: first.sandbox,
+    second: second.sandbox
+  },
   firstNaturalWidth,
   secondNaturalWidth,
   sourceSha256: sourceAfter,
-  sourceBytesUnchanged: true,
-  managedServiceShutdown: true
+  sourceBytesUnchanged,
+  managedServiceShutdown,
+  managedServices: {
+    first: { ...firstManagedServer, shutdown: firstShutdown },
+    second: { ...secondManagedServer, shutdown: secondShutdown }
+  }
 }, null, 2))
