@@ -17,6 +17,13 @@ import { DatabaseWorker, DatabaseWorkerError } from "./persistence/DatabaseWorke
 import { createBackupArchive } from "./maintenance/BackupArchive"
 import { runBackupDrill } from "./maintenance/BackupDrill"
 import {
+  BackupRestoreFailure,
+  currentIdentity,
+  listRestoreArtifacts,
+  readRestorePoint,
+  type RestoreArtifact
+} from "./maintenance/BackupRestoreArchive"
+import {
   NEWER_DATABASE_SCHEMA,
   BackupArtifactRow,
   BackupArtifactCompletionOutcome,
@@ -63,7 +70,8 @@ const usage = (): string =>
   "usage: server.mjs (--data-dir <directory> | --database <path>) [--port <1-65535>] [--initialize-owner | --rotate-owner]\n" +
   "       server.mjs backup-destination <list|register|replace> (--data-dir <directory> | --database <path>) [--name <name>] [--path <directory>] [--id <destination-id>] [--confirm]\n" +
   "       server.mjs backup create (--data-dir <directory> | --database <path>) --destination-id <destination-id> [--label <label>]\n" +
-  "       server.mjs backup drill [list] (--data-dir <directory> | --database <path>) [--artifact-id <artifact-id>]"
+  "       server.mjs backup drill [list] (--data-dir <directory> | --database <path>) [--artifact-id <artifact-id>]\n" +
+  "       server.mjs backup restore [list|preview] (--data-dir <directory> | --database <path>) [--artifact-id <artifact-id>]"
 
 interface BackupDestinationOptions {
   readonly command: "list" | "register" | "replace"
@@ -89,6 +97,54 @@ interface BackupDrillOptions {
   readonly artifactId?: string
 }
 
+interface BackupRestoreOptions {
+  readonly command: "list" | "preview"
+  readonly dataDir?: string
+  readonly database?: string
+  readonly artifactId?: string
+  readonly confirmed: boolean
+}
+
+const parseBackupRestoreOptions = (args: ReadonlyArray<string>): BackupRestoreOptions => {
+  if (args[1] !== "restore") throw new Error(usage())
+  const subcommand = args[2]
+  const command = subcommand === "list" || subcommand === "preview"
+    ? subcommand
+    : "preview"
+  let dataDir: string | undefined
+  let database: string | undefined
+  let artifactId: string | undefined
+  let confirmed = false
+  const firstOption = subcommand === "list" || subcommand === "preview" ? 3 : 2
+  for (let index = firstOption; index < args.length; index += 1) {
+    switch (args[index]) {
+      case "--data-dir":
+        dataDir = args[++index]
+        if (dataDir === undefined || dataDir.startsWith("--")) throw new Error(usage())
+        break
+      case "--database":
+        database = args[++index]
+        if (database === undefined || database.startsWith("--")) throw new Error(usage())
+        break
+      case "--artifact-id":
+        artifactId = args[++index]
+        if (artifactId === undefined || artifactId.startsWith("--")) throw new Error(usage())
+        break
+      case "--confirm":
+        confirmed = true
+        break
+      case "--help":
+        throw new Error(usage())
+      default:
+        throw new Error(usage())
+    }
+  }
+  if ((dataDir === undefined) === (database === undefined)) throw new Error(usage())
+  if (command === "preview" && artifactId === undefined) throw new Error(usage())
+  if (command === "list" && artifactId !== undefined) throw new Error(usage())
+  if (confirmed) throw new Error(usage())
+  return { command, dataDir, database, artifactId, confirmed }
+}
 const parseBackupCreateOptions = (args: ReadonlyArray<string>): BackupCreateOptions => {
   if (args[1] !== "create") throw new Error(usage())
   let dataDir: string | undefined
@@ -629,6 +685,35 @@ const runBackupDestinationCommand = async (options: BackupDestinationOptions): P
   process.stdout.write(JSON.stringify(result) + "\n")
 }
 
+const restoreArtifact = (artifacts: ReadonlyArray<RestoreArtifact>, artifactId: string): RestoreArtifact => {
+  const artifact = artifacts.find((candidate) => candidate.artifactId === artifactId)
+  if (artifact === undefined) throw new BackupRestoreFailure("artifact-not-found", "backup artifact was not found")
+  return artifact
+}
+
+const runBackupRestoreCommand = async (options: BackupRestoreOptions): Promise<void> => {
+  const dbPath = await resolveIndependentDatabasePath(options)
+  const guard = await acquireServerOwnership(dbPath)
+  try {
+    const target = currentIdentity(dbPath)
+    const artifacts = listRestoreArtifacts(dbPath)
+    if (options.command === "list") {
+      const points = await Promise.all(artifacts.map(async (artifact) => {
+        try {
+          return await readRestorePoint(artifact, target, path.dirname(dbPath))
+        } catch (error) {
+          return { artifactId: artifact.artifactId, status: "unavailable", diagnostic: error instanceof Error ? error.message : "recovery point unavailable" }
+        }
+      }))
+      process.stdout.write(JSON.stringify({ recovery_points: points }) + "\n")
+      return
+    }
+    const artifact = restoreArtifact(artifacts, options.artifactId as string)
+    process.stdout.write(JSON.stringify(await readRestorePoint(artifact, target, path.dirname(dbPath))) + "\n")
+  } finally {
+    guard.close()
+  }
+}
 const runBackupCreateCommand = async (options: BackupCreateOptions): Promise<void> => {
   const dbPath = await resolveIndependentDatabasePath(options)
   const result = await runDestinationWorker(dbPath, (worker) =>
