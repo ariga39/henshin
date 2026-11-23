@@ -186,3 +186,14 @@ node apps/server/dist/server.mjs backup-destination replace \
   --data-dir "$PWD/.henshin-server-data" \
   --id <destination-id> --path "/mnt/backup/new" --confirm
 ```
+
+Create a verified application archive at the registered destination. The
+command snapshots server state only; collection files and authentication
+secrets remain outside the bundle:
+
+```sh
+node apps/server/dist/server.mjs backup create \
+  --data-dir "$PWD/.henshin-server-data" \
+  --destination-id <destination-id> \
+  --label "pre-upgrade archive"
+```

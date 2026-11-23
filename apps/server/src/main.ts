@@ -14,7 +14,10 @@ import {
   ServerOwnershipError
 } from "./persistence/ServerOwnership"
 import { DatabaseWorker, DatabaseWorkerError } from "./persistence/DatabaseWorker"
+import { createBackupArchive } from "./maintenance/BackupArchive"
 import {
+  BackupArtifactCompletionOutcome,
+  BackupArtifactReservationOutcome,
   BackupDestinationRegistrationOutcome,
   BackupDestinationRow,
   ServerRootRow,
@@ -51,7 +54,8 @@ interface IndependentOptions {
 
 const usage = (): string =>
   "usage: server.mjs (--data-dir <directory> | --database <path>) [--port <1-65535>] [--initialize-owner | --rotate-owner]\n" +
-  "       server.mjs backup-destination <list|register|replace> (--data-dir <directory> | --database <path>) [--name <name>] [--path <directory>] [--id <destination-id>] [--confirm]"
+  "       server.mjs backup-destination <list|register|replace> (--data-dir <directory> | --database <path>) [--name <name>] [--path <directory>] [--id <destination-id>] [--confirm]\n" +
+  "       server.mjs backup create (--data-dir <directory> | --database <path>) --destination-id <destination-id> [--label <label>]"
 
 interface BackupDestinationOptions {
   readonly command: "list" | "register" | "replace"
@@ -61,6 +65,47 @@ interface BackupDestinationOptions {
   readonly destinationPath?: string
   readonly destinationId?: string
   readonly confirmed: boolean
+}
+
+interface BackupCreateOptions {
+  readonly dataDir?: string
+  readonly database?: string
+  readonly destinationId: string
+  readonly label: string | null
+}
+
+const parseBackupCreateOptions = (args: ReadonlyArray<string>): BackupCreateOptions => {
+  if (args[1] !== "create") throw new Error(usage())
+  let dataDir: string | undefined
+  let database: string | undefined
+  let destinationId: string | undefined
+  let label: string | null = null
+  for (let index = 2; index < args.length; index += 1) {
+    switch (args[index]) {
+      case "--data-dir":
+        dataDir = args[++index]
+        if (dataDir === undefined || dataDir.startsWith("--")) throw new Error(usage())
+        break
+      case "--database":
+        database = args[++index]
+        if (database === undefined || database.startsWith("--")) throw new Error(usage())
+        break
+      case "--destination-id":
+        destinationId = args[++index]
+        if (destinationId === undefined || destinationId.startsWith("--")) throw new Error(usage())
+        break
+      case "--label":
+        label = args[++index] ?? null
+        if (label === null || label.startsWith("--") || label.length > 200) throw new Error(usage())
+        break
+      case "--help":
+        throw new Error(usage())
+      default:
+        throw new Error(usage())
+    }
+  }
+  if ((dataDir === undefined) === (database === undefined) || destinationId === undefined) throw new Error(usage())
+  return { dataDir, database, destinationId, label }
 }
 
 const parseBackupDestinationOptions = (args: ReadonlyArray<string>): BackupDestinationOptions => {
@@ -364,6 +409,18 @@ const decodeBackupDestinationOutcome = (value: unknown): typeof BackupDestinatio
   return decoded.value
 }
 
+const decodeBackupArtifactReservationOutcome = (value: unknown): typeof BackupArtifactReservationOutcome.Type => {
+  const decoded = Schema.decodeUnknownOption(BackupArtifactReservationOutcome)(value)
+  if (Option.isNone(decoded)) throw new Error("database returned invalid backup artifact reservation result")
+  return decoded.value
+}
+
+const decodeBackupArtifactCompletionOutcome = (value: unknown): typeof BackupArtifactCompletionOutcome.Type => {
+  const decoded = Schema.decodeUnknownOption(BackupArtifactCompletionOutcome)(value)
+  if (Option.isNone(decoded)) throw new Error("database returned invalid backup artifact completion result")
+  return decoded.value
+}
+
 const runDestinationWorker = async <A>(
   dbPath: string,
   program: (worker: DatabaseWorker["Service"]) => Effect.Effect<A, DatabaseWorkerError>
@@ -494,6 +551,47 @@ const runBackupDestinationCommand = async (options: BackupDestinationOptions): P
   process.stdout.write(JSON.stringify(result) + "\n")
 }
 
+const runBackupCreateCommand = async (options: BackupCreateOptions): Promise<void> => {
+  const dbPath = await resolveIndependentDatabasePath(options)
+  const result = await runDestinationWorker(dbPath, (worker) =>
+    Effect.gen(function*() {
+      const destinations = decodeBackupDestinations(yield* worker.call({ op: "listBackupDestinations" }))
+      const destination = destinations.find((candidate) => candidate.destinationId === options.destinationId)
+      if (destination === undefined) {
+        return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination was not found" }))
+      }
+      const roots = decodeServerRoots(yield* worker.call({ op: "listRoots" }))
+      const archive = yield* Effect.promise(() => createBackupArchive({
+        dbPath,
+        destination,
+        roots,
+        label: options.label,
+        reserve: async (request) => decodeBackupArtifactReservationOutcome(await Effect.runPromise(worker.call({
+          op: "reserveBackupArtifact",
+          ...request
+        }))),
+        complete: async (request) => decodeBackupArtifactCompletionOutcome(await Effect.runPromise(worker.call({
+          op: "completeBackupArtifact",
+          ...request
+        })))
+      }))
+      return {
+        artifact_id: archive.artifact.artifactId,
+        destination_id: archive.artifact.destinationId,
+        operation_id: archive.artifact.operationId,
+        relative_path: archive.artifact.relativePath,
+        archive_path: archive.archivePath,
+        publication_order: archive.artifact.publicationOrder,
+        status: archive.artifact.status,
+        retention_class: archive.artifact.retentionClass,
+        manifest_digest: archive.manifestDigest,
+        archive_size_bytes: archive.archiveSizeBytes
+      }
+    })
+  )
+  process.stdout.write(JSON.stringify(result) + "\n")
+}
+
 const main = async () => {
   const args = process.argv.slice(2)
   if (args.length === 0) {
@@ -514,6 +612,24 @@ const main = async () => {
       await runBackupDestinationCommand(options)
     } catch (error) {
       console.error(error instanceof Error ? error.message : "backup destination administration failed")
+      process.exitCode = 1
+    }
+    return
+  }
+
+  if (args[0] === "backup") {
+    let options: BackupCreateOptions
+    try {
+      options = parseBackupCreateOptions(args)
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : usage())
+      process.exitCode = 2
+      return
+    }
+    try {
+      await runBackupCreateCommand(options)
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "backup creation failed")
       process.exitCode = 1
     }
     return

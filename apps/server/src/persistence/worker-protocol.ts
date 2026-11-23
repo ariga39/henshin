@@ -53,6 +53,39 @@ export const BackupDestinationRegistrationOutcome = Schema.Union([
 ])
 export type BackupDestinationRegistrationOutcome = typeof BackupDestinationRegistrationOutcome.Type
 
+export const BackupArtifactRow = Schema.Struct({
+  artifactId: Uuid,
+  destinationId: Uuid,
+  operationId: Uuid,
+  relativePath: Schema.String,
+  publicationOrder: Schema.Natural,
+  retentionClass: Schema.Literal("archive"),
+  label: Schema.NullOr(Schema.String),
+  status: Schema.Union([Schema.Literal("reserved"), Schema.Literal("completed")]),
+  manifestDigest: Schema.NullOr(Schema.String),
+  sizeBytes: Schema.NullOr(Schema.Natural),
+  createdAtMs: Schema.Int,
+  completedAtMs: Schema.NullOr(Schema.Int)
+})
+export type BackupArtifactRow = typeof BackupArtifactRow.Type
+
+export const BackupArtifactReservationOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("reserved"), artifact: BackupArtifactRow }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), artifact: BackupArtifactRow }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("destination_not_found") })
+])
+export type BackupArtifactReservationOutcome = typeof BackupArtifactReservationOutcome.Type
+
+export const BackupArtifactCompletionOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("completed"), artifact: BackupArtifactRow }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), artifact: BackupArtifactRow }),
+  Schema.Struct({ kind: Schema.Literal("artifact_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("artifact_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("artifact_not_reserved") })
+])
+export type BackupArtifactCompletionOutcome = typeof BackupArtifactCompletionOutcome.Type
+
 export const RootRegistrationOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("registered"), root: ServerRootRow }),
   Schema.Struct({ kind: Schema.Literal("replayed"), root: ServerRootRow }),
@@ -368,6 +401,7 @@ export const WorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("readNote"), noteId: NoteId }),
   Schema.Struct({ op: Schema.Literal("listRoots") }),
   Schema.Struct({ op: Schema.Literal("listBackupDestinations") }),
+  Schema.Struct({ op: Schema.Literal("listBackupArtifacts") }),
   Schema.Struct({
     op: Schema.Literal("registerBackupDestination"),
     name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
@@ -383,6 +417,22 @@ export const WorkerRequest = Schema.Union([
     canonicalPath: Schema.String,
     device: Schema.String,
     inode: Schema.String
+  }),
+  Schema.Struct({
+    op: Schema.Literal("reserveBackupArtifact"),
+    artifactId: Uuid,
+    operationId: Uuid,
+    destinationId: Uuid,
+    relativePath: Schema.String,
+    label: Schema.NullOr(Schema.String),
+    createdAtMs: Schema.Int
+  }),
+  Schema.Struct({
+    op: Schema.Literal("completeBackupArtifact"),
+    artifactId: Uuid,
+    manifestDigest: Schema.String,
+    sizeBytes: Schema.Natural,
+    completedAtMs: Schema.Int
   }),
   Schema.Struct({
     op: Schema.Literal("lookupRootOperation"),
