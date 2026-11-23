@@ -38,6 +38,10 @@ export interface BackupArchiveContext {
   readonly destination: BackupDestinationRow
   readonly roots: ReadonlyArray<ServerRootRow>
   readonly label: string | null
+  /** Supplied by a durable task; omitted by the standalone maintenance CLI. */
+  readonly artifactId?: string
+  readonly operationId?: string
+  readonly createdAtMs?: number
   readonly reserve: (request: {
     readonly artifactId: string
     readonly operationId: string
@@ -55,6 +59,9 @@ export interface BackupArchiveContext {
   /** Test-only failure seam; production callers leave this unset. */
   readonly beforePublish?: () => Promise<void>
 }
+
+export const backupArchiveRelativePath = (artifactId: string): string =>
+  `${ARCHIVE_DIRECTORY}/${artifactId}${ARCHIVE_SUFFIX}`
 
 export interface BackupArchiveResult {
   readonly artifact: BackupArtifactRow
@@ -245,16 +252,17 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
   })
   if (!separation.ok) throw new Error("backup destination overlaps a collection root or server data directory")
 
-  const artifactId = randomUUID()
-  const operationId = randomUUID()
-  const relativePath = `${ARCHIVE_DIRECTORY}/${artifactId}${ARCHIVE_SUFFIX}`
+  const artifactId = context.artifactId ?? randomUUID()
+  const operationId = context.operationId ?? randomUUID()
+  const relativePath = backupArchiveRelativePath(artifactId)
+  const createdAtMs = context.createdAtMs ?? Date.now()
   const reservation = await context.reserve({
     artifactId,
     operationId,
     destinationId: context.destination.destinationId,
     relativePath,
     label: context.label,
-    createdAtMs: Date.now()
+    createdAtMs
   })
   if (reservation.kind !== "reserved" && reservation.kind !== "replayed") {
     throw new Error(`backup artifact reservation failed: ${reservation.kind}`)

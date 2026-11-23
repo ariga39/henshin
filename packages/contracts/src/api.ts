@@ -32,7 +32,7 @@ import {
   RootPreviewResult,
   RootCommandRequest,
   ScanTask,
-  ScanTaskList,
+  TaskList,
   ScanTaskSubmission,
   StagedDiscoveryList,
   RootRegistrationRequest,
@@ -48,6 +48,7 @@ import {
 import { ReviewCandidateCommandRequest, ReviewCommandResult } from "./review"
 import { ThumbnailKey } from "./thumbnail"
 import { EntryResolution, EntryResolutionQuery } from "./library"
+import { BackupRequest, BackupTaskSubmission } from "./maintenance"
 
 /**
  * Isolated synthetic prototype API. The `/prototype/v1` prefix and the
@@ -156,12 +157,30 @@ export const TaskApi = HttpApi.make("henshin-task").add(
   HttpApiGroup.make("tasks", { topLevel: true })
     .add(
       HttpApiEndpoint.get("list", "/tasks", {
-        success: SuccessEnvelope(ScanTaskList),
+        success: SuccessEnvelope(TaskList),
         error: [AuthenticationRequired, InternalError]
       }),
       HttpApiEndpoint.get("get", "/tasks/:id", {
         params: { id: Uuid },
         success: SuccessEnvelope(ScanTask),
+        error: [AuthenticationRequired, TaskNotFound, InternalError]
+      })
+    )
+    .prefix("/api/v1")
+    .middleware(Authentication)
+)
+
+export const MaintenanceApi = HttpApi.make("henshin-maintenance").add(
+  HttpApiGroup.make("maintenance", { topLevel: true })
+    .add(
+      HttpApiEndpoint.post("createBackup", "/maintenance/backups", {
+        payload: BackupRequest,
+        success: HttpApiSchema.status(202)(SuccessEnvelope(BackupTaskSubmission)),
+        error: [AuthenticationRequired, InvalidRequest, OperationConflict, TaskNotFound, InternalError]
+      }),
+      HttpApiEndpoint.get("getBackup", "/maintenance/backups/:id", {
+        params: { id: Uuid },
+        success: SuccessEnvelope(BackupTaskSubmission),
         error: [AuthenticationRequired, TaskNotFound, InternalError]
       })
     )

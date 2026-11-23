@@ -18,6 +18,7 @@ import {
 import { HttpApiBuilder } from "effect/http-api"
 import { ServerState } from "../identity"
 import { ScanStore } from "../persistence/ScanStore"
+import { BackupTaskStore } from "../persistence/BackupTaskStore"
 import { LibraryStore, type EntryResolutionLookupResult, type ReplacementResolutionResult } from "../persistence/LibraryStore"
 import { RootStore } from "../persistence/RootStore"
 import { analyzeSourceManifest } from "../analysis/SourceManifestAnalysis"
@@ -114,11 +115,12 @@ export const TaskHandlers = HttpApiBuilder.group(TaskApi, "tasks", (handlers) =>
   Effect.gen(function*() {
     const server = yield* ServerState
     const scans = yield* ScanStore
+    const backups = yield* BackupTaskStore
     return handlers
       .handle("list", () =>
         Effect.gen(function*() {
           const context = yield* RequestContext
-          const tasks = yield* scans.listTasks().pipe(
+          const [scanTasks, backupTasks] = yield* Effect.all([scans.listTasks(), backups.list()]).pipe(
             Effect.mapError(() => new InternalError({
               code: "internal_error",
               message: "internal error",
@@ -126,7 +128,7 @@ export const TaskHandlers = HttpApiBuilder.group(TaskApi, "tasks", (handlers) =>
               ...errorBase(server, context.request_id)
             }))
           )
-          return { ...errorBase(server, context.request_id), server_time: Date.now(), data: tasks }
+          return { ...errorBase(server, context.request_id), server_time: Date.now(), data: [...scanTasks, ...backupTasks] }
         })
       )
       .handle("get", ({ params }) =>

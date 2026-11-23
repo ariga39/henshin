@@ -76,6 +76,47 @@ export const BackupArtifactRow = Schema.Struct({
 })
 export type BackupArtifactRow = typeof BackupArtifactRow.Type
 
+/** Durable HTTP submission joined with its reserved/published artifact. */
+export const BackupTaskRow = Schema.Struct({
+  task_id: Uuid,
+  operation_id: Uuid,
+  epoch: Uuid,
+  artifact_id: Uuid,
+  destination_id: Uuid,
+  relative_path: Schema.String,
+  publication_order: Schema.Natural,
+  retention_class: Schema.Literal("archive"),
+  label: Schema.NullOr(Schema.String),
+  artifact_status: Schema.Union([Schema.Literal("reserved"), Schema.Literal("completed")]),
+  manifest_digest: Schema.NullOr(Schema.String),
+  size_bytes: Schema.NullOr(Schema.Natural),
+  artifact_completed_at_ms: Schema.NullOr(Schema.Int),
+  status: Schema.Union([
+    Schema.Literal("queued"),
+    Schema.Literal("running"),
+    Schema.Literal("succeeded"),
+    Schema.Literal("failed"),
+    Schema.Literal("interrupted")
+  ]),
+  error_code: Schema.NullOr(Schema.String),
+  error_message: Schema.NullOr(Schema.String),
+  created_at_ms: Schema.Int,
+  updated_at_ms: Schema.Int,
+  destination_selected_path: Schema.String,
+  destination_canonical_path: Schema.String,
+  destination_device: Schema.String,
+  destination_inode: Schema.String
+})
+export type BackupTaskRow = typeof BackupTaskRow.Type
+
+export const BackupTaskStartOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("created"), task: BackupTaskRow }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), task: BackupTaskRow }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("destination_not_found") })
+])
+export type BackupTaskStartOutcome = typeof BackupTaskStartOutcome.Type
+
 export const BackupArtifactReservationOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("reserved"), artifact: BackupArtifactRow }),
   Schema.Struct({ kind: Schema.Literal("replayed"), artifact: BackupArtifactRow }),
@@ -491,6 +532,45 @@ export const WorkerRequest = Schema.Union([
     manifestDigest: Schema.String,
     sizeBytes: Schema.Natural,
     completedAtMs: Schema.Int
+  }),
+  Schema.Struct({
+    op: Schema.Literal("startBackupTask"),
+    taskId: Uuid,
+    operationId: Uuid,
+    epoch: Uuid,
+    artifactId: Uuid,
+    destinationId: Uuid,
+    relativePath: Schema.String,
+    label: Schema.NullOr(Schema.String),
+    createdAtMs: Schema.Int,
+    destinationSelectedPath: Schema.String,
+    destinationCanonicalPath: Schema.String,
+    destinationDevice: Schema.String,
+    destinationInode: Schema.String
+  }),
+  Schema.Struct({
+    op: Schema.Literal("listBackupTasks")
+  }),
+  Schema.Struct({
+    op: Schema.Literal("readBackupTask"),
+    taskId: Uuid
+  }),
+  Schema.Struct({
+    op: Schema.Literal("markBackupTaskRunning"),
+    taskId: Uuid,
+    updatedAtMs: Schema.Int
+  }),
+  Schema.Struct({
+    op: Schema.Literal("finishBackupTask"),
+    taskId: Uuid,
+    status: Schema.Union([
+      Schema.Literal("succeeded"),
+      Schema.Literal("failed"),
+      Schema.Literal("interrupted")
+    ]),
+    errorCode: Schema.NullOr(Schema.String),
+    errorMessage: Schema.NullOr(Schema.String),
+    updatedAtMs: Schema.Int
   }),
   Schema.Struct({
     op: Schema.Literal("startBackupDrill"),

@@ -1,7 +1,7 @@
 import { Context, Layer } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
 import { HttpApiClient, HttpApiMiddleware } from "effect/http-api"
-import { LibraryApi, PrototypeApi, ReviewApi, ServerApi, TaskApi, ThumbnailApi } from "./api"
+import { LibraryApi, MaintenanceApi, PrototypeApi, ReviewApi, ServerApi, TaskApi, ThumbnailApi } from "./api"
 import { OpenEventApi } from "./open-event-api"
 import { Authentication } from "./auth"
 
@@ -76,6 +76,28 @@ export class TaskHttpClient extends Context.Service<
     return Layer.effect(
       TaskHttpClient,
       HttpApiClient.make(TaskApi, {
+        transformClient: (client) => client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
+      })
+    ).pipe(Layer.provide(AuthenticationClient), Layer.provide(options.transportLayer ?? FetchHttpClient.layer))
+  }
+}
+
+/** Authenticated client for manual server maintenance submissions. */
+export class MaintenanceHttpClient extends Context.Service<
+  MaintenanceHttpClient,
+  HttpApiClient.ForApi<typeof MaintenanceApi>
+>()("henshin/http/MaintenanceHttpClient") {
+  static readonly layer = (options: {
+    readonly baseUrl: string
+    readonly bearerToken: string
+    readonly transportLayer?: Layer.Layer<HttpClient.HttpClient>
+  }): Layer.Layer<MaintenanceHttpClient> => {
+    const AuthenticationClient = HttpApiMiddleware.layerClient(Authentication, ({ next, request }) =>
+      next(HttpClientRequest.bearerToken(request, options.bearerToken))
+    )
+    return Layer.effect(
+      MaintenanceHttpClient,
+      HttpApiClient.make(MaintenanceApi, {
         transformClient: (client) => client.pipe(HttpClient.mapRequest(HttpClientRequest.prependUrl(options.baseUrl)))
       })
     ).pipe(Layer.provide(AuthenticationClient), Layer.provide(options.transportLayer ?? FetchHttpClient.layer))

@@ -12,7 +12,7 @@ import {
 } from "effect/http"
 import type { ServeError } from "effect/http/HttpServerError"
 import { HttpApiBuilder } from "effect/http-api"
-import { LibraryApi, OpenEventApi, PrototypeApi, ReviewApi, ServerApi, TaskApi, ThumbnailApi } from "@henshin/contracts"
+import { LibraryApi, MaintenanceApi, OpenEventApi, PrototypeApi, ReviewApi, ServerApi, TaskApi, ThumbnailApi } from "@henshin/contracts"
 import { AuthenticationLayer } from "./api/AuthenticationLayer"
 import { PrototypeHandlers } from "./api/handlers"
 import { RootHandlers } from "./api/root-preview"
@@ -20,6 +20,7 @@ import { ReviewHandlers, TaskHandlers } from "./api/scan"
 import { LibraryHandlers } from "./api/library"
 import { ThumbnailHandlers } from "./api/thumbnails"
 import { OpenEventHandlers } from "./api/open-events"
+import { MaintenanceHandlers } from "./api/maintenance"
 import { AuthConfig, ServerState } from "./identity"
 import { DatabaseWorker, type DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { NoteStore } from "./persistence/NoteStore"
@@ -28,6 +29,7 @@ import { BackupDestinationStore } from "./persistence/BackupDestinationStore"
 import { ScanStore } from "./persistence/ScanStore"
 import { LibraryStore } from "./persistence/LibraryStore"
 import { OpenEventStore } from "./persistence/OpenEventStore"
+import { BackupTaskStore } from "./persistence/BackupTaskStore"
 import { ServerOwnershipLayer, type ServerOwnershipError } from "./persistence/ServerOwnership"
 import { ThumbnailCache } from "./thumbnails/ThumbnailCache"
 import { ThumbnailProducer } from "./thumbnails/ThumbnailProducer"
@@ -199,8 +201,17 @@ export const makeAppLayer = (
     // server state and HTTP server with the synthetic prototype.
     Layer.provide(RootPreviewHandlersLayer)
   )
-  const TaskHandlersLayer = TaskHandlers.pipe(Layer.provide(Layer.mergeAll(AuthenticationLayer, ScanStore.layer)))
+  const BackupTaskStoreLayer = BackupTaskStore.layer(options.dbPath).pipe(
+    Layer.provide(Layer.mergeAll(RootStore.layer, BackupDestinationStore.layer))
+  )
+  const TaskHandlersLayer = TaskHandlers.pipe(
+    Layer.provide(Layer.mergeAll(AuthenticationLayer, ScanStore.layer, BackupTaskStoreLayer))
+  )
   const TaskRoutesLayer = HttpApiBuilder.layer(TaskApi).pipe(Layer.provide(TaskHandlersLayer))
+  const MaintenanceHandlersLayer = MaintenanceHandlers.pipe(
+    Layer.provide(Layer.mergeAll(AuthenticationLayer, BackupTaskStoreLayer))
+  )
+  const MaintenanceRoutesLayer = HttpApiBuilder.layer(MaintenanceApi).pipe(Layer.provide(MaintenanceHandlersLayer))
   const ReviewHandlersLayer = ReviewHandlers.pipe(
     Layer.provide(Layer.mergeAll(AuthenticationLayer, RootStore.layer, ScanStore.layer, LibraryStore.layer))
   )
@@ -230,6 +241,7 @@ export const makeAppLayer = (
     RoutesLayer,
     RootPreviewRoutesLayer,
     TaskRoutesLayer,
+    MaintenanceRoutesLayer,
     ReviewRoutesLayer,
     LibraryRoutesLayer,
     ThumbnailRoutesLayer,

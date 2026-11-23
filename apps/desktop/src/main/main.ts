@@ -1244,7 +1244,11 @@ const registerIpc = (): void => {
       toResult(
         Effect.gen(function*() {
           const client = yield* TaskHttpClient
-          return yield* client.list()
+          const listed = yield* client.list()
+          return {
+            ...listed,
+            data: listed.data.filter((task): task is import("@henshin/contracts").ScanTask => task.kind === "manual-scan")
+          }
         })
       )
     )

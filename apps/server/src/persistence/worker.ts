@@ -29,6 +29,8 @@ import {
   BackupArtifactCompletionOutcome,
   BackupArtifactReservationOutcome,
   BackupArtifactRow,
+  BackupTaskStartOutcome,
+  BackupTaskRow,
   BackupDrillCompletionOutcome,
   BackupDrillRunRow,
   BackupDrillStartOutcome,
@@ -379,6 +381,23 @@ db.exec(`
     completed_at_ms INTEGER,
     UNIQUE (destination_id, relative_path),
     UNIQUE (destination_id, publication_order)
+  );
+  CREATE TABLE IF NOT EXISTS backup_tasks (
+    task_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    artifact_id TEXT NOT NULL UNIQUE REFERENCES backup_artifacts(artifact_id),
+    destination_id TEXT NOT NULL REFERENCES backup_destinations(destination_id),
+    destination_selected_path TEXT NOT NULL,
+    destination_canonical_path TEXT NOT NULL,
+    destination_device TEXT NOT NULL,
+    destination_inode TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'interrupted')),
+    error_code TEXT,
+    error_message TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE (epoch, operation_id)
   );
   CREATE TABLE IF NOT EXISTS backup_drill_runs (
     run_id TEXT PRIMARY KEY,
@@ -921,6 +940,61 @@ const updateBackupArtifactCompleted = db.prepare(
    SET status = 'completed', manifest_digest = ?, size_bytes = ?, completed_at_ms = ?
    WHERE artifact_id = ? AND status = 'reserved'`
 )
+const selectBackupTasks = db.prepare(
+  `SELECT t.task_id, t.operation_id, t.epoch, t.artifact_id, t.destination_id,
+          a.relative_path, a.publication_order, a.retention_class, a.label,
+          a.status AS artifact_status, a.manifest_digest, a.size_bytes,
+          a.completed_at_ms AS artifact_completed_at_ms,
+          t.status, t.error_code, t.error_message, t.created_at_ms, t.updated_at_ms,
+          t.destination_selected_path, t.destination_canonical_path,
+          t.destination_device, t.destination_inode
+   FROM backup_tasks t
+   JOIN backup_artifacts a ON a.artifact_id = t.artifact_id
+   ORDER BY t.created_at_ms ASC, t.task_id ASC`
+)
+const selectBackupTaskById = db.prepare(
+  `SELECT t.task_id, t.operation_id, t.epoch, t.artifact_id, t.destination_id,
+          a.relative_path, a.publication_order, a.retention_class, a.label,
+          a.status AS artifact_status, a.manifest_digest, a.size_bytes,
+          a.completed_at_ms AS artifact_completed_at_ms,
+          t.status, t.error_code, t.error_message, t.created_at_ms, t.updated_at_ms,
+          t.destination_selected_path, t.destination_canonical_path,
+          t.destination_device, t.destination_inode
+   FROM backup_tasks t
+   JOIN backup_artifacts a ON a.artifact_id = t.artifact_id
+   WHERE t.task_id = ?`
+)
+const selectBackupTaskByOperation = db.prepare(
+  `SELECT t.task_id, t.operation_id, t.epoch, t.artifact_id, t.destination_id,
+          a.relative_path, a.publication_order, a.retention_class, a.label,
+          a.status AS artifact_status, a.manifest_digest, a.size_bytes,
+          a.completed_at_ms AS artifact_completed_at_ms,
+          t.status, t.error_code, t.error_message, t.created_at_ms, t.updated_at_ms,
+          t.destination_selected_path, t.destination_canonical_path,
+          t.destination_device, t.destination_inode
+   FROM backup_tasks t
+   JOIN backup_artifacts a ON a.artifact_id = t.artifact_id
+   WHERE t.epoch = ? AND t.operation_id = ?`
+)
+const insertBackupTaskArtifact = db.prepare(
+  `INSERT INTO backup_artifacts(
+    artifact_id, destination_id, operation_id, relative_path, publication_order,
+    retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
+  ) VALUES (?, ?, ?, ?, ?, 'archive', ?, 'reserved', NULL, NULL, ?, NULL)`
+)
+const insertBackupTask = db.prepare(
+  `INSERT INTO backup_tasks(
+    task_id, operation_id, epoch, artifact_id, destination_id,
+    destination_selected_path, destination_canonical_path, destination_device, destination_inode,
+    status, error_code, error_message, created_at_ms, updated_at_ms
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, ?, ?)`
+)
+const updateBackupTaskRunning = db.prepare(
+  "UPDATE backup_tasks SET status = 'running', error_code = NULL, error_message = NULL, updated_at_ms = ? WHERE task_id = ? AND status <> 'succeeded'"
+)
+const updateBackupTaskFinished = db.prepare(
+  "UPDATE backup_tasks SET status = ?, error_code = ?, error_message = ?, updated_at_ms = ? WHERE task_id = ?"
+)
 const selectBackupDrillRuns = db.prepare(
   `SELECT run_id, artifact_id, manifest_digest, status, started_at_ms, completed_at_ms,
           duration_ms, diagnostic_code, diagnostic_message, checks_json
@@ -1329,6 +1403,158 @@ const backupArtifactRows = (): ReadonlyArray<BackupArtifactRow> =>
   (selectBackupArtifacts.all() as unknown as ReadonlyArray<Parameters<typeof backupArtifactRow>[0]>).map(
     backupArtifactRow
   )
+
+const backupTaskRow = (row: {
+  task_id: string
+  operation_id: string
+  epoch: string
+  artifact_id: string
+  destination_id: string
+  relative_path: string
+  publication_order: number
+  retention_class: "archive"
+  label: string | null
+  artifact_status: "reserved" | "completed"
+  manifest_digest: string | null
+  size_bytes: number | null
+  artifact_completed_at_ms: number | null
+  status: "queued" | "running" | "succeeded" | "failed" | "interrupted"
+  error_code: string | null
+  error_message: string | null
+  created_at_ms: number
+  updated_at_ms: number
+  destination_selected_path: string
+  destination_canonical_path: string
+  destination_device: string
+  destination_inode: string
+}): BackupTaskRow => ({
+  task_id: row.task_id,
+  operation_id: row.operation_id,
+  epoch: row.epoch,
+  artifact_id: row.artifact_id,
+  destination_id: row.destination_id,
+  relative_path: row.relative_path,
+  publication_order: row.publication_order,
+  retention_class: row.retention_class,
+  label: row.label,
+  artifact_status: row.artifact_status,
+  manifest_digest: row.manifest_digest,
+  size_bytes: row.size_bytes,
+  artifact_completed_at_ms: row.artifact_completed_at_ms,
+  status: row.status,
+  error_code: row.error_code,
+  error_message: row.error_message,
+  created_at_ms: row.created_at_ms,
+  updated_at_ms: row.updated_at_ms,
+  destination_selected_path: row.destination_selected_path,
+  destination_canonical_path: row.destination_canonical_path,
+  destination_device: row.destination_device,
+  destination_inode: row.destination_inode
+})
+
+const backupTaskRows = (): ReadonlyArray<BackupTaskRow> =>
+  (selectBackupTasks.all() as unknown as ReadonlyArray<Parameters<typeof backupTaskRow>[0]>).map(backupTaskRow)
+
+const backupTaskById = (taskId: string): BackupTaskRow | undefined => {
+  const row = selectBackupTaskById.get(taskId) as Parameters<typeof backupTaskRow>[0] | undefined
+  return row === undefined ? undefined : backupTaskRow(row)
+}
+
+const startBackupTask = (
+  request: Extract<WorkerRequest, { op: "startBackupTask" }>
+): BackupTaskStartOutcome => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const existing = selectBackupTaskByOperation.get(request.epoch, request.operationId) as
+      | Parameters<typeof backupTaskRow>[0]
+      | undefined
+    if (existing !== undefined) {
+      const task = backupTaskRow(existing)
+      const same = task.destination_id === request.destinationId && task.label === request.label &&
+        task.destination_selected_path === request.destinationSelectedPath &&
+        task.destination_canonical_path === request.destinationCanonicalPath &&
+        task.destination_device === request.destinationDevice && task.destination_inode === request.destinationInode
+      db.exec(same ? "COMMIT" : "ROLLBACK")
+      return same ? { kind: "replayed", task } : { kind: "operation_conflict" }
+    }
+
+    const destination = backupDestinationById(request.destinationId)
+    if (destination === undefined || destination.state !== "active") {
+      db.exec("ROLLBACK")
+      return { kind: "destination_not_found" }
+    }
+    const sameDestination = destination.selectedPath === request.destinationSelectedPath &&
+      destination.canonicalPath === request.destinationCanonicalPath &&
+      destination.device === request.destinationDevice && destination.inode === request.destinationInode
+    if (!sameDestination || selectBackupArtifactById.get(request.artifactId) !== undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "operation_conflict" }
+    }
+
+    const nextOrderRow = selectNextBackupPublicationOrder.get(request.destinationId) as { next_order: number }
+    insertBackupTaskArtifact.run(
+      request.artifactId,
+      request.destinationId,
+      request.operationId,
+      request.relativePath,
+      nextOrderRow.next_order,
+      request.label,
+      request.createdAtMs
+    )
+    insertBackupTask.run(
+      request.taskId,
+      request.operationId,
+      request.epoch,
+      request.artifactId,
+      request.destinationId,
+      request.destinationSelectedPath,
+      request.destinationCanonicalPath,
+      request.destinationDevice,
+      request.destinationInode,
+      request.createdAtMs,
+      request.createdAtMs
+    )
+    db.exec("COMMIT")
+    const task = backupTaskById(request.taskId)
+    if (task === undefined) throw new Error("backup task disappeared after creation")
+    return { kind: "created", task }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const markBackupTaskRunning = (
+  request: Extract<WorkerRequest, { op: "markBackupTaskRunning" }>
+): void => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    updateBackupTaskRunning.run(request.updatedAtMs, request.taskId)
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const finishBackupTask = (
+  request: Extract<WorkerRequest, { op: "finishBackupTask" }>
+): void => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    updateBackupTaskFinished.run(
+      request.status,
+      request.errorCode,
+      request.errorMessage,
+      request.updatedAtMs,
+      request.taskId
+    )
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
 
 const backupDrillRunRow = (row: {
   run_id: string
@@ -3437,6 +3663,16 @@ const handle = (request: WorkerRequest): unknown => {
       return reserveBackupArtifact(request)
     case "completeBackupArtifact":
       return completeBackupArtifact(request)
+    case "startBackupTask":
+      return startBackupTask(request)
+    case "listBackupTasks":
+      return backupTaskRows()
+    case "readBackupTask":
+      return backupTaskById(request.taskId) ?? null
+    case "markBackupTaskRunning":
+      return markBackupTaskRunning(request)
+    case "finishBackupTask":
+      return finishBackupTask(request)
     case "startBackupDrill":
       return startBackupDrill(request)
     case "completeBackupDrill":

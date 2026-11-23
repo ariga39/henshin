@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import { Revision, Uuid } from "./ids"
+import { BackupTask } from "./maintenance"
 
 /** A portable path relative to a saved source root. */
 export const RootRelativePath = Schema.String.check(
@@ -315,6 +316,12 @@ export const ScanTaskSubmission = Schema.Struct({
   task: ScanTask
 })
 export type ScanTaskSubmission = typeof ScanTaskSubmission.Type
+
+export const Task = Schema.Union([ScanTask, BackupTask])
+export type Task = typeof Task.Type
+
+export const TaskList = Schema.Array(Task)
+export type TaskList = typeof TaskList.Type
 
 export const ScanManifestPage = Schema.Struct({
   name: Schema.String,
