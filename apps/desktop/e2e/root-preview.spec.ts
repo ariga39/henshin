@@ -502,18 +502,12 @@ test("inspects and recovers retained handoff outcomes from the ordinary desktop 
         instance_id: instanceId,
         action_id: actionId,
         command: "dismiss_unknown"
-      }), { actionId: unknownActionId, instanceId: randomUUID() })).resolves.toEqual({
-        ok: false,
-        error: {
-          code: "open_journal_namespace",
-          message: "this handoff entry belongs to another server namespace; refresh the diagnostics before recovering it",
-          retryable: true
-        }
-      })
-    await expect(second.window.getByTestId("open-journal-error")).toContainText("another server namespace")
+      }), { actionId: unknownActionId, instanceId })).resolves.toEqual({ ok: true, data: null })
+    await second.window.getByTestId(`dismiss-unknown-${unknownActionId}`).click()
+    await expect(second.window.getByTestId("open-journal-error")).toContainText("no longer retained")
     await second.window.getByTestId("load-open-journal").click()
     await expect(second.window.getByTestId("open-journal-error")).toHaveCount(0)
-    await expect(second.window.getByTestId(`dismiss-unknown-${unknownActionId}`)).toBeVisible()
+    await expect(second.window.getByTestId(`dismiss-unknown-${unknownActionId}`)).toHaveCount(0)
     second.window.once("dialog", async (dialog) => {
       expect(dialog.message()).toContain("pending reading count can be lost")
       await dialog.dismiss()
@@ -525,7 +519,6 @@ test("inspects and recovers retained handoff outcomes from the ordinary desktop 
       await dialog.accept()
     })
     await second.window.getByTestId(`discard-held-${heldActionId}`).click()
-    await second.window.getByTestId(`dismiss-unknown-${unknownActionId}`).click()
     await expect(second.window.getByTestId(`open-event-${heldActionId}`)).toHaveCount(0)
     await expect(second.window.getByTestId(`dismiss-unknown-${unknownActionId}`)).toHaveCount(0)
     await second.app.close()
