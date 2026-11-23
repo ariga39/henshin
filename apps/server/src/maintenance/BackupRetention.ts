@@ -1,11 +1,22 @@
+import { createHash } from "node:crypto"
 import { lstat, rm, realpath } from "node:fs/promises"
 import { dirname, join, relative, resolve } from "node:path"
+import { Option, Schema } from "effect"
+import type { Entry } from "@zip.js/zip.js"
 import {
   revalidateWritableLocation,
   validateWritableLocationSeparation,
   type SourceRootObservation,
   type WritableLocationObservation
 } from "../analysis/NativeSourceBoundary"
+import {
+  inspectBackupArchive,
+  MAX_CONFIGURATION_BYTES,
+  MAX_MANIFEST_BYTES,
+  MAX_STATE_BYTES,
+  readBackupArchiveMember,
+  streamBackupArchiveEntry
+} from "./BackupArchiveIO"
 import type {
   BackupArtifactDeletionOutcome,
   BackupArtifactRow,
@@ -19,6 +30,34 @@ export const ROTATING_KEEP_COUNT = 7
 
 const ROTATING_DIRECTORY = "rotating"
 const ARCHIVE_SUFFIX = ".henshin.zip"
+const textDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
+
+const Digest = Schema.String.check(Schema.isMinLength(64), Schema.isMaxLength(64))
+const RetentionManifest = Schema.Struct({
+  format_version: Schema.Literal(1),
+  artifact_id: Schema.String,
+  operation_id: Schema.String,
+  destination_id: Schema.String,
+  relative_path: Schema.String,
+  publication_order: Schema.Natural,
+  store_kind: Schema.Literal("server"),
+  retention_class: Schema.Literal("rotating"),
+  payloads: Schema.Struct({
+    "state.sqlite": Schema.Struct({ size_bytes: Schema.Natural, sha256: Digest }),
+    "configuration.json": Schema.Struct({ size_bytes: Schema.Natural, sha256: Digest })
+  })
+})
+
+type FileIdentity = {
+  readonly device: number | bigint
+  readonly inode: number | bigint
+  readonly size: number | bigint
+}
+
+type VerifiedArtifact = {
+  readonly path: string
+  readonly identity: FileIdentity
+}
 
 export interface BackupRetentionContext {
   readonly dbPath: string
@@ -93,11 +132,102 @@ const artifactPath = async (
   return resolved
 }
 
-const assertOwnedFile = async (destination: BackupDestinationRow, relativePath: string): Promise<string> => {
-  const path = await artifactPath(destination, relativePath)
-  const entry = await lstat(path)
-  if (!entry.isFile() || entry.isSymbolicLink()) throw new Error("catalog artifact is not an owned regular file")
-  return path
+const identityOf = (entry: Awaited<ReturnType<typeof lstat>>): FileIdentity => ({
+  device: entry.dev,
+  inode: entry.ino,
+  size: entry.size
+})
+
+const sameIdentity = (left: FileIdentity, right: FileIdentity): boolean =>
+  left.device === right.device && left.inode === right.inode && left.size === right.size
+
+const decodeRetentionManifest = (bytes: Uint8Array): typeof RetentionManifest.Type => {
+  try {
+    const decoded = Schema.decodeUnknownOption(RetentionManifest)(JSON.parse(textDecoder.decode(bytes)))
+    if (Option.isSome(decoded)) return decoded.value
+  } catch {
+    // Convert malformed archive metadata into a bounded retention warning.
+  }
+  throw new Error("backup artifact manifest is invalid")
+}
+
+const digestEntry = async (
+  entry: Entry,
+  expected: { readonly size_bytes: number; readonly sha256: string }
+): Promise<void> => {
+  const hash = createHash("sha256")
+  const size = await streamBackupArchiveEntry(entry, expected.size_bytes, (chunk) => {
+    hash.update(chunk)
+  })
+  if (size !== expected.size_bytes || hash.digest("hex") !== expected.sha256) {
+    throw new Error(`backup artifact payload failed verification: ${entry.filename}`)
+  }
+}
+
+const verifyOwnedArchive = async (
+  destination: BackupDestinationRow,
+  artifact: BackupArtifactRow
+): Promise<VerifiedArtifact> => {
+  const path = await artifactPath(destination, artifact.relativePath)
+  const before = await lstat(path)
+  if (!before.isFile() || before.isSymbolicLink()) throw new Error("catalog artifact is not an owned regular file")
+  if (artifact.sizeBytes === null || before.size !== artifact.sizeBytes) {
+    throw new Error("catalog artifact size does not match the published artifact")
+  }
+  if (artifact.manifestDigest === null) throw new Error("catalog artifact has no published manifest digest")
+
+  await inspectBackupArchive(path, async (entries) => {
+    if (entries.length !== 3) throw new Error("backup artifact has unexpected members")
+    const byName = new Map<string, typeof entries[number]>()
+    for (const entry of entries) {
+      if (entry.directory || entry.symlink || byName.has(entry.filename) ||
+        !["manifest.json", "state.sqlite", "configuration.json"].includes(entry.filename)) {
+        throw new Error("backup artifact has unsafe members")
+      }
+      byName.set(entry.filename, entry)
+    }
+    const manifestEntry = byName.get("manifest.json")
+    const stateEntry = byName.get("state.sqlite")
+    const configurationEntry = byName.get("configuration.json")
+    if (manifestEntry === undefined || stateEntry === undefined || configurationEntry === undefined) {
+      throw new Error("backup artifact is incomplete")
+    }
+    if (manifestEntry.uncompressedSize !== undefined && manifestEntry.uncompressedSize > MAX_MANIFEST_BYTES) {
+      throw new Error("backup artifact manifest exceeds the size limit")
+    }
+    const manifestBytes = await readBackupArchiveMember(manifestEntry, MAX_MANIFEST_BYTES)
+    if (createHash("sha256").update(manifestBytes).digest("hex") !== artifact.manifestDigest) {
+      throw new Error("backup artifact manifest digest does not match the catalog")
+    }
+    const manifest = decodeRetentionManifest(manifestBytes)
+    if (manifest.artifact_id !== artifact.artifactId || manifest.operation_id !== artifact.operationId ||
+      manifest.destination_id !== artifact.destinationId || manifest.relative_path !== artifact.relativePath ||
+      manifest.publication_order !== artifact.publicationOrder || manifest.retention_class !== artifact.retentionClass) {
+      throw new Error("backup artifact manifest identity does not match the catalog")
+    }
+    if (stateEntry.uncompressedSize !== undefined && stateEntry.uncompressedSize > MAX_STATE_BYTES) {
+      throw new Error("backup artifact state exceeds the size limit")
+    }
+    if (configurationEntry.uncompressedSize !== undefined && configurationEntry.uncompressedSize > MAX_CONFIGURATION_BYTES) {
+      throw new Error("backup artifact configuration exceeds the size limit")
+    }
+    await digestEntry(stateEntry, manifest.payloads["state.sqlite"])
+    await digestEntry(configurationEntry, manifest.payloads["configuration.json"])
+  })
+
+  const after = await lstat(path)
+  const identity = identityOf(after)
+  if (!after.isFile() || after.isSymbolicLink() || !sameIdentity(identityOf(before), identity)) {
+    throw new Error("backup artifact changed during verification")
+  }
+  return { path, identity }
+}
+
+const revalidateVerifiedArtifact = async (verified: VerifiedArtifact): Promise<void> => {
+  const current = await lstat(verified.path)
+  if (!current.isFile() || current.isSymbolicLink() || !sameIdentity(verified.identity, identityOf(current))) {
+    throw new Error("backup artifact changed after verification")
+  }
 }
 
 const record = async (
@@ -165,32 +295,47 @@ export const applyBackupRetention = async (
   }
 
   const newest = rotating[rotating.length - 1]
+  let newestVerified: VerifiedArtifact
   try {
-    await assertOwnedFile(context.destination, newest.relativePath)
+    newestVerified = await verifyOwnedArchive(context.destination, newest)
   } catch (error) {
     return record(context, retentionWarning(
-      isMissing(error) ? "newest-recovery-point-missing" : "catalog-ownership-uncertain",
+      isMissing(error) ? "newest-recovery-point-missing" : "newest-recovery-point-invalid",
       isMissing(error) ? "newest verified rotating recovery point is missing" : (error instanceof Error ? error.message : String(error))
     ))
   }
 
   const eligible = rotating.slice(0, -ROTATING_KEEP_COUNT)
-  const paths = new Map<string, string>()
+  const verified = new Map<string, VerifiedArtifact>([[newest.artifactId, newestVerified]])
   try {
-    for (const artifact of eligible) paths.set(artifact.artifactId, await assertOwnedFile(context.destination, artifact.relativePath))
+    for (const artifact of eligible) {
+      verified.set(artifact.artifactId, await verifyOwnedArchive(context.destination, artifact))
+    }
   } catch (error) {
     return record(context, retentionWarning(
       isMissing(error) ? "eligible-artifact-missing" : "catalog-ownership-uncertain",
-      isMissing(error) ? "an eligible rotating artifact is missing; cleanup was left intact" : (error instanceof Error ? error.message : String(error))
+      isMissing(error) ? "an eligible rotating artifact is missing; cleanup was left intact" :
+        (error instanceof Error ? error.message : String(error))
+    ))
+  }
+
+  try {
+    for (const candidate of verified.values()) await revalidateVerifiedArtifact(candidate)
+  } catch (error) {
+    return record(context, retentionWarning(
+      isMissing(error) ? "eligible-artifact-missing" : "catalog-ownership-uncertain",
+      isMissing(error) ? "a verified rotating artifact disappeared before cleanup; cleanup was left intact" :
+        (error instanceof Error ? error.message : String(error))
     ))
   }
 
   const deletedArtifactIds: Array<string> = []
   for (const artifact of eligible) {
-    const path = paths.get(artifact.artifactId)
-    if (path === undefined) return record(context, retentionWarning("catalog-ownership-uncertain", "eligible artifact path was not retained", deletedArtifactIds))
+    const candidate = verified.get(artifact.artifactId)
+    if (candidate === undefined) return record(context, retentionWarning("catalog-ownership-uncertain", "eligible artifact path was not retained", deletedArtifactIds))
     try {
-      await rm(path)
+      await revalidateVerifiedArtifact(candidate)
+      await rm(candidate.path)
       const deleted = await context.markDeleted({ artifactId: artifact.artifactId, deletedAtMs: Date.now() })
       if (deleted.kind !== "deleted") throw new Error(`catalog deletion was not recorded: ${deleted.kind}`)
       deletedArtifactIds.push(artifact.artifactId)

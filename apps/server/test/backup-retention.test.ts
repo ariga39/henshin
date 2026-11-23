@@ -190,4 +190,57 @@ describe("server backup retention", () => {
     const preview = await run(["backup", "retention", "enable", "--data-dir", dataDir, "--destination-id", destinationId])
     expect(preview.proposal).toMatchObject({ store_kind: "server", destination_id: destinationId, keep_count: 7, requires_confirmation: true })
   })
+
+  it("preserves every file when the newest rotating archive is corrupt", async () => {
+    const { dataDir, destination, destinationId } = await setup()
+    for (let index = 0; index < 8; index += 1) await publishRotating(dataDir, destinationId, `corrupt-newest-${index}`)
+    await run(["backup", "retention", "enable", "--data-dir", dataDir, "--destination-id", destinationId, "--confirm"])
+    const before = await run(["backup", "list", "--data-dir", dataDir])
+    const rotating = (before.artifacts as Array<{ artifact_id: string; relative_path: string; status: string; publication_order: number }>)
+      .filter((artifact) => artifact.status === "completed" && artifact.relative_path.startsWith("rotating/"))
+      .sort((left, right) => left.publication_order - right.publication_order)
+    const newestPath = path.join(destination, rotating[rotating.length - 1].relative_path)
+    await writeFile(newestPath, "corrupt archive")
+
+    const publishedArchive = await run([
+      "backup", "create", "--data-dir", dataDir,
+      "--destination-id", destinationId, "--retention-class", "archive", "--label", "after-corruption"
+    ])
+    expect(publishedArchive.retention).toMatchObject({
+      state: "warning",
+      warning: { code: "newest-recovery-point-invalid" },
+      deleted_artifact_ids: []
+    })
+    await expect(readFile(newestPath)).resolves.toEqual(Buffer.from("corrupt archive"))
+    for (const artifact of rotating) await expect(stat(path.join(destination, artifact.relative_path))).resolves.toBeDefined()
+    await expect(stat(publishedArchive.archive_path as string)).resolves.toBeDefined()
+  })
+
+  it("preserves every file when an oldest catalog path contains a foreign archive", async () => {
+    const { dataDir, destination, destinationId } = await setup()
+    for (let index = 0; index < 8; index += 1) await publishRotating(dataDir, destinationId, `foreign-oldest-${index}`)
+    await run(["backup", "retention", "enable", "--data-dir", dataDir, "--destination-id", destinationId, "--confirm"])
+    const before = await run(["backup", "list", "--data-dir", dataDir])
+    const rotating = (before.artifacts as Array<{ artifact_id: string; relative_path: string; status: string; publication_order: number }>)
+      .filter((artifact) => artifact.status === "completed" && artifact.relative_path.startsWith("rotating/"))
+      .sort((left, right) => left.publication_order - right.publication_order)
+    const oldestPath = path.join(destination, rotating[0].relative_path)
+    const originalPath = `${oldestPath}.original`
+    await rename(oldestPath, originalPath)
+    await writeFile(oldestPath, "foreign regular file")
+
+    const publishedArchive = await run([
+      "backup", "create", "--data-dir", dataDir,
+      "--destination-id", destinationId, "--retention-class", "archive", "--label", "after-foreign-replacement"
+    ])
+    expect(publishedArchive.retention).toMatchObject({
+      state: "warning",
+      warning: { code: "catalog-ownership-uncertain" },
+      deleted_artifact_ids: []
+    })
+    await expect(readFile(oldestPath)).resolves.toEqual(Buffer.from("foreign regular file"))
+    await expect(stat(originalPath)).resolves.toBeDefined()
+    for (const artifact of rotating.slice(1)) await expect(stat(path.join(destination, artifact.relative_path))).resolves.toBeDefined()
+    await expect(stat(publishedArchive.archive_path as string)).resolves.toBeDefined()
+  })
 })
