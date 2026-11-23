@@ -74,6 +74,11 @@ import {
   reconcileNoteCommand
 } from "./CommandCoordinator"
 import { LocalDatabaseWorker } from "./persistence/LocalDatabaseWorker"
+import {
+  GalleryBindAttemptConflictError,
+  GalleryBindAttemptStore,
+  GalleryBindAttemptStoreFullError
+} from "./persistence/GalleryBindAttemptStore"
 import { OpenResolutionCache } from "./persistence/OpenResolutionCache"
 import {
   OpenJournalConflictError,
@@ -134,7 +139,7 @@ let mainWindow: BrowserWindow | null = null
 const appWindows = new Set<BrowserWindow>()
 const trustedWindowUrls = new Map<BrowserWindow, string>()
 let serverChild: ServerChild | null = null
-type MainServices = DraftStore | CommandAttemptStore | OpenJournalStore | LocalMappingStore | ReaderProfileStore | OpenResolutionCache
+type MainServices = DraftStore | CommandAttemptStore | GalleryBindAttemptStore | OpenJournalStore | LocalMappingStore | ReaderProfileStore | OpenResolutionCache
 let runtime: ManagedRuntime.ManagedRuntime<MainServices, never> | null = null
 let connection: ConnectionLifecycle | null = null
 let openCoordinator: OpenCoordinator | null = null
@@ -170,6 +175,7 @@ const testTargetSelections = new Map<string, {
 const TEST_TARGET_SELECTION_TTL_MS = 10 * 60 * 1000
 const MAX_TEST_TARGET_SELECTIONS = 32
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+const galleryBindTestResponseDelayMs = Number(process.env.HENSHIN_TEST_BIND_RESPONSE_DELAY_MS ?? "0")
 
 const dispatchExplicitReaderTest = (executablePath: string, argumentsList: ReadonlyArray<string>): Promise<void> =>
   new Promise((resolve, reject) => {
@@ -274,6 +280,20 @@ const toPublicError = (error: unknown): PublicError => {
     return {
       code: "command_attempt_store_full",
       message: "command recovery storage is full (64 retained attempts); terminal and dismissed attempts become cleanup-eligible after seven days, while unresolved attempts require reconciliation or dismissal",
+      retryable: false
+    }
+  }
+  if (error instanceof GalleryBindAttemptConflictError) {
+    return {
+      code: "operation_conflict",
+      message: "operation id reused with a different gallery binding intent",
+      retryable: false
+    }
+  }
+  if (error instanceof GalleryBindAttemptStoreFullError) {
+    return {
+      code: "gallery_bind_store_full",
+      message: "gallery binding recovery storage is full; wait for retained outcomes to expire",
       retryable: false
     }
   }
@@ -511,6 +531,123 @@ const runLocalResult = <A>(
   effect: Effect.Effect<IpcOk<A> | IpcErr, never, MainServices>
 ): Promise<IpcOk<A> | IpcErr> =>
   requireRuntime().runPromise(effect).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+
+const comparableGalleryUrl = (input: string): string => {
+  try {
+    const parsed = new URL(input)
+    const domain = parsed.hostname.toLowerCase()
+    const match = /^\/g\/([0-9]{1,20})\/([A-Za-z0-9_-]{1,64})\/$/.exec(parsed.pathname)
+    if ((parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      parsed.username === "" && parsed.password === "" && parsed.port === "" &&
+      (domain === "e-hentai.org" || domain === "exhentai.org") && match !== null) {
+      return `https://${domain}/g/${match[1]}/${match[2]}/`
+    }
+  } catch {
+    // The authenticated server remains the authority for URL validation.
+  }
+  return input
+}
+
+const updateGalleryBindAttempt = (
+  attempt: import("./persistence/draft-worker-protocol").GalleryBindAttemptRow,
+  operation: "completed" | "rejected" | "unresolved"
+): Promise<IpcOk<null> | IpcErr> =>
+  runLocalResult(
+    toRawResult(
+      Effect.gen(function*() {
+        const store = yield* GalleryBindAttemptStore
+        if (operation === "completed") {
+          yield* store.markCompleted({ instanceId: attempt.instanceId, operationId: attempt.operationId })
+        } else if (operation === "rejected") {
+          yield* store.markRejected({ instanceId: attempt.instanceId, operationId: attempt.operationId })
+        } else {
+          yield* store.markUnresolved({ instanceId: attempt.instanceId, operationId: attempt.operationId })
+        }
+        return null
+      })
+    )
+  )
+
+const dispatchGalleryBindAttempt = async (
+  attempt: import("./persistence/draft-worker-protocol").GalleryBindAttemptRow,
+  session: Session
+): Promise<IpcOk<import("@henshin/contracts").EntryCommandResult> | IpcErr> => {
+  const submitted = await runLocalResult(
+    toRawResult(
+      Effect.gen(function*() {
+        const store = yield* GalleryBindAttemptStore
+        return yield* store.markSubmitted({
+          instanceId: attempt.instanceId,
+          operationId: attempt.operationId,
+          epoch: session.epoch
+        })
+      })
+    )
+  )
+  if (!submitted.ok) return submitted as IpcErr
+
+  const result = await runNetworkResult(
+    toResult(
+      Effect.gen(function*() {
+        const client = yield* LibraryHttpClient
+        return yield* client.entryCommand({
+          params: { id: attempt.entryId },
+          payload: {
+            operation_id: attempt.operationId,
+            instance_id: session.instanceId,
+            epoch: session.epoch,
+            expected_decision_version: attempt.expectedDecisionVersion,
+            command: { type: "bind", url: attempt.url }
+          }
+        })
+      })
+    )
+  )
+  if (result.ok && galleryBindTestResponseDelayMs > 0) await delay(galleryBindTestResponseDelayMs)
+  if (result.ok) {
+    await updateGalleryBindAttempt(attempt, "completed")
+  } else if (result.error.retryable) {
+    await updateGalleryBindAttempt(attempt, "unresolved")
+  } else {
+    await updateGalleryBindAttempt(attempt, "rejected")
+  }
+  return result
+}
+
+const reconcilePendingGalleryBinds = async (): Promise<void> => {
+  const activeConnection = connection
+  const session = activeConnection?.getSession()
+  if (activeConnection === null || activeConnection === undefined || session === null || session === undefined) return
+  const pending = await runLocalResult(
+    toRawResult(
+      Effect.gen(function*() {
+        const store = yield* GalleryBindAttemptStore
+        return yield* store.listPending(session.instanceId)
+      })
+    )
+  )
+  if (!pending.ok) return
+  for (const attempt of pending.data) {
+    if (connection !== activeConnection || activeConnection.getSession()?.epoch !== session.epoch) return
+    const current = await runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* LibraryHttpClient
+          return yield* client.entry({ params: { id: attempt.entryId } })
+        })
+      )
+    )
+    if (!current.ok) {
+      if (!current.error.retryable) await updateGalleryBindAttempt(attempt, "rejected")
+      continue
+    }
+    if (current.data.binding !== null && comparableGalleryUrl(current.data.binding.canonical_url) === comparableGalleryUrl(attempt.url)) {
+      await updateGalleryBindAttempt(attempt, "completed")
+      continue
+    }
+    await dispatchGalleryBindAttempt(attempt, session)
+  }
+}
 
 const localMappingKey = (instanceId: string, rootId: string): string => `${instanceId}:${rootId}`
 
@@ -1229,7 +1366,7 @@ const registerIpc = (): void => {
     )
   })
 
-  ipcMain.handle(IpcChannels.libraryBind, (event, raw: unknown) => {
+  ipcMain.handle(IpcChannels.libraryBind, async (event, raw: unknown) => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(LibraryBindIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
@@ -1239,23 +1376,23 @@ const registerIpc = (): void => {
     } catch (error) {
       return { ok: false as const, error: toPublicError(error) }
     }
-    return runNetworkResult(
-      toResult(
+    const prepared = await runLocalResult(
+      toRawResult(
         Effect.gen(function*() {
-          const client = yield* LibraryHttpClient
-          return yield* client.entryCommand({
-            params: { id: decoded.value.entry_id },
-            payload: {
-              operation_id: decoded.value.operation_id,
-              instance_id: session.instanceId,
-              epoch: session.epoch,
-              expected_decision_version: decoded.value.expected_decision_version,
-              command: { type: "bind", url: decoded.value.url }
-            }
+          const store = yield* GalleryBindAttemptStore
+          return yield* store.prepare({
+            instanceId: session.instanceId,
+            operationId: decoded.value.operation_id,
+            entryId: decoded.value.entry_id,
+            url: comparableGalleryUrl(decoded.value.url),
+            expectedDecisionVersion: decoded.value.expected_decision_version,
+            epoch: session.epoch
           })
         })
       )
     )
+    if (!prepared.ok) return prepared
+    return dispatchGalleryBindAttempt(prepared.data.attempt, session)
   })
 
   ipcMain.handle(IpcChannels.openBook, (event, raw: unknown) => {
@@ -1449,6 +1586,7 @@ const registerIpc = (): void => {
     return requireConnection()
       .connect()
       .then((status) => {
+        void reconcilePendingGalleryBinds()
         openEventDeliveryScheduler.schedule()
         return connectionStatusResult(status)
       })
@@ -1809,6 +1947,7 @@ const bootstrap = async (): Promise<void> => {
     Layer.mergeAll(
       DraftStore.layerFromWorker,
       CommandAttemptStore.layerFromWorker,
+      GalleryBindAttemptStore.layerFromWorker,
       OpenJournalStore.layerFromWorker,
       LocalMappingStore.layerFromWorker,
       ReaderProfileStore.layerFromWorker,
@@ -1823,6 +1962,7 @@ const bootstrap = async (): Promise<void> => {
     bearerToken: serverChild.bearerToken
   })
   await connection.connect()
+  void reconcilePendingGalleryBinds()
   openCoordinator = createOpenCoordinator()
   openEventDeliveryScheduler.schedule()
 

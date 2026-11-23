@@ -14,6 +14,7 @@ import {
   DraftWorkerResponse,
   type ReaderProfileRow,
   type CommandAttemptRow,
+  type GalleryBindAttemptRow,
   type LocalMappingRow,
   type DraftRow,
   type OpenJournalRow,
@@ -32,6 +33,9 @@ const OPEN_JOURNAL_TERMINAL_TAIL_ROWS = 64
 const OPEN_JOURNAL_LIST_LIMIT = MAX_OPEN_JOURNAL_OUTSTANDING_ROWS + OPEN_JOURNAL_TERMINAL_TAIL_ROWS
 const COMMAND_ATTEMPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const COMMAND_ATTEMPT_COMPACTION_BATCH = 64
+const MAX_GALLERY_BIND_ATTEMPTS = 64
+const GALLERY_BIND_ATTEMPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const GALLERY_BIND_ATTEMPT_COMPACTION_BATCH = 64
 const OPEN_JOURNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const OPEN_JOURNAL_COMPACTION_BATCH = 64
 const MAX_OPEN_RESOLUTION_CACHE_ROWS = 256
@@ -79,6 +83,18 @@ db.exec(`
     error_message TEXT,
     current_revision INTEGER,
     dismissed INTEGER NOT NULL CHECK (dismissed IN (0, 1)),
+    PRIMARY KEY (instance_id, operation_id)
+  );
+  CREATE TABLE IF NOT EXISTS gallery_bind_attempts (
+    instance_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    expected_decision_version INTEGER NOT NULL,
+    epoch TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('prepared', 'submitted', 'unresolved', 'completed', 'rejected', 'superseded')),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
     PRIMARY KEY (instance_id, operation_id)
   );
   CREATE TABLE IF NOT EXISTS client_mappings (
@@ -445,6 +461,59 @@ const listCommandAttempts = db.prepare(`
 `)
 listCommandAttempts.setReadBigInts(true)
 
+const selectGalleryBindAttempt = db.prepare(`
+  SELECT instance_id, operation_id, entry_id, url, expected_decision_version,
+         epoch, status, created_at_ms, updated_at_ms
+  FROM gallery_bind_attempts
+  WHERE instance_id = ? AND operation_id = ?
+`)
+selectGalleryBindAttempt.setReadBigInts(true)
+const selectPendingGalleryBindByEntry = db.prepare(`
+  SELECT instance_id, operation_id, entry_id, url, expected_decision_version,
+         epoch, status, created_at_ms, updated_at_ms
+  FROM gallery_bind_attempts
+  WHERE instance_id = ? AND entry_id = ? AND status IN ('prepared', 'submitted', 'unresolved')
+  ORDER BY updated_at_ms DESC, created_at_ms DESC, operation_id ASC
+  LIMIT 1
+`)
+selectPendingGalleryBindByEntry.setReadBigInts(true)
+const selectGalleryBindAttemptCount = db.prepare("SELECT COUNT(*) AS count FROM gallery_bind_attempts")
+selectGalleryBindAttemptCount.setReadBigInts(true)
+const compactGalleryBindAttempts = db.prepare(`
+  DELETE FROM gallery_bind_attempts
+  WHERE rowid IN (
+    SELECT rowid
+    FROM gallery_bind_attempts
+    WHERE status IN ('completed', 'rejected', 'superseded')
+      AND updated_at_ms + ? <= ?
+    ORDER BY updated_at_ms ASC, rowid ASC
+    LIMIT ?
+  )
+`)
+const insertGalleryBindAttempt = db.prepare(`
+  INSERT INTO gallery_bind_attempts(
+    instance_id, operation_id, entry_id, url, expected_decision_version,
+    epoch, status, created_at_ms, updated_at_ms
+  ) VALUES(?, ?, ?, ?, ?, ?, 'prepared', ?, ?)
+`)
+const supersedeGalleryBindAttempt = db.prepare(
+  "UPDATE gallery_bind_attempts SET status = 'superseded', updated_at_ms = ? WHERE instance_id = ? AND operation_id = ? AND status IN ('prepared', 'submitted', 'unresolved')"
+)
+const updateGalleryBindSubmitted = db.prepare(
+  "UPDATE gallery_bind_attempts SET status = 'submitted', epoch = ?, updated_at_ms = ? WHERE instance_id = ? AND operation_id = ? AND status IN ('prepared', 'submitted', 'unresolved')"
+)
+const updateGalleryBindStatus = db.prepare(
+  "UPDATE gallery_bind_attempts SET status = ?, updated_at_ms = ? WHERE instance_id = ? AND operation_id = ? AND status IN ('prepared', 'submitted', 'unresolved')"
+)
+const listPendingGalleryBinds = db.prepare(`
+  SELECT instance_id, operation_id, entry_id, url, expected_decision_version,
+         epoch, status, created_at_ms, updated_at_ms
+  FROM gallery_bind_attempts
+  WHERE instance_id = ? AND status IN ('prepared', 'submitted', 'unresolved')
+  ORDER BY updated_at_ms ASC, created_at_ms ASC, operation_id ASC
+`)
+listPendingGalleryBinds.setReadBigInts(true)
+
 const selectLocalMapping = db.prepare(`
   SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision,
          selected_identity, canonical_identity, selected_resolution, canonical_resolution
@@ -729,6 +798,63 @@ const readCommandAttempts = (instanceId: string): ReadonlyArray<CommandAttemptRo
     return attempt
   })
 }
+
+type GalleryBindAttemptDbRow = {
+  readonly instance_id: string
+  readonly operation_id: string
+  readonly entry_id: string
+  readonly url: string
+  readonly expected_decision_version: bigint
+  readonly epoch: string
+  readonly status: import("./draft-worker-protocol").GalleryBindAttemptRow["status"]
+  readonly created_at_ms: bigint
+  readonly updated_at_ms: bigint
+}
+
+const readGalleryBindAttempt = (instanceId: string, operationId: string): GalleryBindAttemptRow | undefined => {
+  const row = selectGalleryBindAttempt.get(instanceId, operationId) as GalleryBindAttemptDbRow | undefined
+  if (row === undefined) return undefined
+  return {
+    instanceId: row.instance_id,
+    operationId: row.operation_id,
+    entryId: row.entry_id,
+    url: row.url,
+    expectedDecisionVersion: row.expected_decision_version.toString(),
+    epoch: row.epoch,
+    status: row.status,
+    createdAtMs: Number(row.created_at_ms),
+    updatedAtMs: Number(row.updated_at_ms)
+  }
+}
+
+const readPendingGalleryBindByEntry = (instanceId: string, entryId: string): GalleryBindAttemptRow | undefined => {
+  const row = selectPendingGalleryBindByEntry.get(instanceId, entryId) as GalleryBindAttemptDbRow | undefined
+  if (row === undefined) return undefined
+  return {
+    instanceId: row.instance_id,
+    operationId: row.operation_id,
+    entryId: row.entry_id,
+    url: row.url,
+    expectedDecisionVersion: row.expected_decision_version.toString(),
+    epoch: row.epoch,
+    status: row.status,
+    createdAtMs: Number(row.created_at_ms),
+    updatedAtMs: Number(row.updated_at_ms)
+  }
+}
+
+const readPendingGalleryBinds = (instanceId: string): ReadonlyArray<GalleryBindAttemptRow> =>
+  (listPendingGalleryBinds.all(instanceId) as unknown as ReadonlyArray<GalleryBindAttemptDbRow>).map((row) => ({
+    instanceId: row.instance_id,
+    operationId: row.operation_id,
+    entryId: row.entry_id,
+    url: row.url,
+    expectedDecisionVersion: row.expected_decision_version.toString(),
+    epoch: row.epoch,
+    status: row.status,
+    createdAtMs: Number(row.created_at_ms),
+    updatedAtMs: Number(row.updated_at_ms)
+  }))
 
 type PersistedLocalMapping = {
   readonly instance_id: string
@@ -1297,6 +1423,90 @@ const handle = (request: DraftWorkerRequest): unknown => {
         throw error
       }
     }
+    case "prepareGalleryBind": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const existingOperation = readGalleryBindAttempt(request.instanceId, request.operationId)
+        if (existingOperation !== undefined) {
+          const sameIntent =
+            existingOperation.entryId === request.entryId &&
+            existingOperation.url === request.url &&
+            existingOperation.expectedDecisionVersion === request.expectedDecisionVersion
+          db.exec("COMMIT")
+          return existingOperation.status === "prepared" || existingOperation.status === "submitted" || existingOperation.status === "unresolved"
+            ? sameIntent
+              ? { kind: "existing", attempt: existingOperation }
+              : { kind: "conflict" }
+            : { kind: "conflict" }
+        }
+
+        const pending = readPendingGalleryBindByEntry(request.instanceId, request.entryId)
+        if (pending !== undefined) {
+          const sameIntent =
+            pending.url === request.url && pending.expectedDecisionVersion === request.expectedDecisionVersion
+          if (sameIntent) {
+            db.exec("COMMIT")
+            return { kind: "existing", attempt: pending }
+          }
+          supersedeGalleryBindAttempt.run(Date.now(), pending.instanceId, pending.operationId)
+        }
+
+        const now = Date.now()
+        compactGalleryBindAttempts.run(GALLERY_BIND_ATTEMPT_RETENTION_MS, now, GALLERY_BIND_ATTEMPT_COMPACTION_BATCH)
+        const count = (selectGalleryBindAttemptCount.get() as { count: bigint }).count
+        if (count >= BigInt(MAX_GALLERY_BIND_ATTEMPTS)) {
+          db.exec("COMMIT")
+          return { kind: "full" }
+        }
+        insertGalleryBindAttempt.run(
+          request.instanceId,
+          request.operationId,
+          request.entryId,
+          request.url,
+          BigInt(request.expectedDecisionVersion),
+          request.epoch,
+          now,
+          now
+        )
+        db.exec("COMMIT")
+        const attempt = readGalleryBindAttempt(request.instanceId, request.operationId)
+        if (attempt === undefined) throw new Error("prepared gallery bind was not readable")
+        return { kind: "prepared", attempt }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "markGalleryBindSubmitted":
+    case "markGalleryBindUnresolved":
+    case "markGalleryBindCompleted":
+    case "markGalleryBindRejected": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const current = readGalleryBindAttempt(request.instanceId, request.operationId)
+        if (current === undefined) {
+          db.exec("ROLLBACK")
+          return { kind: "not_found" }
+        }
+        if (request.op === "markGalleryBindSubmitted") {
+          updateGalleryBindSubmitted.run(request.epoch, Date.now(), request.instanceId, request.operationId)
+        } else {
+          const status = request.op === "markGalleryBindUnresolved"
+            ? "unresolved"
+            : request.op === "markGalleryBindCompleted" ? "completed" : "rejected"
+          updateGalleryBindStatus.run(status, Date.now(), request.instanceId, request.operationId)
+        }
+        db.exec("COMMIT")
+        const attempt = readGalleryBindAttempt(request.instanceId, request.operationId)
+        if (attempt === undefined) throw new Error("updated gallery bind was not readable")
+        return { kind: "updated", attempt }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "listPendingGalleryBinds":
+      return readPendingGalleryBinds(request.instanceId)
     case "loadLocalMapping":
       return readLocalMapping(request.instanceId, request.rootId) ?? null
     case "listLocalMappings":

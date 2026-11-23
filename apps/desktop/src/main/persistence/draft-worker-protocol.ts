@@ -104,6 +104,46 @@ export type CommandAttemptMutation = typeof CommandAttemptMutation.Type
 export const CommandAttemptRows = Schema.Array(CommandAttemptRow)
 export type CommandAttemptRows = typeof CommandAttemptRows.Type
 
+export const GalleryBindAttemptStatus = Schema.Literals([
+  "prepared",
+  "submitted",
+  "unresolved",
+  "completed",
+  "rejected",
+  "superseded"
+])
+export type GalleryBindAttemptStatus = typeof GalleryBindAttemptStatus.Type
+
+export const GalleryBindAttemptRow = Schema.Struct({
+  instanceId: Uuid,
+  operationId: Uuid,
+  entryId: Uuid,
+  url: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)),
+  expectedDecisionVersion: Revision,
+  epoch: Uuid,
+  status: GalleryBindAttemptStatus,
+  createdAtMs: Schema.Int,
+  updatedAtMs: Schema.Int
+})
+export type GalleryBindAttemptRow = typeof GalleryBindAttemptRow.Type
+
+export const GalleryBindAttemptPreparation = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("prepared"), attempt: GalleryBindAttemptRow }),
+  Schema.Struct({ kind: Schema.Literal("existing"), attempt: GalleryBindAttemptRow }),
+  Schema.Struct({ kind: Schema.Literal("conflict") }),
+  Schema.Struct({ kind: Schema.Literal("full") })
+])
+export type GalleryBindAttemptPreparation = typeof GalleryBindAttemptPreparation.Type
+
+export const GalleryBindAttemptMutation = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("updated"), attempt: GalleryBindAttemptRow }),
+  Schema.Struct({ kind: Schema.Literal("not_found") })
+])
+export type GalleryBindAttemptMutation = typeof GalleryBindAttemptMutation.Type
+
+export const GalleryBindAttemptRows = Schema.Array(GalleryBindAttemptRow)
+export type GalleryBindAttemptRows = typeof GalleryBindAttemptRows.Type
+
 export const LocalMappingRow = Schema.Struct({
   instanceId: Uuid,
   rootId: Uuid,
@@ -282,6 +322,20 @@ export const DraftWorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("listCommandAttempts"), instanceId: Uuid }),
   Schema.Struct({ op: Schema.Literal("getCommandAttempt"), instanceId: Uuid, operationId: Uuid }),
   Schema.Struct({ op: Schema.Literal("dismissCommand"), instanceId: Uuid, operationId: Uuid }),
+  Schema.Struct({
+    op: Schema.Literal("prepareGalleryBind"),
+    instanceId: Uuid,
+    operationId: Uuid,
+    entryId: Uuid,
+    url: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)),
+    expectedDecisionVersion: Revision,
+    epoch: Uuid
+  }),
+  Schema.Struct({ op: Schema.Literal("markGalleryBindSubmitted"), instanceId: Uuid, operationId: Uuid, epoch: Uuid }),
+  Schema.Struct({ op: Schema.Literal("markGalleryBindUnresolved"), instanceId: Uuid, operationId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("markGalleryBindCompleted"), instanceId: Uuid, operationId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("markGalleryBindRejected"), instanceId: Uuid, operationId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("listPendingGalleryBinds"), instanceId: Uuid }),
   Schema.Struct({ op: Schema.Literal("loadLocalMapping"), instanceId: Uuid, rootId: Uuid }),
   Schema.Struct({ op: Schema.Literal("listLocalMappings"), instanceId: Uuid }),
   Schema.Struct({

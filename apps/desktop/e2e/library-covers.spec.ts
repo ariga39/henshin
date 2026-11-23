@@ -41,7 +41,7 @@ const stableImageSrc = async (image: Locator): Promise<string> => {
   throw new Error("cover URL did not settle")
 }
 
-const launch = async (dbPath: string): Promise<{ app: ElectronApplication; window: Page }> => {
+const launch = async (dbPath: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<{ app: ElectronApplication; window: Page }> => {
   const app = await electron.launch({
     executablePath: electronPath as unknown as string,
     args: ["."],
@@ -49,7 +49,8 @@ const launch = async (dbPath: string): Promise<{ app: ElectronApplication; windo
     env: {
       ...process.env,
       HENSHIN_PROTOTYPE_DB: dbPath,
-      HENSHIN_PROTOTYPE_CLIENT_DB: `${dbPath}.client`
+      HENSHIN_PROTOTYPE_CLIENT_DB: `${dbPath}.client`,
+      ...extraEnv
     }
   })
   launched.push(app)
@@ -58,6 +59,54 @@ const launch = async (dbPath: string): Promise<{ app: ElectronApplication; windo
 
 test.afterEach(async () => {
   for (const app of launched.splice(0)) await app.close().catch(() => undefined)
+})
+
+test("reconciles a committed bind after the desktop crashes before its response", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-bind-crash-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-bind-crash-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+
+  try {
+    const book = path.join(fixtureDirectory, "crash-book")
+    await mkdir(book)
+    await writeFile(path.join(book, "001.png"), validPng)
+
+    const first = await launch(dbPath, { HENSHIN_TEST_BIND_RESPONSE_DELAY_MS: "5000" })
+    await expect(first.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await first.window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await first.window.getByTestId("root-preview-submit").click()
+    await first.window.getByTestId("root-label").fill("Bind crash case")
+    await first.window.getByTestId("root-save").click()
+    await first.window.getByTestId("root-saved-preview").click()
+    await first.window.getByTestId("scan-hold-new-discoveries").uncheck()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(1, { timeout: 30_000 })
+
+    const details = first.window.getByTestId("library-entry").getByRole("button", { name: /Open details/ })
+    await details.click()
+    const entryDetails = first.window.getByTestId("library-details")
+    await entryDetails.getByTestId("entry-binding-url").fill("http://e-hentai.org/g/54321/CrashToken_1/?ignored=true")
+    const serverPid = await bundledServerPid(first.app)
+    if (serverPid === null) throw new Error("bundled server process was not found")
+    await entryDetails.getByTestId("entry-bind").click()
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    process.kill(serverPid, "SIGTERM")
+    const appPid = first.app.process().pid
+    if (appPid === undefined) throw new Error("Electron process was not found")
+    process.kill(appPid, "SIGKILL")
+    await first.app.close().catch(() => undefined)
+
+    const reopened = await launch(dbPath)
+    await expect(reopened.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await reopened.window.getByTestId("open-library").click()
+    await expect(reopened.window.getByTestId("library-entry")).toBeVisible()
+    await reopened.window.getByTestId("library-entry").getByRole("button", { name: /Open details/ }).click()
+    const reopenedDetails = reopened.window.getByTestId("library-details")
+    await expect(reopenedDetails.getByTestId("entry-binding")).toContainText("https://e-hentai.org/g/54321/CrashToken_1/")
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+  }
 })
 
 test("renders a decoded server cover and keeps an unavailable neighbor usable", async () => {
@@ -103,6 +152,9 @@ test("renders a decoded server cover and keeps an unavailable neighbor usable", 
     await details.getByTestId("entry-bind").click()
     await expect(details.getByTestId("entry-binding")).toContainText("EH / 54321")
     await expect(details.getByTestId("entry-binding")).toContainText("https://e-hentai.org/g/54321/NoNetwork_1/")
+    await details.getByTestId("entry-note").fill("bound from the ordinary entry details")
+    await details.getByTestId("entry-note-save").click()
+    await expect(details.getByTestId("entry-note")).toHaveValue("bound from the ordinary entry details")
 
     await app.close()
     const reopened = await launch(dbPath)
@@ -114,6 +166,7 @@ test("renders a decoded server cover and keeps an unavailable neighbor usable", 
     const reopenedDetails = reopened.window.getByTestId("library-details")
     await expect(reopenedDetails.getByTestId("entry-binding")).toContainText("https://e-hentai.org/g/54321/NoNetwork_1/")
     await expect(reopenedDetails.getByTestId("entry-metadata-pending")).toContainText("Metadata pending")
+    await expect(reopenedDetails.getByTestId("entry-note")).toHaveValue("bound from the ordinary entry details")
 
     await reopened.window.getByTestId("library-refresh").click()
     await expect(reopenedEntry.getByTestId("library-cover-image")).toBeVisible({ timeout: 30_000 })
