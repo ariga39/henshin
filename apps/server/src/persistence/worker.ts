@@ -3698,8 +3698,6 @@ const handle = (request: WorkerRequest): unknown => {
       return bindEntry(request)
     case "updateEntryCommand":
       return updateEntryCommand(request)
-    case "updatePersonalTitle":
-      return updatePersonalTitle(request)
     case "startEhRefresh":
       return startEhRefresh(request)
     case "finishEhRefresh":

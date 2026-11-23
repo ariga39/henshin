@@ -7,6 +7,7 @@ import path from "node:path"
 import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import { LibraryHttpClient, ServerHttpClient, TaskHttpClient, type LibraryEntry, type ScanTask } from "@henshin/contracts"
+import { makeEhRefreshCoalescer } from "../src/api/library"
 import { fetchEhMetadata, makeEhMetadataScheduler } from "../src/eh-metadata"
 import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
 
@@ -174,6 +175,25 @@ afterEach(async () => {
 })
 
 describe("durable EH metadata refresh", () => {
+  it("coalesces refresh work before the first promise starts", async () => {
+    const coalesce = makeEhRefreshCoalescer<number>()
+    let starts = 0
+    let release!: (value: number) => void
+    const start = () => {
+      starts += 1
+      return new Promise<number>((resolve) => { release = resolve })
+    }
+
+    const first = coalesce("EH:12345", start)
+    const second = coalesce("EH:12345", start)
+    expect(second).toBe(first)
+    expect(starts).toBe(0)
+    await Promise.resolve()
+    expect(starts).toBe(1)
+    release(7)
+    await expect(Promise.all([first, second])).resolves.toEqual([7, 7])
+  })
+
   it("serializes distinct galleries and honors bounded 429 timing", async () => {
     const upstream = await startFixture()
     process.env.HENSHIN_EH_GDATA_URL = upstream.baseUrl
@@ -348,20 +368,16 @@ describe("durable EH metadata refresh", () => {
     expect((await readEntry(server, second.entry_id)).data.metadata).toEqual(refreshed.data.metadata)
 
     upstream.setMode("blocked")
-    const requestCountBeforeConcurrent = upstream.requests.length
-    const concurrentFirst = withLibraryClient(server, Effect.gen(function*() {
+    const blockedRefresh = withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).ehRefresh({ payload: { source: "EH", gid: "12345" } })
     }))
-    for (let attempt = 0; attempt < 700 && upstream.requests.length === requestCountBeforeConcurrent; attempt += 1) {
+    for (let attempt = 0; attempt < 700 && upstream.requests.length === 1; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10))
     }
-    const concurrentSecond = withLibraryClient(server, Effect.gen(function*() {
-      return yield* (yield* LibraryHttpClient).ehRefresh({ payload: { source: "EH", gid: "12345" } })
-    }))
-    expect(upstream.requests).toHaveLength(requestCountBeforeConcurrent + 1)
+    expect(upstream.requests).toHaveLength(2)
     upstream.release()
-    const [coalescedFirst, coalescedSecond] = await Promise.all([concurrentFirst, concurrentSecond])
-    expect(coalescedFirst.data).toEqual(coalescedSecond.data)
+    const blockedResult = await blockedRefresh
+    expect(blockedResult.data.metadata.status).toBe("ready")
 
     upstream.setMode("malformed")
     const failed = await withLibraryClient(server, Effect.gen(function*() {

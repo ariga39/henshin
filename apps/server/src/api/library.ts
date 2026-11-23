@@ -49,22 +49,36 @@ const rootView = (root: {
   state: root.state
 })
 
+type RefreshOutcome =
+  | { readonly kind: "gallery_not_found" }
+  | { readonly kind: "finished"; readonly metadata: EhGalleryMetadata }
+
+/** Coalesces one in-process refresh promise per source/gallery until it settles. */
+export const makeEhRefreshCoalescer = <A>() => {
+  const inFlight = new Map<string, Promise<A>>()
+  return (key: string, start: () => Promise<A>): Promise<A> => {
+    const existing = inFlight.get(key)
+    if (existing !== undefined) return existing
+    const pending = Promise.resolve().then(start)
+    inFlight.set(key, pending)
+    void pending.then(
+      () => { if (inFlight.get(key) === pending) inFlight.delete(key) },
+      () => { if (inFlight.get(key) === pending) inFlight.delete(key) }
+    )
+    return pending
+  }
+}
+
 export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (handlers) =>
   Effect.gen(function*() {
     const server = yield* ServerState
     const library = yield* LibraryStore
     const roots = yield* RootStore
-    type RefreshOutcome =
-      | { readonly kind: "gallery_not_found" }
-      | { readonly kind: "finished"; readonly metadata: EhGalleryMetadata }
-    const inFlightRefreshes = new Map<string, Promise<RefreshOutcome>>()
+    const coalesceRefresh = makeEhRefreshCoalescer<RefreshOutcome>()
     const metadataScheduler = makeEhMetadataScheduler()
     const refresh = (payload: EhGalleryRefreshRequest): Effect.Effect<RefreshOutcome, unknown> => {
       const key = `${payload.source}:${payload.gid}`
-      const existing = inFlightRefreshes.get(key)
-      if (existing !== undefined) return Effect.tryPromise(() => existing)
-
-      const pending = Effect.runPromise(Effect.gen(function*() {
+      return Effect.tryPromise(() => coalesceRefresh(key, () => Effect.runPromise(Effect.gen(function*() {
         const started = yield* library.startEhRefresh(payload)
         if (started.kind === "gallery_not_found") return started
         const fetched = yield* Effect.tryPromise({
@@ -80,13 +94,7 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
         })
         if (finished.kind === "gallery_not_found") return { kind: "gallery_not_found" as const }
         return { kind: "finished" as const, metadata: finished.metadata }
-      }))
-      inFlightRefreshes.set(key, pending)
-      void pending.then(
-        () => { if (inFlightRefreshes.get(key) === pending) inFlightRefreshes.delete(key) },
-        () => { if (inFlightRefreshes.get(key) === pending) inFlightRefreshes.delete(key) }
-      )
-      return Effect.tryPromise(() => pending)
+      }))))
     }
     return handlers
       .handle("get", () =>
