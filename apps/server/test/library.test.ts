@@ -1817,5 +1817,28 @@ describe("literal library search", () => {
     expect(restoredTitleSearch.data.entries).toEqual([
       expect.objectContaining({ entry_id: sharpBook.entry_id, title: "Straße", title_override: null, match_fields: ["title"] })
     ])
+
+    const whitespaceTitle = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: sharpBook.entry_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: restarted.instanceId,
+          epoch: restarted.epoch,
+          expected_decision_version: "4",
+          command: { type: "set-personal-title" as const, title: " \t\n " }
+        }
+      })
+    }))
+    expect(whitespaceTitle.data.entry).toMatchObject({
+      entry_id: sharpBook.entry_id,
+      title: "",
+      title_override: "",
+      decision_version: "5"
+    })
+    const whitespaceSearch = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "straße" } })
+    }))
+    expect(whitespaceSearch.data.entries).toHaveLength(0)
   })
 })

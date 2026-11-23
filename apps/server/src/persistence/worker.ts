@@ -690,15 +690,6 @@ const currentLibraryEntryColumns = new Set(
     (column) => column.name
   )
 )
-db.exec(`
-  CREATE TABLE IF NOT EXISTS entry_overrides (
-    entry_id TEXT PRIMARY KEY REFERENCES library_entries(entry_id) ON DELETE CASCADE,
-    title_present INTEGER NOT NULL CHECK (title_present IN (0, 1)),
-    title TEXT,
-    title_search TEXT,
-    CHECK ((title_present = 0 AND title IS NULL AND title_search IS NULL) OR (title_present = 1 AND title IS NOT NULL AND title_search IS NOT NULL))
-  )
-`)
 const entryOverrideColumns = new Set(
   (db.prepare("PRAGMA table_info(entry_overrides)").all() as unknown as ReadonlyArray<{ name: string }>).map(
     (column) => column.name
@@ -2190,7 +2181,12 @@ const updatePersonalTitle = (
       db.exec("COMMIT")
       return { kind: "storage_full" }
     }
-    const title = request.command.type === "set-personal-title" ? request.command.title : null
+    const requestedTitle = request.command.type === "set-personal-title" ? request.command.title : null
+    const title = requestedTitle === null
+      ? null
+      : requestedTitle.trim().length === 0
+        ? ""
+        : requestedTitle
     if (title === null) deleteEntryOverride.run(request.entryId)
     else upsertEntryOverride.run(request.entryId, title, normalizeSearchText(title))
     advanceEntryDecision.run(now, request.entryId)

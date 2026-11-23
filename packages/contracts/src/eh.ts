@@ -1,4 +1,4 @@
-import { Schema } from "effect"
+import { Effect, Schema } from "effect"
 import { Revision, Uuid } from "./ids"
 import { ReplacementComparison } from "./library"
 import { ThumbnailReference } from "./thumbnail"
@@ -51,7 +51,9 @@ export const LibraryEntryDetails = Schema.Struct({
   source_path: Schema.String,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
   title: Schema.String,
-  title_override: Schema.NullOr(personalTitle),
+  title_override: Schema.NullOr(personalTitle).pipe(
+    Schema.withDecodingDefaultType(Effect.succeed(null))
+  ),
   page_count: Schema.Natural,
   state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending")]),
   decision_version: Revision,

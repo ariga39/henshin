@@ -160,6 +160,18 @@ describe("durable EH binding", () => {
     })
     expect(bound.data.entry.decision_version).toBe("2")
 
+    const persistedBindResult = new DatabaseSync(server.dbPath)
+    const storedBind = persistedBindResult.prepare(
+      "SELECT result FROM entry_operations WHERE epoch = ? AND operation_id = ?"
+    ).get(server.epoch, operationId) as { result: string } | undefined
+    if (storedBind === undefined) throw new Error("expected persisted bind result")
+    const legacyBindResult = JSON.parse(storedBind.result) as { entry: { title_override?: unknown } }
+    delete legacyBindResult.entry.title_override
+    persistedBindResult.prepare(
+      "UPDATE entry_operations SET result = ? WHERE epoch = ? AND operation_id = ?"
+    ).run(JSON.stringify(legacyBindResult), server.epoch, operationId)
+    persistedBindResult.close()
+
     const replay = await withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).entryCommand({
         params: { id: indexed.entry_id },
@@ -389,5 +401,44 @@ describe("durable EH binding", () => {
       }).pipe(Effect.flip)
     }))
     expect(locatorConflict._tag).toBe("InvalidRequest")
+  })
+
+  it("migrates legacy personal title search data", async () => {
+    const server = await start()
+    const entries = await indexEntries(server)
+    const entry = entries[0]
+    if (entry === undefined) throw new Error("expected an indexed entry")
+
+    await server.stop()
+    const legacy = new DatabaseSync(server.dbPath)
+    legacy.exec("DROP TABLE entry_overrides")
+    legacy.exec(`
+      CREATE TABLE entry_overrides (
+        entry_id TEXT PRIMARY KEY REFERENCES library_entries(entry_id) ON DELETE CASCADE,
+        title_present INTEGER NOT NULL CHECK (title_present IN (0, 1)),
+        title TEXT,
+        CHECK ((title_present = 0 AND title IS NULL) OR (title_present = 1 AND title IS NOT NULL))
+      )
+    `)
+    legacy.prepare("INSERT INTO entry_overrides(entry_id, title_present, title) VALUES(?, 1, ?)")
+      .run(entry.entry_id, "Legacy Straße")
+    legacy.close()
+
+    const migrated = await startServer(server.dbPath)
+    servers.push(migrated)
+    const columns = new DatabaseSync(server.dbPath)
+    expect(columns.prepare("PRAGMA table_info(entry_overrides)").all()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "title_search" })])
+    )
+    expect(columns.prepare("SELECT title_search FROM entry_overrides WHERE entry_id = ?").get(entry.entry_id))
+      .toEqual({ title_search: "legacy straße" })
+    columns.close()
+
+    const search = await withLibraryClient(migrated, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "legacy straße" } })
+    }))
+    expect(search.data.entries).toEqual([
+      expect.objectContaining({ entry_id: entry.entry_id, title: "Legacy Straße", title_override: "Legacy Straße", match_fields: ["title"] })
+    ])
   })
 })
