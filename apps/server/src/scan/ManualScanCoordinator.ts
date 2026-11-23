@@ -14,7 +14,7 @@ import {
   resolveSourceCandidate,
   type SourceRootObservation,
 } from "../analysis/NativeSourceBoundary"
-import { fingerprintSource } from "../analysis/SourceFingerprint"
+import { FINGERPRINT_DEADLINE_MS, FINGERPRINT_MAX_BYTES, fingerprintSource } from "../analysis/SourceFingerprint"
 import { ScanStore, type FinishScanInput } from "../persistence/ScanStore"
 import { ScanManifest, type ScanTask } from "@henshin/contracts"
 import type { ServerRootRow } from "../persistence/worker-protocol"
@@ -303,9 +303,14 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
 
     let readinessError: { readonly code: string; readonly message: string } | null = null
     let unstableCandidateCount = 0
+    let fingerprintFailureCount = 0
     let allocationDeferred = false
     let deferredReviewNeededCount: number | undefined
     if (!task.hold_new_discoveries && coverage.status === "complete") {
+      const fingerprintPaths = new Set(yield* store.readNormalScanFingerprintPlan({
+        taskId: task.task_id,
+        rootId: task.root_id
+      }))
       let verifiedAnalyzed = 0
       let verifiedErrors = 0
       const verifiedCandidatePaths: Array<string> = []
@@ -337,11 +342,24 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
           const observedManifest = JSON.stringify(manifestView)
           const stable = firstObservations.get(candidate.relativePath) === observedManifest
           let stagedManifest: typeof ScanManifest.Type = manifestView
-          if (stable) {
-            const fingerprint = yield* Effect.promise(() => fingerprintSource(resolved.value.nativePath, result.success).catch(() => undefined))
-            if (fingerprint !== undefined) stagedManifest = { ...manifestView, fingerprint }
+          let fingerprintCompleted = true
+          if (stable && fingerprintPaths.has(candidate.relativePath)) {
+            const fingerprintResult = yield* Effect.result(Effect.tryPromise({
+              try: (signal) => fingerprintSource(resolved.value.nativePath, result.success, {
+                signal,
+                maxBytes: FINGERPRINT_MAX_BYTES,
+                deadlineMs: FINGERPRINT_DEADLINE_MS
+              }),
+              catch: (error) => error
+            }))
+            if (Result.isSuccess(fingerprintResult)) {
+              stagedManifest = { ...manifestView, fingerprint: fingerprintResult.success }
+            } else {
+              fingerprintFailureCount += 1
+              fingerprintCompleted = false
+            }
           }
-          if (stable) {
+          if (stable && fingerprintCompleted) {
             verifiedCandidatePaths.push(candidate.relativePath)
           } else {
             unstableCandidateCount += 1
@@ -437,7 +455,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
       ...progress,
       reviewNeededCount
     }
-    const hasErrors = progress.analysisErrorCount > 0 || progress.coverage?.status === "partial" || unstableCandidateCount > 0 || allocationDeferred
+    const hasErrors = progress.analysisErrorCount > 0 || progress.coverage?.status === "partial" || unstableCandidateCount > 0 || fingerprintFailureCount > 0 || allocationDeferred
     const failed = readinessError !== null && readinessError.code !== "allocation_deferred"
     yield* finish(store, {
       taskId: task.task_id,
@@ -450,9 +468,11 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
       coverage: progress.coverage,
       error: !failed && hasErrors
         ? {
-            code: allocationDeferred ? "allocation_deferred" : unstableCandidateCount > 0 ? "unstable_observation" : progress.analysisErrorCount > 0 ? "analysis_error" : "partial_coverage",
+            code: allocationDeferred ? "allocation_deferred" : fingerprintFailureCount > 0 ? "fingerprint_unavailable" : unstableCandidateCount > 0 ? "unstable_observation" : progress.analysisErrorCount > 0 ? "analysis_error" : "partial_coverage",
             message: allocationDeferred
               ? "automatic allocation was deferred; unresolved occupied paths require review"
+              : fingerprintFailureCount > 0
+                ? "one or more targeted fingerprints could not be completed within the scan limits"
               : unstableCandidateCount > 0
                 ? "one or more discoveries changed during the quiet interval"
                 : progress.analysisErrorCount > 0

@@ -579,6 +579,11 @@ export const WorkerRequest = Schema.Union([
     observedCandidatePaths: Schema.Array(Schema.String)
   }),
   Schema.Struct({
+    op: Schema.Literal("readNormalScanFingerprintPlan"),
+    taskId: Uuid,
+    rootId: Uuid
+  }),
+  Schema.Struct({
     op: Schema.Literal("releaseHeldDiscovery"),
     candidateId: Uuid,
     rootId: Uuid,

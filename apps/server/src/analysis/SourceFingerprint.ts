@@ -6,11 +6,40 @@ import type { ScanFingerprint } from "@henshin/contracts/root"
 import type { SourceManifest } from "./SourceManifestAnalysis"
 
 const MAX_READ_BYTES = 1024 * 1024
+export const FINGERPRINT_MAX_BYTES = 4 * 1024 ** 3
+export const FINGERPRINT_DEADLINE_MS = 30_000
+const FINGERPRINT_MAX_FILES = 20_000
+
+export interface FingerprintOptions {
+  readonly signal?: AbortSignal
+  readonly maxBytes?: number
+  readonly deadlineMs?: number
+}
+
+interface FingerprintBudget {
+  readonly signal?: AbortSignal
+  readonly maxBytes: number
+  readonly deadlineAt: number
+  bytesRead: number
+  filesRead: number
+}
 
 class FingerprintSourceChanged extends Error {
   constructor() {
     super("source changed while fingerprinting")
   }
+}
+
+class FingerprintLimitExceeded extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "FingerprintLimitExceeded"
+  }
+}
+
+const checkBudget = (budget: FingerprintBudget): void => {
+  budget.signal?.throwIfAborted()
+  if (Date.now() > budget.deadlineAt) throw new FingerprintLimitExceeded("fingerprint deadline exceeded")
 }
 
 const statKey = (stats: Stats): string => JSON.stringify({
@@ -21,21 +50,29 @@ const statKey = (stats: Stats): string => JSON.stringify({
   ctimeMs: stats.ctimeMs
 })
 
-const hashFile = async (sourcePath: string): Promise<{ readonly digest: Buffer; readonly size: number }> => {
+const hashFile = async (sourcePath: string, budget: FingerprintBudget): Promise<{ readonly digest: Buffer; readonly size: number }> => {
+  checkBudget(budget)
   const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0
   const file = await open(sourcePath, constants.O_RDONLY | noFollow)
   try {
+    checkBudget(budget)
     const before = await file.stat({ bigint: false })
     if (!before.isFile()) throw new FingerprintSourceChanged()
+    if (before.size > budget.maxBytes - budget.bytesRead) {
+      throw new FingerprintLimitExceeded("fingerprint byte limit exceeded")
+    }
     const digest = createHash("sha256")
     const buffer = Buffer.allocUnsafe(MAX_READ_BYTES)
     let offset = 0
     while (offset < before.size) {
+      checkBudget(budget)
       const result = await file.read(buffer, 0, Math.min(buffer.length, before.size - offset), offset)
       if (result.bytesRead === 0) throw new FingerprintSourceChanged()
       digest.update(buffer.subarray(0, result.bytesRead))
       offset += result.bytesRead
+      budget.bytesRead += result.bytesRead
     }
+    budget.filesRead += 1
     const after = await file.stat({ bigint: false })
     if (!after.isFile() || statKey(before) !== statKey(after) || offset !== after.size) {
       throw new FingerprintSourceChanged()
@@ -46,10 +83,12 @@ const hashFile = async (sourcePath: string): Promise<{ readonly digest: Buffer; 
   }
 }
 
-const archiveFingerprint = async (sourcePath: string): Promise<ScanFingerprint> => {
+const archiveFingerprint = async (sourcePath: string, budget: FingerprintBudget): Promise<ScanFingerprint> => {
+  checkBudget(budget)
   const before = await lstat(sourcePath, { bigint: false })
   if (!before.isFile()) throw new FingerprintSourceChanged()
-  const hashed = await hashFile(sourcePath)
+  const hashed = await hashFile(sourcePath, budget)
+  checkBudget(budget)
   const after = await lstat(sourcePath, { bigint: false })
   if (!after.isFile() || statKey(before) !== statKey(after)) throw new FingerprintSourceChanged()
   return { profile: "archive-sha256-v1", digest: hashed.digest.toString("hex") }
@@ -67,27 +106,44 @@ const writeSize = (hash: ReturnType<typeof createHash>, size: number): void => {
   hash.update(encoded)
 }
 
-const directoryFingerprint = async (sourcePath: string, manifest: SourceManifest): Promise<ScanFingerprint> => {
+const directoryFingerprint = async (sourcePath: string, manifest: SourceManifest, budget: FingerprintBudget): Promise<ScanFingerprint> => {
+  checkBudget(budget)
   const before = await lstat(sourcePath, { bigint: false })
   if (!before.isDirectory()) throw new FingerprintSourceChanged()
   const digest = createHash("sha256")
   digest.update("directory-pages-sha256-v1\0", "utf8")
   const pages = [...manifest.pages].sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)))
   for (const page of pages) {
+    checkBudget(budget)
+    if (budget.filesRead >= FINGERPRINT_MAX_FILES) throw new FingerprintLimitExceeded("fingerprint file limit exceeded")
     const name = Buffer.from(page.name, "utf8")
     const pagePath = join(sourcePath, page.name)
-    const hashed = await hashFile(pagePath)
+    const hashed = await hashFile(pagePath, budget)
     writeLength(digest, name.length)
     digest.update(name)
     writeSize(digest, hashed.size)
     digest.update(hashed.digest)
   }
+  checkBudget(budget)
   const after = await lstat(sourcePath, { bigint: false })
   if (!after.isDirectory() || statKey(before) !== statKey(after)) throw new FingerprintSourceChanged()
   return { profile: "directory-pages-sha256-v1", digest: digest.digest("hex") }
 }
 
-export const fingerprintSource = async (sourcePath: string, manifest: SourceManifest): Promise<ScanFingerprint> =>
-  manifest.sourceKind === "archive"
-    ? archiveFingerprint(sourcePath)
-    : directoryFingerprint(sourcePath, manifest)
+export const fingerprintSource = async (
+  sourcePath: string,
+  manifest: SourceManifest,
+  options: FingerprintOptions = {}
+): Promise<ScanFingerprint> => {
+  const deadlineMs = options.deadlineMs ?? FINGERPRINT_DEADLINE_MS
+  const budget: FingerprintBudget = {
+    signal: options.signal,
+    maxBytes: options.maxBytes ?? FINGERPRINT_MAX_BYTES,
+    deadlineAt: Date.now() + deadlineMs,
+    bytesRead: 0,
+    filesRead: 0
+  }
+  return manifest.sourceKind === "archive"
+    ? archiveFingerprint(sourcePath, budget)
+    : directoryFingerprint(sourcePath, manifest, budget)
+}

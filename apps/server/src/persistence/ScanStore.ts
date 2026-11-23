@@ -165,6 +165,10 @@ export class ScanStore extends Context.Service<
       readonly observedPaths: ReadonlyArray<string>
       readonly observedCandidatePaths: ReadonlyArray<string>
     }) => Effect.Effect<typeof NormalPublishOutcome.Type, DatabaseWorkerError>
+    readonly readNormalScanFingerprintPlan: (input: {
+      readonly taskId: string
+      readonly rootId: string
+    }) => Effect.Effect<ReadonlyArray<string>, DatabaseWorkerError>
     readonly releaseHeld: (input: {
       readonly candidateId: string
       readonly rootId: string
@@ -267,6 +271,16 @@ export class ScanStore extends Context.Service<
         })
       )
 
+      const readNormalScanFingerprintPlan = (input: { readonly taskId: string; readonly rootId: string }) =>
+        worker.call({ op: "readNormalScanFingerprintPlan", ...input }).pipe(
+          Effect.flatMap((value) => {
+            const decoded = Schema.decodeUnknownOption(Schema.Array(Schema.String))(value)
+            return Option.isNone(decoded)
+              ? Effect.fail(new DatabaseWorkerError({ message: "invalid normal scan fingerprint plan" }))
+              : Effect.succeed(decoded.value)
+          })
+        )
+
       const releaseHeld = (input: {
         readonly candidateId: string
         readonly rootId: string
@@ -309,7 +323,7 @@ export class ScanStore extends Context.Service<
 
       const recoverInterrupted = () => worker.call({ op: "recoverScans" }).pipe(Effect.asVoid)
 
-      return ScanStore.of({ start, listTasks, readTask, listStaged, recordDiscovery, markRunning, stage, publishNormal, releaseHeld, finish, recoverInterrupted })
+      return ScanStore.of({ start, listTasks, readTask, listStaged, recordDiscovery, markRunning, stage, publishNormal, readNormalScanFingerprintPlan, releaseHeld, finish, recoverInterrupted })
     })
   )
 }

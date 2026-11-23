@@ -333,10 +333,28 @@ describe("normal library scan", () => {
     expect(renamed.data.entries[0]).toMatchObject({
       entry_id: initial.entry_id,
       relative_path: "after",
+      title: "after",
       content_version: initial.content_version,
       location_revision: "2",
       availability: { status: "present" }
     })
+    const renamedSearch = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "after", page_size: 20 } })
+    }))
+    expect(renamedSearch.data.entries).toMatchObject([{ entry_id: initial.entry_id, title: "after" }])
+
+    const repeatedRenameScan = await scanRoot(server, root)
+    if (!("task" in repeatedRenameScan.data)) throw new Error("expected repeated rename scan task")
+    expect((await waitForTerminal(server, repeatedRenameScan.data.task.task_id)).status).toBe("succeeded")
+    const repeatedRenamed = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(repeatedRenamed.data.entries).toMatchObject([{
+      entry_id: initial.entry_id,
+      relative_path: "after",
+      title: "after",
+      location_revision: "2"
+    }])
 
     await server.stop()
     const restarted = await startServer(server.dbPath)

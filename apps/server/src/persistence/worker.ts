@@ -138,6 +138,7 @@ const comparableManifest = (value: string): {
   readonly value: string
   readonly beforeToken?: string
   readonly afterToken?: string
+  readonly fingerprint?: { readonly profile: string; readonly digest: string }
 } | null => {
   try {
     const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
@@ -147,7 +148,8 @@ const comparableManifest = (value: string): {
     return {
       value: JSON.stringify({ ...decoded.value, fingerprint: undefined, before, after }),
       beforeToken,
-      afterToken
+      afterToken,
+      ...(decoded.value.fingerprint === undefined ? {} : { fingerprint: decoded.value.fingerprint })
     }
   } catch {
     return null
@@ -163,7 +165,10 @@ const manifestsEquivalent = (left: string, right: string): boolean => {
   return comparableLeft !== null && comparableRight !== null &&
     comparableLeft.value === comparableRight.value &&
     observationsEquivalent(comparableLeft.beforeToken, comparableRight.beforeToken) &&
-    observationsEquivalent(comparableLeft.afterToken, comparableRight.afterToken)
+    observationsEquivalent(comparableLeft.afterToken, comparableRight.afterToken) &&
+    (comparableLeft.fingerprint === undefined || comparableRight.fingerprint === undefined ||
+      (comparableLeft.fingerprint.profile === comparableRight.fingerprint.profile &&
+        comparableLeft.fingerprint.digest === comparableRight.fingerprint.digest))
 }
 
 const fingerprintFromManifest = (value: string): { readonly profile: string; readonly digest: string } | null => {
@@ -174,6 +179,14 @@ const fingerprintFromManifest = (value: string): { readonly profile: string; rea
   } catch {
     return null
   }
+}
+
+const refreshManifest = (accepted: string, candidate: string): string => {
+  const acceptedFingerprint = fingerprintFromManifest(accepted)
+  if (acceptedFingerprint === null || fingerprintFromManifest(candidate) !== null) return candidate
+  const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(candidate))
+  if (Option.isNone(decoded)) throw new Error("invalid candidate manifest")
+  return JSON.stringify({ ...decoded.value, fingerprint: acceptedFingerprint })
 }
 
 type ReplacementEvidence = "confirmed-change" | "recoverable" | "insufficient"
@@ -1001,6 +1014,15 @@ const selectStagedById = db.prepare(
 )
 selectStagedById.setReadBigInts(true)
 const selectEntriesForRoot = db.prepare("SELECT entry_id, relative_path, kind, state, decision_version, location_revision, manifest_json, availability_status, availability_observed_at_ms FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
+const selectNormalScanFingerprintPlan = db.prepare(
+  `SELECT s.relative_path, s.manifest_json, e.manifest_json AS accepted_manifest_json, e.state AS accepted_state
+   FROM staged_discoveries s
+   LEFT JOIN library_entries e ON e.root_id = s.root_id AND e.relative_path = s.relative_path
+     AND e.state IN ('accepted', 'replacement-pending')
+   WHERE s.task_id = ? AND s.root_id = ? AND s.hold_state = 'eligible'
+     AND s.analysis_status = 'ready' AND s.manifest_json IS NOT NULL AND e.entry_id IS NULL
+   ORDER BY s.relative_path ASC`
+)
 const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path, state, decision_version, location_revision, content_version, page_count FROM library_entries WHERE root_id = ? AND relative_path = ? AND state IN ('accepted', 'replacement-pending')")
 const selectEntryResolution = db.prepare(
   "SELECT entry_id, root_id, relative_path, kind, state, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
@@ -1100,7 +1122,7 @@ const updateEntryAvailability = db.prepare(
   "UPDATE library_entries SET availability_status = ?, availability_observed_at_ms = ?, updated_at_ms = ? WHERE entry_id = ?"
 )
 const relocateAcceptedEntry = db.prepare(
-  "UPDATE library_entries SET relative_path = ?, source_path = ?, location_revision = location_revision + 1, manifest_json = ?, accepted_observation_json = ?, availability_status = 'present', availability_observed_at_ms = ?, updated_at_ms = ? WHERE entry_id = ? AND root_id = ? AND state = 'accepted' AND decision_version = ? AND location_revision = ?"
+  "UPDATE library_entries SET relative_path = ?, source_path = ?, title = ?, title_search = ?, basename_search = ?, location_revision = location_revision + 1, manifest_json = ?, accepted_observation_json = ?, availability_status = 'present', availability_observed_at_ms = ?, updated_at_ms = ? WHERE entry_id = ? AND root_id = ? AND state = 'accepted' AND decision_version = ? AND location_revision = ?"
 )
 const markEntryPending = db.prepare(
   "UPDATE library_entries SET state = 'replacement-pending', updated_at_ms = ? WHERE entry_id = ? AND state = 'accepted'"
@@ -2813,12 +2835,14 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       }
     }
     const staged = db.prepare(
-      "SELECT candidate_id, relative_path, kind, candidate_version, manifest_json FROM staged_discoveries WHERE task_id = ? AND root_id = ? AND hold_state = 'eligible' AND analysis_status = 'ready' ORDER BY relative_path ASC"
+      "SELECT candidate_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json FROM staged_discoveries WHERE task_id = ? AND root_id = ? ORDER BY relative_path ASC"
     ).all(request.taskId, request.rootId) as unknown as ReadonlyArray<{
       candidate_id: string
       relative_path: string
       kind: "archive" | "image-directory"
       candidate_version: bigint
+      hold_state: "held" | "eligible"
+      analysis_status: "ready" | "error"
       manifest_json: string | null
     }>
     const sourcePathFor = (relativePath: string): string => join(root.selectedPath, ...relativePath.split("/"))
@@ -2834,6 +2858,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       location_revision: bigint
     }>()
     for (const candidate of staged) {
+      if (candidate.hold_state !== "eligible" || candidate.analysis_status !== "ready") continue
       if (!observedCandidates.has(candidate.relative_path) || candidate.manifest_json === null) continue
       const manifest = JSON.parse(candidate.manifest_json) as { pages?: ReadonlyArray<unknown> }
       const pageCount = Array.isArray(manifest.pages) ? manifest.pages.length : 0
@@ -2867,6 +2892,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
     const relocatedTargetPaths = new Set<string>()
     const candidatesByFingerprint = new Map<string, Array<(typeof staged)[number]>>()
     for (const candidate of staged) {
+      if (candidate.hold_state !== "eligible" || candidate.analysis_status !== "ready") continue
       if (!observedCandidates.has(candidate.relative_path) || candidate.manifest_json === null) continue
       if (existingForCandidate.has(candidate.relative_path)) continue
       const fingerprint = fingerprintFromManifest(candidate.manifest_json)
@@ -2875,6 +2901,13 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       const matches = candidatesByFingerprint.get(key) ?? []
       matches.push(candidate)
       candidatesByFingerprint.set(key, matches)
+    }
+    const existingPathSet = new Set(existingEntries.map((entry) => entry.relative_path))
+    const couldMatchSource = (candidate: (typeof staged)[number], key: string): boolean => {
+      if (candidate.hold_state !== "eligible" || candidate.analysis_status !== "ready") return true
+      if (candidate.manifest_json === null) return true
+      const fingerprint = fingerprintFromManifest(candidate.manifest_json)
+      return fingerprint === null || `${fingerprint.profile}:${fingerprint.digest}` === key
     }
     for (const [key, targets] of candidatesByFingerprint) {
       if (targets.length !== 1) continue
@@ -2887,6 +2920,16 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       if (sourceMatches.length !== 1) continue
       const source = sourceMatches[0]
       if (source === undefined || source.state !== "accepted") continue
+      const hasUnresolvedCandidate = staged.some((candidate) =>
+        observed.has(candidate.relative_path) &&
+        !existingPathSet.has(candidate.relative_path) &&
+        couldMatchSource(candidate, key) &&
+        (candidate.hold_state !== "eligible" ||
+          candidate.analysis_status !== "ready" ||
+          !observedCandidates.has(candidate.relative_path) ||
+          fingerprintFromManifest(candidate.manifest_json ?? "") === null)
+      )
+      if (hasUnresolvedCandidate) continue
       const hasPresentPending = existingEntries.some((entry) =>
         entry.state === "replacement-pending" && observed.has(entry.relative_path) && !isExcluded(entry.relative_path)
       )
@@ -2901,9 +2944,13 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       if (target === undefined || target.manifest_json === null || target.kind !== source.kind) continue
       const targetManifest = persistedManifest(target.manifest_json, "relocation target manifest")
       const targetSourcePath = sourcePathFor(target.relative_path)
+      const targetTitle = titleForCandidate(target.relative_path, target.kind)
       const moved = relocateAcceptedEntry.run(
         target.relative_path,
         targetSourcePath,
+        targetTitle,
+        normalizeSearchText(targetTitle),
+        normalizeSearchText(searchBasename(target.relative_path)),
         target.manifest_json,
         JSON.stringify(replacementObservation(targetManifest, target.kind)),
         observedAtMs,
@@ -2921,6 +2968,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
     }
     missingPaths = missingPaths.filter((relativePath) => !relocatedMissingPaths.has(relativePath))
     for (const candidate of staged) {
+      if (candidate.hold_state !== "eligible" || candidate.analysis_status !== "ready") continue
       if (!observedCandidates.has(candidate.relative_path) || candidate.manifest_json === null) continue
       if (relocatedTargetPaths.has(candidate.relative_path)) continue
       const manifest = JSON.parse(candidate.manifest_json) as { pages?: ReadonlyArray<unknown> }
@@ -2936,16 +2984,19 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
           existing.source_path === sourcePathFor(candidate.relative_path)
         ) {
           if (existing.manifest_json !== candidate.manifest_json) {
-            db.prepare("UPDATE library_entries SET manifest_json = ?, updated_at_ms = ? WHERE entry_id = ?").run(
-              candidate.manifest_json,
-              Date.now(),
-              existing.entry_id
-            )
-            db.prepare("UPDATE library_entries SET accepted_observation_json = ? WHERE entry_id = ?").run(
-              JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind)),
-              existing.entry_id
-            )
-            changed = true
+            const refreshedManifest = refreshManifest(existing.manifest_json, candidate.manifest_json)
+            if (refreshedManifest !== existing.manifest_json) {
+              db.prepare("UPDATE library_entries SET manifest_json = ?, updated_at_ms = ? WHERE entry_id = ?").run(
+                refreshedManifest,
+                Date.now(),
+                existing.entry_id
+              )
+              db.prepare("UPDATE library_entries SET accepted_observation_json = ? WHERE entry_id = ?").run(
+                JSON.stringify(replacementObservation(persistedManifest(refreshedManifest, "candidate manifest"), candidate.kind)),
+                existing.entry_id
+              )
+              changed = true
+            }
           }
           if (existing.state === "accepted") deleteStaged.run(candidate.candidate_id)
         }
@@ -3117,6 +3168,22 @@ const indexedRootSamples = (
     library_change_revision: librarySummary().change_revision
   }
 }
+
+const normalScanFingerprintPlan = (
+  request: Extract<WorkerRequest, { op: "readNormalScanFingerprintPlan" }>
+): ReadonlyArray<string> =>
+  (selectNormalScanFingerprintPlan.all(request.taskId, request.rootId) as unknown as ReadonlyArray<{
+    relative_path: string
+    manifest_json: string
+    accepted_manifest_json: string | null
+    accepted_state: "accepted" | "replacement-pending" | null
+  }>)
+    .filter((row) => row.accepted_manifest_json === null || (
+      row.accepted_state === "accepted" &&
+      fingerprintFromManifest(row.accepted_manifest_json) !== null &&
+      !manifestsEquivalent(row.accepted_manifest_json, row.manifest_json)
+    ))
+    .map((row) => row.relative_path)
 
 const entryResolution = (
   request: Extract<WorkerRequest, { op: "readEntryResolution" }>
@@ -3542,6 +3609,8 @@ const handle = (request: WorkerRequest): unknown => {
       return (selectStagedDiscoveries.all() as unknown as ReadonlyArray<Parameters<typeof stagedDiscoveryRow>[0]>).map(stagedDiscoveryRow)
     case "publishNormalScan":
       return publishNormalScan(request)
+    case "readNormalScanFingerprintPlan":
+      return normalScanFingerprintPlan(request)
     case "releaseHeldDiscovery":
       return releaseHeldDiscovery(request)
     case "lookupEntryResolution":
