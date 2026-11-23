@@ -1388,7 +1388,7 @@ export const bindLibraryEntry = (url: string) =>
     const state = viewStore.getState()
     const entry = state.library_entry
     const entryId = state.library_selected_entry_id
-    if (entry === null || entryId === null || entry.entry_id !== entryId) return
+    if (state.library_entry_status !== "ready" || entry === null || entryId === null || entry.entry_id !== entryId) return
     const requestGeneration = state.library_entry_request_generation + 1
     const operationId = state.library_bind_operation_id !== null && state.library_bind_operation_url === url
       ? state.library_bind_operation_id
@@ -1438,7 +1438,9 @@ export const bindLibraryEntry = (url: string) =>
         }
         return
       }
-      const retainOperation = result.error.retryable || result.error.code === "ipc_failed"
+      const retainOperation = result.error.retryable ||
+        result.error.code === "ipc_failed" ||
+        result.error.code === "internal_error"
       yield* Effect.sync(() => viewStore.set({
         library_bind_status: "error",
         library_bind_error: result.error.message,

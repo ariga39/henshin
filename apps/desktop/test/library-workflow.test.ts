@@ -318,7 +318,7 @@ describe("library renderer workflow", () => {
       bind: (input) => {
         bindRequests.push(input)
         return bindRequests.length === 1
-          ? Effect.succeed({ ok: false as const, error: { code: "ipc_failed", message: "bind response was lost", retryable: false } })
+          ? Effect.succeed({ ok: false as const, error: { code: "internal_error", message: "bind response was lost", retryable: false } })
           : Effect.succeed({ ok: true as const, data: { operation_id: firstActionId, entry: bound } })
       },
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
@@ -338,6 +338,48 @@ describe("library renderer workflow", () => {
     expect(bindRequests[1]?.operation_id).toBe(bindRequests[0]?.operation_id)
     expect(viewStore.getState().library_entry?.binding).toEqual(bound.binding)
     expect(viewStore.getState().library_bind_operation_id).toBeNull()
+  })
+
+  it("does not rebind stale details when a conflict refresh fails", async () => {
+    const bindRequests: Array<{ readonly operation_id: string; readonly expected_decision_version: string }> = []
+    let entryCalls = 0
+    const client = LibraryClient.of({
+      entry: () => {
+        entryCalls += 1
+        return entryCalls === 1
+          ? Effect.succeed({ ok: true as const, data: entryDetails(entryAId, "1") })
+          : Effect.succeed({ ok: false as const, error: { code: "internal_error", message: "entry refresh failed", retryable: false } })
+      },
+      bind: (input) => {
+        bindRequests.push(input)
+        return Effect.succeed({ ok: false as const, error: {
+          code: "revision_conflict",
+          message: "stale entry decision revision",
+          retryable: false,
+          current_revision: "2"
+        } })
+      },
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({ library_entries: [entry(entryAId, "book-a")] })
+
+    await run(selectLibraryEntry(entryAId), client)
+    const typedUrl = "https://e-hentai.org/g/98765/stale-refresh/"
+    await run(bindLibraryEntry(typedUrl), client)
+
+    expect(bindRequests).toHaveLength(1)
+    expect(viewStore.getState()).toMatchObject({
+      library_entry_status: "error",
+      library_entry_error: "entry refresh failed",
+      library_bind_status: "idle",
+      library_bind_url: typedUrl
+    })
+
+    await run(bindLibraryEntry(typedUrl), client)
+    expect(bindRequests).toHaveLength(1)
   })
 
   it("does not open a replacement-pending entry", async () => {
