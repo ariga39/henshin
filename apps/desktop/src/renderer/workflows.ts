@@ -1499,24 +1499,22 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
     if (!result.ok) {
       yield* Effect.sync(() => {
         const state = viewStore.getState()
-        const unfiltered = query.trim() === ""
-        viewStore.set(unfiltered && state.library_entries.length > 0
+        const filtered = state.library_query.trim() !== ""
+        viewStore.set(filtered
           ? {
-              library_status: "ready",
-              library_error: result.error.message,
-              library_freshness: state.library_freshness === null
-                ? null
-                : { ...state.library_freshness, source: "cached", stale: true, partial: true }
+              library_entries: [],
+              library_cursor: null,
+              library_has_more: false,
+              library_freshness: null,
+              library_status: "error",
+              library_error: result.error.message
             }
           : {
               library_status: "error",
               library_error: result.error.message,
-              ...(unfiltered ? {} : {
-                library_entries: [],
-                library_cursor: null,
-                library_has_more: false,
-                library_freshness: null
-              })
+              ...(state.library_freshness !== null
+                ? { library_freshness: { ...state.library_freshness, source: "cached", stale: true, partial: true } }
+                : {})
             })
       })
       return
@@ -1750,12 +1748,22 @@ export const reconnectLibrary = Effect.gen(function*() {
     if (isCurrent(connectionGeneration)) {
       yield* Effect.sync(() => {
         const state = viewStore.getState()
-        viewStore.set({
-          library_error: result.error.message,
-          ...(state.library_query.trim() === "" && state.library_entries.length > 0 && state.library_freshness !== null
-            ? { library_freshness: { ...state.library_freshness, source: "cached", stale: true, partial: true } }
-            : {})
-        })
+        const filtered = state.library_query.trim() !== ""
+        viewStore.set(filtered
+          ? {
+              library_entries: [],
+              library_cursor: null,
+              library_has_more: false,
+              library_freshness: null,
+              library_status: "error",
+              library_error: result.error.message
+            }
+          : {
+              library_error: result.error.message,
+              ...(state.library_entries.length > 0 && state.library_freshness !== null
+                ? { library_freshness: { ...state.library_freshness, source: "cached", stale: true, partial: true } }
+                : {})
+            })
       })
     }
     return

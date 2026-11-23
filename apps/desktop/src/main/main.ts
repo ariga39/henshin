@@ -1245,7 +1245,8 @@ const registerIpc = (): void => {
     try {
       if (!cacheableLibrary) throw new OfflineLibraryUnavailableError()
       const namespace = requireNamespace()
-      if (requireConnection().getStatus().state !== "disconnected") {
+      const connectionState = requireConnection().getStatus().state
+      if (connectionState !== "disconnected" && connectionState !== "blocked") {
         throw new ConnectionPausedError({ state: requireConnection().getStatus().state })
       }
       return requireRuntime().runPromise(

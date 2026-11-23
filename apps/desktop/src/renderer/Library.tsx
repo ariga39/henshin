@@ -227,7 +227,7 @@ export const LibraryScreen = () => {
         )}
         <button
           data-testid="library-reconnect"
-          disabled={state.connection.state === "connecting"}
+          disabled={state.connection.state !== "disconnected" && state.connection.state !== "blocked"}
           onClick={() => void runtime.runPromise(reconnectLibrary)}
         >
           Reconnect
