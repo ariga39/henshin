@@ -40,6 +40,45 @@ const start = async (): Promise<RunningServer> => {
   return server
 }
 
+const indexEntries = async (server: RunningServer): Promise<ReadonlyArray<{ readonly entry_id: string }>> => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-eh-binding-multi-"))
+  fixturePaths.add(fixture)
+  for (const name of ["book-a", "book-b"]) {
+    const book = path.join(fixture, name)
+    await mkdir(book)
+    await writeFile(path.join(book, "001.jpg"), "page")
+  }
+  const root = await withServerClient(server, Effect.gen(function*() {
+    const client = yield* ServerHttpClient
+    const preview = yield* client.preview({ payload: { path: fixture } })
+    if (!("children" in preview.data)) throw new Error("expected setup preview")
+    return yield* client.save({
+      payload: {
+        operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+        label: "EH binding multi", path: fixture, preview_identity: preview.data.preview_identity
+      }
+    })
+  }))
+  const submitted = await withServerClient(server, Effect.gen(function*() {
+    return yield* (yield* ServerHttpClient).command({
+      params: { id: root.data.root_id },
+      payload: {
+        operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+        expected_mapping_revision: root.data.mapping_revision,
+        expected_policy_revision: root.data.policy_revision,
+        command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+      }
+    })
+  }))
+  if (!("task" in submitted.data)) throw new Error("expected scan task")
+  expect((await waitForTerminal(server, submitted.data.task.task_id)).status).toBe("succeeded")
+  const page = await withLibraryClient(server, Effect.gen(function*() {
+    return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 10 } })
+  }))
+  expect(page.data.entries).toHaveLength(2)
+  return page.data.entries
+}
+
 afterEach(async () => {
   for (const server of servers.splice(0)) await server.stop()
   for (const dbPath of dbPaths) await cleanupTempDb(dbPath)
@@ -156,5 +195,94 @@ describe("durable EH binding", () => {
     }))
     expect(afterRestart.data.binding).toEqual(bound.data.entry.binding)
     expect(afterRestart.data.decision_version).toBe("2")
+  })
+
+  it("expires retained bind results, isolates preferred domains, and reports conflicts", async () => {
+    const server = await start()
+    const entries = await indexEntries(server)
+    const first = entries[0]
+    const second = entries[1]
+    if (first === undefined || second === undefined) throw new Error("expected two indexed entries")
+
+    const operationId = randomUUID()
+    const bindFirst = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: first.entry_id },
+        payload: {
+          operation_id: operationId, instance_id: server.instanceId, epoch: server.epoch,
+          expected_decision_version: "1",
+          command: { type: "bind", url: "https://e-hentai.org/g/12345/shared-token/" }
+        }
+      })
+    }))
+    expect(bindFirst.data.entry.decision_version).toBe("2")
+
+    const operationConflict = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: first.entry_id },
+        payload: {
+          operation_id: operationId, instance_id: server.instanceId, epoch: server.epoch,
+          expected_decision_version: "2",
+          command: { type: "bind", url: "https://exhentai.org/g/12345/shared-token/" }
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(operationConflict._tag).toBe("OperationConflict")
+
+    const db = new DatabaseSync(server.dbPath)
+    db.prepare("UPDATE entry_operations SET created_at_ms = 0 WHERE epoch = ? AND operation_id = ?").run(server.epoch, operationId)
+    db.close()
+    const expired = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: first.entry_id },
+        payload: {
+          operation_id: operationId, instance_id: server.instanceId, epoch: server.epoch,
+          expected_decision_version: "1",
+          command: { type: "bind", url: "https://e-hentai.org/g/12345/shared-token/" }
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(expired._tag).toBe("OperationExpired")
+
+    const bindSecond = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: second.entry_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_decision_version: "1",
+          command: { type: "bind", url: "https://exhentai.org/g/12345/shared-token/" }
+        }
+      })
+    }))
+    expect(bindSecond.data.entry.decision_version).toBe("2")
+    expect(bindSecond.data.entry.binding?.canonical_url).toBe("https://exhentai.org/g/12345/shared-token/")
+
+    const firstAfterDomainChange = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entry({ params: { id: first.entry_id } })
+    }))
+    expect(firstAfterDomainChange.data.binding?.canonical_url).toBe("https://e-hentai.org/g/12345/shared-token/")
+    expect(firstAfterDomainChange.data.decision_version).toBe("2")
+
+    const invalidUrl = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: second.entry_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_decision_version: "2", command: { type: "bind", url: "https://example.com/g/12345/shared-token/" }
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(invalidUrl._tag).toBe("InvalidRequest")
+
+    const locatorConflict = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: second.entry_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_decision_version: "2", command: { type: "bind", url: "https://exhentai.org/g/12345/different-token/" }
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(locatorConflict._tag).toBe("InvalidRequest")
   })
 })

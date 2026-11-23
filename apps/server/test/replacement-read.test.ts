@@ -342,6 +342,13 @@ describe("replacement comparison read model", () => {
     expect(entry.replacement.candidate_observation.format_evidence).toEqual(["jpeg"])
     expect(entry.replacement.candidate_observation.size_bytes).toBe(24)
 
+    const detailed = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entry({ params: { id: entry.entry_id } })
+    }))
+    expect(detailed.data.state).toBe("replacement-pending")
+    expect(detailed.data.decision_version).toBe("1")
+    expect(detailed.data.replacement).toEqual(entry.replacement)
+
     const pendingPage = await withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).search({
         payload: { page_size: 1, state: "replacement-pending" }

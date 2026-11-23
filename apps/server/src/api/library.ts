@@ -7,9 +7,11 @@ import {
   InvalidRequest,
   LibraryApi,
   OperationConflict,
+  OperationExpired,
   RequestContext,
   RevisionConflict,
-  RootNotFound
+  RootNotFound,
+  StorageFull
 } from "@henshin/contracts"
 import { HttpApiBuilder } from "effect/http-api"
 import { ServerState } from "../identity"
@@ -199,6 +201,20 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
                 code: "operation_conflict",
                 message: "operation id reused with a different payload",
                 retryable: false,
+                ...errorBase(server, context.request_id)
+              })
+            case "operation_expired":
+              return yield* new OperationExpired({
+                code: "operation_expired",
+                message: "the binding operation result expired; inspect the current entry before retrying",
+                retryable: false,
+                ...errorBase(server, context.request_id)
+              })
+            case "storage_full":
+              return yield* new StorageFull({
+                code: "storage_full503",
+                message: "binding operation recovery storage is full",
+                retryable: true,
                 ...errorBase(server, context.request_id)
               })
             case "entry_not_found":

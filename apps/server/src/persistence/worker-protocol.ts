@@ -269,6 +269,8 @@ export const BindEntryOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("replayed"), result: EntryCommandResult }),
   Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
   Schema.Struct({ kind: Schema.Literal("entry_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("operation_expired") }),
+  Schema.Struct({ kind: Schema.Literal("storage_full") }),
   Schema.Struct({ kind: Schema.Literal("revision_conflict"), currentDecisionVersion: Revision }),
   Schema.Struct({ kind: Schema.Literal("locator_conflict") })
 ])

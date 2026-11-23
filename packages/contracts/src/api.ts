@@ -226,8 +226,10 @@ export const LibraryApi = HttpApi.make("henshin-library").add(
           InvalidRequest,
           RevisionConflict,
           OperationConflict,
+          OperationExpired,
           EpochChanged,
           InstanceMismatch,
+          StorageFull,
           InternalError
         ]
       }),

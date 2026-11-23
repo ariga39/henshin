@@ -46,7 +46,7 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
-const CURRENT_SCHEMA_VERSION = 9
+const CURRENT_SCHEMA_VERSION = 10
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
@@ -442,6 +442,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS bindings (
     entry_id TEXT PRIMARY KEY REFERENCES library_entries(entry_id) ON DELETE CASCADE,
     gallery_id TEXT NOT NULL REFERENCES galleries(gallery_id),
+    preferred_domain TEXT NOT NULL CHECK (preferred_domain IN ('e-hentai.org', 'exhentai.org')),
     bound_at_ms INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS bindings_gallery_id ON bindings(gallery_id);
@@ -509,6 +510,16 @@ if (!libraryEntryColumns.some((column) => column.name === "basename_search")) {
 const addedAcceptedObservationSummary = !libraryEntryColumns.some((column) => column.name === "accepted_observation_json")
 if (addedAcceptedObservationSummary) {
   db.exec("ALTER TABLE library_entries ADD COLUMN accepted_observation_json TEXT")
+}
+
+const bindingColumns = new Set(
+  (db.prepare("PRAGMA table_info(bindings)").all() as unknown as ReadonlyArray<{ name: string }>).map(
+    (column) => column.name
+  )
+)
+if (!bindingColumns.has("preferred_domain")) {
+  db.exec("ALTER TABLE bindings ADD COLUMN preferred_domain TEXT NOT NULL DEFAULT 'e-hentai.org' CHECK (preferred_domain IN ('e-hentai.org', 'exhentai.org'))")
+  db.exec("UPDATE bindings SET preferred_domain = (SELECT preferred_domain FROM galleries WHERE galleries.gallery_id = bindings.gallery_id)")
 }
 
 const stagedDiscoveryColumns = db.prepare("PRAGMA table_info(staged_discoveries)").all() as unknown as ReadonlyArray<{ name: string }>
@@ -827,30 +838,41 @@ const selectEntryDetails = db.prepare(`
   SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
     e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
     b.gallery_id, g.source AS binding_source, g.gid AS binding_gid, g.token AS binding_token,
-    g.preferred_domain AS binding_preferred_domain
+    COALESCE(b.preferred_domain, g.preferred_domain) AS binding_preferred_domain,
+    CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
+    s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
+    s.candidate_observation_json
   FROM library_entries e
   LEFT JOIN bindings b ON b.entry_id = e.entry_id
   LEFT JOIN galleries g ON g.gallery_id = b.gallery_id
+  LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
   WHERE e.entry_id = ? AND e.state IN ('accepted', 'replacement-pending')
 `)
 selectEntryDetails.setReadBigInts(true)
 const selectEntryOperation = db.prepare(
-  "SELECT entry_id, payload, result FROM entry_operations WHERE epoch = ? AND operation_id = ?"
+  "SELECT entry_id, payload, result, created_at_ms FROM entry_operations WHERE epoch = ? AND operation_id = ?"
 )
 const insertEntryOperation = db.prepare(
   "INSERT INTO entry_operations(epoch, operation_id, entry_id, payload, result, created_at_ms) VALUES(?, ?, ?, ?, ?, ?)"
 )
+const countEntryOperations = db.prepare("SELECT COUNT(*) AS count FROM entry_operations")
+const compactEntryOperations = db.prepare(`
+  DELETE FROM entry_operations
+  WHERE rowid IN (
+    SELECT rowid FROM entry_operations
+    WHERE created_at_ms <= ? OR epoch <> ?
+    ORDER BY created_at_ms ASC, rowid ASC
+    LIMIT ?
+  )
+`)
 const selectGallery = db.prepare(
-  "SELECT gallery_id, token, preferred_domain FROM galleries WHERE source = ? AND gid = ?"
+  "SELECT gallery_id, token FROM galleries WHERE source = ? AND gid = ?"
 )
 const insertGallery = db.prepare(
   "INSERT INTO galleries(gallery_id, source, gid, token, preferred_domain, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?)"
 )
-const updateGalleryDomain = db.prepare(
-  "UPDATE galleries SET preferred_domain = ?, updated_at_ms = ? WHERE gallery_id = ?"
-)
 const upsertBinding = db.prepare(
-  "INSERT INTO bindings(entry_id, gallery_id, bound_at_ms) VALUES(?, ?, ?) ON CONFLICT(entry_id) DO UPDATE SET gallery_id = excluded.gallery_id, bound_at_ms = excluded.bound_at_ms"
+  "INSERT INTO bindings(entry_id, gallery_id, preferred_domain, bound_at_ms) VALUES(?, ?, ?, ?) ON CONFLICT(entry_id) DO UPDATE SET gallery_id = excluded.gallery_id, preferred_domain = excluded.preferred_domain, bound_at_ms = excluded.bound_at_ms"
 )
 const advanceEntryDecision = db.prepare(
   "UPDATE library_entries SET decision_version = decision_version + 1, updated_at_ms = ? WHERE entry_id = ?"
@@ -1897,6 +1919,12 @@ const entryDetailsRow = (row: {
   binding_gid: string | null
   binding_token: string | null
   binding_preferred_domain: "e-hentai.org" | "exhentai.org" | null
+  accepted_observation_json: string | null
+  candidate_id: string | null
+  candidate_version: bigint | null
+  candidate_kind: "archive" | "image-directory" | null
+  candidate_analysis_status: "ready" | "error" | null
+  candidate_observation_json: string | null
 }): import("./worker-protocol").LibraryEntryDetailsRow => ({
   entry_id: row.entry_id,
   library_id: row.library_id,
@@ -1914,7 +1942,15 @@ const entryDetailsRow = (row: {
     key: `default-v1.${row.entry_id}.${row.content_version.toString()}`,
     profile: "default-cover-v1"
   },
-  replacement: null,
+  replacement: row.candidate_id === null || row.candidate_version === null || row.candidate_kind === null || row.candidate_analysis_status === null || row.accepted_observation_json === null || row.candidate_observation_json === null
+    ? null
+    : {
+        candidate_id: row.candidate_id,
+        candidate_version: Number(row.candidate_version),
+        decision_version: row.decision_version.toString(),
+        old_observation: persistedReplacementObservation(row.accepted_observation_json, "accepted observation summary"),
+        candidate_observation: persistedReplacementCandidateObservation(row.candidate_observation_json, "candidate observation summary")
+      },
   binding: row.binding_source === null || row.binding_gid === null || row.binding_token === null || row.binding_preferred_domain === null
     ? null
     : {
@@ -1952,11 +1988,16 @@ const bindEntry = (
       entry_id: string
       payload: string
       result: string
+      created_at_ms: number
     } | undefined
     if (previous !== undefined) {
       if (previous.entry_id !== request.entryId || previous.payload !== canonicalPayload) {
         db.exec("ROLLBACK")
         return { kind: "operation_conflict" }
+      }
+      if (previous.created_at_ms <= Date.now() - RESULT_RETENTION_MS) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_expired" }
       }
       const replay = Schema.decodeUnknownOption(EntryCommandResult)(JSON.parse(previous.result))
       if (Option.isNone(replay)) throw new Error("invalid persisted bind result")
@@ -1974,10 +2015,16 @@ const bindEntry = (
       return { kind: "revision_conflict", currentDecisionVersion: current.decision_version.toString() }
     }
 
+    const now = Date.now()
+    compactEntryOperations.run(now - RESULT_RETENTION_MS, request.epoch, COMPACTION_BATCH)
+    if (Number(countEntryOperations.get()?.count) >= MAX_OPERATION_RESULTS) {
+      db.exec("COMMIT")
+      return { kind: "storage_full" }
+    }
+
     const existingGallery = selectGallery.get(request.source, request.gid) as {
       gallery_id: string
       token: string
-      preferred_domain: "e-hentai.org" | "exhentai.org"
     } | undefined
     let galleryId: string
     if (existingGallery === undefined) {
@@ -1997,13 +2044,9 @@ const bindEntry = (
         return { kind: "locator_conflict" }
       }
       galleryId = existingGallery.gallery_id
-      if (existingGallery.preferred_domain !== request.preferredDomain) {
-        updateGalleryDomain.run(request.preferredDomain, Date.now(), galleryId)
-      }
     }
 
-    const now = Date.now()
-    upsertBinding.run(request.entryId, galleryId, now)
+    upsertBinding.run(request.entryId, galleryId, request.preferredDomain, now)
     advanceEntryDecision.run(now, request.entryId)
     bumpLibraryRevision.run()
     const entry = readEntryDetails(request.entryId)
