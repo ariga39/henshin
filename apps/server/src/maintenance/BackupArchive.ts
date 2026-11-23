@@ -4,11 +4,18 @@ import { chmod, lstat, mkdir, mkdtemp, open, realpath, rename, rm, stat } from "
 import { join, dirname } from "node:path"
 import serverPackage from "../../package.json"
 import {
-  Reader,
   Uint8ArrayReader,
-  ZipReader,
   ZipWriter
 } from "@zip.js/zip.js"
+import {
+  BackupFileHandleReader,
+  digestFile,
+  inspectBackupArchive,
+  MAX_CONFIGURATION_BYTES,
+  MAX_MANIFEST_BYTES,
+  MAX_STATE_BYTES,
+  streamBackupArchiveEntry
+} from "./BackupArchiveIO"
 import {
   revalidateWritableLocation,
   validateWritableLocationSeparation,
@@ -23,11 +30,6 @@ import type {
   ServerRootRow
 } from "../persistence/worker-protocol"
 
-const MAX_STATE_BYTES = 512 * 1024 * 1024
-const MAX_CONFIGURATION_BYTES = 4 * 1024 * 1024
-const MAX_MANIFEST_BYTES = 256 * 1024
-const MAX_ARCHIVE_BYTES = MAX_STATE_BYTES + MAX_CONFIGURATION_BYTES + MAX_MANIFEST_BYTES + 16 * 1024 * 1024
-const IO_CHUNK_BYTES = 1024 * 1024
 const ARCHIVE_DIRECTORY = "archives"
 const ARCHIVE_SUFFIX = ".henshin.zip"
 
@@ -172,56 +174,6 @@ const validateSnapshot = (snapshot: DatabaseSync): void => {
   }
 }
 
-class FileHandleReader extends Reader<Awaited<ReturnType<typeof open>>> {
-  readonly size: number
-
-  constructor(
-    private readonly file: Awaited<ReturnType<typeof open>>,
-    size: number
-  ) {
-    super(file)
-    this.size = size
-  }
-
-  override async init(): Promise<void> {
-    return
-  }
-
-  override async readUint8Array(index: number, length: number): Promise<Uint8Array> {
-    if (!Number.isSafeInteger(index) || !Number.isSafeInteger(length) || index < 0 || length < 0) {
-      throw new Error("invalid backup archive read range")
-    }
-    const available = Math.max(0, Math.min(length, this.size - index))
-    const output = new Uint8Array(available)
-    let offset = 0
-    while (offset < available) {
-      const result = await this.file.read(output, offset, available - offset, index + offset)
-      if (result.bytesRead === 0) throw new Error("backup archive ended before its declared range")
-      offset += result.bytesRead
-    }
-    return output
-  }
-}
-
-const digestFile = async (filePath: string, expectedSize: number): Promise<string> => {
-  const file = await open(filePath, "r")
-  try {
-    const hash = createHash("sha256")
-    const buffer = new Uint8Array(IO_CHUNK_BYTES)
-    let offset = 0
-    while (offset < expectedSize) {
-      const result = await file.read(buffer, 0, Math.min(buffer.length, expectedSize - offset), offset)
-      if (result.bytesRead === 0) throw new Error("backup payload ended before its declared size")
-      hash.update(buffer.subarray(0, result.bytesRead))
-      offset += result.bytesRead
-    }
-    if ((await file.stat()).size !== expectedSize) throw new Error("backup payload changed during verification")
-    return hash.digest("hex")
-  } finally {
-    await file.close()
-  }
-}
-
 const fileWritable = (file: Awaited<ReturnType<typeof open>>): WritableStream<Uint8Array> => {
   let position = 0
   return new WritableStream({
@@ -242,12 +194,7 @@ const verifyArchive = async (
   archivePath: string,
   expected: ReadonlyMap<string, { readonly size: number; readonly sha256: string }>
 ): Promise<void> => {
-  const archiveSize = (await stat(archivePath)).size
-  if (archiveSize > MAX_ARCHIVE_BYTES) throw new Error("backup archive exceeds the size limit")
-  const file = await open(archivePath, "r")
-  const reader = new ZipReader(new FileHandleReader(file, archiveSize))
-  try {
-    const entries = await reader.getEntries()
+  await inspectBackupArchive(archivePath, async (entries) => {
     if (entries.length !== expected.size) throw new Error("backup archive has an unexpected member count")
     const seen = new Set<string>()
     for (const entry of entries) {
@@ -258,22 +205,14 @@ const verifyArchive = async (
       if (wanted === undefined) throw new Error("backup archive contains an unexpected member")
       seen.add(entry.filename)
       const hash = createHash("sha256")
-      let size = 0
-      await entry.getData(new WritableStream<Uint8Array>({
-        write(chunk) {
-          size += chunk.byteLength
-          if (size > wanted.size) throw new Error(`backup archive member exceeds its manifest size: ${entry.filename}`)
-          hash.update(chunk)
-        }
-      }))
+      const size = await streamBackupArchiveEntry(entry, wanted.size, (chunk) => {
+        hash.update(chunk)
+      })
       if (size !== wanted.size || hash.digest("hex") !== wanted.sha256) {
         throw new Error(`backup archive member failed verification: ${entry.filename}`)
       }
     }
-  } finally {
-    await reader.close()
-    await file.close()
-  }
+  })
 }
 
 const writeArchive = async (
@@ -288,7 +227,7 @@ const writeArchive = async (
   try {
     const writer = new ZipWriter(fileWritable(handle))
     await writer.add("manifest.json", new Uint8ArrayReader(manifestBytes))
-    await writer.add("state.sqlite", new FileHandleReader(state, stateSize))
+    await writer.add("state.sqlite", new BackupFileHandleReader(state, stateSize))
     await writer.add("configuration.json", new Uint8ArrayReader(configurationBytes))
     await writer.close()
   } finally {

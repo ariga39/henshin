@@ -1,9 +1,20 @@
 import { DatabaseSync } from "node:sqlite"
 import { createHash, randomUUID } from "node:crypto"
-import { lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { lstat, mkdtemp, open, realpath, rm } from "node:fs/promises"
+import type { FileHandle } from "node:fs/promises"
 import { dirname, join, relative, resolve } from "node:path"
 import { Option, Schema } from "effect"
-import { Uint8ArrayReader, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js"
+import {
+  BackupArchiveMemberSizeError,
+  BackupArchiveSizeError,
+  digestFile,
+  inspectBackupArchive,
+  MAX_CONFIGURATION_BYTES,
+  MAX_MANIFEST_BYTES,
+  MAX_STATE_BYTES,
+  readBackupArchiveMember,
+  streamBackupArchiveEntry
+} from "./BackupArchiveIO"
 import {
   revalidateWritableLocation,
   validateWritableLocationSeparation,
@@ -19,10 +30,6 @@ import type {
   ServerRootRow
 } from "../persistence/worker-protocol"
 
-const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
-const MAX_STATE_BYTES = 512 * 1024 * 1024
-const MAX_CONFIGURATION_BYTES = 4 * 1024 * 1024
-const MAX_MANIFEST_BYTES = 256 * 1024
 const ARCHIVE_DIRECTORY = "archives"
 const ARCHIVE_SUFFIX = ".henshin.zip"
 const CURRENT_SCHEMA_VERSION = 10
@@ -177,38 +184,74 @@ const ensureArchivePath = async (
   return archivePath
 }
 
-const readArchiveMembers = async (archivePath: string): Promise<ReadonlyMap<string, Uint8Array>> => {
-  let archiveBytes: Uint8Array
-  try {
-    archiveBytes = new Uint8Array(await readFile(archivePath))
-  } catch {
-    throw new BackupDrillFailure("artifact-unavailable", "backup artifact is unavailable")
+const writeFileChunk = async (file: FileHandle, chunk: Uint8Array): Promise<void> => {
+  let offset = 0
+  while (offset < chunk.length) {
+    const result = await file.write(chunk, offset, chunk.length - offset, null)
+    if (result.bytesWritten === 0) throw new Error("backup drill output made no progress")
+    offset += result.bytesWritten
   }
-  if (archiveBytes.byteLength > MAX_ARCHIVE_BYTES) throw new BackupDrillFailure("archive-too-large", "backup artifact exceeds the size limit")
-  const reader = new ZipReader(new Uint8ArrayReader(archiveBytes))
+}
+
+const readArchiveMembers = async (
+  archivePath: string,
+  stagingDirectory: string
+): Promise<{
+  readonly manifestBytes: Uint8Array
+  readonly configurationBytes: Uint8Array
+  readonly statePath: string
+  readonly stateSize: number
+}> => {
+  const statePath = join(stagingDirectory, "state.sqlite")
+  let stateFile: FileHandle | undefined
   try {
-    const entries = await reader.getEntries()
-    if (entries.length !== 3) throw new BackupDrillFailure("archive-members", "backup artifact has unexpected members")
-    const expected = new Set(["manifest.json", "state.sqlite", "configuration.json"])
-    const members = new Map<string, Uint8Array>()
-    for (const entry of entries) {
-      if (entry.directory || !expected.has(entry.filename) || members.has(entry.filename)) {
-        throw new BackupDrillFailure("archive-members", "backup artifact has unsafe members")
+    const members = await inspectBackupArchive(archivePath, async (entries) => {
+      if (entries.length !== 3) throw new BackupDrillFailure("archive-members", "backup artifact has unexpected members")
+      const expected = new Set(["manifest.json", "state.sqlite", "configuration.json"])
+      const buffered = new Map<string, Uint8Array>()
+      let stateSize: number | undefined
+      for (const entry of entries) {
+        if (entry.directory || entry.symlink || !expected.has(entry.filename) || buffered.has(entry.filename) || (entry.filename === "state.sqlite" && stateSize !== undefined)) {
+          throw new BackupDrillFailure("archive-members", "backup artifact has unsafe members")
+        }
+        const limit = entry.filename === "state.sqlite"
+          ? MAX_STATE_BYTES
+          : entry.filename === "configuration.json" ? MAX_CONFIGURATION_BYTES : MAX_MANIFEST_BYTES
+        if (entry.uncompressedSize !== undefined && entry.uncompressedSize > limit) {
+          throw new BackupArchiveMemberSizeError()
+        }
+        if (entry.filename === "state.sqlite") {
+          stateFile = await open(statePath, "wx", 0o600)
+          try {
+            stateSize = await streamBackupArchiveEntry(entry, limit, (chunk) => writeFileChunk(stateFile as FileHandle, chunk))
+            await stateFile.sync()
+          } finally {
+            await stateFile.close()
+            stateFile = undefined
+          }
+        } else {
+          buffered.set(entry.filename, await readBackupArchiveMember(entry, limit))
+        }
       }
-      const limit = entry.filename === "state.sqlite" ? MAX_STATE_BYTES : entry.filename === "configuration.json" ? MAX_CONFIGURATION_BYTES : MAX_MANIFEST_BYTES
-      if (entry.uncompressedSize !== undefined && entry.uncompressedSize > limit) {
-        throw new BackupDrillFailure("member-too-large", "backup artifact member exceeds the size limit")
+      const manifestBytes = buffered.get("manifest.json")
+      const configurationBytes = buffered.get("configuration.json")
+      if (manifestBytes === undefined || configurationBytes === undefined || stateSize === undefined) {
+        throw new BackupDrillFailure("archive-members", "backup artifact is incomplete")
       }
-      const bytes = new Uint8Array(await entry.getData(new Uint8ArrayWriter()))
-      if (bytes.byteLength > limit) throw new BackupDrillFailure("member-too-large", "backup artifact member exceeds the size limit")
-      members.set(entry.filename, bytes)
-    }
-    return members
+      return { manifestBytes, configurationBytes, stateSize }
+    })
+    return { ...members, statePath }
   } catch (error) {
     if (error instanceof BackupDrillFailure) throw error
+    if (error instanceof BackupArchiveSizeError) {
+      throw new BackupDrillFailure("archive-too-large", "backup artifact exceeds the size limit")
+    }
+    if (error instanceof BackupArchiveMemberSizeError) {
+      throw new BackupDrillFailure("member-too-large", "backup artifact member exceeds the size limit")
+    }
     throw new BackupDrillFailure("archive-invalid", "backup artifact cannot be read")
   } finally {
-    await reader.close()
+    if (stateFile !== undefined) await stateFile.close()
   }
 }
 
@@ -309,11 +352,8 @@ export const runBackupDrill = async (context: BackupDrillContext): Promise<Backu
     if (context.beforeVerification !== undefined && await context.beforeVerification() === "interrupt") {
       throw new BackupDrillInterrupted()
     }
-    const members = await readArchiveMembers(archivePath)
-    const manifestBytes = members.get("manifest.json")
-    const stateBytes = members.get("state.sqlite")
-    const configurationBytes = members.get("configuration.json")
-    if (manifestBytes === undefined || stateBytes === undefined || configurationBytes === undefined) throw new BackupDrillFailure("archive-members", "backup artifact is incomplete")
+    const members = await readArchiveMembers(archivePath, stagingDirectory)
+    const { manifestBytes, configurationBytes, statePath, stateSize } = members
     if (sha256(manifestBytes) !== context.artifact.manifestDigest) throw new BackupDrillFailure("manifest-digest", "backup manifest digest does not match the catalog")
     const manifest = decodeJson(ArchiveManifest, manifestBytes, "manifest") as ArchiveManifest
     const configuration = decodeJson(SnapshotConfiguration, configurationBytes, "configuration") as SnapshotConfiguration
@@ -321,15 +361,17 @@ export const runBackupDrill = async (context: BackupDrillContext): Promise<Backu
       manifest.relative_path !== context.artifact.relativePath || manifest.retention_class !== "archive") {
       throw new BackupDrillFailure("artifact-mismatch", "backup manifest is not bound to the catalog artifact")
     }
-    for (const [name, bytes] of [["state.sqlite", stateBytes], ["configuration.json", configurationBytes]] as const) {
+    const stateDigest = await digestFile(statePath, stateSize)
+    for (const [name, size, digest] of [
+      ["state.sqlite", stateSize, stateDigest],
+      ["configuration.json", configurationBytes.byteLength, sha256(configurationBytes)]
+    ] as const) {
       const payload = manifest.payloads[name]
-      if (payload.size_bytes !== bytes.byteLength || payload.sha256 !== sha256(bytes)) {
+      if (payload.size_bytes !== size || payload.sha256 !== digest) {
         throw new BackupDrillFailure("payload-digest", `backup ${name} digest does not match the manifest`)
       }
     }
-    const snapshotPath = join(stagingDirectory, "state.sqlite")
-    await writeFile(snapshotPath, stateBytes, { flag: "wx" })
-    const checks = verifySnapshot(snapshotPath, manifest, configuration, context.dbPath)
+    const checks = verifySnapshot(statePath, manifest, configuration, context.dbPath)
     const completed = await context.complete({
       runId,
       status: "passed",

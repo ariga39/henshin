@@ -1,12 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process"
 import { DatabaseSync } from "node:sqlite"
 import { createHash, randomUUID } from "node:crypto"
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, open, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
 import { afterEach, describe, expect, it } from "vitest"
 import { runBackupDrill, type BackupDrillContext } from "../src/maintenance/BackupDrill"
+import { MAX_ARCHIVE_BYTES } from "../src/maintenance/BackupArchiveIO"
 import type { BackupArtifactRow, BackupDestinationRow } from "../src/persistence/worker-protocol"
 
 const execFile = promisify(execFileCallback)
@@ -202,5 +203,41 @@ describe("server backup restore drill", () => {
     expect(listed.runs.some((run: Record<string, any>) => run.status === "failed" && run.artifactId === firstArtifactId)).toBe(true)
     expect(await readFile(sourceFile)).toEqual(sourceBytes)
     expect(createHash("sha256").update(await readFile(firstArchivePath)).digest("hex")).toBe(firstArchiveDigest)
+
+    const oversizedArtifactId = randomUUID()
+    const oversizedPath = path.join(destination, "archives", `${oversizedArtifactId}.henshin.zip`)
+    const oversizedSize = MAX_ARCHIVE_BYTES + 1
+    const oversizedFile = await open(oversizedPath, "w")
+    try {
+      await oversizedFile.truncate(oversizedSize)
+    } finally {
+      await oversizedFile.close()
+    }
+    const oversizedDatabase = new DatabaseSync(path.join(dataDir, "server.sqlite"))
+    try {
+      oversizedDatabase.prepare(`
+        INSERT INTO backup_artifacts(
+          artifact_id, destination_id, operation_id, relative_path, publication_order,
+          retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
+        ) VALUES (?, ?, ?, ?, 3, 'archive', NULL, 'completed', ?, ?, ?, ?)
+      `).run(
+        oversizedArtifactId,
+        destinationId,
+        randomUUID(),
+        `archives/${oversizedArtifactId}.henshin.zip`,
+        "0".repeat(64),
+        oversizedSize,
+        Date.now(),
+        Date.now()
+      )
+    } finally {
+      oversizedDatabase.close()
+    }
+    const oversized = await runFailure(["backup", "drill", "--data-dir", dataDir, "--artifact-id", oversizedArtifactId])
+    expect(oversized.code).toBe(1)
+    const oversizedResult = JSON.parse(oversized.stdout) as Record<string, any>
+    expect(oversizedResult.run.status).toBe("failed")
+    expect(oversizedResult.run.diagnosticCode).toBe("archive-too-large")
+    expect((await stat(oversizedPath)).size).toBe(oversizedSize)
   })
 })
