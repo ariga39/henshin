@@ -119,7 +119,9 @@ export const LibraryEntryDetails = Schema.Struct({
   note: Schema.NullOr(EntryNote).pipe(
     Schema.withDecodingDefaultType(Effect.succeed(null))
   ),
-  metadata: Schema.NullOr(EhGalleryMetadata)
+  metadata: Schema.NullOr(EhGalleryMetadata).pipe(
+    Schema.withDecodingDefaultType(Effect.succeed(null))
+  )
 })
 export type LibraryEntryDetails = typeof LibraryEntryDetails.Type
 

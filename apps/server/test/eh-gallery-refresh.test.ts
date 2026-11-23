@@ -11,7 +11,7 @@ import { makeEhRefreshCoalescer } from "../src/api/library"
 import { fetchEhMetadata, makeEhMetadataScheduler } from "../src/eh-metadata"
 import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
 
-type FixtureMode = "success" | "numeric-exact" | "malformed" | "blocked" | "mismatched" | "bare-error" | "rate-limited" | "oversized"
+type FixtureMode = "success" | "exact" | "numeric-exact" | "malformed" | "blocked" | "mismatched" | "bare-error" | "rate-limited" | "oversized"
 
 const servers: RunningServer[] = []
 const dbPaths = new Set<string>()
@@ -77,7 +77,14 @@ const startFixture = async () => {
         ? { gmetadata: [{ gid: Number(gid) + 1, token, title: "wrong gallery", title_jpn: "", tags: [] }] }
         : mode === "bare-error"
           ? { gmetadata: [{ error: "fixture blocked" }] }
-          : { gmetadata: [{ gid: Number(gid), token, title: `title-${gid}`, title_jpn: `日本語-${gid}`, tags: ["artist:fixture", "language:english"] }] }
+          : { gmetadata: [{
+              gid: mode === "exact" ? outboundGid : Number(gid),
+              token,
+              title: `title-${outboundGid}`,
+              title_jpn: `日本語-${outboundGid}`,
+              tags: ["artist:fixture", "language:english"],
+              unknown_upstream_field: { source: "fixture", value: 7 }
+            }] }
     const responseBody = mode === "numeric-exact"
       ? `{"gmetadata":[{"gid":${outboundGid},"token":${JSON.stringify(token)},"title":"title-${outboundGid}","title_jpn":"日本語-${outboundGid}","tags":["artist:fixture","language:english"],"unknown_upstream_field":{"source":"fixture","value":7}}]}`
       : JSON.stringify(bodyForMode)
@@ -341,6 +348,36 @@ describe("durable EH metadata refresh", () => {
     const result = await fetchEhMetadata({ gid: "12345", token: "fixture-token" })
 
     expect(result).toMatchObject({ kind: "failure", error: "metadata upstream request failed", retryable: true })
+    await upstream.close()
+  })
+
+  it("refreshes zero-padded and large decimal GIDs without changing entry identity", async () => {
+    const upstream = await startFixture()
+    const dbPath = await makeTempDbPath()
+    dbPaths.add(dbPath)
+    process.env.HENSHIN_EH_GDATA_URL = upstream.baseUrl
+    const server = await startServer(dbPath)
+    servers.push(server)
+    const [entry] = await indexTwoEntries(server)
+    if (entry === undefined) throw new Error("expected indexed entry")
+
+    await bind(server, entry.entry_id, "000123", "1")
+    const padded = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).ehRefresh({ payload: { source: "EH", gid: "000123" } })
+    }))
+    expect(padded.data.metadata.status).toBe("ready")
+    expect(upstream.rawBodies[0]).toContain('"gidlist":[[123,"fixture-token"]]')
+    expect((await readEntry(server, entry.entry_id)).data.binding?.gid).toBe("000123")
+
+    const rebound = await bind(server, entry.entry_id, "9007199254740993", "2")
+    expect(rebound.data.entry.binding?.gid).toBe("9007199254740993")
+    upstream.setMode("exact")
+    const large = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).ehRefresh({ payload: { source: "EH", gid: "9007199254740993" } })
+    }))
+    expect(large.data.metadata.status).toBe("ready")
+    expect(upstream.rawBodies[1]).toContain('"gidlist":[[9007199254740993,"fixture-token"]]')
+    expect((await readEntry(server, entry.entry_id)).data.binding?.gid).toBe("9007199254740993")
     await upstream.close()
   })
 

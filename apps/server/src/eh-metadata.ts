@@ -54,11 +54,13 @@ const retryAfterMilliseconds = (value: string | null, now: number): number | und
   return Number.isFinite(date) && Number.isFinite(milliseconds) ? Math.max(0, milliseconds) : undefined
 }
 
-const decimalJsonNumber = (gid: string): string | null =>
-  /^(?:0|[1-9][0-9]*)$/u.test(gid) && gid.length <= 20 ? gid : null
+const canonicalDecimalGid = (gid: string): string | null => {
+  if (!/^[0-9]{1,20}$/u.test(gid)) return null
+  return gid.replace(/^0+(?=\d)/u, "")
+}
 
 const requestBody = (locator: EhMetadataLocator): string | null => {
-  const gid = decimalJsonNumber(locator.gid)
+  const gid = canonicalDecimalGid(locator.gid)
   return gid === null
     ? null
     : `{"method":"gdata","namespace":1,"gidlist":[[${gid},${JSON.stringify(locator.token)}]]}`
@@ -146,12 +148,16 @@ export const fetchEhMetadata = async (locator: EhMetadataLocator): Promise<EhMet
     if (decoded === null || decoded.gmetadata.length !== 1) return failure("metadata upstream returned an invalid item set")
     const item = decoded.gmetadata[0]
     if (item.error !== undefined) return failure(`metadata upstream rejected the gallery: ${item.error}`)
-    const gid = item.gid === undefined
+    const responseGid = item.gid === undefined
       ? undefined
       : typeof item.gid === "number"
         ? Number.isSafeInteger(item.gid) ? String(item.gid) : undefined
         : item.gid
-    if (gid !== locator.gid || item.token !== locator.token) return failure("metadata upstream identity did not match the gallery")
+    if (
+      responseGid === undefined ||
+      canonicalDecimalGid(responseGid) !== canonicalDecimalGid(locator.gid) ||
+      item.token !== locator.token
+    ) return failure("metadata upstream identity did not match the gallery")
     if (item.title === undefined || item.title_jpn === undefined || item.tags === undefined) {
       return failure("metadata upstream omitted required gallery fields")
     }

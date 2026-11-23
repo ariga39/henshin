@@ -116,14 +116,15 @@ describe("private Library entry notes", () => {
     await bind(first.entry_id, "1")
     await bind(second.entry_id, "1")
 
+    const setTitlePayload = {
+      operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+      expected_decision_version: "2",
+      command: { type: "set-personal-title" as const, title: "Title survives note clearing" }
+    }
     const titled = await withClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).entryCommand({
         params: { id: first.entry_id },
-        payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-          expected_decision_version: "2",
-          command: { type: "set-personal-title", title: "Title survives note clearing" }
-        }
+        payload: setTitlePayload
       })
     }))
     expect(titled.data.entry.title_override).toBe("Title survives note clearing")
@@ -153,6 +154,40 @@ describe("private Library entry notes", () => {
     }))
     expect(setFirst.data.entry.note).toMatchObject({ text: "first book note", revision: "1" })
     expect(setSecond.data.entry.note).toMatchObject({ text: "second book note", revision: "1" })
+
+    const eraseMetadataFromRecordedResult = (operationId: string) => {
+      const legacyDb = new DatabaseSync(server.dbPath)
+      const row = legacyDb.prepare(
+        "SELECT result FROM entry_operations WHERE epoch = ? AND operation_id = ?"
+      ).get(server.epoch, operationId) as { result: string } | undefined
+      if (row === undefined) throw new Error("expected recorded entry command result")
+      const result = JSON.parse(row.result) as { entry: Record<string, unknown> }
+      delete result.entry.metadata
+      legacyDb.prepare(
+        "UPDATE entry_operations SET result = ? WHERE epoch = ? AND operation_id = ?"
+      ).run(JSON.stringify(result), server.epoch, operationId)
+      legacyDb.close()
+    }
+    eraseMetadataFromRecordedResult(setTitlePayload.operation_id)
+    const legacyTitleReplay = await withClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: first.entry_id }, payload: setTitlePayload
+      })
+    }))
+    expect(legacyTitleReplay.data).toEqual({
+      ...titled.data,
+      entry: { ...titled.data.entry, metadata: null }
+    })
+    eraseMetadataFromRecordedResult(setFirstPayload.operation_id)
+    const legacyNoteReplay = await withClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: first.entry_id }, payload: setFirstPayload
+      })
+    }))
+    expect(legacyNoteReplay.data).toEqual({
+      ...setFirst.data,
+      entry: { ...setFirst.data.entry, metadata: null }
+    })
 
     const staleRead = await withClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).entry({ params: { id: second.entry_id } })
