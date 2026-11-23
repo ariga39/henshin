@@ -6,7 +6,7 @@ import { App } from "./App"
 import { LibraryScreen } from "./Library"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { loadConnectionStatus, loadLibraryConnectionStatus, loadRootWorkspace } from "./workflows"
+import { loadConnectionStatus, loadLibraryWorkspace } from "./workflows"
 
 const container = document.getElementById("root")
 if (container === null) throw new Error("missing #root container")
@@ -20,10 +20,7 @@ const Root = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   useEffect(() => {
     if (prototype) void runtime.runPromise(loadConnectionStatus)
-    else {
-      void runtime.runPromise(loadLibraryConnectionStatus)
-      void runtime.runPromise(loadRootWorkspace)
-    }
+    else void runtime.runPromise(loadLibraryWorkspace)
   }, [])
   return prototype ? <App /> : state.screen === "library" ? <LibraryScreen /> : <RootPreviewScreen />
 }

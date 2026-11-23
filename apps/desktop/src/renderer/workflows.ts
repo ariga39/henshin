@@ -1704,6 +1704,11 @@ export const loadLibraryConnectionStatus = Effect.gen(function*() {
   }
 })
 
+export const loadLibraryWorkspace = Effect.gen(function*() {
+  yield* loadLibraryConnectionStatus
+  yield* loadRootWorkspace
+})
+
 export const disconnectLibrary = Effect.gen(function*() {
   const client = yield* ConnectionClient
   const connectionGeneration = viewStore.beginConnectionTransition("disconnected")
@@ -1712,13 +1717,21 @@ export const disconnectLibrary = Effect.gen(function*() {
     yield* Effect.sync(() => {
       viewStore.publishConnection(result.data, connectionGeneration)
       const state = viewStore.getState()
-      if (state.library_query.trim() === "" && state.library_entries.length > 0) {
-        viewStore.set({
-          library_freshness: state.library_freshness === null
-            ? null
-            : { ...state.library_freshness, source: "cached", stale: true, partial: true }
-        })
-      }
+      const filtered = state.library_query.trim() !== ""
+      viewStore.set(filtered
+        ? {
+            library_entries: [],
+            library_cursor: null,
+            library_has_more: false,
+            library_freshness: null,
+            library_status: "error",
+            library_error: "Filtered Library results were cleared while disconnected. Reconnect to search again."
+          }
+        : {
+            library_freshness: state.library_freshness === null
+              ? null
+              : { ...state.library_freshness, source: "cached", stale: true, partial: true }
+          })
     })
   } else if (isCurrent(connectionGeneration)) {
     yield* Effect.sync(() => viewStore.set({ library_error: result.error.message }))
@@ -1735,7 +1748,15 @@ export const reconnectLibrary = Effect.gen(function*() {
       yield* Effect.sync(() => viewStore.publishConnection(status.data, connectionGeneration))
     }
     if (isCurrent(connectionGeneration)) {
-      yield* Effect.sync(() => viewStore.set({ library_error: result.error.message }))
+      yield* Effect.sync(() => {
+        const state = viewStore.getState()
+        viewStore.set({
+          library_error: result.error.message,
+          ...(state.library_query.trim() === "" && state.library_entries.length > 0 && state.library_freshness !== null
+            ? { library_freshness: { ...state.library_freshness, source: "cached", stale: true, partial: true } }
+            : {})
+        })
+      })
     }
     return
   }

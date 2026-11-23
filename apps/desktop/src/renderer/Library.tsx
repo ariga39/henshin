@@ -220,6 +220,11 @@ export const LibraryScreen = () => {
         {state.connection.state === "disconnected" && (
           <p>Server network work is paused; cached Library data is available only for this verified server.</p>
         )}
+        {state.connection.state === "blocked" && (
+          <p role="alert" data-testid="library-connection-error">
+            Reconnection failed: {state.library_error ?? "the server is unavailable"}. Check the server and try again.
+          </p>
+        )}
         <button
           data-testid="library-reconnect"
           disabled={state.connection.state === "connecting"}
