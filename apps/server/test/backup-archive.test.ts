@@ -7,7 +7,9 @@ import path from "node:path"
 import { promisify } from "node:util"
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js"
 import { afterEach, describe, expect, it } from "vitest"
+import serverPackage from "../package.json"
 import { createBackupArchive, type BackupArchiveContext } from "../src/maintenance/BackupArchive"
+import { startServer } from "./support/server-process"
 
 const execFile = promisify(execFileCallback)
 const SERVER_PATH = path.resolve("apps/server/dist/server.mjs")
@@ -154,12 +156,12 @@ describe("server backup archive", () => {
     })
     await stat(path.join(dataDir, ".henshin-server-auth.sqlite"))
     const database = new DatabaseSync(path.join(dataDir, "server.sqlite"))
+    const entryId = randomUUID()
     try {
       const library = database.prepare("SELECT library_id FROM server_library WHERE id = 1").get() as { library_id: string }
       const identity = await stat(collection)
       const canonicalCollection = await realpath(collection)
       const rootId = randomUUID()
-      const entryId = randomUUID()
       database.prepare(`
         INSERT INTO server_roots(
           library_id, root_id, label, selected_path, canonical_path, device, inode,
@@ -182,9 +184,27 @@ describe("server backup archive", () => {
         ) VALUES (?, (SELECT instance_id FROM server_state WHERE id = 1), ?, 'fixture', 1, 1, ?, ?)
       `).run(randomUUID(), entryId, Date.now(), Date.now())
       database.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1").run()
+      database.prepare("UPDATE server_state SET schema_version = 9 WHERE id = 1").run()
     } finally {
       database.close()
     }
+
+    const recovered = await startServer(path.join(dataDir, "server.sqlite"))
+    await recovered.stop()
+    const recoveredDatabase = new DatabaseSync(path.join(dataDir, "server.sqlite"), { readOnly: true })
+    try {
+      expect((recoveredDatabase.prepare("SELECT schema_version FROM server_state WHERE id = 1").get() as { schema_version: number }).schema_version)
+        .toBe(10)
+      expect((recoveredDatabase.prepare("SELECT title_search, basename_search FROM library_entries WHERE entry_id = ?").get(entryId) as {
+        title_search: string
+        basename_search: string
+      })).toMatchObject({ title_search: "book", basename_search: "book.cbz" })
+    } finally {
+      recoveredDatabase.close()
+    }
+
+    const schema10 = await startServer(path.join(dataDir, "server.sqlite"))
+    await schema10.stop()
 
     const created = await run([
       "backup", "create", "--data-dir", dataDir, "--destination-id", saved.destination_id,
@@ -207,7 +227,11 @@ describe("server backup archive", () => {
     const manifest = JSON.parse(new TextDecoder().decode(payloads.get("manifest.json"))) as {
       payloads: Record<string, { size_bytes: number; sha256: string }>
       library_id: string
+      application_version: string
+      schema_version: number
     }
+    expect(manifest.application_version).toBe(serverPackage.version)
+    expect(manifest.schema_version).toBe(10)
     for (const name of ["state.sqlite", "configuration.json"]) {
       const payload = payloads.get(name)
       if (payload === undefined) throw new Error(`missing ${name}`)

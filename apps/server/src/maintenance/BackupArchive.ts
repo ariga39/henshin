@@ -2,6 +2,7 @@ import { backup, DatabaseSync } from "node:sqlite"
 import { createHash, randomUUID } from "node:crypto"
 import { chmod, lstat, mkdir, mkdtemp, open, realpath, rename, rm, stat } from "node:fs/promises"
 import { join, dirname } from "node:path"
+import serverPackage from "../../package.json"
 import {
   Reader,
   Uint8ArrayReader,
@@ -359,7 +360,7 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
       store_kind: "server",
       instance_id: configuration.instance_id,
       library_id: configuration.library_id,
-      application_version: "0.0.0",
+      application_version: serverPackage.version,
       schema_version: configuration.schema_version,
       snapshot_started_at: snapshotStartedAt,
       snapshot_completed_at: new Date().toISOString(),
