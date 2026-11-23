@@ -393,6 +393,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
           rootId: task.root_id,
           mappingRevision: task.mapping_revision,
           expectedPolicyRevision: root.policyRevision,
+          observedPaths: discovered.value.candidates.map((candidate) => candidate.relativePath),
           observedCandidatePaths: verifiedCandidatePaths
         })
         switch (published.kind) {

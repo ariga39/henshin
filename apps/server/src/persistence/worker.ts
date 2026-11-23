@@ -423,7 +423,9 @@ db.exec(`
     manifest_json TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    accepted_observation_json TEXT
+    accepted_observation_json TEXT,
+    availability_status TEXT NOT NULL DEFAULT 'unknown' CHECK (availability_status IN ('present', 'missing', 'inaccessible', 'unknown')),
+    availability_observed_at_ms INTEGER
   );
   CREATE UNIQUE INDEX IF NOT EXISTS library_entries_current_location_unique
     ON library_entries(root_id, relative_path)
@@ -639,6 +641,18 @@ if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("deta
   }
 }
 
+const currentLibraryEntryColumns = new Set(
+  (db.prepare("PRAGMA table_info(library_entries)").all() as unknown as ReadonlyArray<{ name: string }>).map(
+    (column) => column.name
+  )
+)
+if (!currentLibraryEntryColumns.has("availability_status")) {
+  db.exec("ALTER TABLE library_entries ADD COLUMN availability_status TEXT NOT NULL DEFAULT 'unknown' CHECK (availability_status IN ('present', 'missing', 'inaccessible', 'unknown'))")
+}
+if (!currentLibraryEntryColumns.has("availability_observed_at_ms")) {
+  db.exec("ALTER TABLE library_entries ADD COLUMN availability_observed_at_ms INTEGER")
+}
+
 const needsSummaryBackfill = addedAcceptedObservationSummary || addedCandidateObservationSummary ||
   (existingServerState !== undefined && existingServerState.schema_version < CURRENT_SCHEMA_VERSION)
 const needsSearchBackfill = addedSearchColumns ||
@@ -775,7 +789,7 @@ const selectStagedById = db.prepare(
   "SELECT candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms FROM staged_discoveries WHERE candidate_id = ? AND root_id = ?"
 )
 selectStagedById.setReadBigInts(true)
-const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
+const selectEntriesForRoot = db.prepare("SELECT entry_id, relative_path, availability_status, availability_observed_at_ms FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
 const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path, state, decision_version, location_revision, content_version, page_count FROM library_entries WHERE root_id = ? AND relative_path = ? AND state IN ('accepted', 'replacement-pending')")
 const selectEntryResolution = db.prepare(
   "SELECT entry_id, root_id, relative_path, kind, state, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
@@ -784,7 +798,7 @@ selectEntryResolution.setReadBigInts(true)
 const selectStagedForResolution = db.prepare(
   "SELECT kind, analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
-const selectEntryForResolution = db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, decision_version, content_version, location_revision, accepted_observation_json, NULL AS candidate_id, NULL AS candidate_version, NULL AS candidate_kind, NULL AS candidate_analysis_status, NULL AS candidate_observation_json FROM library_entries WHERE entry_id = ? AND root_id = ?")
+const selectEntryForResolution = db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, decision_version, content_version, location_revision, accepted_observation_json, availability_status, availability_observed_at_ms, NULL AS candidate_id, NULL AS candidate_version, NULL AS candidate_kind, NULL AS candidate_analysis_status, NULL AS candidate_observation_json FROM library_entries WHERE entry_id = ? AND root_id = ?")
 selectEntryForResolution.setReadBigInts(true)
 const selectResolutionSiblingClaims = db.prepare(
   "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
@@ -811,7 +825,7 @@ const updateEntryStatistics = db.prepare(
   "UPDATE entry_statistics SET open_count = open_count + 1, last_opened_at_ms = CASE WHEN last_opened_at_ms IS NULL OR last_opened_at_ms < ? THEN ? ELSE last_opened_at_ms END WHERE entry_id = ?"
 )
 const insertEntry = db.prepare(
-  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, title_search, basename_search, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms, accepted_observation_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?, ?)"
+  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, title_search, basename_search, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms, accepted_observation_json, availability_status, availability_observed_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?, ?, 'present', ?)"
 )
 const markEntryPending = db.prepare(
   "UPDATE library_entries SET state = 'replacement-pending', updated_at_ms = ? WHERE entry_id = ? AND state = 'accepted'"
@@ -839,6 +853,7 @@ const selectLibraryEntries = (
     ? `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
          e.title_search, e.basename_search,
          e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
+         e.availability_status, e.availability_observed_at_ms,
          CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
          s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
          s.candidate_observation_json
@@ -849,6 +864,7 @@ const selectLibraryEntries = (
     : `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
          e.title_search, e.basename_search,
          e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
+         e.availability_status, e.availability_observed_at_ms,
          CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
          s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
          s.candidate_observation_json
@@ -1783,6 +1799,8 @@ const entryRow = (row: {
   decision_version: bigint
   content_version: bigint
   location_revision: bigint
+  availability_status: "present" | "missing" | "inaccessible" | "unknown"
+  availability_observed_at_ms: bigint | null
   accepted_observation_json: string | null
   candidate_id: string | null
   candidate_version: bigint | null
@@ -1807,6 +1825,10 @@ const entryRow = (row: {
         ...(row.title_search.includes(query) ? ["title" as const] : []),
         ...(row.basename_search.includes(query) ? ["basename" as const] : [])
       ],
+  availability: {
+    status: row.availability_status,
+    observed_at_ms: row.availability_observed_at_ms === null ? null : Number(row.availability_observed_at_ms)
+  },
   replacement: row.candidate_id === null || row.candidate_version === null || row.candidate_kind === null || row.candidate_analysis_status === null || row.accepted_observation_json === null || row.candidate_observation_json === null
     ? null
     : {
@@ -1847,7 +1869,8 @@ const titleForCandidate = (relativePath: string, kind: "archive" | "image-direct
 }
 
 const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalScan" }>): import("./worker-protocol").NormalPublishOutcome => {
-  const observed = new Set(request.observedCandidatePaths)
+  const observed = new Set(request.observedPaths)
+  const observedCandidates = new Set(request.observedCandidatePaths)
   db.exec("BEGIN IMMEDIATE")
   try {
     const root = rootById(request.rootId)
@@ -1869,10 +1892,27 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
         ? exclusion.path === relativePath
         : relativePath === exclusion.path || relativePath.startsWith(`${exclusion.path}/`)
     )
-    const existingPaths = (selectEntriesForRoot.all(request.rootId) as unknown as ReadonlyArray<{ relative_path: string }>)
-      .map((row) => row.relative_path)
+    const existingEntries = selectEntriesForRoot.all(request.rootId) as unknown as ReadonlyArray<{
+      entry_id: string
+      relative_path: string
+      availability_status: "present" | "missing" | "inaccessible" | "unknown"
+      availability_observed_at_ms: number | null
+    }>
+    const existingPaths = existingEntries.map((row) => row.relative_path)
     const missingPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && !isExcluded(relativePath))
     const excludedPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && isExcluded(relativePath))
+    const observedAtMs = Date.now()
+    let availabilityChanged = false
+    for (const entry of existingEntries) {
+      if (isExcluded(entry.relative_path)) continue
+      const status = observed.has(entry.relative_path) ? "present" : "missing"
+      if (entry.availability_status !== status || entry.availability_observed_at_ms !== observedAtMs) {
+        db.prepare(
+          "UPDATE library_entries SET availability_status = ?, availability_observed_at_ms = ?, updated_at_ms = ? WHERE entry_id = ?"
+        ).run(status, observedAtMs, observedAtMs, entry.entry_id)
+        availabilityChanged = true
+      }
+    }
     const staged = db.prepare(
       "SELECT candidate_id, relative_path, kind, manifest_json FROM staged_discoveries WHERE task_id = ? AND root_id = ? AND hold_state = 'eligible' AND analysis_status = 'ready' ORDER BY relative_path ASC"
     ).all(request.taskId, request.rootId) as unknown as ReadonlyArray<{
@@ -1892,7 +1932,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       state: "accepted" | "replacement-pending"
     }>()
     for (const candidate of staged) {
-      if (!observed.has(candidate.relative_path) || candidate.manifest_json === null) continue
+      if (!observedCandidates.has(candidate.relative_path) || candidate.manifest_json === null) continue
       const manifest = JSON.parse(candidate.manifest_json) as { pages?: ReadonlyArray<unknown> }
       const pageCount = Array.isArray(manifest.pages) ? manifest.pages.length : 0
       if (pageCount === 0) continue
@@ -1920,7 +1960,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
     }
     let changed = false
     for (const candidate of staged) {
-      if (!observed.has(candidate.relative_path) || candidate.manifest_json === null) continue
+      if (!observedCandidates.has(candidate.relative_path) || candidate.manifest_json === null) continue
       const manifest = JSON.parse(candidate.manifest_json) as { pages?: ReadonlyArray<unknown> }
       const pageCount = Array.isArray(manifest.pages) ? manifest.pages.length : 0
       if (pageCount === 0) continue
@@ -1963,17 +2003,19 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
         normalizeSearchText(searchBasename(candidate.relative_path)),
         BigInt(pageCount),
         candidate.manifest_json,
+        observedAtMs,
         Date.now(),
-        Date.now(),
-        JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind))
+        JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind)),
+        observedAtMs
       )
       deleteStaged.run(candidate.candidate_id)
       changed = true
     }
-    if (changed) bumpLibraryRevision.run()
-    if (missingPaths.length > 0 || changedPaths.length > 0) {
-      const stagedPaths = (selectStagedPathsForRoot.all(request.rootId) as unknown as ReadonlyArray<{ relative_path: string }>)
-        .map((row) => row.relative_path)
+    if (changed || availabilityChanged) bumpLibraryRevision.run()
+    const stagedPaths = (selectStagedPathsForRoot.all(request.rootId) as unknown as ReadonlyArray<{ relative_path: string }>)
+      .map((row) => row.relative_path)
+    const allocationDeferred = missingPaths.length > 0 && stagedPaths.length > 0 || changedPaths.length > 0
+    if (allocationDeferred) {
       const reviewPaths = new Set([...stagedPaths, ...missingPaths, ...changedPaths])
       db.exec("COMMIT")
       return {
@@ -2040,6 +2082,8 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
     decision_version: bigint
     content_version: bigint
     location_revision: bigint
+    availability_status: "present" | "missing" | "inaccessible" | "unknown"
+    availability_observed_at_ms: bigint | null
     accepted_observation_json: string | null
     candidate_id: string | null
     candidate_version: bigint | null

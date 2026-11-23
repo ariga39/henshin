@@ -775,6 +775,7 @@ describe("held scan renderer workflows", () => {
       content_version: "1",
       location_revision: "1",
       match_fields: [],
+      availability: { status: "present" as const, observed_at_ms: 1 },
       replacement: null
     }
     const appended = {

@@ -1,5 +1,5 @@
 import { Schema } from "effect"
-import { INDEXED_ROOT_SAMPLE_LIMIT } from "@henshin/contracts"
+import { INDEXED_ROOT_SAMPLE_LIMIT, ServerAvailability } from "@henshin/contracts"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import { OpenEvent, OpenEventOutcome } from "@henshin/contracts/event"
 import { RootExclusions, RootPolicyCommand, RootRelativePath, ScanManifestObservation, ScanManifestPage } from "@henshin/contracts/root"
@@ -143,6 +143,7 @@ export const LibraryEntryRow = Schema.Struct({
   content_version: Revision,
   location_revision: Revision,
   match_fields: Schema.Array(Schema.Literals(["title", "basename"])),
+  availability: ServerAvailability,
   cover: Schema.NullOr(ThumbnailReference),
   replacement: Schema.NullOr(ReplacementComparison)
 })
@@ -396,6 +397,7 @@ export const WorkerRequest = Schema.Union([
     rootId: Uuid,
     mappingRevision: Revision,
     expectedPolicyRevision: Revision,
+    observedPaths: Schema.Array(Schema.String),
     observedCandidatePaths: Schema.Array(Schema.String)
   }),
   Schema.Struct({
