@@ -119,5 +119,6 @@ keeps the database instance ID and creates a new authority epoch.
 To reuse a database created by managed desktop mode, select its existing file
 explicitly on both commands, for example
 `--database "$PWD/.henshin-server-data/managed-library.db"`. A data directory
-containing a non-default database is not silently paired with a new empty
-`server.sqlite` library.
+with any recognized non-default database requires explicit `--database`
+selection and is never silently paired with a new empty `server.sqlite`
+library.

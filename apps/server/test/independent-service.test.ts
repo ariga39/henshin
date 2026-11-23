@@ -1,5 +1,5 @@
 import { createServer } from "node:http"
-import { readFile, mkdtemp, rm, stat } from "node:fs/promises"
+import { access, readFile, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
@@ -152,6 +152,13 @@ const stopServer = async (server: RunningServer): Promise<void> => {
   await expect(waitForExit(server.child, EXIT_TIMEOUT_MS)).resolves.toEqual({ code: 130, signal: null })
 }
 
+const expectUsageFailure = async (args: ReadonlyArray<string>): Promise<void> => {
+  const attempt = launch(args)
+  await expect(waitForExit(attempt.child, EXIT_TIMEOUT_MS)).resolves.toEqual({ code: 2, signal: null })
+  expect(attempt.stdout()).toBe("")
+  expect(attempt.stderr()).toContain("usage: server.mjs")
+}
+
 afterEach(async () => {
   for (const attempt of attempts) {
     if (attempt.child.exitCode === null && attempt.child.signalCode === null) {
@@ -220,7 +227,7 @@ describe("independent foreground service", () => {
   it("requires explicit database selection when a managed database is not server.sqlite", async () => {
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "henshin-managed-reuse-"))
     dataDirectories.add(dataDir)
-    const database = path.join(dataDir, "managed-library.db")
+    const database = path.join(dataDir, "Library.DB")
     const initialized = await initializeOwner(["--database", database])
     const port = await freeLoopbackPort()
     const server = await startServer(["--database", database], port)
@@ -235,9 +242,42 @@ describe("independent foreground service", () => {
       const result = await waitForExit(ambiguous.child, EXIT_TIMEOUT_MS)
       expect(result).toEqual({ code: 1, signal: null })
       expect(ambiguous.stdout()).not.toContain('"event":"ready"')
-      expect(ambiguous.stderr()).toContain("explicit --database selection")
+      expect(ambiguous.stderr()).toContain("existing database requires explicit --database selection")
     } finally {
       if (server.child.exitCode === null && server.child.signalCode === null) await stopServer(server)
     }
+  })
+
+  it("detects a symlinked database candidate without creating the default", async () => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "henshin-symlink-guard-"))
+    const targetDir = await mkdtemp(path.join(os.tmpdir(), "henshin-symlink-target-"))
+    const target = path.join(targetDir, "real-library.sqlite")
+    const link = path.join(dataDir, "Library.SQLITE")
+    dataDirectories.add(dataDir)
+    dataDirectories.add(targetDir)
+    await writeFile(target, "fixture")
+    await symlink(target, link)
+
+    const attempt = launch(["--data-dir", dataDir, "--port", String(await freeLoopbackPort())])
+    await expect(waitForExit(attempt.child, EXIT_TIMEOUT_MS)).resolves.toEqual({ code: 1, signal: null })
+    expect(attempt.stderr()).toContain("existing database requires explicit --database selection")
+    await expect(access(path.join(dataDir, "server.sqlite"))).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("does not turn a dangling database symlink into a new default library", async () => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "henshin-dangling-guard-"))
+    const link = path.join(dataDir, "Library.DB")
+    dataDirectories.add(dataDir)
+    await symlink(path.join(dataDir, "missing.sqlite"), link)
+
+    const attempt = launch(["--data-dir", dataDir, "--port", String(await freeLoopbackPort())])
+    await expect(waitForExit(attempt.child, EXIT_TIMEOUT_MS)).resolves.toEqual({ code: 1, signal: null })
+    expect(attempt.stderr()).toContain("existing database requires explicit --database selection")
+    await expect(access(path.join(dataDir, "server.sqlite"))).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("rejects empty data-directory and database values", async () => {
+    await expectUsageFailure(["--data-dir", ""])
+    await expectUsageFailure(["--database", ""])
   })
 })

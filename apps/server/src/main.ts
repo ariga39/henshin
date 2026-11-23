@@ -52,11 +52,15 @@ const parseIndependentOptions = (args: ReadonlyArray<string>): IndependentOption
     switch (args[index]) {
       case "--data-dir":
         dataDir = args[++index]
-        if (dataDir === undefined || dataDir.startsWith("--")) throw new Error(usage())
+        if (dataDir === undefined || dataDir.length === 0 || dataDir.startsWith("--")) {
+          throw new Error(usage())
+        }
         break
       case "--database":
         database = args[++index]
-        if (database === undefined || database.startsWith("--")) throw new Error(usage())
+        if (database === undefined || database.length === 0 || database.startsWith("--")) {
+          throw new Error(usage())
+        }
         break
       case "--port": {
         const value = args[++index]
@@ -91,27 +95,34 @@ const resolveIndependentDatabasePath = async (options: IndependentOptions): Prom
   if (dataDir === undefined) throw new Error(usage())
 
   const defaultPath = path.join(dataDir, "server.sqlite")
+  let defaultExists = true
   try {
     await lstat(defaultPath)
-    return canonicalizeDatabasePath(defaultPath)
   } catch (error) {
     if (!isMissingPath(error)) throw error
+    defaultExists = false
   }
+  if (defaultExists) return canonicalizeDatabasePath(defaultPath)
 
+  let candidates: ReadonlyArray<string>
   try {
-    const candidates = (await readdir(dataDir, { withFileTypes: true }))
+    candidates = (await readdir(dataDir, { withFileTypes: true }))
       .filter(
         (entry) =>
-          entry.isFile() && !entry.name.startsWith(".") && /\.(?:db|sqlite|sqlite3)$/u.test(entry.name)
+          entry.name !== ".henshin-server-auth.sqlite" &&
+          entry.name !== ".henshin-server-owner.sqlite" &&
+          (entry.isFile() || entry.isSymbolicLink()) &&
+          /\.(?:db|sqlite|sqlite3)$/iu.test(entry.name)
       )
       .map((entry) => entry.name)
-    if (candidates.length > 0) {
-      throw new Error(
-        "server startup failed at data-directory: existing database requires explicit --database selection"
-      )
-    }
   } catch (error) {
-    if (!isMissingPath(error)) throw error
+    if (isMissingPath(error)) return canonicalizeDatabasePath(defaultPath)
+    throw error
+  }
+  if (candidates.length > 0) {
+    throw new Error(
+      "server startup failed at data-directory: existing database requires explicit --database selection"
+    )
   }
   return canonicalizeDatabasePath(defaultPath)
 }
