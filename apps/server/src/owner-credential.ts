@@ -25,7 +25,8 @@ const verifyPath = async (filePath: string, create: boolean): Promise<void> => {
       throw new OwnerCredentialError("server startup failed at authentication: owner credential state is unavailable")
     }
   } catch (error) {
-    if (!create || !isMissingPath(error)) throw error
+    if (!isMissingPath(error)) throw error
+    if (!create) throw new OwnerCredentialError("owner credential is not initialized; run --initialize-owner")
   }
 }
 const openAuthDatabase = async (dbPath: string, create: boolean): Promise<DatabaseSync> => {
@@ -66,7 +67,12 @@ export const writeOwnerCredential = async (dbPath: string, command: "initialize"
       if (!inserted.changes) throw new OwnerCredentialError("server initialization failed: owner credential is already initialized")
     } else {
       const updated = database.prepare("UPDATE owner_credential SET verifier = ? WHERE id = 1 AND database_name = ?").run(verifier, name)
-      if (!updated.changes) throw new OwnerCredentialError("owner rotation requires an initialized credential for the selected database")
+      if (!updated.changes) {
+        const owner = database.prepare("SELECT id FROM owner_credential WHERE id = 1").get()
+        throw new OwnerCredentialError(owner
+          ? "owner credential belongs to another database; select it with --database"
+          : "owner credential is not initialized; run --initialize-owner")
+      }
     }
     return token
   } finally {
@@ -77,18 +83,7 @@ export const writeOwnerCredential = async (dbPath: string, command: "initialize"
 export const readOwnerCredential = async (
   dbPath: string
 ): Promise<{ readonly verifier: string; readonly databaseName: string }> => {
-  let database: DatabaseSync
-  try {
-    database = await openAuthDatabase(dbPath, false)
-  } catch (error) {
-    if (isMissingPath(error)) {
-      throw new OwnerCredentialError(
-        "server startup failed at authentication: owner credential is not initialized"
-      )
-    }
-    throw error
-  }
-
+  const database = await openAuthDatabase(dbPath, false)
   try {
     const row = database.prepare("SELECT verifier, database_name FROM owner_credential WHERE id = 1").get() as
       | { verifier: string; database_name: string }

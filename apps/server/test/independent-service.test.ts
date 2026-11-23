@@ -229,7 +229,13 @@ describe("independent foreground service", () => {
     dataDirectories.add(dataDir)
     const selection = ["--data-dir", dataDir]
     const port = await freeLoopbackPort()
+    const uninitialized = launch([...selection, "--rotate-owner"])
+    expect((await waitForExit(uninitialized.child, EXIT_TIMEOUT_MS)).code).toBe(1)
+    expect(uninitialized.stderr()).toContain("--initialize-owner")
     const { token } = await initializeOwner(selection)
+    const wrongLibrary = launch(["--database", path.join(dataDir, "other.db"), "--rotate-owner"])
+    expect((await waitForExit(wrongLibrary.child, EXIT_TIMEOUT_MS)).code).toBe(1)
+    expect(wrongLibrary.stderr()).toContain("belongs to another database")
     const first = await startServer(selection, port)
     const handshake = (server: RunningServer, secret: string) => fetch(server.baseUrl + "/prototype/v1/handshake", {
       headers: { authorization: "Bearer " + secret }
