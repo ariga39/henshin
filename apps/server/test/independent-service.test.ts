@@ -174,12 +174,13 @@ interface WindowsAclSnapshot {
 }
 
 const WINDOWS_ACL_SCRIPT = `$ErrorActionPreference = 'Stop'
-$acl = Get-Acl -LiteralPath $env:HENSHIN_AUTH_PATH
-$ownerSid = ([System.Security.Principal.NTAccount]::new($acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+$sidType = [System.Security.Principal.SecurityIdentifier]
+$acl = [System.IO.File]::GetAccessControl($env:HENSHIN_AUTH_PATH)
+$ownerSid = $acl.GetOwner($sidType).Value
 $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$rules = @($acl.Access | ForEach-Object {
+$rules = @($acl.GetAccessRules($true, $true, $sidType) | ForEach-Object {
   [pscustomobject]@{
-    sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    sid = $_.IdentityReference.Value
     type = $_.AccessControlType.ToString()
     rightsValue = [int64]$_.FileSystemRights
   }
