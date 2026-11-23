@@ -179,12 +179,12 @@ $ownerSid = ([System.Security.Principal.NTAccount]::new($acl.Owner)).Translate([
 $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $rules = @($acl.Access | ForEach-Object {
   [pscustomobject]@{
-    Sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-    Type = $_.AccessControlType.ToString()
-    RightsValue = [int64]$_.FileSystemRights
+    sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    type = $_.AccessControlType.ToString()
+    rightsValue = [int64]$_.FileSystemRights
   }
 })
-[pscustomobject]@{ OwnerSid = $ownerSid; CurrentSid = $currentSid; Rules = $rules } |
+[pscustomobject]@{ ownerSid = $ownerSid; currentSid = $currentSid; rules = $rules } |
   ConvertTo-Json -Compress -Depth 5`
 
 const expectProtectedOwnerState = async (authPath: string): Promise<void> => {
