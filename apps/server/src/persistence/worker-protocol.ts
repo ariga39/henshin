@@ -697,7 +697,9 @@ export const WorkerRequest = Schema.Union([
         kind: Schema.Literal("success"),
         title: Schema.String,
         titleJpn: Schema.String,
-        tags: Schema.Array(Schema.String)
+        tags: Schema.Array(Schema.String),
+        rawResponse: Schema.String.check(Schema.isMaxLength(256 * 1024)),
+        retrievedAtMs: Schema.Int
       }),
       Schema.Struct({ kind: Schema.Literal("failure"), error: Schema.String })
     ])

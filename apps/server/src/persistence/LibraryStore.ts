@@ -122,7 +122,14 @@ export class LibraryStore extends Context.Service<
       readonly galleryId: string
       readonly refreshRevision: string
       readonly outcome:
-        | { readonly kind: "success"; readonly title: string; readonly titleJpn: string; readonly tags: ReadonlyArray<string> }
+        | {
+            readonly kind: "success"
+            readonly title: string
+            readonly titleJpn: string
+            readonly tags: ReadonlyArray<string>
+            readonly rawResponse: string
+            readonly retrievedAtMs: number
+          }
         | { readonly kind: "failure"; readonly error: string }
     }) => Effect.Effect<typeof EhRefreshFinishOutcome.Type, DatabaseWorkerError>
     readonly indexedRootSamples: (rootId: string) => Effect.Effect<IndexedRootSamplePage, DatabaseWorkerError>

@@ -20,7 +20,14 @@ export interface EhMetadataLocator {
 }
 
 export type EhMetadataFetchResult =
-  | { readonly kind: "success"; readonly title: string; readonly titleJpn: string; readonly tags: ReadonlyArray<string> }
+  | {
+      readonly kind: "success"
+      readonly title: string
+      readonly titleJpn: string
+      readonly tags: ReadonlyArray<string>
+      readonly rawResponse: string
+      readonly retrievedAtMs: number
+    }
   | {
       readonly kind: "failure"
       readonly error: string
@@ -161,7 +168,14 @@ export const fetchEhMetadata = async (locator: EhMetadataLocator): Promise<EhMet
     if (item.title === undefined || item.title_jpn === undefined || item.tags === undefined) {
       return failure("metadata upstream omitted required gallery fields")
     }
-    return { kind: "success", title: item.title, titleJpn: item.title_jpn, tags: item.tags }
+    return {
+      kind: "success",
+      title: item.title,
+      titleJpn: item.title_jpn,
+      tags: item.tags,
+      rawResponse: text,
+      retrievedAtMs: Date.now()
+    }
   } catch (error) {
     return failure(
       error instanceof Error && error.name === "AbortError" ? "metadata upstream timed out" : "metadata upstream request failed",

@@ -176,6 +176,16 @@ const readLibrary = (server: RunningServer) =>
     return yield* (yield* LibraryHttpClient).get()
   }))
 
+const readRawSnapshot = (dbPath: string) => {
+  const db = new DatabaseSync(dbPath)
+  const row = db.prepare(
+    "SELECT metadata_raw_response, metadata_last_success_at_ms FROM galleries WHERE source = 'EH' AND gid = ?"
+  ).get("12345") as { metadata_raw_response: string | null; metadata_last_success_at_ms: number | null } | undefined
+  db.close()
+  if (row === undefined) throw new Error("expected persisted EH metadata snapshot")
+  return row
+}
+
 afterEach(async () => {
   for (const server of servers.splice(0)) await server.stop()
   for (const dbPath of dbPaths) await cleanupTempDb(dbPath)
@@ -464,6 +474,36 @@ describe("durable EH metadata refresh", () => {
     const blockedResult = await blockedRefresh
     expect(blockedResult.data.metadata.status).toBe("ready")
 
+    const successfulSnapshot = readRawSnapshot(server.dbPath)
+    expect(successfulSnapshot.metadata_raw_response).not.toBeNull()
+    expect(JSON.parse(successfulSnapshot.metadata_raw_response ?? "null")).toMatchObject({
+      gmetadata: [{ unknown_upstream_field: { source: "fixture", value: 7 } }]
+    })
+    expect(successfulSnapshot.metadata_last_success_at_ms).toEqual(expect.any(Number))
+    const successfulRawResponse = successfulSnapshot.metadata_raw_response
+    const successfulRetrievedAtMs = successfulSnapshot.metadata_last_success_at_ms
+
+    upstream.setMode("blocked")
+    const requestCountBeforeStale = upstream.requests.length
+    const staleRefresh = withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).ehRefresh({ payload: { source: "EH", gid: "12345" } })
+    }))
+    for (let attempt = 0; attempt < 700 && upstream.requests.length === requestCountBeforeStale; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    expect(upstream.requests).toHaveLength(requestCountBeforeStale + 1)
+    const staleDb = new DatabaseSync(server.dbPath)
+    staleDb.prepare(
+      "UPDATE galleries SET refresh_revision = refresh_revision + 1, metadata_status = 'ready', metadata_error = NULL WHERE source = 'EH' AND gid = ?"
+    ).run("12345")
+    staleDb.close()
+    upstream.release()
+    await staleRefresh
+    expect(readRawSnapshot(server.dbPath)).toEqual({
+      metadata_raw_response: successfulRawResponse,
+      metadata_last_success_at_ms: successfulRetrievedAtMs
+    })
+
     upstream.setMode("malformed")
     const failed = await withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).ehRefresh({ payload: { source: "EH", gid: "12345" } })
@@ -483,6 +523,11 @@ describe("durable EH metadata refresh", () => {
       return yield* (yield* LibraryHttpClient).ehRefresh({ payload: { source: "EH", gid: "12345" } })
     }))
     expect(bareError.data.metadata.latest_error).toBe("metadata upstream rejected the gallery: fixture blocked")
+    const afterFailures = readRawSnapshot(server.dbPath)
+    expect(afterFailures).toEqual({
+      metadata_raw_response: successfulRawResponse,
+      metadata_last_success_at_ms: successfulRetrievedAtMs
+    })
     await server.stop()
     servers.splice(servers.indexOf(server), 1)
     const restarted = await startServer(dbPath)
@@ -492,6 +537,11 @@ describe("durable EH metadata refresh", () => {
       title: "title-12345",
       tags: refreshed.data.metadata.tags,
       latest_error: "metadata upstream rejected the gallery: fixture blocked"
+    })
+    const afterRestart = readRawSnapshot(dbPath)
+    expect(afterRestart).toEqual({
+      metadata_raw_response: successfulRawResponse,
+      metadata_last_success_at_ms: successfulRetrievedAtMs
     })
     await upstream.close()
   })

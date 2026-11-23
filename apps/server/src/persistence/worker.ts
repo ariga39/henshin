@@ -511,6 +511,7 @@ db.exec(`
     metadata_error TEXT,
     metadata_last_attempt_at_ms INTEGER,
     metadata_last_success_at_ms INTEGER,
+    metadata_raw_response TEXT,
     refresh_revision INTEGER NOT NULL DEFAULT 0,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
@@ -597,6 +598,7 @@ if (!galleryColumns.has("metadata_status")) db.exec("ALTER TABLE galleries ADD C
 if (!galleryColumns.has("metadata_error")) db.exec("ALTER TABLE galleries ADD COLUMN metadata_error TEXT")
 if (!galleryColumns.has("metadata_last_attempt_at_ms")) db.exec("ALTER TABLE galleries ADD COLUMN metadata_last_attempt_at_ms INTEGER")
 if (!galleryColumns.has("metadata_last_success_at_ms")) db.exec("ALTER TABLE galleries ADD COLUMN metadata_last_success_at_ms INTEGER")
+if (!galleryColumns.has("metadata_raw_response")) db.exec("ALTER TABLE galleries ADD COLUMN metadata_raw_response TEXT")
 if (!galleryColumns.has("refresh_revision")) db.exec("ALTER TABLE galleries ADD COLUMN refresh_revision INTEGER NOT NULL DEFAULT 0")
 const addedAcceptedObservationSummary = !libraryEntryColumns.some((column) => column.name === "accepted_observation_json")
 if (addedAcceptedObservationSummary) {
@@ -1121,7 +1123,7 @@ const recoverInterruptedEhRefreshes = db.prepare(
 )
 const finishGalleryRefresh = db.prepare(
   `UPDATE galleries
-      SET metadata_title = ?, metadata_title_jpn = ?, metadata_tags_json = ?,
+      SET metadata_title = ?, metadata_title_jpn = ?, metadata_tags_json = ?, metadata_raw_response = ?,
           metadata_status = ?, metadata_error = ?, metadata_last_success_at_ms = ?, updated_at_ms = ?
     WHERE gallery_id = ? AND refresh_revision = ?`
 )
@@ -2728,9 +2730,10 @@ const finishEhRefresh = (
           request.outcome.title,
           request.outcome.titleJpn,
           JSON.stringify(request.outcome.tags),
+          request.outcome.rawResponse,
           "ready",
           null,
-          now,
+          request.outcome.retrievedAtMs,
           now,
           request.galleryId,
           revision
