@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
-import { chmod, lstat, rm } from "node:fs/promises"
+import { chmod, lstat } from "node:fs/promises"
 import path from "node:path"
 import { promisify } from "node:util"
 import { DatabaseSync } from "node:sqlite"
@@ -12,7 +12,7 @@ const execFileAsync = promisify(execFile)
 const WINDOWS_PROTECT_AUTH_FILE_SCRIPT = `$ErrorActionPreference = 'Stop'
 $path = $env:HENSHIN_AUTH_PATH
 $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$acl = New-Object System.Security.AccessControl.FileSecurity
+$acl = [System.Security.AccessControl.FileSecurity]::new()
 $acl.SetAccessRuleProtection($true, $false)
 $acl.SetOwner($currentSid)
 $rules = @(
@@ -71,24 +71,19 @@ const protectWindowsAuthFile = async (filePath: string, create: boolean): Promis
 
   let createFile = false
   try {
-    try {
-      await lstat(filePath)
-    } catch (error) {
-      if (!isMissingPath(error) || !create) throw error
-      createFile = true
-    }
-    await execFileAsync(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_PROTECT_AUTH_FILE_SCRIPT],
-      {
-        windowsHide: true,
-        env: { ...process.env, HENSHIN_AUTH_PATH: filePath, HENSHIN_AUTH_CREATE: createFile ? "1" : "0" }
-      }
-    )
+    await lstat(filePath)
   } catch (error) {
-    if (createFile) await rm(filePath, { force: true })
-    throw error
+    if (!isMissingPath(error) || !create) throw error
+    createFile = true
   }
+  await execFileAsync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_PROTECT_AUTH_FILE_SCRIPT],
+    {
+      windowsHide: true,
+      env: { ...process.env, HENSHIN_AUTH_PATH: filePath, HENSHIN_AUTH_CREATE: createFile ? "1" : "0" }
+    }
+  )
 }
 
 const openAuthDatabase = async (dbPath: string, create: boolean): Promise<DatabaseSync> => {
