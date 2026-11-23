@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises"
+import { chmod, copyFile, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises"
 import { DatabaseSync } from "node:sqlite"
 import os from "node:os"
 import path from "node:path"
@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto"
 import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import { BlobWriter, Uint8ArrayReader, ZipWriter } from "@zip.js/zip.js"
-import { LibraryHttpClient, ReviewHttpClient, ServerHttpClient, TaskHttpClient, type ScanTask } from "@henshin/contracts"
+import { LibraryHttpClient, OpenEventHttpClient, ReviewHttpClient, ServerHttpClient, TaskHttpClient, type ScanTask } from "@henshin/contracts"
 import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
 
 const servers: RunningServer[] = []
@@ -32,6 +32,9 @@ const withTaskClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E
 
 const withReviewClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, ReviewHttpClient>): Promise<A> =>
   Effect.runPromise(Effect.provide(program, ReviewHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
+
+const withOpenEventClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, OpenEventHttpClient>): Promise<A> =>
+  Effect.runPromise(Effect.provide(program, OpenEventHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
 
 const waitForTerminal = async (server: RunningServer, taskId: string): Promise<ScanTask> => {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -63,11 +66,41 @@ const makeZip = async (archivePath: string): Promise<void> => {
   await writeFile(archivePath, Buffer.from(await blob.arrayBuffer()))
 }
 
-const makeImageBook = async (rootPath: string, name: string): Promise<void> => {
+const makeImageBook = async (rootPath: string, name: string, page = "page"): Promise<void> => {
   const book = path.join(rootPath, name)
   await mkdir(book)
-  await writeFile(path.join(book, "001.jpg"), "page")
+  await writeFile(path.join(book, "001.jpg"), page)
 }
+
+const registerRoot = (server: RunningServer, fixture: string, label: string) => withServerClient(server, Effect.gen(function*() {
+  const client = yield* ServerHttpClient
+  const preview = yield* client.preview({ payload: { path: fixture } })
+  if (!("children" in preview.data)) throw new Error("expected setup preview")
+  return yield* client.save({
+    payload: {
+      operation_id: randomUUID(),
+      instance_id: preview.data.instance_id,
+      epoch: preview.data.epoch,
+      label,
+      path: fixture,
+      preview_identity: preview.data.preview_identity
+    }
+  })
+}))
+
+const scanRoot = (server: RunningServer, root: Awaited<ReturnType<typeof registerRoot>>, holdNewDiscoveries = false) => withServerClient(server, Effect.gen(function*() {
+  return yield* (yield* ServerHttpClient).command({
+    params: { id: root.data.root_id },
+    payload: {
+      operation_id: randomUUID(),
+      instance_id: server.instanceId,
+      epoch: server.epoch,
+      expected_mapping_revision: root.data.mapping_revision,
+      expected_policy_revision: root.data.policy_revision,
+      command: { type: "start-scan", mode: "manual", hold_new_discoveries: holdNewDiscoveries }
+    }
+  })
+}))
 
 afterEach(async () => {
   for (const server of servers.splice(0)) await server.stop()
@@ -251,6 +284,273 @@ describe("normal library scan", () => {
     }))
     expect(afterRepeat.data.entries).toHaveLength(2)
     expect(new Map(afterRepeat.data.entries.map((entry) => [entry.relative_path, entry.entry_id]))).toEqual(firstIds)
+  })
+
+  it("reconciles a unique exact same-root rename without changing identity, content, or open history", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-rename-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "before")
+    const root = await registerRoot(server, fixture, "Rename books")
+
+    const initialScan = await scanRoot(server, root)
+    if (!("task" in initialScan.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, initialScan.data.task.task_id)).status).toBe("succeeded")
+    const initial = await withLibraryClient(server, Effect.gen(function*() {
+      const result = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+      const entry = result.data.entries[0]
+      if (entry === undefined) throw new Error("expected accepted entry")
+      return entry
+    }))
+
+    const event = await withOpenEventClient(server, Effect.gen(function*() {
+      return yield* (yield* OpenEventHttpClient).batch({
+        payload: {
+          epoch: server.epoch,
+          events: [{
+            event_id: randomUUID(),
+            instance_id: server.instanceId,
+            entry_id: initial.entry_id,
+            device_id: randomUUID(),
+            observed_location_revision: initial.location_revision,
+            observed_content_version: initial.content_version,
+            occurred_at_ms: Date.now()
+          }]
+        }
+      })
+    }))
+    expect(event.data.results[0]?.outcome).toBe("accepted")
+
+    await rename(path.join(fixture, "before"), path.join(fixture, "after"))
+    const renamedScan = await scanRoot(server, root)
+    if (!("task" in renamedScan.data)) throw new Error("expected rename scan task")
+    const renamedTerminal = await waitForTerminal(server, renamedScan.data.task.task_id)
+    expect(renamedTerminal.status).toBe("succeeded")
+    const renamed = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(renamed.data.entries).toHaveLength(1)
+    expect(renamed.data.entries[0]).toMatchObject({
+      entry_id: initial.entry_id,
+      relative_path: "after",
+      content_version: initial.content_version,
+      location_revision: "2",
+      availability: { status: "present" }
+    })
+
+    await server.stop()
+    const restarted = await startServer(server.dbPath)
+    servers.push(restarted)
+    const persisted = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(persisted.data.entries).toHaveLength(1)
+    expect(persisted.data.entries[0]).toMatchObject({
+      entry_id: initial.entry_id,
+      relative_path: "after",
+      content_version: initial.content_version,
+      location_revision: "2"
+    })
+    const db = new DatabaseSync(server.dbPath)
+    const history = db.prepare("SELECT entry_id, observed_location_revision, observed_content_version FROM open_events WHERE entry_id = ? ORDER BY occurred_at_ms").all(initial.entry_id) as Array<{ entry_id: string; observed_location_revision: number; observed_content_version: number }>
+    db.close()
+    expect(history).toEqual([{ entry_id: initial.entry_id, observed_location_revision: 1, observed_content_version: 1 }])
+  })
+
+  it("keeps an identical copy as a separate entry without transferring open history", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-copy-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "original")
+    const root = await registerRoot(server, fixture, "Copy books")
+
+    const initialScan = await scanRoot(server, root)
+    if (!("task" in initialScan.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, initialScan.data.task.task_id)).status).toBe("succeeded")
+    const initial = await withLibraryClient(server, Effect.gen(function*() {
+      const result = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+      const entry = result.data.entries[0]
+      if (entry === undefined) throw new Error("expected original entry")
+      return entry
+    }))
+    const eventId = randomUUID()
+    const event = await withOpenEventClient(server, Effect.gen(function*() {
+      return yield* (yield* OpenEventHttpClient).batch({
+        payload: {
+          epoch: server.epoch,
+          events: [{
+            event_id: eventId,
+            instance_id: server.instanceId,
+            entry_id: initial.entry_id,
+            device_id: randomUUID(),
+            observed_location_revision: initial.location_revision,
+            observed_content_version: initial.content_version,
+            occurred_at_ms: Date.now()
+          }]
+        }
+      })
+    }))
+    expect(event.data.results[0]?.outcome).toBe("accepted")
+
+    await mkdir(path.join(fixture, "copy"))
+    await copyFile(path.join(fixture, "original", "001.jpg"), path.join(fixture, "copy", "001.jpg"))
+    const copiedScan = await scanRoot(server, root)
+    if (!("task" in copiedScan.data)) throw new Error("expected copy scan task")
+    expect((await waitForTerminal(server, copiedScan.data.task.task_id)).status).toBe("succeeded")
+    const copied = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(copied.data.entries).toHaveLength(2)
+    const original = copied.data.entries.find((entry) => entry.relative_path === "original")
+    const copy = copied.data.entries.find((entry) => entry.relative_path === "copy")
+    const copyId = copy?.entry_id
+    if (copyId === undefined) throw new Error("expected copied entry identity")
+    expect(original).toMatchObject({ entry_id: initial.entry_id, location_revision: "1", content_version: "1" })
+    expect(copy).toMatchObject({ location_revision: "1", content_version: "1" })
+    expect(copy?.entry_id).not.toBe(initial.entry_id)
+    const db = new DatabaseSync(server.dbPath)
+    const history = db.prepare("SELECT entry_id, COUNT(*) AS count FROM open_events WHERE entry_id IN (?, ?) GROUP BY entry_id ORDER BY entry_id").all(initial.entry_id, copyId) as Array<{ entry_id: string; count: number }>
+    db.close()
+    expect(history).toEqual([{ entry_id: initial.entry_id, count: 1 }])
+  })
+
+  it("defers held, ambiguous, and incomplete move evidence until one target is complete", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-move-fences-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "source")
+    const root = await registerRoot(server, fixture, "Move fences")
+
+    const initialScan = await scanRoot(server, root)
+    if (!("task" in initialScan.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, initialScan.data.task.task_id)).status).toBe("succeeded")
+    const initial = await withLibraryClient(server, Effect.gen(function*() {
+      const result = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+      const entry = result.data.entries[0]
+      if (entry === undefined) throw new Error("expected source entry")
+      return entry
+    }))
+
+    await rename(path.join(fixture, "source"), path.join(fixture, "target-a"))
+    await mkdir(path.join(fixture, "target-b"))
+    await copyFile(path.join(fixture, "target-a", "001.jpg"), path.join(fixture, "target-b", "001.jpg"))
+    const heldScan = await scanRoot(server, root, true)
+    if (!("task" in heldScan.data)) throw new Error("expected held scan task")
+    expect((await waitForTerminal(server, heldScan.data.task.task_id)).status).toBe("succeeded")
+    const afterHeld = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(afterHeld.data.entries).toMatchObject([{
+      entry_id: initial.entry_id,
+      relative_path: "source",
+      location_revision: "1"
+    }])
+
+    const heldCandidates = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).candidates()
+    }))
+    for (const candidate of heldCandidates.data) {
+      await withReviewClient(server, Effect.gen(function*() {
+        return yield* (yield* ReviewHttpClient).command({
+          params: { id: candidate.candidate_id },
+          payload: {
+            root_id: root.data.root_id,
+            operation_id: randomUUID(),
+            instance_id: server.instanceId,
+            epoch: server.epoch,
+            expected_candidate_version: candidate.candidate_version,
+            expected_mapping_revision: root.data.mapping_revision,
+            expected_policy_revision: root.data.policy_revision,
+            command: { type: "release-hold" }
+          }
+        })
+      }))
+    }
+
+    const ambiguousScan = await scanRoot(server, root)
+    if (!("task" in ambiguousScan.data)) throw new Error("expected ambiguous scan task")
+    const ambiguousTerminal = await waitForTerminal(server, ambiguousScan.data.task.task_id)
+    expect(ambiguousTerminal.status).toBe("completed_with_errors")
+    expect(ambiguousTerminal.readiness_error?.code).toBe("allocation_deferred")
+    const afterAmbiguous = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(afterAmbiguous.data.entries).toMatchObject([{
+      entry_id: initial.entry_id,
+      relative_path: "source",
+      availability: { status: "missing" },
+      location_revision: "1"
+    }])
+    expect(afterAmbiguous.data.entries).toHaveLength(1)
+
+    await rm(path.join(fixture, "target-b"), { recursive: true, force: true })
+    const uniqueScan = await scanRoot(server, root)
+    if (!("task" in uniqueScan.data)) throw new Error("expected unique target scan task")
+    expect((await waitForTerminal(server, uniqueScan.data.task.task_id)).status).toBe("succeeded")
+    const relocated = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(relocated.data.entries).toMatchObject([{
+      entry_id: initial.entry_id,
+      relative_path: "target-a",
+      location_revision: "2",
+      content_version: "1"
+    }])
+
+    await rename(path.join(fixture, "target-a"), path.join(fixture, "target-final"))
+    const unavailableRoot = `${fixture}-unavailable`
+    await rename(fixture, unavailableRoot)
+    try {
+      const incompleteScan = await scanRoot(server, root)
+      if (!("task" in incompleteScan.data)) throw new Error("expected incomplete scan task")
+      expect((await waitForTerminal(server, incompleteScan.data.task.task_id)).status).toBe("failed")
+      const afterIncomplete = await withLibraryClient(server, Effect.gen(function*() {
+        return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+      }))
+      expect(afterIncomplete.data.entries).toMatchObject([{
+        entry_id: initial.entry_id,
+        relative_path: "target-a",
+        location_revision: "2"
+      }])
+    } finally {
+      await rename(unavailableRoot, fixture)
+    }
+  })
+
+  it("does not relocate an exact target when the missing claim is excluded", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-move-exclusion-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "source")
+    const root = await registerRoot(server, fixture, "Move exclusions")
+    const initialScan = await scanRoot(server, root)
+    if (!("task" in initialScan.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, initialScan.data.task.task_id)).status).toBe("succeeded")
+    const initial = await withLibraryClient(server, Effect.gen(function*() {
+      return (yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })).data.entries[0]
+    }))
+    if (initial === undefined) throw new Error("expected source entry")
+    await rename(path.join(fixture, "source"), path.join(fixture, "target"))
+    const policy = await withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "exclude", exclusion: { path: "source", scope: "exact" } }
+        }
+      })
+    }))
+    if ("task" in policy.data) throw new Error("expected policy response")
+    const scan = await scanRoot(server, { ...root, data: policy.data })
+    if (!("task" in scan.data)) throw new Error("expected excluded move scan task")
+    expect((await waitForTerminal(server, scan.data.task.task_id)).status).toBe("succeeded")
+    const result = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(result.data.entries).toHaveLength(2)
+    expect(result.data.entries.find((entry) => entry.entry_id === initial.entry_id)).toMatchObject({ relative_path: "source" })
+    expect(result.data.entries.find((entry) => entry.relative_path === "target")?.entry_id).not.toBe(initial.entry_id)
   })
 
   it("does not accept held discoveries when a later normal scan sees the same paths", async () => {
@@ -601,6 +901,7 @@ describe("normal library scan", () => {
 
   it("persists complete-scan availability and restores the same claim after reappearance", async () => {
     const previousQuietInterval = process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
+    process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = "1000"
     const server = await start()
     const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-availability-"))
     fixturePaths.add(fixture)
@@ -647,7 +948,6 @@ describe("normal library scan", () => {
       const initialObservation = initial.availability.observed_at_ms
       if (initialObservation === null) throw new Error("expected initial availability time")
 
-      process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = "1000"
       const interrupted = await scan()
       if (!("task" in interrupted.data)) throw new Error("expected interrupted availability scan")
       await waitForStagedPath(server, "book")
@@ -1330,7 +1630,7 @@ describe("normal library scan", () => {
     expect(missingOnlyTerminal.readiness_error?.message).toContain("missing-book")
     expect(missingOnlyTerminal.review_needed_count).toBe(1)
 
-    await makeImageBook(fixture, "new-book")
+    await makeImageBook(fixture, "new-book", "different page")
 
     const second = await scan()
     if (!("task" in second.data)) throw new Error("expected deferred scan task")

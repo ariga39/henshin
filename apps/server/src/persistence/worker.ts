@@ -87,7 +87,8 @@ const replacementObservation = (
     ? manifest.after.bytes
     : manifest.pages.reduce((total, page) => total + page.declared_bytes, 0),
   entry_count: manifest.after.entry_count,
-  diagnostics: manifest.diagnostics
+  diagnostics: manifest.diagnostics,
+  ...(manifest.fingerprint === undefined ? {} : { fingerprint: manifest.fingerprint })
 })
 
 const emptyDiagnostics = {
@@ -144,7 +145,7 @@ const comparableManifest = (value: string): {
     const { observation_token: beforeToken, ...before } = decoded.value.before
     const { observation_token: afterToken, ...after } = decoded.value.after
     return {
-      value: JSON.stringify({ ...decoded.value, before, after }),
+      value: JSON.stringify({ ...decoded.value, fingerprint: undefined, before, after }),
       beforeToken,
       afterToken
     }
@@ -163,6 +164,16 @@ const manifestsEquivalent = (left: string, right: string): boolean => {
     comparableLeft.value === comparableRight.value &&
     observationsEquivalent(comparableLeft.beforeToken, comparableRight.beforeToken) &&
     observationsEquivalent(comparableLeft.afterToken, comparableRight.afterToken)
+}
+
+const fingerprintFromManifest = (value: string): { readonly profile: string; readonly digest: string } | null => {
+  try {
+    const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
+    if (Option.isNone(decoded) || decoded.value.fingerprint === undefined) return null
+    return decoded.value.fingerprint
+  } catch {
+    return null
+  }
 }
 
 type ReplacementEvidence = "confirmed-change" | "recoverable" | "insufficient"
@@ -989,7 +1000,7 @@ const selectStagedById = db.prepare(
   "SELECT candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms FROM staged_discoveries WHERE candidate_id = ? AND root_id = ?"
 )
 selectStagedById.setReadBigInts(true)
-const selectEntriesForRoot = db.prepare("SELECT entry_id, relative_path, availability_status, availability_observed_at_ms FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
+const selectEntriesForRoot = db.prepare("SELECT entry_id, relative_path, kind, state, decision_version, location_revision, manifest_json, availability_status, availability_observed_at_ms FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
 const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path, state, decision_version, location_revision, content_version, page_count FROM library_entries WHERE root_id = ? AND relative_path = ? AND state IN ('accepted', 'replacement-pending')")
 const selectEntryResolution = db.prepare(
   "SELECT entry_id, root_id, relative_path, kind, state, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
@@ -1087,6 +1098,9 @@ const insertEntry = db.prepare(
 )
 const updateEntryAvailability = db.prepare(
   "UPDATE library_entries SET availability_status = ?, availability_observed_at_ms = ?, updated_at_ms = ? WHERE entry_id = ?"
+)
+const relocateAcceptedEntry = db.prepare(
+  "UPDATE library_entries SET relative_path = ?, source_path = ?, location_revision = location_revision + 1, manifest_json = ?, accepted_observation_json = ?, availability_status = 'present', availability_observed_at_ms = ?, updated_at_ms = ? WHERE entry_id = ? AND root_id = ? AND state = 'accepted' AND decision_version = ? AND location_revision = ?"
 )
 const markEntryPending = db.prepare(
   "UPDATE library_entries SET state = 'replacement-pending', updated_at_ms = ? WHERE entry_id = ? AND state = 'accepted'"
@@ -2057,7 +2071,8 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
       state: "accepted" | "replacement-pending"
     } | undefined
     const sameAcceptedObservation = request.holdState === "held" && request.analysisStatus === "ready" && request.manifestJson !== null && accepted !== undefined &&
-      accepted.state === "accepted" && accepted.kind === request.kind && accepted.manifest_json === request.manifestJson
+      accepted.state === "accepted" && accepted.kind === request.kind &&
+      (accepted.manifest_json === request.manifestJson || manifestsEquivalent(accepted.manifest_json, request.manifestJson))
     const knownReplacement = accepted !== undefined && accepted.state === "accepted" &&
       confirmedReplacement(
         accepted.kind,
@@ -2775,11 +2790,16 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
     const existingEntries = selectEntriesForRoot.all(request.rootId) as unknown as ReadonlyArray<{
       entry_id: string
       relative_path: string
+      kind: "archive" | "image-directory"
+      state: "accepted" | "replacement-pending"
+      decision_version: bigint
+      location_revision: bigint
+      manifest_json: string
       availability_status: "present" | "missing" | "inaccessible" | "unknown"
       availability_observed_at_ms: number | null
     }>
     const existingPaths = existingEntries.map((row) => row.relative_path)
-    const missingPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && !isExcluded(relativePath))
+    let missingPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && !isExcluded(relativePath))
     const unidentifiedPaths = existingPaths.filter((relativePath) => observed.has(relativePath) && !observedCandidates.has(relativePath) && !isExcluded(relativePath))
     const excludedPaths = existingPaths.filter((relativePath) => !observed.has(relativePath) && isExcluded(relativePath))
     const observedAtMs = Date.now()
@@ -2793,11 +2813,12 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       }
     }
     const staged = db.prepare(
-      "SELECT candidate_id, relative_path, kind, manifest_json FROM staged_discoveries WHERE task_id = ? AND root_id = ? AND hold_state = 'eligible' AND analysis_status = 'ready' ORDER BY relative_path ASC"
+      "SELECT candidate_id, relative_path, kind, candidate_version, manifest_json FROM staged_discoveries WHERE task_id = ? AND root_id = ? AND hold_state = 'eligible' AND analysis_status = 'ready' ORDER BY relative_path ASC"
     ).all(request.taskId, request.rootId) as unknown as ReadonlyArray<{
       candidate_id: string
       relative_path: string
       kind: "archive" | "image-directory"
+      candidate_version: bigint
       manifest_json: string | null
     }>
     const sourcePathFor = (relativePath: string): string => join(root.selectedPath, ...relativePath.split("/"))
@@ -2809,6 +2830,8 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       title: string
       source_path: string
       state: "accepted" | "replacement-pending"
+      decision_version: bigint
+      location_revision: bigint
     }>()
     for (const candidate of staged) {
       if (!observedCandidates.has(candidate.relative_path) || candidate.manifest_json === null) continue
@@ -2824,6 +2847,8 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
         title: string
         source_path: string
         state: "accepted" | "replacement-pending"
+        decision_version: bigint
+        location_revision: bigint
       } | undefined
       if (existing !== undefined) {
         existingForCandidate.set(candidate.relative_path, existing)
@@ -2838,8 +2863,66 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       }
     }
     let changed = false
+    const relocatedMissingPaths = new Set<string>()
+    const relocatedTargetPaths = new Set<string>()
+    const candidatesByFingerprint = new Map<string, Array<(typeof staged)[number]>>()
     for (const candidate of staged) {
       if (!observedCandidates.has(candidate.relative_path) || candidate.manifest_json === null) continue
+      if (existingForCandidate.has(candidate.relative_path)) continue
+      const fingerprint = fingerprintFromManifest(candidate.manifest_json)
+      if (fingerprint === null) continue
+      const key = `${fingerprint.profile}:${fingerprint.digest}`
+      const matches = candidatesByFingerprint.get(key) ?? []
+      matches.push(candidate)
+      candidatesByFingerprint.set(key, matches)
+    }
+    for (const [key, targets] of candidatesByFingerprint) {
+      if (targets.length !== 1) continue
+      const sourceMatches = existingEntries.filter((entry) =>
+        missingPaths.includes(entry.relative_path) &&
+        entry.state === "accepted" &&
+        fingerprintFromManifest(entry.manifest_json) !== null &&
+        `${fingerprintFromManifest(entry.manifest_json)?.profile}:${fingerprintFromManifest(entry.manifest_json)?.digest}` === key
+      )
+      if (sourceMatches.length !== 1) continue
+      const source = sourceMatches[0]
+      if (source === undefined || source.state !== "accepted") continue
+      const hasPresentPending = existingEntries.some((entry) =>
+        entry.state === "replacement-pending" && observed.has(entry.relative_path) && !isExcluded(entry.relative_path)
+      )
+      const hasPresentMatchingCopy = existingEntries.some((entry) =>
+        entry.entry_id !== source.entry_id &&
+        observed.has(entry.relative_path) &&
+        fingerprintFromManifest(entry.manifest_json) !== null &&
+        `${fingerprintFromManifest(entry.manifest_json)?.profile}:${fingerprintFromManifest(entry.manifest_json)?.digest}` === key
+      )
+      if (hasPresentPending || hasPresentMatchingCopy) continue
+      const target = targets[0]
+      if (target === undefined || target.manifest_json === null || target.kind !== source.kind) continue
+      const targetManifest = persistedManifest(target.manifest_json, "relocation target manifest")
+      const targetSourcePath = sourcePathFor(target.relative_path)
+      const moved = relocateAcceptedEntry.run(
+        target.relative_path,
+        targetSourcePath,
+        target.manifest_json,
+        JSON.stringify(replacementObservation(targetManifest, target.kind)),
+        observedAtMs,
+        observedAtMs,
+        source.entry_id,
+        request.rootId,
+        source.decision_version,
+        source.location_revision
+      )
+      if (Number(moved.changes) !== 1) continue
+      deleteStaged.run(target.candidate_id)
+      relocatedMissingPaths.add(source.relative_path)
+      relocatedTargetPaths.add(target.relative_path)
+      changed = true
+    }
+    missingPaths = missingPaths.filter((relativePath) => !relocatedMissingPaths.has(relativePath))
+    for (const candidate of staged) {
+      if (!observedCandidates.has(candidate.relative_path) || candidate.manifest_json === null) continue
+      if (relocatedTargetPaths.has(candidate.relative_path)) continue
       const manifest = JSON.parse(candidate.manifest_json) as { pages?: ReadonlyArray<unknown> }
       const pageCount = Array.isArray(manifest.pages) ? manifest.pages.length : 0
       if (pageCount === 0) continue

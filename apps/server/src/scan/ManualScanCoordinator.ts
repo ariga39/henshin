@@ -14,8 +14,9 @@ import {
   resolveSourceCandidate,
   type SourceRootObservation,
 } from "../analysis/NativeSourceBoundary"
+import { fingerprintSource } from "../analysis/SourceFingerprint"
 import { ScanStore, type FinishScanInput } from "../persistence/ScanStore"
-import type { ScanTask } from "@henshin/contracts"
+import { ScanManifest, type ScanTask } from "@henshin/contracts"
 import type { ServerRootRow } from "../persistence/worker-protocol"
 
 const emptyDiagnostics = () => ({
@@ -332,8 +333,15 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
         const result = yield* Effect.result(analyzeSourceManifest({ sourcePath: resolved.value.nativePath }))
         if (Result.isSuccess(result)) {
           verifiedAnalyzed += 1
-          const observedManifest = JSON.stringify(sourceManifestView(result.success))
-          if (firstObservations.get(candidate.relativePath) === observedManifest) {
+          const manifestView = sourceManifestView(result.success)
+          const observedManifest = JSON.stringify(manifestView)
+          const stable = firstObservations.get(candidate.relativePath) === observedManifest
+          let stagedManifest: typeof ScanManifest.Type = manifestView
+          if (stable) {
+            const fingerprint = yield* Effect.promise(() => fingerprintSource(resolved.value.nativePath, result.success).catch(() => undefined))
+            if (fingerprint !== undefined) stagedManifest = { ...manifestView, fingerprint }
+          }
+          if (stable) {
             verifiedCandidatePaths.push(candidate.relativePath)
           } else {
             unstableCandidateCount += 1
@@ -346,7 +354,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
             kind: candidate.kind,
             holdState: "eligible",
             analysisStatus: "ready",
-            manifest: sourceManifestView(result.success),
+            manifest: stagedManifest,
             analysisError: null
           })
         } else {

@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 import { Revision, Uuid } from "./ids"
-import { RootRelativePath, ScanAnalysisError, ScanManifestDiagnostics, ScanManifestObservation, ScanManifestPage, ServerRootList } from "./root"
+import { RootRelativePath, ScanAnalysisError, ScanFingerprint, ScanManifestDiagnostics, ScanManifestObservation, ScanManifestPage, ServerRootList } from "./root"
 import { ThumbnailReference } from "./thumbnail"
 
 const replacementObservationFields = {
@@ -9,7 +9,8 @@ const replacementObservationFields = {
   format_evidence: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
   size_bytes: Schema.NullOr(Schema.Natural),
   entry_count: Schema.Natural,
-  diagnostics: ScanManifestDiagnostics
+  diagnostics: ScanManifestDiagnostics,
+  fingerprint: Schema.optional(ScanFingerprint)
 } as const
 
 export const ReplacementObservation = Schema.Struct(replacementObservationFields)

@@ -341,12 +341,19 @@ export const ScanManifestObservation = Schema.Struct({
 })
 export type ScanManifestObservation = typeof ScanManifestObservation.Type
 
+export const ScanFingerprint = Schema.Struct({
+  profile: Schema.Literals(["archive-sha256-v1", "directory-pages-sha256-v1"]),
+  digest: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/u))
+})
+export type ScanFingerprint = typeof ScanFingerprint.Type
+
 export const ScanManifest = Schema.Struct({
   source_kind: Schema.Union([Schema.Literal("directory"), Schema.Literal("archive")]),
   pages: Schema.Array(ScanManifestPage),
   diagnostics: ScanManifestDiagnostics,
   before: ScanManifestObservation,
-  after: ScanManifestObservation
+  after: ScanManifestObservation,
+  fingerprint: Schema.optional(ScanFingerprint)
 })
 export type ScanManifest = typeof ScanManifest.Type
 
