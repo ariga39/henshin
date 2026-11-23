@@ -17,6 +17,7 @@ import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanAnalysisError } from "@henshin
 import { caseFold } from "unicode-case-folding"
 import { normalizeSearchText, SEARCH_NORMALIZATION_PROFILE, searchBasename } from "../search"
 import {
+  NEWER_DATABASE_SCHEMA,
   WorkerMessage,
   WorkerResponse,
   type CommitOutcome,
@@ -295,6 +296,15 @@ const decodeResolutionCursor = (value: string): typeof ResolutionCursor.Type | u
 
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const db = new DatabaseSync(dbPath)
+const hasServerState = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'server_state'").get()
+const existingServerState = hasServerState
+  ? db.prepare("SELECT schema_version FROM server_state WHERE id = 1").get() as { schema_version: number } | undefined
+  : undefined
+if (existingServerState !== undefined && existingServerState.schema_version > CURRENT_SCHEMA_VERSION) {
+  db.close()
+  throw new Error(NEWER_DATABASE_SCHEMA)
+}
+
 const cleanupBackupDrillStaging = (): void => {
   const dataDirectory = dirname(dbPath)
   for (const entry of readdirSync(dataDirectory, { withFileTypes: true })) {
@@ -535,10 +545,6 @@ db.exec(`
     last_opened_at_ms INTEGER
   );
 `)
-
-const existingServerState = db.prepare(
-  "SELECT schema_version FROM server_state WHERE id = 1"
-).get() as { schema_version: number } | undefined
 
 const rootColumns = new Set(
   (db.prepare("PRAGMA table_info(server_roots)").all() as unknown as ReadonlyArray<{ name: string }>).map(
@@ -3360,9 +3366,6 @@ const handle = (request: WorkerRequest): unknown => {
         | { instance_id: string; schema_version: number }
         | undefined
       const schemaVersion = existing?.schema_version
-      if (schemaVersion !== undefined && schemaVersion > CURRENT_SCHEMA_VERSION) {
-        throw new Error("unsupported server database schema version")
-      }
       const instanceId = existing?.instance_id ?? randomUUID()
       if (existing === undefined) {
         db.prepare("INSERT INTO server_state(id, instance_id, schema_version) VALUES(1, ?, ?)").run(

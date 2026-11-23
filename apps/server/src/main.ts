@@ -17,6 +17,7 @@ import { DatabaseWorker, DatabaseWorkerError } from "./persistence/DatabaseWorke
 import { createBackupArchive } from "./maintenance/BackupArchive"
 import { runBackupDrill } from "./maintenance/BackupDrill"
 import {
+  NEWER_DATABASE_SCHEMA,
   BackupArtifactRow,
   BackupArtifactCompletionOutcome,
   BackupArtifactReservationOutcome,
@@ -42,6 +43,7 @@ const startupDiagnostic = (error: unknown): string | undefined => {
   if (error instanceof ServerOwnershipError) return error.message
   if (error instanceof OwnerCredentialError) return error.message
   if (error instanceof DatabaseWorkerError) {
+    if (error.message === NEWER_DATABASE_SCHEMA) return NEWER_DATABASE_SCHEMA
     return "server startup failed at database: database initialization failed"
   }
   if (typeof error === "object" && error !== null && "_tag" in error && error._tag === "ServeError") {

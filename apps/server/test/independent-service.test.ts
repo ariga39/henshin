@@ -1,5 +1,6 @@
 import { createServer } from "node:http"
 import { access, readFile, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises"
+import { DatabaseSync } from "node:sqlite"
 import os from "node:os"
 import path from "node:path"
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
@@ -274,6 +275,30 @@ afterEach(async () => {
 })
 
 describe("independent foreground service", () => {
+  it("refuses a newer schema before modifying the library database", async () => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "henshin-future-library-"))
+    dataDirectories.add(dataDir)
+    const dbPath = path.join(dataDir, "server.sqlite")
+    await initializeOwner(["--data-dir", dataDir])
+    const future = new DatabaseSync(dbPath)
+    try {
+      future.exec(`
+        CREATE TABLE server_state (id INTEGER PRIMARY KEY, instance_id TEXT, schema_version INTEGER);
+        INSERT INTO server_state VALUES (1, 'future-instance', 9999);
+        CREATE TABLE future_books (title TEXT);
+        INSERT INTO future_books VALUES ('preserved');
+      `)
+    } finally {
+      future.close()
+    }
+    const before = await readFile(dbPath)
+    const refused = launch(["--data-dir", dataDir, "--port", String(await freeLoopbackPort())])
+    expect((await waitForExit(refused.child, EXIT_TIMEOUT_MS)).code).toBe(1)
+    expect((await readFile(dbPath)).equals(before)).toBe(true)
+    expect(refused.stdout()).not.toContain('"event":"ready"')
+    expect(refused.stderr()).toContain("newer database schema")
+  })
+
   it("initializes an owner, serves authenticated HTTP on a stable port, and restarts with a new epoch", async () => {
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "henshin-independent-service-"))
     dataDirectories.add(dataDir)
