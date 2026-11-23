@@ -29,11 +29,15 @@ import {
   BackupDestinationRegistrationOutcome,
   BackupDestinationRow,
   BackupArtifactCompletionOutcome,
+  BackupArtifactDeletionOutcome,
   BackupArtifactReservationOutcome,
   BackupArtifactRow,
   BackupDrillCompletionOutcome,
   BackupDrillRunRow,
   BackupDrillStartOutcome,
+  BackupRetentionClass,
+  BackupRetentionPolicyMutationOutcome,
+  BackupRetentionPolicyRow,
   RootRegistrationOutcome,
   RootReplayLookup,
   type WorkerRequest
@@ -57,7 +61,7 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
-const CURRENT_SCHEMA_VERSION = 10
+const CURRENT_SCHEMA_VERSION = 13
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
@@ -401,15 +405,28 @@ db.exec(`
     inode TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state = 'active')
   );
+  CREATE TABLE IF NOT EXISTS backup_retention_policies (
+    destination_id TEXT PRIMARY KEY REFERENCES backup_destinations(destination_id),
+    store_kind TEXT NOT NULL CHECK (store_kind = 'server'),
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    keep_count INTEGER NOT NULL CHECK (keep_count = 7),
+    state TEXT NOT NULL CHECK (state IN ('disabled', 'enabled', 'needs-reactivation', 'warning')),
+    authorized_device TEXT,
+    authorized_inode TEXT,
+    authorized_at_ms INTEGER,
+    last_cleanup_at_ms INTEGER,
+    warning_code TEXT,
+    warning_message TEXT
+  );
   CREATE TABLE IF NOT EXISTS backup_artifacts (
     artifact_id TEXT PRIMARY KEY,
     destination_id TEXT NOT NULL REFERENCES backup_destinations(destination_id),
     operation_id TEXT NOT NULL UNIQUE,
     relative_path TEXT NOT NULL,
     publication_order INTEGER NOT NULL,
-    retention_class TEXT NOT NULL CHECK (retention_class = 'archive'),
+    retention_class TEXT NOT NULL CHECK (retention_class IN ('archive', 'rotating')),
     label TEXT,
-    status TEXT NOT NULL CHECK (status IN ('reserved', 'completed')),
+    status TEXT NOT NULL CHECK (status IN ('reserved', 'completed', 'deleted')),
     manifest_digest TEXT,
     size_bytes INTEGER,
     created_at_ms INTEGER NOT NULL,
@@ -575,6 +592,47 @@ db.exec(`
     last_opened_at_ms INTEGER
   );
 `)
+
+const backupArtifactsTable = db.prepare(
+  "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'backup_artifacts'"
+).get() as { sql: string } | undefined
+if (backupArtifactsTable !== undefined &&
+  (!backupArtifactsTable.sql.includes("'rotating'") || !backupArtifactsTable.sql.includes("'deleted'"))) {
+  db.exec("PRAGMA foreign_keys = OFF")
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    db.exec(`
+      CREATE TABLE backup_artifacts_v13 (
+        artifact_id TEXT PRIMARY KEY,
+        destination_id TEXT NOT NULL REFERENCES backup_destinations(destination_id),
+        operation_id TEXT NOT NULL UNIQUE,
+        relative_path TEXT NOT NULL,
+        publication_order INTEGER NOT NULL,
+        retention_class TEXT NOT NULL CHECK (retention_class IN ('archive', 'rotating')),
+        label TEXT,
+        status TEXT NOT NULL CHECK (status IN ('reserved', 'completed', 'deleted')),
+        manifest_digest TEXT,
+        size_bytes INTEGER,
+        created_at_ms INTEGER NOT NULL,
+        completed_at_ms INTEGER,
+        UNIQUE (destination_id, relative_path),
+        UNIQUE (destination_id, publication_order)
+      );
+      INSERT INTO backup_artifacts_v13
+        SELECT artifact_id, destination_id, operation_id, relative_path, publication_order,
+               retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
+        FROM backup_artifacts;
+      DROP TABLE backup_artifacts;
+      ALTER TABLE backup_artifacts_v13 RENAME TO backup_artifacts;
+    `)
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON")
+  }
+}
 
 const rootColumns = new Set(
   (db.prepare("PRAGMA table_info(server_roots)").all() as unknown as ReadonlyArray<{ name: string }>).map(
@@ -814,9 +872,9 @@ if (!entryOverrideColumns.has("notes_revision")) db.exec("ALTER TABLE entry_over
 if (!entryOverrideColumns.has("notes_updated_at_ms")) db.exec("ALTER TABLE entry_overrides ADD COLUMN notes_updated_at_ms INTEGER")
 
 const needsSummaryBackfill = addedAcceptedObservationSummary || addedCandidateObservationSummary ||
-  (existingVersion !== undefined && existingVersion < CURRENT_SCHEMA_VERSION)
+  (existingVersion !== undefined && existingVersion < 10)
 const needsSearchBackfill = addedSearchColumns ||
-  (existingVersion !== undefined && existingVersion < CURRENT_SCHEMA_VERSION)
+  (existingVersion !== undefined && existingVersion < 10)
 
 if (needsSummaryBackfill || needsSearchBackfill) {
   db.exec("BEGIN IMMEDIATE")
@@ -925,6 +983,48 @@ const insertBackupDestination = db.prepare(
 const updateBackupDestination = db.prepare(
   "UPDATE backup_destinations SET selected_path = ?, canonical_path = ?, device = ?, inode = ?, state = 'active' WHERE destination_id = ?"
 )
+const selectBackupRetentionPolicies = db.prepare(
+  `SELECT destination_id, store_kind, enabled, keep_count, state, authorized_device,
+          authorized_inode, authorized_at_ms, last_cleanup_at_ms, warning_code, warning_message
+   FROM backup_retention_policies ORDER BY destination_id ASC`
+)
+const selectBackupRetentionPolicy = db.prepare(
+  `SELECT destination_id, store_kind, enabled, keep_count, state, authorized_device,
+          authorized_inode, authorized_at_ms, last_cleanup_at_ms, warning_code, warning_message
+   FROM backup_retention_policies WHERE destination_id = ?`
+)
+const upsertBackupRetentionPolicy = db.prepare(
+  `INSERT INTO backup_retention_policies(
+    destination_id, store_kind, enabled, keep_count, state, authorized_device,
+    authorized_inode, authorized_at_ms, last_cleanup_at_ms, warning_code, warning_message
+  ) VALUES (?, 'server', ?, 7, ?, ?, ?, ?, NULL, NULL, NULL)
+  ON CONFLICT(destination_id) DO UPDATE SET
+    enabled = excluded.enabled,
+    keep_count = excluded.keep_count,
+    state = excluded.state,
+    authorized_device = excluded.authorized_device,
+    authorized_inode = excluded.authorized_inode,
+    authorized_at_ms = excluded.authorized_at_ms,
+    warning_code = NULL,
+    warning_message = NULL`
+)
+const resetBackupRetentionOnDestinationReplace = db.prepare(
+  `UPDATE backup_retention_policies
+   SET enabled = 0, state = 'needs-reactivation', authorized_device = ?, authorized_inode = ?,
+       authorized_at_ms = NULL, warning_code = 'destination-replaced',
+       warning_message = 'destination was replaced; retention requires fresh confirmation'
+   WHERE destination_id = ?`
+)
+const recordBackupRetentionSuccess = db.prepare(
+  `UPDATE backup_retention_policies
+   SET state = 'enabled', last_cleanup_at_ms = ?, warning_code = NULL, warning_message = NULL
+   WHERE destination_id = ? AND enabled = 1`
+)
+const recordBackupRetentionWarning = db.prepare(
+  `UPDATE backup_retention_policies
+   SET state = 'warning', last_cleanup_at_ms = ?, warning_code = ?, warning_message = ?
+   WHERE destination_id = ? AND enabled = 1`
+)
 const selectBackupArtifacts = db.prepare(
   `SELECT artifact_id, destination_id, operation_id, relative_path, publication_order,
           retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
@@ -947,12 +1047,16 @@ const insertBackupArtifact = db.prepare(
   `INSERT INTO backup_artifacts(
     artifact_id, destination_id, operation_id, relative_path, publication_order,
     retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
-  ) VALUES (?, ?, ?, ?, ?, 'archive', ?, 'reserved', NULL, NULL, ?, NULL)`
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', NULL, NULL, ?, NULL)`
 )
 const updateBackupArtifactCompleted = db.prepare(
   `UPDATE backup_artifacts
    SET status = 'completed', manifest_digest = ?, size_bytes = ?, completed_at_ms = ?
    WHERE artifact_id = ? AND status = 'reserved'`
+)
+const updateBackupArtifactDeleted = db.prepare(
+  `UPDATE backup_artifacts SET status = 'deleted'
+   WHERE artifact_id = ? AND status = 'completed'`
 )
 const selectBackupDrillRuns = db.prepare(
   `SELECT run_id, artifact_id, manifest_digest, status, started_at_ms, completed_at_ms,
@@ -1330,15 +1434,70 @@ const backupDestinationRows = (): ReadonlyArray<BackupDestinationRow> =>
     backupDestinationRow
   )
 
+const backupRetentionPolicyRow = (row: {
+  destination_id: string
+  store_kind: "server"
+  enabled: number
+  keep_count: 7
+  state: BackupRetentionPolicyRow["state"]
+  authorized_device: string | null
+  authorized_inode: string | null
+  authorized_at_ms: number | null
+  last_cleanup_at_ms: number | null
+  warning_code: string | null
+  warning_message: string | null
+}): BackupRetentionPolicyRow => ({
+  destinationId: row.destination_id,
+  storeKind: row.store_kind,
+  enabled: row.enabled === 1,
+  keepCount: 7,
+  state: row.state,
+  authorizedDevice: row.authorized_device,
+  authorizedInode: row.authorized_inode,
+  authorizedAtMs: row.authorized_at_ms,
+  lastCleanupAtMs: row.last_cleanup_at_ms,
+  warningCode: row.warning_code,
+  warningMessage: row.warning_message
+})
+
+const defaultBackupRetentionPolicy = (destinationId: string): BackupRetentionPolicyRow => ({
+  destinationId,
+  storeKind: "server",
+  enabled: false,
+  keepCount: 7,
+  state: "disabled",
+  authorizedDevice: null,
+  authorizedInode: null,
+  authorizedAtMs: null,
+  lastCleanupAtMs: null,
+  warningCode: null,
+  warningMessage: null
+})
+
+const backupRetentionPolicyRows = (): ReadonlyArray<BackupRetentionPolicyRow> => {
+  const stored = new Map(
+    (selectBackupRetentionPolicies.all() as unknown as ReadonlyArray<Parameters<typeof backupRetentionPolicyRow>[0]>).map(
+      (row) => [row.destination_id, backupRetentionPolicyRow(row)] as const
+    )
+  )
+  return backupDestinationRows().map((destination) => stored.get(destination.destinationId) ?? defaultBackupRetentionPolicy(destination.destinationId))
+}
+
+const backupRetentionPolicyById = (destinationId: string): BackupRetentionPolicyRow | undefined => {
+  if (backupDestinationById(destinationId) === undefined) return undefined
+  const row = selectBackupRetentionPolicy.get(destinationId) as Parameters<typeof backupRetentionPolicyRow>[0] | undefined
+  return row === undefined ? defaultBackupRetentionPolicy(destinationId) : backupRetentionPolicyRow(row)
+}
+
 const backupArtifactRow = (row: {
   artifact_id: string
   destination_id: string
   operation_id: string
   relative_path: string
   publication_order: number
-  retention_class: "archive"
+  retention_class: BackupRetentionClass
   label: string | null
-  status: "reserved" | "completed"
+  status: "reserved" | "completed" | "deleted"
   manifest_digest: string | null
   size_bytes: number | null
   created_at_ms: number
@@ -1501,8 +1660,79 @@ const replaceBackupDestination = (
       destination.inode,
       destination.destinationId
     )
+    resetBackupRetentionOnDestinationReplace.run(
+      destination.device,
+      destination.inode,
+      destination.destinationId
+    )
     db.exec("COMMIT")
     return { kind: "registered", destination }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const setBackupRetentionPolicy = (
+  request: Extract<WorkerRequest, { op: "setBackupRetentionPolicy" }>
+): BackupRetentionPolicyMutationOutcome => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    if (backupDestinationById(request.destinationId) === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "destination_not_found" }
+    }
+    if (request.enabled) {
+      const restoreTable = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'server_restore_state'"
+      ).get() as { name: string } | undefined
+      if (restoreTable !== undefined) {
+        const restored = db.prepare(
+          "SELECT status FROM server_restore_state WHERE id = 1"
+        ).get() as { status: "normal" | "needs-reconciliation" } | undefined
+        if (restored?.status === "needs-reconciliation") {
+          db.exec("ROLLBACK")
+          return { kind: "restore_reconciliation_required" }
+        }
+      }
+    }
+    upsertBackupRetentionPolicy.run(
+      request.destinationId,
+      request.enabled ? 1 : 0,
+      request.enabled ? "enabled" : "disabled",
+      request.device,
+      request.inode,
+      request.enabled ? request.authorizedAtMs : null
+    )
+    db.exec("COMMIT")
+    return { kind: "updated", policy: backupRetentionPolicyById(request.destinationId) as BackupRetentionPolicyRow }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const recordBackupRetentionOutcome = (
+  request: Extract<WorkerRequest, { op: "recordBackupRetentionOutcome" }>
+): BackupRetentionPolicyMutationOutcome => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    if (backupRetentionPolicyById(request.destinationId) === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "destination_not_found" }
+    }
+    if (request.outcome === "success") {
+      recordBackupRetentionSuccess.run(request.completedAtMs, request.destinationId)
+    } else {
+      recordBackupRetentionWarning.run(
+        request.completedAtMs,
+        request.warningCode,
+        request.warningMessage,
+        request.destinationId
+      )
+    }
+    db.exec("COMMIT")
+    return { kind: "updated", policy: backupRetentionPolicyById(request.destinationId) as BackupRetentionPolicyRow }
   } catch (error) {
     db.exec("ROLLBACK")
     throw error
@@ -1522,6 +1752,7 @@ const reserveBackupArtifact = (
       const same = artifact.artifactId === request.artifactId &&
         artifact.destinationId === request.destinationId &&
         artifact.relativePath === request.relativePath &&
+        artifact.retentionClass === request.retentionClass &&
         artifact.label === request.label &&
         artifact.createdAtMs === request.createdAtMs
       db.exec(same ? "COMMIT" : "ROLLBACK")
@@ -1543,12 +1774,41 @@ const reserveBackupArtifact = (
       request.operationId,
       request.relativePath,
       publicationOrder,
+      request.retentionClass,
       request.label,
       request.createdAtMs
     )
     db.exec("COMMIT")
     const artifact = backupArtifactRow(selectBackupArtifactById.get(request.artifactId) as Parameters<typeof backupArtifactRow>[0])
     return { kind: "reserved", artifact }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const deleteBackupArtifact = (
+  request: Extract<WorkerRequest, { op: "deleteBackupArtifact" }>
+): BackupArtifactDeletionOutcome => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const existing = selectBackupArtifactById.get(request.artifactId) as
+      | Parameters<typeof backupArtifactRow>[0]
+      | undefined
+    if (existing === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "artifact_not_found" }
+    }
+    if (existing.status !== "completed") {
+      db.exec("ROLLBACK")
+      return { kind: "artifact_not_completed" }
+    }
+    updateBackupArtifactDeleted.run(request.artifactId)
+    db.exec("COMMIT")
+    return {
+      kind: "deleted",
+      artifact: backupArtifactRow(selectBackupArtifactById.get(request.artifactId) as Parameters<typeof backupArtifactRow>[0])
+    }
   } catch (error) {
     db.exec("ROLLBACK")
     throw error
@@ -3415,6 +3675,30 @@ const commitNote = (request: Extract<WorkerRequest, { op: "commitNote" }>): Comm
   }
 }
 
+/**
+ * The restore maintenance path (#198) records this optional marker in the
+ * restored store. Retention never owns restore; it only invalidates copied
+ * authorization until an operator explicitly reactivates it.
+ */
+const invalidateBackupRetentionAfterRestore = (): void => {
+  const restoreTable = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'server_restore_state'"
+  ).get() as { name: string } | undefined
+  if (restoreTable === undefined) return
+  const restored = db.prepare(
+    "SELECT status, restored_at_ms FROM server_restore_state WHERE id = 1"
+  ).get() as { status: "normal" | "needs-reconciliation"; restored_at_ms: number | null } | undefined
+  if (restored === undefined || restored.restored_at_ms === null) return
+  db.prepare(
+    `UPDATE backup_retention_policies
+     SET enabled = 0, state = 'needs-reactivation', authorized_at_ms = NULL,
+         warning_code = 'restore-requires-reactivation',
+         warning_message = 'restored application state requires fresh retention confirmation'
+     WHERE enabled = 1 AND (state = 'enabled' OR state = 'warning')
+       AND (? = 'needs-reconciliation' OR authorized_at_ms IS NULL OR authorized_at_ms < ?)`
+  ).run(restored.status, restored.restored_at_ms)
+}
+
 const handle = (request: WorkerRequest): unknown => {
   switch (request.op) {
     case "init": {
@@ -3436,6 +3720,7 @@ const handle = (request: WorkerRequest): unknown => {
       if (schemaVersion !== undefined && schemaVersion < CURRENT_SCHEMA_VERSION) {
         db.prepare("UPDATE server_state SET schema_version = ? WHERE id = 1").run(CURRENT_SCHEMA_VERSION)
       }
+      invalidateBackupRetentionAfterRestore()
       cleanupBackupDrillStaging()
       const interruptedAtMs = Date.now()
       interruptRunningBackupDrills.run(interruptedAtMs, interruptedAtMs)
@@ -3455,6 +3740,8 @@ const handle = (request: WorkerRequest): unknown => {
       return rootRows()
     case "listBackupDestinations":
       return backupDestinationRows()
+    case "listBackupRetentionPolicies":
+      return backupRetentionPolicyRows()
     case "listBackupArtifacts":
       return backupArtifactRows()
     case "listBackupDrillRuns":
@@ -3463,10 +3750,16 @@ const handle = (request: WorkerRequest): unknown => {
       return registerBackupDestination(request)
     case "replaceBackupDestination":
       return replaceBackupDestination(request)
+    case "setBackupRetentionPolicy":
+      return setBackupRetentionPolicy(request)
+    case "recordBackupRetentionOutcome":
+      return recordBackupRetentionOutcome(request)
     case "reserveBackupArtifact":
       return reserveBackupArtifact(request)
     case "completeBackupArtifact":
       return completeBackupArtifact(request)
+    case "deleteBackupArtifact":
+      return deleteBackupArtifact(request)
     case "startBackupDrill":
       return startBackupDrill(request)
     case "completeBackupDrill":

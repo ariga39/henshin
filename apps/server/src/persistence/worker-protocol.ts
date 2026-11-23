@@ -62,15 +62,51 @@ export const BackupDestinationRegistrationOutcome = Schema.Union([
 ])
 export type BackupDestinationRegistrationOutcome = typeof BackupDestinationRegistrationOutcome.Type
 
+export const BackupRetentionClass = Schema.Union([
+  Schema.Literal("archive"),
+  Schema.Literal("rotating")
+])
+export type BackupRetentionClass = typeof BackupRetentionClass.Type
+
+export const BackupRetentionPolicyState = Schema.Union([
+  Schema.Literal("disabled"),
+  Schema.Literal("enabled"),
+  Schema.Literal("needs-reactivation"),
+  Schema.Literal("warning")
+])
+export type BackupRetentionPolicyState = typeof BackupRetentionPolicyState.Type
+
+export const BackupRetentionPolicyRow = Schema.Struct({
+  destinationId: Uuid,
+  storeKind: Schema.Literal("server"),
+  enabled: Schema.Boolean,
+  keepCount: Schema.Literal(7),
+  state: BackupRetentionPolicyState,
+  authorizedDevice: Schema.NullOr(Schema.String),
+  authorizedInode: Schema.NullOr(Schema.String),
+  authorizedAtMs: Schema.NullOr(Schema.Int),
+  lastCleanupAtMs: Schema.NullOr(Schema.Int),
+  warningCode: Schema.NullOr(Schema.String.check(Schema.isMaxLength(100))),
+  warningMessage: Schema.NullOr(Schema.String.check(Schema.isMaxLength(512)))
+})
+export type BackupRetentionPolicyRow = typeof BackupRetentionPolicyRow.Type
+
+export const BackupRetentionPolicyMutationOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("updated"), policy: BackupRetentionPolicyRow }),
+  Schema.Struct({ kind: Schema.Literal("destination_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("restore_reconciliation_required") })
+])
+export type BackupRetentionPolicyMutationOutcome = typeof BackupRetentionPolicyMutationOutcome.Type
+
 export const BackupArtifactRow = Schema.Struct({
   artifactId: Uuid,
   destinationId: Uuid,
   operationId: Uuid,
   relativePath: Schema.String,
   publicationOrder: Schema.Natural,
-  retentionClass: Schema.Literal("archive"),
+  retentionClass: BackupRetentionClass,
   label: Schema.NullOr(Schema.String),
-  status: Schema.Union([Schema.Literal("reserved"), Schema.Literal("completed")]),
+  status: Schema.Union([Schema.Literal("reserved"), Schema.Literal("completed"), Schema.Literal("deleted")]),
   manifestDigest: Schema.NullOr(Schema.String),
   sizeBytes: Schema.NullOr(Schema.Natural),
   createdAtMs: Schema.Int,
@@ -94,6 +130,13 @@ export const BackupArtifactCompletionOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("artifact_not_reserved") })
 ])
 export type BackupArtifactCompletionOutcome = typeof BackupArtifactCompletionOutcome.Type
+
+export const BackupArtifactDeletionOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("deleted"), artifact: BackupArtifactRow }),
+  Schema.Struct({ kind: Schema.Literal("artifact_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("artifact_not_completed") })
+])
+export type BackupArtifactDeletionOutcome = typeof BackupArtifactDeletionOutcome.Type
 
 export const BackupDrillRunRow = Schema.Struct({
   runId: Uuid,
@@ -460,6 +503,7 @@ export const WorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("readNote"), noteId: NoteId }),
   Schema.Struct({ op: Schema.Literal("listRoots") }),
   Schema.Struct({ op: Schema.Literal("listBackupDestinations") }),
+  Schema.Struct({ op: Schema.Literal("listBackupRetentionPolicies") }),
   Schema.Struct({ op: Schema.Literal("listBackupArtifacts") }),
   Schema.Struct({ op: Schema.Literal("listBackupDrillRuns") }),
   Schema.Struct({
@@ -479,11 +523,28 @@ export const WorkerRequest = Schema.Union([
     inode: Schema.String
   }),
   Schema.Struct({
+    op: Schema.Literal("setBackupRetentionPolicy"),
+    destinationId: Uuid,
+    enabled: Schema.Boolean,
+    device: Schema.String,
+    inode: Schema.String,
+    authorizedAtMs: Schema.Int
+  }),
+  Schema.Struct({
+    op: Schema.Literal("recordBackupRetentionOutcome"),
+    destinationId: Uuid,
+    outcome: Schema.Union([Schema.Literal("success"), Schema.Literal("warning")]),
+    warningCode: Schema.NullOr(Schema.String.check(Schema.isMaxLength(100))),
+    warningMessage: Schema.NullOr(Schema.String.check(Schema.isMaxLength(512))),
+    completedAtMs: Schema.Int
+  }),
+  Schema.Struct({
     op: Schema.Literal("reserveBackupArtifact"),
     artifactId: Uuid,
     operationId: Uuid,
     destinationId: Uuid,
     relativePath: Schema.String,
+    retentionClass: BackupRetentionClass,
     label: Schema.NullOr(Schema.String),
     createdAtMs: Schema.Int
   }),
@@ -493,6 +554,11 @@ export const WorkerRequest = Schema.Union([
     manifestDigest: Schema.String,
     sizeBytes: Schema.Natural,
     completedAtMs: Schema.Int
+  }),
+  Schema.Struct({
+    op: Schema.Literal("deleteBackupArtifact"),
+    artifactId: Uuid,
+    deletedAtMs: Schema.Int
   }),
   Schema.Struct({
     op: Schema.Literal("startBackupDrill"),
