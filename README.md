@@ -40,6 +40,25 @@ Choose a collection directory, confirm the preview, and start a scan to
 populate Library. The development build uses an ad hoc signature. Public
 distribution requires Developer ID signing and notarization.
 
+## Build and install the Windows x64 desktop package
+
+On a Windows x64 host with Node.js 24.19.0 and the repository's pinned pnpm,
+run these commands from the checkout.
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm --filter @henshin/desktop package:windows
+```
+
+Extract `henshin-desktop-0.0.0-win32-x64.zip` from `dist/desktop/` to any
+directory, including one whose path contains spaces, and launch `Henshin.exe`.
+The portable directory includes the managed server and keeps its managed
+library under the normal Electron user-data directory, so saved roots and
+accepted books are available after closing and reopening the application.
+The adjacent `.sha256` file is the archive checksum. The development archive
+is explicitly unsigned because no Authenticode certificate is configured;
+public distribution requires release signing.
+
 ## Build the standalone server archive
 
 The repository build produces a platform-specific archive under

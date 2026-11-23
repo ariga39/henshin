@@ -1,0 +1,160 @@
+name: Windows desktop distribution
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-desktop.yml"
+      - "apps/desktop/**"
+      - "apps/server/**"
+      - "packages/contracts/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows x64 desktop archive
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build portable Windows x64 desktop archive
+        shell: pwsh
+        env:
+          HENSHIN_DESKTOP_ARTIFACT_DIR: ${{ runner.temp }}\henshin-desktop-artifact
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path $env:HENSHIN_DESKTOP_ARTIFACT_DIR | Out-Null
+          Write-Host "Windows: $([System.Environment]::OSVersion.VersionString)"
+          Write-Host "Node: $(node --version), architecture: $(node -p 'process.arch')"
+          Write-Host "pnpm: $(pnpm --version)"
+          pnpm --filter @henshin/desktop package:windows
+          if ($LASTEXITCODE -ne 0) { throw "Windows desktop package failed" }
+          Copy-Item -LiteralPath "apps/desktop/e2e/windows-desktop-acceptance.mjs" -Destination (Join-Path $env:HENSHIN_DESKTOP_ARTIFACT_DIR "windows-desktop-acceptance.mjs") -Force
+
+      - name: Verify checksum and signing declaration
+        shell: pwsh
+        env:
+          HENSHIN_DESKTOP_ARTIFACT_DIR: ${{ runner.temp }}\henshin-desktop-artifact
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = @(Get-ChildItem -LiteralPath $env:HENSHIN_DESKTOP_ARTIFACT_DIR -Filter "*.zip" -File)
+          $checksum = @(Get-ChildItem -LiteralPath $env:HENSHIN_DESKTOP_ARTIFACT_DIR -Filter "*.sha256" -File)
+          $signing = @(Get-ChildItem -LiteralPath $env:HENSHIN_DESKTOP_ARTIFACT_DIR -Filter "*.signing-status.txt" -File)
+          if ($archive.Count -ne 1) { throw "expected exactly one Windows desktop archive" }
+          if ($checksum.Count -ne 1) { throw "expected exactly one Windows desktop checksum" }
+          if ($signing.Count -ne 1) { throw "expected exactly one Windows desktop signing status" }
+          $expected = ((Get-Content -LiteralPath $checksum[0].FullName -Raw).Trim() -split "\s+")[0].ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $archive[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw "desktop archive checksum mismatch" }
+          $status = Get-Content -LiteralPath $signing[0].FullName -Raw
+          if ($status -notmatch "Windows Authenticode signing status: UNSIGNED") {
+            throw "Windows signing status was not honestly declared unsigned"
+          }
+          Write-Host "Archive: $($archive[0].Name)"
+          Write-Host "SHA256: $actual"
+          Write-Host $status
+
+      - name: Upload Windows x64 desktop archive and acceptance harness
+        uses: actions/upload-artifact@v4
+        with:
+          name: henshin-desktop-windows-x64
+          path: ${{ runner.temp }}\henshin-desktop-artifact\*
+          if-no-files-found: error
+          retention-days: 7
+
+  acceptance:
+    name: Native Windows packaged restart acceptance
+    needs: build
+    runs-on: windows-latest
+    steps:
+      # Deliberately no checkout: this runner exercises only the downloaded
+      # portable archive and the downloaded acceptance harness.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Download produced desktop archive
+        uses: actions/download-artifact@v4
+        with:
+          name: henshin-desktop-windows-x64
+          path: ${{ runner.temp }}\henshin-desktop-download
+
+      - name: Verify, unpack, and inspect the portable executable
+        id: unpack
+        shell: pwsh
+        env:
+          HENSHIN_DOWNLOAD_DIR: ${{ runner.temp }}\henshin-desktop-download
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = @(Get-ChildItem -LiteralPath $env:HENSHIN_DOWNLOAD_DIR -Filter "*.zip" -File -Recurse)
+          $checksum = @(Get-ChildItem -LiteralPath $env:HENSHIN_DOWNLOAD_DIR -Filter "*.sha256" -File -Recurse)
+          $signing = @(Get-ChildItem -LiteralPath $env:HENSHIN_DOWNLOAD_DIR -Filter "*.signing-status.txt" -File -Recurse)
+          if ($archive.Count -ne 1 -or $checksum.Count -ne 1 -or $signing.Count -ne 1) {
+            throw "expected one archive, checksum, and signing declaration"
+          }
+          $expected = ((Get-Content -LiteralPath $checksum[0].FullName -Raw).Trim() -split "\s+")[0].ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $archive[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw "downloaded desktop archive checksum mismatch" }
+          if ((Get-Content -LiteralPath $signing[0].FullName -Raw) -notmatch "Windows Authenticode signing status: UNSIGNED") {
+            throw "downloaded signing declaration is not honest"
+          }
+
+          $unpack = Join-Path $env:RUNNER_TEMP "henshin desktop unpacked path with spaces"
+          Remove-Item -LiteralPath $unpack -Recurse -Force -ErrorAction SilentlyContinue
+          Expand-Archive -LiteralPath $archive[0].FullName -DestinationPath $unpack -Force
+          $executable = Join-Path $unpack "Henshin\Henshin.exe"
+          if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "packaged Henshin.exe is missing" }
+          $signature = Get-AuthenticodeSignature -LiteralPath $executable
+          if ($signature.Status -ne "NotSigned") { throw "unexpected Authenticode status: $($signature.Status)" }
+          "executable=$executable" >> $env:GITHUB_OUTPUT
+          Write-Host "Archive: $($archive[0].FullName)"
+          Write-Host "SHA256: $actual"
+          Write-Host "Authenticode: $($signature.Status)"
+
+      - name: Install acceptance tooling without a checkout
+        shell: pwsh
+        env:
+          HENSHIN_TOOLING_DIR: ${{ runner.temp }}\henshin-desktop-acceptance-tooling
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path $env:HENSHIN_TOOLING_DIR | Out-Null
+          npm install --prefix $env:HENSHIN_TOOLING_DIR --no-save @playwright/test@1.64.1
+          if ($LASTEXITCODE -ne 0) { throw "acceptance tooling install failed" }
+          $harness = Get-ChildItem -LiteralPath "${{ runner.temp }}\henshin-desktop-download" -Filter "windows-desktop-acceptance.mjs" -File -Recurse | Select-Object -First 1
+          if ($null -eq $harness) { throw "downloaded acceptance harness is missing" }
+          Copy-Item -LiteralPath $harness.FullName -Destination (Join-Path $env:HENSHIN_TOOLING_DIR "windows-desktop-acceptance.mjs") -Force
+
+      - name: Exercise managed library across packaged restarts
+        shell: pwsh
+        env:
+          HENSHIN_EXECUTABLE: ${{ steps.unpack.outputs.executable }}
+          HENSHIN_TOOLING_DIR: ${{ runner.temp }}\henshin-desktop-acceptance-tooling
+        run: |
+          $ErrorActionPreference = "Stop"
+          Push-Location $env:HENSHIN_TOOLING_DIR
+          try {
+            node .\windows-desktop-acceptance.mjs
+            if ($LASTEXITCODE -ne 0) { throw "packaged desktop acceptance failed" }
+          } finally {
+            Pop-Location
+          }
