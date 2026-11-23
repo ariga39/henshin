@@ -1246,7 +1246,7 @@ const registerIpc = (): void => {
           return yield* client.entryCommand({
             params: { id: decoded.value.entry_id },
             payload: {
-              operation_id: randomUUID(),
+              operation_id: decoded.value.operation_id,
               instance_id: session.instanceId,
               epoch: session.epoch,
               expected_decision_version: decoded.value.expected_decision_version,

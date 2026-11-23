@@ -138,6 +138,8 @@ export interface ViewState {
   readonly library_bind_url: string
   readonly library_bind_status: "idle" | "loading" | "error"
   readonly library_bind_error: string | null
+  readonly library_bind_operation_id: string | null
+  readonly library_bind_operation_url: string | null
   readonly library_entry_request_generation: number
   readonly library_cursor: string | null
   readonly library_has_more: boolean
@@ -255,6 +257,8 @@ const initialState: ViewState = {
   library_bind_url: "",
   library_bind_status: "idle",
   library_bind_error: null,
+  library_bind_operation_id: null,
+  library_bind_operation_url: null,
   library_entry_request_generation: 0,
   library_cursor: null,
   library_has_more: false,

@@ -9,6 +9,7 @@ import type {
   LibraryEntryPage,
   LibraryEntryDetails,
   LibraryNoteIpcRequest,
+  LibraryBindIpcRequest,
   EntryCommandResult,
   OpenBookIpcRequest,
   OpenBookIpcResult,
@@ -164,7 +165,7 @@ export interface LibraryBridge {
   }): Promise<Result<LibraryEntryPage>>
   entry(input: { readonly entry_id: string }): Promise<Result<LibraryEntryDetails>>
   note(input: LibraryNoteIpcRequest): Promise<Result<EntryCommandResult>>
-  bind(input: { readonly entry_id: string; readonly url: string; readonly expected_decision_version: string }): Promise<Result<EntryCommandResult>>
+  bind(input: LibraryBindIpcRequest): Promise<Result<EntryCommandResult>>
   open(input: OpenBookIpcRequest): Promise<Result<OpenBookIpcResult>>
   status(input: OpenBookStatusIpcRequest): Promise<Result<OpenBookIpcResult | null>>
   onOpenStateChanged(listener: () => void): () => void
@@ -336,7 +337,7 @@ export class LibraryClient extends Context.Service<
     }) => Effect.Effect<Result<LibraryEntryPage>>
     readonly entry: (input: { readonly entry_id: string }) => Effect.Effect<Result<LibraryEntryDetails>>
     readonly note: (input: LibraryNoteIpcRequest) => Effect.Effect<Result<EntryCommandResult>>
-    readonly bind: (input: { readonly entry_id: string; readonly url: string; readonly expected_decision_version: string }) => Effect.Effect<Result<EntryCommandResult>>
+    readonly bind: (input: LibraryBindIpcRequest) => Effect.Effect<Result<EntryCommandResult>>
     readonly open: (input: OpenBookIpcRequest) => Effect.Effect<Result<OpenBookIpcResult>>
     readonly status: (input: OpenBookStatusIpcRequest) => Effect.Effect<Result<OpenBookIpcResult | null>>
     readonly getThumbnail: (key: ThumbnailKey) => Effect.Effect<Result<Uint8Array>>

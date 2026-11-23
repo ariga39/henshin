@@ -205,6 +205,7 @@ export const LibraryNoteIpcRequest = Schema.Struct({
 export type LibraryNoteIpcRequest = typeof LibraryNoteIpcRequest.Type
 export const LibraryBindIpcRequest = Schema.Struct({
   entry_id: Uuid,
+  operation_id: Uuid,
   url: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)),
   expected_decision_version: Revision
 })

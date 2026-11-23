@@ -104,7 +104,9 @@ const resetView = () => {
     library_selected_entry_id: null,
     library_open_profile_id: null,
     library_open_states: [],
-    library_entry_request_generation: 0
+    library_entry_request_generation: 0,
+    library_bind_operation_id: null,
+    library_bind_operation_url: null
   })
 }
 
@@ -148,7 +150,7 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_entry?.decision_version).toBe("2")
   })
   it("binds the selected entry with its revision and stores the canonical binding", async () => {
-    const bindRequests: Array<{ readonly entry_id: string; readonly url: string; readonly expected_decision_version: string }> = []
+    const bindRequests: Array<{ readonly entry_id: string; readonly operation_id: string; readonly url: string; readonly expected_decision_version: string }> = []
     const bound = entryDetails(entryAId, "1", {
       source: "EH",
       gid: "12345",
@@ -174,11 +176,12 @@ describe("library renderer workflow", () => {
     await run(selectLibraryEntry(entryAId), client)
     await run(bindLibraryEntry("https://e-hentai.org/g/12345/typed-token/?ignored=true"), client)
 
-    expect(bindRequests).toEqual([{
+    expect(bindRequests[0]).toMatchObject({
       entry_id: entryAId,
       url: "https://e-hentai.org/g/12345/typed-token/?ignored=true",
       expected_decision_version: "1"
-    }])
+    })
+    expect(bindRequests[0]?.operation_id).toMatch(/^[0-9a-f-]{36}$/i)
     expect(viewStore.getState().library_entry?.binding).toEqual(bound.binding)
     expect(viewStore.getState().library_bind_url).toBe(bound.binding?.canonical_url)
     expect(viewStore.getState().library_bind_error).toBeNull()
@@ -257,7 +260,7 @@ describe("library renderer workflow", () => {
   })
 
   it("reloads a conflict revision while retaining the typed URL for retry", async () => {
-    const bindRequests: Array<{ readonly expected_decision_version: string; readonly url: string }> = []
+    const bindRequests: Array<{ readonly expected_decision_version: string; readonly operation_id: string; readonly url: string }> = []
     let entryCalls = 0
     const bound = entryDetails(entryAId, "2", {
       source: "EH",
@@ -297,8 +300,44 @@ describe("library renderer workflow", () => {
 
     await run(bindLibraryEntry(viewStore.getState().library_bind_url), client)
     expect(bindRequests.map((request) => request.expected_decision_version)).toEqual(["1", "2"])
+    expect(bindRequests[0]?.operation_id).not.toBe(bindRequests[1]?.operation_id)
     expect(viewStore.getState().library_entry?.binding).toEqual(bound.binding)
     expect(viewStore.getState().library_bind_error).toBeNull()
+  })
+
+  it("reuses a bind operation after an indeterminate response", async () => {
+    const bindRequests: Array<{ readonly operation_id: string; readonly url: string }> = []
+    const bound = entryDetails(entryAId, "1", {
+      source: "EH",
+      gid: "24680",
+      canonical_url: "https://e-hentai.org/g/24680/replayed/",
+      preferred_domain: "e-hentai.org"
+    })
+    const client = LibraryClient.of({
+      entry: () => Effect.succeed({ ok: true as const, data: entryDetails(entryAId) }),
+      bind: (input) => {
+        bindRequests.push(input)
+        return bindRequests.length === 1
+          ? Effect.succeed({ ok: false as const, error: { code: "ipc_failed", message: "bind response was lost", retryable: false } })
+          : Effect.succeed({ ok: true as const, data: { operation_id: firstActionId, entry: bound } })
+      },
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({ library_entries: [entry(entryAId, "book-a")] })
+
+    await run(selectLibraryEntry(entryAId), client)
+    const typedUrl = "https://e-hentai.org/g/24680/replayed/"
+    await run(bindLibraryEntry(typedUrl), client)
+    expect(viewStore.getState().library_bind_operation_id).toBe(bindRequests[0]?.operation_id)
+    expect(viewStore.getState().library_bind_error).toBe("bind response was lost")
+
+    await run(bindLibraryEntry(typedUrl), client)
+    expect(bindRequests[1]?.operation_id).toBe(bindRequests[0]?.operation_id)
+    expect(viewStore.getState().library_entry?.binding).toEqual(bound.binding)
+    expect(viewStore.getState().library_bind_operation_id).toBeNull()
   })
 
   it("does not open a replacement-pending entry", async () => {
