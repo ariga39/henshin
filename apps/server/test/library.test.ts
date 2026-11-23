@@ -1610,6 +1610,68 @@ describe("normal library scan", () => {
     })
     expect(smallSamples.data.samples).toHaveLength(1)
   })
+
+  it("pages the maximum valid tag filter envelope with a compact cursor and bounded vocabulary", async () => {
+    const server = await start()
+    await server.stop()
+
+    const db = new DatabaseSync(server.dbPath)
+    const library = db.prepare("SELECT library_id FROM server_library WHERE id = 1").get() as { library_id: string }
+    const rootId = randomUUID()
+    db.prepare(
+      "INSERT INTO server_roots(library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, state) VALUES(?, ?, ?, ?, ?, ?, ?, 1, 0, '[]', 'active')"
+    ).run(library.library_id, rootId, "Maximum tag search fixture", "/max-tags", "/max-tags", "device", "inode")
+
+    const includeTags = Array.from({ length: 64 }, (_, index) => `artist:include-${index.toString().padStart(2, "0")}`)
+    const excludeTags = Array.from({ length: 64 }, (_, index) => `genre:exclude-${index.toString().padStart(2, "0")}`)
+    const vocabularyTags = Array.from({ length: 300 }, (_, index) => `local:vocabulary-${index.toString().padStart(3, "0")}`)
+    const insertEntry = db.prepare(
+      "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, title_search, basename_search, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'accepted', 1, 1, 1, '{}', 0, 0)"
+    )
+    const insertGallery = db.prepare(
+      "INSERT INTO galleries(gallery_id, source, gid, token, preferred_domain, metadata_tags_json, created_at_ms, updated_at_ms) VALUES(?, 'EH', ?, 'token', 'e-hentai.org', ?, 0, 0)"
+    )
+    const insertBinding = db.prepare(
+      "INSERT INTO bindings(entry_id, gallery_id, preferred_domain, bound_at_ms) VALUES(?, ?, 'e-hentai.org', 0)"
+    )
+    for (const [index, tags] of [includeTags, includeTags, [...excludeTags, ...vocabularyTags]].entries()) {
+      const entryId = randomUUID()
+      const relativePath = `max-${index}`
+      insertEntry.run(entryId, library.library_id, rootId, relativePath, `/max-tags/${relativePath}`, "image-directory", relativePath, relativePath, relativePath)
+      const galleryId = randomUUID()
+      insertGallery.run(galleryId, String(index + 1), JSON.stringify(tags))
+      insertBinding.run(entryId, galleryId)
+    }
+    db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1").run()
+    db.close()
+
+    const restarted = await startServer(server.dbPath)
+    servers.push(restarted)
+    const client = <A, E>(program: Effect.Effect<A, E, LibraryHttpClient>) => withLibraryClient(restarted, program)
+    const payload = { include_tags: includeTags, exclude_tags: excludeTags, page_size: 1 }
+    const first = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload })
+    }))
+    expect(first.data.entries).toHaveLength(1)
+    expect(first.data.has_more).toBe(true)
+    expect(first.data.next_cursor).not.toBeNull()
+    expect(first.data.tag_options).toHaveLength(256)
+    const cursor = first.data.next_cursor
+    if (cursor === null) throw new Error("expected a maximum-filter cursor")
+    expect(cursor.length).toBeLessThan(8192)
+    const cursorBody = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Record<string, unknown>
+    expect(cursorBody.include_tags).toBeUndefined()
+    expect(cursorBody.exclude_tags).toBeUndefined()
+    expect(cursorBody.filter_key).toEqual(expect.any(String))
+
+    const second = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { ...payload, cursor } })
+    }))
+    expect(second.data.entries).toHaveLength(1)
+    expect(second.data.entries[0]?.entry_id).not.toBe(first.data.entries[0]?.entry_id)
+    expect(second.data.has_more).toBe(false)
+    expect(second.data.tag_options).toBeUndefined()
+  })
 })
 
 describe("literal library search", () => {
@@ -1891,7 +1953,7 @@ describe("effective tag library search", () => {
       )
       if (fixture.tags.length > 0) {
         const galleryId = randomUUID()
-        insertGallery.run(galleryId, String(index + 1), JSON.stringify(fixture.tags))
+        insertGallery.run(galleryId, String(index + 1), fixture.relativePath === "beta" ? "{malformed" : JSON.stringify(fixture.tags))
         insertBinding.run(entryId, galleryId)
       }
       for (const override of fixture.overrides ?? []) insertOverride.run(entryId, override.tag, override.action)
@@ -1928,6 +1990,39 @@ describe("effective tag library search", () => {
       { id: "local:favourite", namespace: "local", name: "favourite", alias: null }
     ]))
     expect(allPages[0]?.tag_options?.some((tag) => tag.id === "artist:alpha")).toBe(true)
+    expect(allPages.slice(1).every((page) => page.tag_options === undefined)).toBe(true)
+
+    const alphaThree = allPages.flatMap((page) => page.entries).find((entry) => entry.relative_path === "alpha-three")
+    if (alphaThree === undefined) throw new Error("expected alpha-three entry")
+    const suppressed = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: alphaThree.entry_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: restarted.instanceId,
+          epoch: restarted.epoch,
+          expected_decision_version: "1",
+          command: { type: "set-personal-tag", tag: "artist:alpha", action: "suppress" }
+        }
+      })
+    }))
+    expect(suppressed.data.entry.entry_id).toBe(alphaThree.entry_id)
+    const afterSuppression = await collect({ include_tags: ["artist:alpha"] })
+    expect(new Set(afterSuppression.flatMap((page) => page.entries.map((entry) => entry.relative_path)))).toEqual(
+      new Set(["alpha-one", "alpha-two"])
+    )
+    await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: alphaThree.entry_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: restarted.instanceId,
+          epoch: restarted.epoch,
+          expected_decision_version: "2",
+          command: { type: "reset-personal-tag", tag: "artist:alpha" }
+        }
+      })
+    }))
 
     const included = await collect({ include_tags: ["artist:alpha"] })
     expect(included).toHaveLength(2)

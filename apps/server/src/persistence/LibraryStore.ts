@@ -9,6 +9,7 @@ import {
   LibraryEntryDetailsRow,
   BindEntryOutcome,
   PersonalTitleOutcome,
+  PersonalTagOutcome,
   LibrarySummaryRow,
   EntryResolutionLookupOutcome,
   ResolveReplacementOutcome
@@ -48,6 +49,7 @@ const decodeEntryResolutionLookup = Schema.decodeUnknownOption(EntryResolutionLo
 const decodeEntryDetailsResult = Schema.decodeUnknownOption(Schema.NullOr(LibraryEntryDetailsRow))
 const decodeBindEntry = Schema.decodeUnknownOption(BindEntryOutcome)
 const decodePersonalTitle = Schema.decodeUnknownOption(PersonalTitleOutcome)
+const decodePersonalTag = Schema.decodeUnknownOption(PersonalTagOutcome)
 const decodeStaged = Schema.decodeUnknownOption(StagedDiscovery)
 
 const jsonValue = (value: string | null): unknown => {
@@ -107,6 +109,13 @@ export class LibraryStore extends Context.Service<
         | { readonly type: "set-personal-title"; readonly title: string }
         | { readonly type: "remove-personal-title" }
     }) => Effect.Effect<typeof PersonalTitleOutcome.Type, DatabaseWorkerError>
+    readonly updatePersonalTag: (input: {
+      readonly entryId: string
+      readonly operationId: string
+      readonly epoch: string
+      readonly expectedDecisionVersion: string
+      readonly command: import("@henshin/contracts").SetPersonalTagCommand | import("@henshin/contracts").ResetPersonalTagCommand
+    }) => Effect.Effect<typeof PersonalTagOutcome.Type, DatabaseWorkerError>
     readonly indexedRootSamples: (rootId: string) => Effect.Effect<IndexedRootSamplePage, DatabaseWorkerError>
     readonly resolution: (input: {
       readonly entryId: string
@@ -179,6 +188,16 @@ export class LibraryStore extends Context.Service<
         ...input
       }).pipe(
         Effect.flatMap((value) => decodeOrFail(decodePersonalTitle, value, "invalid personal title result"))
+      )
+      const updatePersonalTag = (input: Parameters<LibraryStore["Service"]["updatePersonalTag"]>[0]) => worker.call({
+        op: "updatePersonalTag",
+        ...input
+      }).pipe(
+        Effect.flatMap((value) => decodeOrFail(
+          decodePersonalTag,
+          value,
+          "invalid personal tag result"
+        ))
       )
       const resolution = (input: {
         readonly entryId: string
@@ -265,6 +284,7 @@ export class LibraryStore extends Context.Service<
         lookupReplacementOperation,
         resolution,
         resolveReplacement,
+        updatePersonalTag,
         bindEntry,
         updatePersonalTitle,
         entry,

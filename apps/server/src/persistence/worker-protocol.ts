@@ -9,6 +9,8 @@ import {
   EntryCommandResult,
   LibraryEntryDetails,
   RemovePersonalTitleCommand,
+  ResetPersonalTagCommand,
+  SetPersonalTagCommand,
   SetPersonalTitleCommand
 } from "@henshin/contracts"
 
@@ -349,6 +351,17 @@ export const PersonalTitleOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("revision_conflict"), currentDecisionVersion: Revision })
 ])
 export type PersonalTitleOutcome = typeof PersonalTitleOutcome.Type
+
+export const PersonalTagOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("committed"), result: EntryCommandResult }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), result: EntryCommandResult }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("operation_expired") }),
+  Schema.Struct({ kind: Schema.Literal("storage_full") }),
+  Schema.Struct({ kind: Schema.Literal("entry_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("revision_conflict"), currentDecisionVersion: Revision })
+])
+export type PersonalTagOutcome = typeof PersonalTagOutcome.Type
 export const IndexedRootSampleRow = Schema.Struct({
   relative_path: RootRelativePath,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
@@ -604,6 +617,14 @@ export const WorkerRequest = Schema.Union([
     epoch: Uuid,
     expectedDecisionVersion: Revision,
     command: Schema.Union([SetPersonalTitleCommand, RemovePersonalTitleCommand])
+  }),
+  Schema.Struct({
+    op: Schema.Literal("updatePersonalTag"),
+    entryId: Uuid,
+    operationId: Uuid,
+    epoch: Uuid,
+    expectedDecisionVersion: Revision,
+    command: Schema.Union([SetPersonalTagCommand, ResetPersonalTagCommand])
   }),
   Schema.Struct({ op: Schema.Literal("readAcceptedThumbnailEntry"), entryId: Uuid }),
   Schema.Struct({ op: Schema.Literal("acceptOpenEvents"), events: Schema.Array(OpenEvent) }),

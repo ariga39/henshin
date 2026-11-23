@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { DatabaseSync } from "node:sqlite"
 import { basename, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
@@ -255,17 +255,21 @@ const ResolutionCursor = Schema.Struct({
 })
 
 const LibrarySearchCursor = Schema.Struct({
-  version: Schema.Literal(1),
+  version: Schema.Literal(2),
   normalization_profile: Schema.Literal(SEARCH_NORMALIZATION_PROFILE),
   query: Schema.String,
   page_size: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(200)),
   library_id: Uuid,
   epoch: Uuid,
   state: Schema.NullOr(Schema.Literal("replacement-pending")),
-  include_tags: Schema.Array(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512))).check(Schema.isMaxLength(64)),
-  exclude_tags: Schema.Array(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512))).check(Schema.isMaxLength(64)),
+  filter_key: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64)),
   last_entry_id: Uuid
 })
+
+const libraryFilterKey = (includeTags: ReadonlyArray<string>, excludeTags: ReadonlyArray<string>): string =>
+  createHash("sha256")
+    .update(JSON.stringify({ include_tags: includeTags, exclude_tags: excludeTags }), "utf8")
+    .digest("base64url")
 
 const encodeLibrarySearchCursor = (value: typeof LibrarySearchCursor.Type): string =>
   Buffer.from(JSON.stringify(value), "utf8").toString("base64url")
@@ -992,6 +996,13 @@ const upsertEntryOverride = db.prepare(
   "INSERT INTO entry_overrides(entry_id, title_present, title, title_search) VALUES(?, 1, ?, ?) ON CONFLICT(entry_id) DO UPDATE SET title_present = 1, title = excluded.title, title_search = excluded.title_search"
 )
 const deleteEntryOverride = db.prepare("DELETE FROM entry_overrides WHERE entry_id = ?")
+
+const upsertEntryTagOverride = db.prepare(
+  "INSERT INTO entry_tag_overrides(entry_id, tag, action) VALUES(?, ?, ?) ON CONFLICT(entry_id, tag) DO UPDATE SET action = excluded.action"
+)
+const deleteEntryTagOverride = db.prepare(
+  "DELETE FROM entry_tag_overrides WHERE entry_id = ? AND tag = ?"
+)
 const insertEntryOperation = db.prepare(
   "INSERT INTO entry_operations(epoch, operation_id, entry_id, payload, result, created_at_ms) VALUES(?, ?, ?, ?, ?, ?)"
 )
@@ -1048,14 +1059,17 @@ const detachEntry = db.prepare(
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
 const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
 const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
+const MAX_LIBRARY_TAG_OPTIONS = 256
 const tagMembershipSql = (tag: string): { readonly sql: string; readonly parameters: ReadonlyArray<string> } => ({
   sql: `(
     EXISTS (
       SELECT 1
       FROM bindings b
       JOIN galleries g ON g.gallery_id = b.gallery_id
-      JOIN json_each(CASE WHEN g.metadata_tags_json IS NULL THEN '[]' ELSE g.metadata_tags_json END) source_tag
-        ON source_tag.value = ?
+      JOIN json_each(CASE WHEN json_valid(g.metadata_tags_json) THEN g.metadata_tags_json ELSE '[]' END) source_tag
+        ON typeof(source_tag.value) = 'text'
+        AND length(source_tag.value) BETWEEN 1 AND 512
+        AND source_tag.value = ?
       WHERE b.entry_id = e.entry_id
         AND NOT EXISTS (
           SELECT 1 FROM entry_tag_overrides suppressed
@@ -1085,8 +1099,10 @@ const selectLibraryTagOptions = (
       FROM library_entries e
       JOIN bindings b ON b.entry_id = e.entry_id
       JOIN galleries g ON g.gallery_id = b.gallery_id
-      JOIN json_each(CASE WHEN g.metadata_tags_json IS NULL THEN '[]' ELSE g.metadata_tags_json END) source_tag
+      JOIN json_each(CASE WHEN json_valid(g.metadata_tags_json) THEN g.metadata_tags_json ELSE '[]' END) source_tag
       WHERE ${stateClause}
+        AND typeof(source_tag.value) = 'text'
+        AND length(source_tag.value) BETWEEN 1 AND 512
         AND NOT EXISTS (
           SELECT 1 FROM entry_tag_overrides suppressed
           WHERE suppressed.entry_id = e.entry_id
@@ -1100,9 +1116,17 @@ const selectLibraryTagOptions = (
       WHERE ${stateClause}
         AND added.action = 'add'
     )
+    WHERE typeof(tag) = 'text' AND length(tag) BETWEEN 1 AND 512
     ORDER BY tag ASC
-  `).all() as unknown as ReadonlyArray<{ tag: string }>
+    LIMIT ?
+  `).all(MAX_LIBRARY_TAG_OPTIONS) as unknown as ReadonlyArray<{ tag: string }>
   return rows.map((row) => tagOption(row.tag))
+}
+const libraryTagExists = (state: "replacement-pending" | null, tag: string): boolean => {
+  const stateClause = state === null ? "e.state IN ('accepted', 'replacement-pending')" : "e.state = 'replacement-pending'"
+  const membership = tagMembershipSql(tag)
+  const row = db.prepare(`SELECT 1 FROM library_entries e WHERE ${stateClause} AND ${membership.sql} LIMIT 1`).get(...membership.parameters)
+  return row !== undefined
 }
 const selectLibraryEntries = (
   query: string,
@@ -2548,6 +2572,7 @@ const updatePersonalTitle = (
 
   db.exec("BEGIN IMMEDIATE")
   try {
+    const now = Date.now()
     const previous = selectEntryOperation.get(request.epoch, request.operationId) as {
       entry_id: string
       payload: string
@@ -2559,7 +2584,7 @@ const updatePersonalTitle = (
         db.exec("ROLLBACK")
         return { kind: "operation_conflict" }
       }
-      if (previous.created_at_ms <= Date.now() - RESULT_RETENTION_MS) {
+      if (previous.created_at_ms <= now - RESULT_RETENTION_MS) {
         db.exec("ROLLBACK")
         return { kind: "operation_expired" }
       }
@@ -2579,7 +2604,6 @@ const updatePersonalTitle = (
       return { kind: "revision_conflict", currentDecisionVersion: current.decision_version.toString() }
     }
 
-    const now = Date.now()
     compactEntryOperations.run(now - RESULT_RETENTION_MS, request.epoch, COMPACTION_BATCH)
     if (Number(countEntryOperations.get()?.count) >= MAX_OPERATION_RESULTS) {
       db.exec("COMMIT")
@@ -2597,6 +2621,73 @@ const updatePersonalTitle = (
     bumpLibraryRevision.run()
     const entry = readEntryDetails(request.entryId)
     if (entry === null) throw new Error("titled entry disappeared")
+    const result = { operation_id: request.operationId, entry }
+    insertEntryOperation.run(request.epoch, request.operationId, request.entryId, canonicalPayload, JSON.stringify(result), now)
+    db.exec("COMMIT")
+    return { kind: "committed", result }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const updatePersonalTag = (
+  request: Extract<WorkerRequest, { op: "updatePersonalTag" }>
+): import("./worker-protocol").PersonalTagOutcome => {
+  const canonicalPayload = JSON.stringify({
+    entry_id: request.entryId,
+    expected_decision_version: request.expectedDecisionVersion,
+    command: request.command
+  })
+
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const now = Date.now()
+    const previous = selectEntryOperation.get(request.epoch, request.operationId) as {
+      entry_id: string
+      payload: string
+      result: string
+      created_at_ms: number
+    } | undefined
+    if (previous !== undefined) {
+      if (previous.entry_id !== request.entryId || previous.payload !== canonicalPayload) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_conflict" }
+      }
+      if (previous.created_at_ms <= now - RESULT_RETENTION_MS) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_expired" }
+      }
+      const replay = Schema.decodeUnknownOption(EntryCommandResult)(JSON.parse(previous.result))
+      if (Option.isNone(replay)) throw new Error("invalid persisted personal tag result")
+      db.exec("COMMIT")
+      return { kind: "replayed", result: replay.value }
+    }
+
+    const current = selectEntryDetails.get(request.entryId) as Parameters<typeof entryDetailsRow>[0] | undefined
+    if (current === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "entry_not_found" }
+    }
+    if (current.decision_version.toString() !== request.expectedDecisionVersion) {
+      db.exec("ROLLBACK")
+      return { kind: "revision_conflict", currentDecisionVersion: current.decision_version.toString() }
+    }
+
+    compactEntryOperations.run(now - RESULT_RETENTION_MS, request.epoch, COMPACTION_BATCH)
+    if (Number(countEntryOperations.get()?.count) >= MAX_OPERATION_RESULTS) {
+      db.exec("COMMIT")
+      return { kind: "storage_full" }
+    }
+    if (request.command.type === "reset-personal-tag") {
+      deleteEntryTagOverride.run(request.entryId, request.command.tag)
+    } else {
+      upsertEntryTagOverride.run(request.entryId, request.command.tag, request.command.action)
+    }
+    advanceEntryDecision.run(now, request.entryId)
+    bumpLibraryRevision.run()
+    const entry = readEntryDetails(request.entryId)
+    if (entry === null) throw new Error("tagged entry disappeared")
     const result = { operation_id: request.operationId, entry }
     insertEntryOperation.run(request.epoch, request.operationId, request.entryId, canonicalPayload, JSON.stringify(result), now)
     db.exec("COMMIT")
@@ -2816,19 +2907,19 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
   db.exec("BEGIN")
   try {
   const library = librarySummary()
-  const tagOptions = selectLibraryTagOptions(state)
-  const knownTags = new Set(tagOptions.map((tag) => tag.id))
+  const tagOptions = request.cursor === null ? selectLibraryTagOptions(state) : undefined
+  const filterKey = libraryFilterKey(includeTags, excludeTags)
   const conflictingTag = includeTags.find((tag) => excludeTags.includes(tag))
   if (conflictingTag !== undefined) {
     db.exec("ROLLBACK")
     return { kind: "conflicting_filter", tag: conflictingTag }
   }
-  const unknownInclude = includeTags.find((tag) => !knownTags.has(tag))
+  const unknownInclude = includeTags.find((tag) => !libraryTagExists(state, tag))
   if (unknownInclude !== undefined) {
     db.exec("ROLLBACK")
     return { kind: "invalid_filter", field: "include_tags" }
   }
-  const unknownExclude = excludeTags.find((tag) => !knownTags.has(tag))
+  const unknownExclude = excludeTags.find((tag) => !libraryTagExists(state, tag))
   if (unknownExclude !== undefined) {
     db.exec("ROLLBACK")
     return { kind: "invalid_filter", field: "exclude_tags" }
@@ -2844,8 +2935,7 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
       cursor.library_id !== library.library_id ||
       cursor.epoch !== request.epoch ||
       cursor.state !== (state ?? null) ||
-      JSON.stringify(cursor.include_tags) !== JSON.stringify(includeTags) ||
-      JSON.stringify(cursor.exclude_tags) !== JSON.stringify(excludeTags)
+      cursor.filter_key !== filterKey
     ) {
       db.exec("ROLLBACK")
       return { kind: "invalid_cursor" }
@@ -2883,15 +2973,14 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
   const last = page[page.length - 1]
   const nextCursor = hasMore && last !== undefined
     ? encodeLibrarySearchCursor({
-        version: 1,
+        version: 2,
         normalization_profile: SEARCH_NORMALIZATION_PROFILE,
         query: normalizedQuery,
         page_size: request.pageSize,
         library_id: library.library_id,
         epoch: request.epoch,
         state: state ?? null,
-        include_tags: includeTags,
-        exclude_tags: excludeTags,
+        filter_key: filterKey,
         last_entry_id: last.entry_id
       })
     : null
@@ -2902,7 +2991,7 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
       has_more: hasMore,
       next_cursor: nextCursor,
       library_change_revision: librarySummary().change_revision,
-      tag_options: tagOptions
+      ...(tagOptions === undefined ? {} : { tag_options: tagOptions })
     }
   }
   db.exec("COMMIT")
@@ -3377,6 +3466,8 @@ const handle = (request: WorkerRequest): unknown => {
       return bindEntry(request)
     case "updatePersonalTitle":
       return updatePersonalTitle(request)
+    case "updatePersonalTag":
+      return updatePersonalTag(request)
     case "acceptOpenEvents":
       return acceptOpenEvents(request)
     case "recordDiscovery":

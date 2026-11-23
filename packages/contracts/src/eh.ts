@@ -34,12 +34,33 @@ export const RemovePersonalTitleCommand = Schema.Struct({
 })
 export type RemovePersonalTitleCommand = typeof RemovePersonalTitleCommand.Type
 
+const personalTag = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512))
+
+export const SetPersonalTagCommand = Schema.Struct({
+  type: Schema.Literal("set-personal-tag"),
+  tag: personalTag,
+  action: Schema.Literals(["add", "suppress"])
+})
+export type SetPersonalTagCommand = typeof SetPersonalTagCommand.Type
+
+export const ResetPersonalTagCommand = Schema.Struct({
+  type: Schema.Literal("reset-personal-tag"),
+  tag: personalTag
+})
+export type ResetPersonalTagCommand = typeof ResetPersonalTagCommand.Type
+
 export const EntryCommandRequest = Schema.Struct({
   operation_id: Uuid,
   instance_id: Uuid,
   epoch: Uuid,
   expected_decision_version: Revision,
-  command: Schema.Union([BindEntryCommand, SetPersonalTitleCommand, RemovePersonalTitleCommand])
+  command: Schema.Union([
+    BindEntryCommand,
+    SetPersonalTitleCommand,
+    RemovePersonalTitleCommand,
+    SetPersonalTagCommand,
+    ResetPersonalTagCommand
+  ])
 })
 export type EntryCommandRequest = typeof EntryCommandRequest.Type
 

@@ -203,20 +203,35 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
                   }))
                 )
               })
-            : yield* library.updatePersonalTitle({
-                entryId: params.id,
-                operationId: payload.operation_id,
-                epoch: server.epoch,
-                expectedDecisionVersion: payload.expected_decision_version,
-                command
-              }).pipe(
-                Effect.mapError(() => new InternalError({
-                  code: "internal_error",
-                  message: "internal error",
-                  retryable: false,
-                  ...errorBase(server, context.request_id)
-                }))
-              )
+            : command.type === "set-personal-title" || command.type === "remove-personal-title"
+              ? yield* library.updatePersonalTitle({
+                  entryId: params.id,
+                  operationId: payload.operation_id,
+                  epoch: server.epoch,
+                  expectedDecisionVersion: payload.expected_decision_version,
+                  command
+                }).pipe(
+                  Effect.mapError(() => new InternalError({
+                    code: "internal_error",
+                    message: "internal error",
+                    retryable: false,
+                    ...errorBase(server, context.request_id)
+                  }))
+                )
+              : yield* library.updatePersonalTag({
+              entryId: params.id,
+              operationId: payload.operation_id,
+              epoch: server.epoch,
+              expectedDecisionVersion: payload.expected_decision_version,
+              command: payload.command
+            }).pipe(
+              Effect.mapError(() => new InternalError({
+                code: "internal_error",
+                message: "internal error",
+                retryable: false,
+                ...errorBase(server, context.request_id)
+              }))
+            )
           switch (outcome.kind) {
             case "committed":
             case "replayed":
