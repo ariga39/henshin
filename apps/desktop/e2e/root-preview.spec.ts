@@ -1,5 +1,6 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test"
 import electronPath from "electron"
+import { randomUUID } from "node:crypto"
 import { DatabaseSync } from "node:sqlite"
 import { mkdtemp, mkdir, rename, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
@@ -441,5 +442,94 @@ test("loads an additional Library page after a normal scan", async () => {
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })
+  }
+})
+
+test("inspects and recovers retained handoff outcomes from the ordinary desktop screen across restart", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-open-journal-ui-db-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+  const clientDbPath = `${dbPath}.client`
+  const unknownActionId = randomUUID()
+  const heldActionId = randomUUID()
+  const entryId = randomUUID()
+  const deviceId = randomUUID()
+
+  try {
+    const first = await launch(dbPath)
+    await expect(first.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await expect(first.window.getByTestId("reader-settings")).toBeVisible()
+    await first.app.close()
+    launched.splice(launched.indexOf(first.app), 1)
+
+    const serverDatabase = new DatabaseSync(dbPath)
+    const instanceId = (serverDatabase.prepare("SELECT instance_id FROM server_state WHERE id = 1").get() as { instance_id: string }).instance_id
+    serverDatabase.close()
+
+    const clientDatabase = new DatabaseSync(clientDbPath)
+    const now = Date.now()
+    const heldEvent = JSON.stringify({
+      event_id: heldActionId,
+      instance_id: instanceId,
+      entry_id: entryId,
+      device_id: deviceId,
+      observed_location_revision: "3",
+      observed_content_version: "5",
+      occurred_at_ms: now
+    })
+    clientDatabase.prepare(`
+      INSERT INTO launch_journal(
+        instance_id, action_id, entry_id, device_id, observed_location_revision,
+        observed_content_version, status, event_json, delivery_status,
+        delivery_error_code, delivery_error_message, failure_code, failure_message,
+        created_at_ms, updated_at_ms
+      ) VALUES(?, ?, ?, ?, 3, 5, 'prepared', NULL, 'pending', NULL, NULL, NULL, NULL, ?, ?),
+               (?, ?, ?, ?, 3, 5, 'accepted', ?, 'held', 'offline', 'server unavailable', NULL, NULL, ?, ?)
+    `).run(
+      instanceId, unknownActionId, randomUUID(), deviceId, now, now,
+      instanceId, heldActionId, randomUUID(), deviceId, heldEvent, now, now
+    )
+    clientDatabase.close()
+
+    const second = await launch(dbPath)
+    await second.window.getByTestId("load-open-journal").click()
+    await expect(second.window.getByTestId(`dismiss-unknown-${unknownActionId}`)).toBeVisible()
+    await expect(second.window.getByTestId(`open-event-${heldActionId}`)).toContainText("pending reading count can be lost")
+    await expect(second.window.evaluate(({ actionId, instanceId }) =>
+      window.henshinOpenJournal.recover({
+        instance_id: instanceId,
+        action_id: actionId,
+        command: "dismiss_unknown"
+      }), { actionId: unknownActionId, instanceId: randomUUID() })).resolves.toEqual({
+        ok: false,
+        error: {
+          code: "open_journal_namespace",
+          message: "this handoff entry belongs to another server namespace; refresh the diagnostics before recovering it",
+          retryable: true
+        }
+      })
+    await expect(second.window.getByTestId(`dismiss-unknown-${unknownActionId}`)).toBeVisible()
+    second.window.once("dialog", async (dialog) => {
+      expect(dialog.message()).toContain("pending reading count can be lost")
+      await dialog.dismiss()
+    })
+    await second.window.getByTestId(`discard-held-${heldActionId}`).click()
+    await expect(second.window.getByTestId(`open-event-${heldActionId}`)).toBeVisible()
+    second.window.once("dialog", async (dialog) => {
+      expect(dialog.message()).toContain("pending reading count can be lost")
+      await dialog.accept()
+    })
+    await second.window.getByTestId(`discard-held-${heldActionId}`).click()
+    await second.window.getByTestId(`dismiss-unknown-${unknownActionId}`).click()
+    await expect(second.window.getByTestId(`open-event-${heldActionId}`)).toHaveCount(0)
+    await expect(second.window.getByTestId(`dismiss-unknown-${unknownActionId}`)).toHaveCount(0)
+    await second.app.close()
+    launched.splice(launched.indexOf(second.app), 1)
+
+    const third = await launch(dbPath)
+    await expect(third.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await expect(third.window.getByTestId(`open-event-${heldActionId}`)).toHaveCount(0)
+    await expect(third.window.getByTestId(`dismiss-unknown-${unknownActionId}`)).toHaveCount(0)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
   }
 })

@@ -246,6 +246,123 @@ describe("desktop open journal SQLite worker", () => {
     })).resolves.toEqual({ kind: "conflict" })
   })
 
+  it("dismisses unknown intents and held events only after restart, without removing live rows", async () => {
+    const first = await startWorker()
+    const instanceId = randomUUID()
+    const otherInstanceId = randomUUID()
+    const unknownActionId = randomUUID()
+    const heldActionId = randomUUID()
+    const pendingActionId = randomUUID()
+    const acknowledgedActionId = randomUUID()
+    const failedActionId = randomUUID()
+
+    const accepted = async (actionId: string) => {
+      const input = { instanceId, actionId }
+      const prepared = await prepare(first.running, input) as { entry: { entryId: string; deviceId: string } }
+      await expect(first.running.call({
+        op: "recordOpenAccepted",
+        instanceId,
+        actionId,
+        event: eventFor({ instanceId, actionId, entryId: prepared.entry.entryId, deviceId: prepared.entry.deviceId })
+      })).resolves.toMatchObject({ kind: "updated" })
+    }
+
+    await expect(prepare(first.running, { instanceId, actionId: unknownActionId })).resolves.toMatchObject({ kind: "admitted" })
+    await accepted(heldActionId)
+    await accepted(pendingActionId)
+    await accepted(acknowledgedActionId)
+    await expect(prepare(first.running, { instanceId, actionId: failedActionId })).resolves.toMatchObject({ kind: "admitted" })
+    await expect(first.running.call({
+      op: "recordOpenFailed",
+      instanceId,
+      actionId: failedActionId,
+      failureCode: "reader_failed",
+      failureMessage: "reader rejected the target"
+    })).resolves.toMatchObject({ kind: "updated" })
+    await expect(first.running.call({
+      op: "acknowledgeOpenEvent",
+      instanceId,
+      actionId: acknowledgedActionId
+    })).resolves.toMatchObject({ kind: "updated" })
+    await expect(first.running.call({
+      op: "holdOpenEvent",
+      instanceId,
+      actionId: heldActionId,
+      deliveryErrorCode: "offline",
+      deliveryErrorMessage: "server unavailable"
+    })).resolves.toMatchObject({ kind: "updated" })
+
+    await expect(first.running.call({
+      op: "dismissUnknownOpen",
+      instanceId,
+      actionId: unknownActionId
+    })).resolves.toEqual({ kind: "conflict" })
+    await expect(first.running.call({
+      op: "discardHeldOpenEvent",
+      instanceId,
+      actionId: pendingActionId
+    })).resolves.toEqual({ kind: "conflict" })
+
+    await first.running.close()
+    workers.delete(first.running)
+    const reopened = await startWorker(first.dbPath)
+
+    await expect(reopened.running.call({
+      op: "dismissUnknownOpen",
+      instanceId: otherInstanceId,
+      actionId: unknownActionId
+    })).resolves.toEqual({ kind: "not_found" })
+    await expect(reopened.running.call({
+      op: "getOpenJournal",
+      instanceId,
+      actionId: unknownActionId
+    })).resolves.toMatchObject({ status: "unknown" })
+    await expect(reopened.running.call({
+      op: "dismissUnknownOpen",
+      instanceId,
+      actionId: unknownActionId
+    })).resolves.toEqual({ kind: "deleted" })
+    await expect(reopened.running.call({
+      op: "discardHeldOpenEvent",
+      instanceId,
+      actionId: heldActionId
+    })).resolves.toEqual({ kind: "deleted" })
+    await expect(reopened.running.call({
+      op: "discardHeldOpenEvent",
+      instanceId,
+      actionId: pendingActionId
+    })).resolves.toEqual({ kind: "conflict" })
+    await expect(reopened.running.call({
+      op: "discardHeldOpenEvent",
+      instanceId,
+      actionId: acknowledgedActionId
+    })).resolves.toEqual({ kind: "conflict" })
+    await expect(reopened.running.call({
+      op: "dismissUnknownOpen",
+      instanceId,
+      actionId: pendingActionId
+    })).resolves.toEqual({ kind: "conflict" })
+    await expect(reopened.running.call({
+      op: "dismissUnknownOpen",
+      instanceId,
+      actionId: failedActionId
+    })).resolves.toEqual({ kind: "conflict" })
+
+    await expect(prepare(reopened.running, { instanceId })).resolves.toMatchObject({ kind: "admitted" })
+    await expect(reopened.running.call({ op: "getOpenJournal", instanceId, actionId: heldActionId })).resolves.toBeNull()
+    await expect(reopened.running.call({ op: "getOpenJournal", instanceId, actionId: pendingActionId })).resolves.toMatchObject({
+      status: "accepted",
+      deliveryStatus: "pending"
+    })
+    await expect(reopened.running.call({ op: "getOpenJournal", instanceId, actionId: acknowledgedActionId })).resolves.toMatchObject({
+      status: "accepted",
+      deliveryStatus: "acknowledged"
+    })
+    await expect(reopened.running.call({ op: "getOpenJournal", instanceId, actionId: failedActionId })).resolves.toMatchObject({
+      status: "failed"
+    })
+  })
+
   it("blocks a new counted Open when the finite journal is full and preserves pending events", async () => {
     const { running } = await startWorker()
     const instanceId = randomUUID()

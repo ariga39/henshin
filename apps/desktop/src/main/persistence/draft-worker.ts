@@ -257,6 +257,7 @@ const updateOpenFailed = db.prepare(`
   SET status = 'failed', failure_code = ?, failure_message = ?, updated_at_ms = ?
   WHERE instance_id = ? AND action_id = ? AND status = 'prepared'
 `)
+const deleteOpenJournal = db.prepare("DELETE FROM launch_journal WHERE instance_id = ? AND action_id = ?")
 const selectReaderProfileCount = db.prepare("SELECT COUNT(*) AS count FROM reader_profiles")
 selectReaderProfileCount.setReadBigInts(true)
 const insertReaderProfile = db.prepare(`
@@ -1409,6 +1410,46 @@ const handle = (request: DraftWorkerRequest): unknown => {
         const entry = readOpenJournal(request.instanceId, request.actionId)
         if (entry === undefined) throw new Error("failed open intent was not readable")
         return { kind: "updated", entry }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "dismissUnknownOpen": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const current = readOpenJournal(request.instanceId, request.actionId)
+        if (current === undefined) {
+          db.exec("ROLLBACK")
+          return { kind: "not_found" }
+        }
+        if (current.status !== "unknown") {
+          db.exec("COMMIT")
+          return { kind: "conflict" }
+        }
+        deleteOpenJournal.run(request.instanceId, request.actionId)
+        db.exec("COMMIT")
+        return { kind: "deleted" }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "discardHeldOpenEvent": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const current = readOpenJournal(request.instanceId, request.actionId)
+        if (current === undefined) {
+          db.exec("ROLLBACK")
+          return { kind: "not_found" }
+        }
+        if (current.status !== "accepted" || current.deliveryStatus !== "held") {
+          db.exec("COMMIT")
+          return { kind: "conflict" }
+        }
+        deleteOpenJournal.run(request.instanceId, request.actionId)
+        db.exec("COMMIT")
+        return { kind: "deleted" }
       } catch (error) {
         rollbackIfActive()
         throw error

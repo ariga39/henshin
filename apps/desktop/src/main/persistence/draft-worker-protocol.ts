@@ -199,6 +199,13 @@ export const OpenJournalMutation = Schema.Union([
 ])
 export type OpenJournalMutation = typeof OpenJournalMutation.Type
 
+export const OpenJournalRemoval = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("deleted") }),
+  Schema.Struct({ kind: Schema.Literal("not_found") }),
+  Schema.Struct({ kind: Schema.Literal("conflict") })
+])
+export type OpenJournalRemoval = typeof OpenJournalRemoval.Type
+
 export const DraftWorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("listReaderProfiles") }),
   Schema.Struct({ op: Schema.Literal("getReaderProfile"), profileId: Uuid }),
@@ -297,6 +304,8 @@ export const DraftWorkerRequest = Schema.Union([
     failureCode: Schema.String,
     failureMessage: Schema.String
   }),
+  Schema.Struct({ op: Schema.Literal("dismissUnknownOpen"), instanceId: Uuid, actionId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("discardHeldOpenEvent"), instanceId: Uuid, actionId: Uuid }),
   Schema.Struct({ op: Schema.Literal("listOpenJournal"), instanceId: Uuid }),
   Schema.Struct({ op: Schema.Literal("getOpenJournal"), instanceId: Uuid, actionId: Uuid }),
   Schema.Struct({ op: Schema.Literal("close") })

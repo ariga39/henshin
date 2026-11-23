@@ -16,6 +16,7 @@ import {
 } from "./workflows"
 import { HeldScanControls, HeldScanReview } from "./HeldScanReview"
 import { ReaderProfiles } from "./ReaderProfiles"
+import { OpenJournalDiagnostics } from "./OpenJournalDiagnostics"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -342,6 +343,7 @@ export const RootPreviewScreen = () => {
         </ul>
       </section>
       <ReaderProfiles />
+      <OpenJournalDiagnostics />
     </main>
   )
 }

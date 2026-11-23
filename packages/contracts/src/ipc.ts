@@ -60,6 +60,19 @@ export type ConnectionStatusIpcRequest = typeof ConnectionStatusIpcRequest.Type
 export const ListOpenJournalIpcRequest = Schema.Struct({})
 export type ListOpenJournalIpcRequest = typeof ListOpenJournalIpcRequest.Type
 
+export const OpenJournalRecoveryCommand = Schema.Union([
+  Schema.Literal("dismiss_unknown"),
+  Schema.Literal("discard_held")
+])
+export type OpenJournalRecoveryCommand = typeof OpenJournalRecoveryCommand.Type
+
+export const RecoverOpenJournalIpcRequest = Schema.Struct({
+  instance_id: Uuid,
+  action_id: Uuid,
+  command: OpenJournalRecoveryCommand
+})
+export type RecoverOpenJournalIpcRequest = typeof RecoverOpenJournalIpcRequest.Type
+
 export const GetNoteIpcRequest = Schema.Struct({
   note_id: NoteId
 })
