@@ -25,6 +25,9 @@ import {
   type ServerRootRow,
   BackupDestinationRegistrationOutcome,
   BackupDestinationRow,
+  BackupArtifactCompletionOutcome,
+  BackupArtifactReservationOutcome,
+  BackupArtifactRow,
   RootRegistrationOutcome,
   RootReplayLookup,
   type WorkerRequest
@@ -349,6 +352,22 @@ db.exec(`
     device TEXT NOT NULL,
     inode TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state = 'active')
+  );
+  CREATE TABLE IF NOT EXISTS backup_artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    destination_id TEXT NOT NULL REFERENCES backup_destinations(destination_id),
+    operation_id TEXT NOT NULL UNIQUE,
+    relative_path TEXT NOT NULL,
+    publication_order INTEGER NOT NULL,
+    retention_class TEXT NOT NULL CHECK (retention_class = 'archive'),
+    label TEXT,
+    status TEXT NOT NULL CHECK (status IN ('reserved', 'completed')),
+    manifest_digest TEXT,
+    size_bytes INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    completed_at_ms INTEGER,
+    UNIQUE (destination_id, relative_path),
+    UNIQUE (destination_id, publication_order)
   );
   CREATE TABLE IF NOT EXISTS root_operations (
     operation_id TEXT PRIMARY KEY,
@@ -813,6 +832,35 @@ const insertBackupDestination = db.prepare(
 const updateBackupDestination = db.prepare(
   "UPDATE backup_destinations SET selected_path = ?, canonical_path = ?, device = ?, inode = ?, state = 'active' WHERE destination_id = ?"
 )
+const selectBackupArtifacts = db.prepare(
+  `SELECT artifact_id, destination_id, operation_id, relative_path, publication_order,
+          retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
+   FROM backup_artifacts ORDER BY destination_id ASC, publication_order ASC`
+)
+const selectBackupArtifactByOperation = db.prepare(
+  `SELECT artifact_id, destination_id, operation_id, relative_path, publication_order,
+          retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
+   FROM backup_artifacts WHERE operation_id = ?`
+)
+const selectBackupArtifactById = db.prepare(
+  `SELECT artifact_id, destination_id, operation_id, relative_path, publication_order,
+          retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
+   FROM backup_artifacts WHERE artifact_id = ?`
+)
+const selectNextBackupPublicationOrder = db.prepare(
+  "SELECT COALESCE(MAX(publication_order), 0) + 1 AS next_order FROM backup_artifacts WHERE destination_id = ?"
+)
+const insertBackupArtifact = db.prepare(
+  `INSERT INTO backup_artifacts(
+    artifact_id, destination_id, operation_id, relative_path, publication_order,
+    retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
+  ) VALUES (?, ?, ?, ?, ?, 'archive', ?, 'reserved', NULL, NULL, ?, NULL)`
+)
+const updateBackupArtifactCompleted = db.prepare(
+  `UPDATE backup_artifacts
+   SET status = 'completed', manifest_digest = ?, size_bytes = ?, completed_at_ms = ?
+   WHERE artifact_id = ? AND status = 'reserved'`
+)
 const selectLibrary = db.prepare("SELECT library_id FROM server_library WHERE id = 1")
 const selectLibraryState = db.prepare("SELECT library_id, change_revision FROM server_library WHERE id = 1")
 const selectRootOperation = db.prepare("SELECT payload, result FROM root_operations WHERE operation_id = ?")
@@ -1139,6 +1187,39 @@ const backupDestinationRows = (): ReadonlyArray<BackupDestinationRow> =>
     backupDestinationRow
   )
 
+const backupArtifactRow = (row: {
+  artifact_id: string
+  destination_id: string
+  operation_id: string
+  relative_path: string
+  publication_order: number
+  retention_class: "archive"
+  label: string | null
+  status: "reserved" | "completed"
+  manifest_digest: string | null
+  size_bytes: number | null
+  created_at_ms: number
+  completed_at_ms: number | null
+}): BackupArtifactRow => ({
+  artifactId: row.artifact_id,
+  destinationId: row.destination_id,
+  operationId: row.operation_id,
+  relativePath: row.relative_path,
+  publicationOrder: row.publication_order,
+  retentionClass: row.retention_class,
+  label: row.label,
+  status: row.status,
+  manifestDigest: row.manifest_digest,
+  sizeBytes: row.size_bytes,
+  createdAtMs: row.created_at_ms,
+  completedAtMs: row.completed_at_ms
+})
+
+const backupArtifactRows = (): ReadonlyArray<BackupArtifactRow> =>
+  (selectBackupArtifacts.all() as unknown as ReadonlyArray<Parameters<typeof backupArtifactRow>[0]>).map(
+    backupArtifactRow
+  )
+
 const backupDestinationById = (destinationId: string): BackupDestinationRow | undefined => {
   const row = selectBackupDestination.get(destinationId) as Parameters<typeof backupDestinationRow>[0] | undefined
   return row === undefined ? undefined : backupDestinationRow(row)
@@ -1250,6 +1331,91 @@ const replaceBackupDestination = (
     )
     db.exec("COMMIT")
     return { kind: "registered", destination }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const reserveBackupArtifact = (
+  request: Extract<WorkerRequest, { op: "reserveBackupArtifact" }>
+): BackupArtifactReservationOutcome => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const existing = selectBackupArtifactByOperation.get(request.operationId) as
+      | Parameters<typeof backupArtifactRow>[0]
+      | undefined
+    if (existing !== undefined) {
+      const artifact = backupArtifactRow(existing)
+      const same = artifact.artifactId === request.artifactId &&
+        artifact.destinationId === request.destinationId &&
+        artifact.relativePath === request.relativePath &&
+        artifact.label === request.label &&
+        artifact.createdAtMs === request.createdAtMs
+      db.exec(same ? "COMMIT" : "ROLLBACK")
+      return same
+        ? { kind: "replayed", artifact }
+        : { kind: "operation_conflict" }
+    }
+
+    if (backupDestinationById(request.destinationId) === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "destination_not_found" }
+    }
+
+    const nextOrderRow = selectNextBackupPublicationOrder.get(request.destinationId) as { next_order: number }
+    const publicationOrder = nextOrderRow.next_order
+    insertBackupArtifact.run(
+      request.artifactId,
+      request.destinationId,
+      request.operationId,
+      request.relativePath,
+      publicationOrder,
+      request.label,
+      request.createdAtMs
+    )
+    db.exec("COMMIT")
+    const artifact = backupArtifactRow(selectBackupArtifactById.get(request.artifactId) as Parameters<typeof backupArtifactRow>[0])
+    return { kind: "reserved", artifact }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const completeBackupArtifact = (
+  request: Extract<WorkerRequest, { op: "completeBackupArtifact" }>
+): BackupArtifactCompletionOutcome => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const existing = selectBackupArtifactById.get(request.artifactId) as
+      | Parameters<typeof backupArtifactRow>[0]
+      | undefined
+    if (existing === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "artifact_not_found" }
+    }
+    const artifact = backupArtifactRow(existing)
+    if (artifact.status === "completed") {
+      const same = artifact.manifestDigest === request.manifestDigest && artifact.sizeBytes === request.sizeBytes
+      db.exec(same ? "COMMIT" : "ROLLBACK")
+      return same ? { kind: "replayed", artifact } : { kind: "artifact_conflict" }
+    }
+    if (artifact.manifestDigest !== null || artifact.sizeBytes !== null) {
+      db.exec("ROLLBACK")
+      return { kind: "artifact_conflict" }
+    }
+    updateBackupArtifactCompleted.run(
+      request.manifestDigest,
+      request.sizeBytes,
+      request.completedAtMs,
+      request.artifactId
+    )
+    db.exec("COMMIT")
+    return {
+      kind: "completed",
+      artifact: backupArtifactRow(selectBackupArtifactById.get(request.artifactId) as Parameters<typeof backupArtifactRow>[0])
+    }
   } catch (error) {
     db.exec("ROLLBACK")
     throw error
@@ -2938,10 +3104,16 @@ const handle = (request: WorkerRequest): unknown => {
       return rootRows()
     case "listBackupDestinations":
       return backupDestinationRows()
+    case "listBackupArtifacts":
+      return backupArtifactRows()
     case "registerBackupDestination":
       return registerBackupDestination(request)
     case "replaceBackupDestination":
       return replaceBackupDestination(request)
+    case "reserveBackupArtifact":
+      return reserveBackupArtifact(request)
+    case "completeBackupArtifact":
+      return completeBackupArtifact(request)
     case "lookupRootOperation":
       return lookupRootOperation(request)
     case "readOperation":
