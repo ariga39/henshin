@@ -1,5 +1,5 @@
 import path from "node:path"
-import { readdir } from "node:fs/promises"
+import { readFile, readdir } from "node:fs/promises"
 import { NodeRuntime } from "@effect/platform-node"
 import { Effect, Layer, Option, Schema } from "effect"
 import { makeAppLayer } from "./app"
@@ -13,9 +13,19 @@ import {
   canonicalizeDatabasePath,
   ServerOwnershipError
 } from "./persistence/ServerOwnership"
+import {
+  acquireDesktopOwnership,
+  canonicalizeDesktopDataDirectory,
+  DesktopOwnershipError
+} from "./persistence/DesktopOwnership"
 import { DatabaseWorker, DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { createBackupArchive } from "./maintenance/BackupArchive"
 import { runBackupDrill } from "./maintenance/BackupDrill"
+import {
+  createDesktopBackupArchive,
+  DESKTOP_DATABASE_NAME,
+  DESKTOP_IDENTITY_NAME
+} from "./maintenance/DesktopBackupArchive"
 import {
   NEWER_DATABASE_SCHEMA,
   BackupArtifactRow,
@@ -41,6 +51,7 @@ interface Bootstrap {
 
 const startupDiagnostic = (error: unknown): string | undefined => {
   if (error instanceof ServerOwnershipError) return error.message
+  if (error instanceof DesktopOwnershipError) return error.message
   if (error instanceof OwnerCredentialError) return error.message
   if (error instanceof DatabaseWorkerError) {
     if (error.message === NEWER_DATABASE_SCHEMA) return NEWER_DATABASE_SCHEMA
@@ -64,6 +75,7 @@ const usage = (): string =>
   "       server.mjs backup-destination <list|register|replace> (--data-dir <directory> | --database <path>) [--name <name>] [--path <directory>] [--id <destination-id>] [--confirm]\n" +
   "       server.mjs backup create (--data-dir <directory> | --database <path>) --destination-id <destination-id> [--label <label>]\n" +
   "       server.mjs backup drill [list] (--data-dir <directory> | --database <path>) [--artifact-id <artifact-id>]"
+  + "\n       server.mjs backup desktop --data-dir <directory> --output <archive> [--label <label>]"
 
 interface BackupDestinationOptions {
   readonly command: "list" | "register" | "replace"
@@ -87,6 +99,12 @@ interface BackupDrillOptions {
   readonly dataDir?: string
   readonly database?: string
   readonly artifactId?: string
+}
+
+interface DesktopBackupOptions {
+  readonly dataDirectory: string
+  readonly outputPath: string
+  readonly label: string | null
 }
 
 const parseBackupCreateOptions = (args: ReadonlyArray<string>): BackupCreateOptions => {
@@ -154,6 +172,35 @@ const parseBackupDrillOptions = (args: ReadonlyArray<string>): BackupDrillOption
   if (command === "run" && artifactId === undefined) throw new Error(usage())
   if (command === "list" && artifactId !== undefined) throw new Error(usage())
   return { command, dataDir, database, artifactId }
+}
+
+const parseDesktopBackupOptions = (args: ReadonlyArray<string>): DesktopBackupOptions => {
+  if (args[1] !== "desktop") throw new Error(usage())
+  let dataDirectory: string | undefined
+  let outputPath: string | undefined
+  let label: string | null = null
+  for (let index = 2; index < args.length; index += 1) {
+    switch (args[index]) {
+      case "--data-dir":
+        dataDirectory = args[++index]
+        if (dataDirectory === undefined || dataDirectory.startsWith("--")) throw new Error(usage())
+        break
+      case "--output":
+        outputPath = args[++index]
+        if (outputPath === undefined || outputPath.startsWith("--")) throw new Error(usage())
+        break
+      case "--label":
+        label = args[++index] ?? null
+        if (label === null || label.startsWith("--") || label.length > 200) throw new Error(usage())
+        break
+      case "--help":
+        throw new Error(usage())
+      default:
+        throw new Error(usage())
+    }
+  }
+  if (dataDirectory === undefined || outputPath === undefined) throw new Error(usage())
+  return { dataDirectory, outputPath, label }
 }
 
 const parseBackupDestinationOptions = (args: ReadonlyArray<string>): BackupDestinationOptions => {
@@ -713,6 +760,36 @@ const runBackupDrillCommand = async (options: BackupDrillOptions): Promise<void>
   }
 }
 
+const runDesktopBackupCommand = async (options: DesktopBackupOptions): Promise<void> => {
+  const dataDirectory = await canonicalizeDesktopDataDirectory(options.dataDirectory)
+  let guard: Awaited<ReturnType<typeof acquireDesktopOwnership>> | undefined
+  try {
+    guard = await acquireDesktopOwnership(dataDirectory)
+    let installationId: string
+    try {
+      installationId = (await readFile(path.join(dataDirectory, DESKTOP_IDENTITY_NAME), "utf8")).trim()
+    } catch {
+      throw new Error("desktop maintenance failed at data-directory: installation identity is unavailable")
+    }
+    const archive = await createDesktopBackupArchive({
+      dataDirectory,
+      databasePath: path.join(dataDirectory, DESKTOP_DATABASE_NAME),
+      outputPath: options.outputPath,
+      installationId,
+      label: options.label
+    })
+    process.stdout.write(JSON.stringify({
+      store_kind: "desktop",
+      archive_path: archive.archivePath,
+      installation_id: archive.installationId,
+      manifest_digest: archive.manifestDigest,
+      archive_size_bytes: archive.archiveSizeBytes
+    }) + "\n")
+  } finally {
+    guard?.close()
+  }
+}
+
 const main = async () => {
   const args = process.argv.slice(2)
   if (args.length === 0) {
@@ -739,6 +816,24 @@ const main = async () => {
   }
 
   if (args[0] === "backup") {
+    if (args[1] === "desktop") {
+      let options: DesktopBackupOptions
+      try {
+        options = parseDesktopBackupOptions(args)
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : usage())
+        process.exitCode = 2
+        return
+      }
+      try {
+        await runDesktopBackupCommand(options)
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : "desktop backup creation failed")
+        process.exitCode = 1
+      }
+      return
+    }
+
     let options: BackupCreateOptions | BackupDrillOptions
     try {
       options = args[1] === "create" ? parseBackupCreateOptions(args) : parseBackupDrillOptions(args)

@@ -228,3 +228,24 @@ node apps/server/dist/server.mjs backup drill \
 node apps/server/dist/server.mjs backup drill list \
   --data-dir "$PWD/.henshin-server-data"
 ```
+
+Back up a stopped desktop's durable local work through the bundled maintenance
+command. Stop Henshin first; the command acquires the same desktop data-
+directory ownership guard and refuses a running desktop. Choose an output
+directory outside the desktop data directory and any configured collection
+mapping:
+
+```sh
+node apps/server/dist/server.mjs backup desktop \
+  --data-dir "$HOME/Library/Application Support/Henshin" \
+  --output "$PWD/henshin-desktop-backup.henshin.zip" \
+  --label "before desktop migration"
+```
+
+The desktop bundle contains the durable local mappings, reader profiles,
+launch journals, saved drafts, and command attempts. It excludes display and
+resolution caches, connection credentials, the server database, collection
+files, and host service configuration. Publication writes a private,
+content-verified archive atomically and never overwrites an existing output.
+The backup cannot include local events created after the snapshot, and a
+recovered desktop must be reauthenticated before use.

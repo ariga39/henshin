@@ -4,6 +4,7 @@ import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
+import type { DatabaseSync } from "node:sqlite"
 import {
   DiscardDraftIpcRequest,
   ConnectIpcRequest,
@@ -108,6 +109,7 @@ import {
 } from "./ConnectionLifecycle"
 import { OpenCoordinator, type OpenCoordinatorPorts } from "./OpenCoordinator"
 import { loadDeviceId } from "./device-identity"
+import { acquireDesktopOwnership } from "../../../server/src/persistence/DesktopOwnership"
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
 const LOCAL_MAPPING_REQUEST_TIMEOUT = Duration.seconds(12)
@@ -139,6 +141,7 @@ let connection: ConnectionLifecycle | null = null
 let openCoordinator: OpenCoordinator | null = null
 let shutdownPromise: Promise<void> | null = null
 let readyToQuit = false
+let desktopOwnership: DatabaseSync | null = null
 const prototypeMode = process.env.HENSHIN_PROTOTYPE_MODE === "1"
 let protectedWritablePaths: ReadonlyArray<string> = []
 let deviceId = ""
@@ -1755,6 +1758,9 @@ const shutdown = (): Promise<void> => {
     const child = serverChild
     serverChild = null
     if (child !== null) await child.stop()
+    const ownership = desktopOwnership
+    desktopOwnership = null
+    ownership?.close()
   })()
   return shutdownPromise
 }
@@ -1763,6 +1769,7 @@ const bootstrap = async (): Promise<void> => {
   const dbPath = process.env.HENSHIN_PROTOTYPE_DB ?? path.join(app.getPath("userData"), "prototype.db")
   const clientDbPath =
     process.env.HENSHIN_PROTOTYPE_CLIENT_DB ?? path.join(app.getPath("userData"), "prototype-client.db")
+  desktopOwnership = await acquireDesktopOwnership(app.getPath("userData"))
   deviceId = await loadDeviceId(app.getPath("userData"))
   protectedWritablePaths = [
     app.getPath("userData"),

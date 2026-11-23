@@ -63,9 +63,9 @@ export interface BackupArchiveResult {
   readonly archiveSizeBytes: number
 }
 
-const digest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex")
+export const digest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex")
 
-const jsonBytes = (value: unknown): Uint8Array =>
+export const jsonBytes = (value: unknown): Uint8Array =>
   new TextEncoder().encode(`${JSON.stringify(value)}\n`)
 
 const sourceRootObservation = (root: ServerRootRow): SourceRootObservation => ({
@@ -190,7 +190,7 @@ const fileWritable = (file: Awaited<ReturnType<typeof open>>): WritableStream<Ui
   })
 }
 
-const verifyArchive = async (
+export const verifyArchive = async (
   archivePath: string,
   expected: ReadonlyMap<string, { readonly size: number; readonly sha256: string }>
 ): Promise<void> => {
@@ -215,7 +215,7 @@ const verifyArchive = async (
   })
 }
 
-const writeArchive = async (
+export const writeArchive = async (
   filePath: string,
   statePath: string,
   stateSize: number,
