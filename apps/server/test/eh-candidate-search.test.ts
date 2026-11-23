@@ -123,11 +123,14 @@ describe("authenticated EH candidate search", () => {
   })
 
   it("distinguishes empty results, upstream access failure, and an unrecognized layout", async () => {
-    let mode: "empty" | "restricted" | "layout" | "unknown_list" = "empty"
+    let mode: "empty" | "restricted" | "failure" | "layout" | "unknown_list" | "invalid_row" | "noise" = "empty"
     const upstreamUrl = await listenUpstream(() => {
-      if (mode === "empty") return { status: 200, body: `<div class="itg"><p>No hits found</p></div>` }
+      if (mode === "empty") return { status: 200, body: `<div class="itg"><div class="searchtext">No hits found</div></div>` }
       if (mode === "restricted") return { status: 403, body: "restricted" }
+      if (mode === "failure") return { status: 500, body: "upstream failed" }
       if (mode === "unknown_list") return { status: 200, body: `<div class="itg"><div class="changed-row"><a href="/g/99999/changed/">Changed markup</a></div></div>` }
+      if (mode === "invalid_row") return { status: 200, body: `<table class="itg"><tr><td><a href="/g/99999/changed/">Changed markup</a></td></tr></table>` }
+      if (mode === "noise") return { status: 200, body: `<aside class="sidebar">No results</aside>` }
       return { status: 200, body: "<html><body>layout changed</body></html>" }
     })
     const dbPath = await makeTempDbPath()
@@ -141,9 +144,15 @@ describe("authenticated EH candidate search", () => {
     expect((await search()).data).toEqual({ status: "empty", candidates: [] })
     mode = "restricted"
     expect((await search()).data).toEqual({ status: "restricted", candidates: [] })
+    mode = "failure"
+    expect((await search()).data).toEqual({ status: "access_failed", candidates: [] })
     mode = "layout"
     expect((await search()).data).toEqual({ status: "unrecognized_layout", candidates: [] })
     mode = "unknown_list"
+    expect((await search()).data).toEqual({ status: "unrecognized_layout", candidates: [] })
+    mode = "invalid_row"
+    expect((await search()).data).toEqual({ status: "unrecognized_layout", candidates: [] })
+    mode = "noise"
     expect((await search()).data).toEqual({ status: "unrecognized_layout", candidates: [] })
   })
 
@@ -181,6 +190,7 @@ describe("authenticated EH candidate search", () => {
     }))
     const [firstResult, secondResult] = await Promise.all([first, second])
     expect(firstResult.data.status).toBe("rate_limited")
+    expect(firstResult.data.retry_after_ms).toBe(6_000)
     expect(secondResult.data.status).toBe("results")
     expect(starts).toHaveLength(2)
     expect((starts[1] ?? 0) - (starts[0] ?? 0)).toBeGreaterThanOrEqual(5_500)
@@ -278,14 +288,16 @@ describe("authenticated EH candidate search", () => {
     const server = await startServer(dbPath, { env: { HENSHIN_EH_SEARCH_URL: `http://127.0.0.1:${address.port}/` } })
     servers.push(server)
 
-    const firstResult = await withEhClient(server, Effect.gen(function*() {
+    const first = withEhClient(server, Effect.gen(function*() {
       return yield* (yield* EhHttpClient).candidates({ payload: { title: "first" } })
     }))
-    expect(firstResult.data.status).toBe("rate_limited")
-    const secondResult = await withEhClient(server, Effect.gen(function*() {
+    const second = withEhClient(server, Effect.gen(function*() {
       return yield* (yield* EhHttpClient).candidates({ payload: { title: "second" } })
     }))
+    const [firstResult, secondResult] = await Promise.all([first, second])
+    expect(firstResult.data.status).toBe("rate_limited")
     expect(secondResult.data.status).toBe("rate_limited")
+    expect(secondResult.data.retry_after_ms).toBeGreaterThan(0)
     expect(calls).toBe(1)
   })
 })

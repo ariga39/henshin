@@ -120,6 +120,7 @@ export type EhGalleryCandidate = typeof EhGalleryCandidate.Type
 
 export const EhCandidateSearchResult = Schema.Struct({
   status: Schema.Literals(["results", "empty", "access_failed", "rate_limited", "restricted", "unrecognized_layout"]),
-  candidates: Schema.Array(EhGalleryCandidate)
+  candidates: Schema.Array(EhGalleryCandidate),
+  retry_after_ms: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
 })
 export type EhCandidateSearchResult = typeof EhCandidateSearchResult.Type

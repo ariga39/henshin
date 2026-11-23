@@ -1312,6 +1312,7 @@ export const selectLibraryEntry = (entryId: string) =>
       gallery_search_generation: generation,
       gallery_search_status: "idle",
       gallery_search_error: null,
+      gallery_search_retry_after_ms: null,
       gallery_candidates: [],
       gallery_selected_candidate_url: null,
       gallery_bind_status: "idle",
@@ -1565,6 +1566,7 @@ export const searchGalleryCandidates = () =>
       gallery_search_generation: generation,
       gallery_search_status: "loading",
       gallery_search_error: null,
+      gallery_search_retry_after_ms: null,
       gallery_candidates: [],
       gallery_selected_candidate_url: null,
       gallery_bind_status: "idle",
@@ -1585,6 +1587,7 @@ export const searchGalleryCandidates = () =>
     yield* Effect.sync(() => viewStore.set({
       gallery_search_status: result.data.status,
       gallery_search_error: null,
+      gallery_search_retry_after_ms: result.data.retry_after_ms ?? null,
       gallery_candidates: result.data.candidates,
       gallery_selected_candidate_url: null
     }))
@@ -1597,6 +1600,7 @@ export const cancelGallerySearch = Effect.sync(() => {
     gallery_search_generation: state.gallery_search_generation + 1,
     gallery_search_status: "cancelled",
     gallery_search_error: null,
+    gallery_search_retry_after_ms: null,
     gallery_candidates: [],
       gallery_selected_candidate_url: null,
       gallery_bind_operation_id: null

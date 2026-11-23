@@ -137,6 +137,7 @@ export interface ViewState {
   readonly gallery_search_language: string
   readonly gallery_search_status: "idle" | "loading" | "results" | "empty" | "access_failed" | "rate_limited" | "restricted" | "unrecognized_layout" | "cancelled" | "error"
   readonly gallery_search_error: string | null
+  readonly gallery_search_retry_after_ms: number | null
   readonly gallery_candidates: ReadonlyArray<EhGalleryCandidate>
   readonly gallery_selected_candidate_url: string | null
   readonly gallery_search_generation: number
@@ -144,9 +145,6 @@ export interface ViewState {
   readonly gallery_bind_error: string | null
   readonly gallery_bind_operation_id: string | null
   readonly library_query: string
-  readonly library_entry: LibraryEntryDetails | null
-  readonly library_entry_status: "idle" | "loading" | "ready" | "error"
-  readonly library_entry_error: string | null
   readonly library_note_text: string
   readonly library_note_status: "idle" | "loading" | "error"
   readonly library_note_error: string | null
@@ -264,6 +262,7 @@ const initialState: ViewState = {
   gallery_search_language: "",
   gallery_search_status: "idle",
   gallery_search_error: null,
+  gallery_search_retry_after_ms: null,
   gallery_candidates: [],
   gallery_selected_candidate_url: null,
   gallery_search_generation: 0,
@@ -271,9 +270,6 @@ const initialState: ViewState = {
   gallery_bind_error: null,
   gallery_bind_operation_id: null,
   library_query: "",
-  library_entry: null,
-  library_entry_status: "idle",
-  library_entry_error: null,
   library_note_text: "",
   library_note_status: "idle",
   library_note_error: null,

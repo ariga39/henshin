@@ -24,9 +24,10 @@ interface SearchJob {
   readonly onAbort: () => void
 }
 
-const failure = (status: SearchStatus): EhCandidateSearchResult => ({
+const failure = (status: SearchStatus, retryAfterMs?: number): EhCandidateSearchResult => ({
   status,
-  candidates: []
+  candidates: [],
+  ...(retryAfterMs === undefined ? {} : { retry_after_ms: retryAfterMs })
 })
 
 const retryAfterMs = (value: string | null): number | null => {
@@ -83,7 +84,7 @@ class EhSearchScheduler {
     if (startAt > job.deadlineAt) {
       this.queue.shift()
       job.signal.removeEventListener("abort", job.onAbort)
-      job.resolve(failure(this.blockedUntil > job.deadlineAt ? "rate_limited" : "access_failed"))
+      job.resolve(failure("rate_limited", Math.max(0, startAt - now)))
       this.pump()
       return
     }
@@ -202,8 +203,9 @@ const parseCandidate = (row: string, baseUrl: URL): EhGalleryCandidate | null =>
   const language = innerText(row, "glsub")
   const pagesText = innerText(row, "glpage") ?? cellText(row, "gl4c") ?? ""
   const ratingText = innerText(row, "glrating")
-  const pageCountMatch = pagesText.match(/(?:^|\s)([0-9][0-9,]*)\s+pages?\b/iu)
-  const pageCount = pageCountMatch?.[1] === undefined ? null : Number(pageCountMatch[1].replace(/,/gu, ""))
+  const pageCountMatches = [...pagesText.matchAll(/(?:^|\s)([0-9][0-9,]*)\s+pages?\b/giu)]
+  const pageCountText = pageCountMatches.at(-1)?.[1]
+  const pageCount = pageCountText === undefined ? null : Number(pageCountText.replace(/,/gu, ""))
   const rating = ratingText !== null && /^[0-9]+(?:\.[0-9]+)?$/u.test(ratingText) ? Number(ratingText) : null
   return {
     source: "EH",
@@ -250,7 +252,8 @@ const parseCandidates = (
   }
   if (rows.length > 0) return { status: "results", candidates: rows.slice(0, 25) }
 
-  const explicitlyEmpty = /(?:no\s+(?:galleries|hits|results)(?:\s+found)?|nothing\s+found)/iu.test(htmlText(html))
+  const emptyElementText = innerText(html, "searchtext") ?? innerText(html, "noresults") ?? innerText(html, "no-results")
+  const explicitlyEmpty = emptyElementText !== null && /(?:no\s+(?:galleries|hits|results)(?:\s+found)?|nothing\s+found)/iu.test(emptyElementText)
   return invalidGalleryRow || !explicitlyEmpty
     ? failure("unrecognized_layout")
     : { status: "empty", candidates: [] }
@@ -266,25 +269,28 @@ export const searchEhCandidates = async (
     .filter((value): value is string => value !== undefined && value.length > 0)
     .join(" ")
   url.searchParams.set("f_search", search)
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-  const abort = () => controller.abort(signal?.reason)
-  signal?.addEventListener("abort", abort, { once: true })
+  const queueSignal = signal ?? new AbortController().signal
   try {
-    const requestSignal = AbortSignal.any([controller.signal, ...(signal === undefined ? [] : [signal])])
     return await scheduler.enqueue(async (scheduledSignal) => {
-      const response = await fetch(url, { redirect: "error", signal: scheduledSignal, headers: { accept: "text/html" } })
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+      try {
+        const requestSignal = AbortSignal.any([scheduledSignal, controller.signal])
+        const response = await fetch(url, { redirect: "error", signal: requestSignal, headers: { accept: "text/html" } })
       const retryAfter = retryAfterMs(response.headers.get("retry-after"))
       if (response.status === 403) return { data: failure("restricted"), retryAfterMs: null }
-      if (response.status === 429) return { data: failure("rate_limited"), retryAfterMs: retryAfter ?? DEFAULT_RETRY_AFTER_MS }
+      if (response.status === 429) {
+        const wait = retryAfter ?? DEFAULT_RETRY_AFTER_MS
+        return { data: failure("rate_limited", wait), retryAfterMs: wait }
+      }
       if (!response.ok) return { data: failure("access_failed"), retryAfterMs: retryAfter }
       const preferredDomain = url.hostname.toLowerCase() === "exhentai.org" ? "exhentai.org" : "e-hentai.org"
       return { data: parseCandidates(await readBoundedText(response), preferredDomain), retryAfterMs: null }
-    }, requestSignal, Date.now() + REQUEST_TIMEOUT_MS)
+      } finally {
+        clearTimeout(timeout)
+      }
+    }, queueSignal, Date.now() + REQUEST_TIMEOUT_MS)
   } catch {
     return failure("access_failed")
-  } finally {
-    signal?.removeEventListener("abort", abort)
-    clearTimeout(timeout)
   }
 }

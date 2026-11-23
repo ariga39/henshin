@@ -39,7 +39,6 @@ import {
   RootCommandIpcRequest,
   RootSaveIpcRequest,
   ReleaseHeldDiscoveryIpcRequest,
-  LibraryEntryIpcRequest,
   LibraryNoteIpcRequest,
   ReviewCandidateIpcRequest,
   ReviewCandidatesIpcRequest,
@@ -1271,20 +1270,6 @@ const registerIpc = (): void => {
     } catch (error) {
       return Promise.resolve({ ok: false as const, error: toPublicError(error) })
     }
-  })
-
-  ipcMain.handle(IpcChannels.libraryEntry, (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(LibraryEntryIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    return runNetworkResult(
-      toResult(
-        Effect.gen(function*() {
-          const client = yield* LibraryHttpClient
-          return yield* client.entry({ params: { id: decoded.value.entry_id } })
-        })
-      )
-    )
   })
 
   ipcMain.handle(IpcChannels.libraryBind, (event, raw: unknown) => {

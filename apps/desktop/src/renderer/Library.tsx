@@ -400,7 +400,11 @@ export const LibraryScreen = () => {
                   </form>
                   {state.gallery_search_status === "empty" && <p data-testid="gallery-search-empty">No gallery candidates matched this query.</p>}
                   {state.gallery_search_status === "access_failed" && <p role="alert" data-testid="gallery-search-access-failed">Gallery search could not access the upstream service.</p>}
-                  {state.gallery_search_status === "rate_limited" && <p role="alert" data-testid="gallery-search-rate-limited">Gallery search is rate limited; retry later.</p>}
+                  {state.gallery_search_status === "rate_limited" && (
+                    <p role="alert" data-testid="gallery-search-rate-limited">
+                      Gallery search is rate limited; retry in {Math.max(1, Math.ceil((state.gallery_search_retry_after_ms ?? 0) / 1000))} seconds.
+                    </p>
+                  )}
                   {state.gallery_search_status === "restricted" && <p role="alert" data-testid="gallery-search-restricted">Gallery search access is restricted by the upstream service.</p>}
                   {state.gallery_search_status === "unrecognized_layout" && <p role="alert" data-testid="gallery-search-unrecognized">Gallery search returned an unrecognized upstream layout.</p>}
                   {state.gallery_search_status === "cancelled" && <p data-testid="gallery-search-cancelled">Gallery search cancelled; this book remains unchanged.</p>}
