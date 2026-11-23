@@ -1,0 +1,260 @@
+name: Linux SMB read-only server
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/linux-smb-readonly.yml"
+      - "apps/server/**"
+      - "packages/contracts/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  linux-smb-readonly:
+    name: Native Linux SMB read-only collection
+    runs-on: ubuntu-22.04
+    env:
+      HENSHIN_SMB_SOURCE_ROOT: /tmp/henshin-smb-source-${{ github.run_id }}-${{ github.run_attempt }}
+      HENSHIN_SMB_OWNER: henshin-smb-fixture-owner
+      HENSHIN_SMB_READER: henshin-smb-collection-reader
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+
+      - name: Initialize disposable runner paths
+        run: |
+          printf 'HENSHIN_SMB_RUN_DIR=%s\n' "$RUNNER_TEMP/henshin-smb-run" >> "$GITHUB_ENV"
+          printf 'HENSHIN_SMB_MOUNT_ROOT=%s\n' "$RUNNER_TEMP/henshin-smb-mount" >> "$GITHUB_ENV"
+
+      - name: Install native SMB tooling
+        run: |
+          set -euo pipefail
+          policy_path=/usr/sbin/policy-rc.d
+          policy_backup="$RUNNER_TEMP/henshin-policy-rc.d.backup"
+          restore_policy() {
+            if [ -f "$policy_backup" ]; then
+              sudo cp -p "$policy_backup" "$policy_path"
+            else
+              sudo rm -f "$policy_path"
+            fi
+          }
+          if sudo test -e "$policy_path"; then
+            sudo cp -p "$policy_path" "$policy_backup"
+          fi
+          printf '#!/bin/sh\nexit 101\n' | sudo tee "$policy_path" >/dev/null
+          sudo chmod 755 "$policy_path"
+          trap restore_policy EXIT
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cifs-utils samba smbclient
+          restore_policy
+          trap - EXIT
+          for service in smbd nmbd samba samba-ad-dc winbind; do
+            sudo systemctl mask --runtime "$service.service" >/dev/null 2>&1 || true
+            sudo systemctl stop "$service.service" >/dev/null 2>&1 || true
+          done
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shipped Linux server archive
+        env:
+          HENSHIN_ARTIFACT_DIR: ${{ runner.temp }}/henshin-server-artifact
+        run: |
+          pnpm build:server:distribution
+          archive=$(find "$HENSHIN_ARTIFACT_DIR" -maxdepth 1 -name 'henshin-server-*.tar.gz' -type f -print -quit)
+          test -n "$archive"
+          mkdir -p "$RUNNER_TEMP/henshin-server-unpacked"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/henshin-server-unpacked"
+          test -f "$RUNNER_TEMP/henshin-server-unpacked/server.mjs"
+          file "$archive"
+          sha256sum "$archive"
+
+      - name: Provision loopback-only authenticated SMB fixture
+        id: smb
+        run: |
+          set -euo pipefail
+          run_dir="$HENSHIN_SMB_RUN_DIR"
+          source_root="$HENSHIN_SMB_SOURCE_ROOT"
+          mount_root="$HENSHIN_SMB_MOUNT_ROOT"
+          owner="$HENSHIN_SMB_OWNER"
+          reader="$HENSHIN_SMB_READER"
+          mkdir -p "$run_dir" "$mount_root"
+          chmod 755 "$run_dir" "$mount_root"
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$owner"
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$reader"
+          sudo mkdir -p "$source_root/fixture-book"
+          sudo chown -R "$owner:$owner" "$source_root"
+          sudo chmod 755 "$source_root" "$source_root/fixture-book"
+          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' |
+            base64 --decode |
+            sudo -u "$owner" -- tee "$source_root/fixture-book/001.png" >/dev/null
+          sudo chmod 644 "$source_root/fixture-book/001.png"
+
+          smb_password=$(openssl rand -hex 24)
+          credentials="$run_dir/credentials"
+          umask 077
+          printf 'username=%s\npassword=%s\ndomain=WORKGROUP\n' "$reader" "$smb_password" > "$credentials"
+
+          mkdir -p "$run_dir/private" "$run_dir/state" "$run_dir/cache" "$run_dir/lock"
+          chmod 700 "$run_dir" "$run_dir/private" "$run_dir/state" "$run_dir/cache" "$run_dir/lock"
+          config="$run_dir/smb.conf"
+          cat > "$config" <<EOF
+          [global]
+            server role = standalone server
+            security = user
+            passdb backend = tdbsam
+            map to guest = never
+            interfaces = 127.0.0.1
+            bind interfaces only = yes
+            hosts allow = 127.0.0.1
+            hosts deny = ALL
+            smb ports = 1445
+            disable netbios = yes
+            server min protocol = SMB2
+            private dir = $run_dir/private
+            state directory = $run_dir/state
+            cache directory = $run_dir/cache
+            lock directory = $run_dir/lock
+            log file = $run_dir/smbd.log
+            max log size = 100
+            load printers = no
+            printing = bsd
+            printcap name = /dev/null
+            disable spoolss = yes
+
+          [collection]
+            path = $source_root
+            valid users = $reader
+            read only = yes
+            writeable = no
+            guest ok = no
+            browseable = no
+            read list = $reader
+          EOF
+          testparm -s "$config" >/dev/null
+          printf '%s\n%s\n' "$smb_password" "$smb_password" |
+            sudo smbpasswd -c "$config" -a -s "$reader" >/dev/null
+          unset smb_password
+
+          if sudo ss -ltnH '( sport = :139 or sport = :445 )' | grep -q .; then
+            echo 'a default Samba listener is active on port 139 or 445' >&2
+            exit 1
+          fi
+
+          sudo smbd --foreground --no-process-group --configfile="$config" >"$run_dir/smbd.stdout" 2>"$run_dir/smbd.stderr" &
+          smbd_pid=$!
+          echo "$smbd_pid" > "$run_dir/smbd.pid"
+          for attempt in $(seq 1 20); do
+            if smbclient //127.0.0.1/collection -p 1445 -A "$credentials" -c 'ls' >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" -eq 20 ]; then
+              cat "$run_dir/smbd.stderr"
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$(sudo ss -ltnH 'sport = :1445' | awk '{print $4}' | head -n 1)" = '127.0.0.1:1445'
+
+          printf '%s\n' 'disposable write probe' > "$run_dir/write-probe.txt"
+          set +e
+          smbclient //127.0.0.1/collection -p 1445 -A "$credentials" \
+            -c "put $run_dir/write-probe.txt rejected-write-probe" >"$run_dir/write-probe.log" 2>&1
+          share_write_status=$?
+          set -e
+          test "$share_write_status" -ne 0
+          test ! -e "$source_root/rejected-write-probe"
+
+          sudo mount -t cifs //127.0.0.1/collection "$mount_root" \
+            -o "port=1445,credentials=$credentials,vers=3.0,ro,uid=$(id -u),gid=$(id -g),file_mode=0444,dir_mode=0555,serverino"
+          test "$(findmnt -no FSTYPE "$mount_root")" = cifs
+          set +e
+          touch "$mount_root/mount-write-probe"
+          mount_write_status=$?
+          set -e
+          test "$mount_write_status" -ne 0
+          test ! -e "$mount_root/mount-write-probe"
+
+          tree_manifest() {
+            sudo -u "$owner" -- bash -c '
+              cd "$1"
+              find . -type f -print0 | sort -z | while IFS= read -r -d "" file; do
+                sha256sum "$file"
+              done
+            ' -- "$1" | sha256sum | awk '{print $1}'
+          }
+          source_sha=$(sudo -u "$owner" -- sha256sum "$source_root/fixture-book/001.png" | awk '{print $1}')
+          tree_before=$(tree_manifest "$source_root")
+          {
+            echo "SMB implementation: $(smbd --version)"
+            echo "SMB client: $(mount.cifs -V 2>&1 | head -n 1)"
+            echo "SMB share: //127.0.0.1:1445/collection"
+            echo "SMB policy: authenticated user; loopback-only; share read-only; client mount ro"
+            echo "SMB fixture owner: separate setup/inspection context"
+            echo "SMB object: fixture-book/001.png"
+            echo "SMB object sha256: $source_sha"
+            echo "SMB source tree manifest sha256 before: $tree_before"
+            echo "SMB share write probe: denied (exit $share_write_status)"
+            echo "SMB mount write probe: denied (exit $mount_write_status)"
+            echo "SMB mounted filesystem: $(findmnt -no FSTYPE "$mount_root")"
+          } | tee "$run_dir/evidence-before.txt"
+          {
+            echo "mount=$mount_root"
+            echo "object=fixture-book"
+            echo "source_sha256=$source_sha"
+          } >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$tree_before" > "$run_dir/tree-before.sha256"
+
+      - name: Exercise authenticated scan, Library, and thumbnail flow
+        env:
+          HENSHIN_SERVER_ENTRYPOINT: ${{ runner.temp }}/henshin-server-unpacked/server.mjs
+          HENSHIN_SERVER_CWD: ${{ runner.temp }}/henshin-server-unpacked
+          HENSHIN_SMB_MOUNT_PATH: ${{ steps.smb.outputs.mount }}
+          HENSHIN_SMB_OBJECT: ${{ steps.smb.outputs.object }}
+          HENSHIN_SMB_SOURCE_SHA256: ${{ steps.smb.outputs.source_sha256 }}
+        run: node apps/server/test/linux-smb-acceptance.mjs
+
+      - name: Verify fixture bytes and names after indexing
+        if: always()
+        run: |
+          set -euo pipefail
+          tree_manifest() {
+            sudo -u "$HENSHIN_SMB_OWNER" -- bash -c '
+              cd "$1"
+              find . -type f -print0 | sort -z | while IFS= read -r -d "" file; do
+                sha256sum "$file"
+              done
+            ' -- "$1" | sha256sum | awk '{print $1}'
+          }
+          source_sha_after=$(sudo -u "$HENSHIN_SMB_OWNER" -- sha256sum "$HENSHIN_SMB_SOURCE_ROOT/fixture-book/001.png" | awk '{print $1}')
+          tree_after=$(tree_manifest "$HENSHIN_SMB_SOURCE_ROOT")
+          tree_before=$(cat "$HENSHIN_SMB_RUN_DIR/tree-before.sha256")
+          test "$source_sha_after" = "$(sed -n 's/^SMB object sha256: //p' "$HENSHIN_SMB_RUN_DIR/evidence-before.txt")"
+          test "$tree_after" = "$tree_before"
+          echo "SMB source tree manifest sha256 after: $tree_after"
+          echo "SMB source unchanged: yes"
+
+      - name: Clean up disposable SMB fixture
+        if: always()
+        run: |
+          set +e
+          if mountpoint -q "$HENSHIN_SMB_MOUNT_ROOT"; then sudo umount "$HENSHIN_SMB_MOUNT_ROOT"; fi
+          if [ -f "$HENSHIN_SMB_RUN_DIR/smbd.pid" ]; then sudo kill "$(cat "$HENSHIN_SMB_RUN_DIR/smbd.pid")"; fi
+          sudo smbpasswd -c "$HENSHIN_SMB_RUN_DIR/smb.conf" -x "$HENSHIN_SMB_READER" >/dev/null 2>&1
+          sudo userdel "$HENSHIN_SMB_READER" >/dev/null 2>&1
+          sudo userdel "$HENSHIN_SMB_OWNER" >/dev/null 2>&1
+          sudo rm -rf "$HENSHIN_SMB_SOURCE_ROOT" "$HENSHIN_SMB_RUN_DIR" "$HENSHIN_SMB_MOUNT_ROOT"
