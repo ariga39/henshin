@@ -35,6 +35,8 @@ import {
   RootCommandIpcRequest,
   RootSaveIpcRequest,
   ReleaseHeldDiscoveryIpcRequest,
+  LibraryEntryIpcRequest,
+  LibraryNoteIpcRequest,
   ReviewCandidateIpcRequest,
   ReviewCandidatesIpcRequest,
   ServerHttpClient,
@@ -1176,6 +1178,51 @@ const registerIpc = (): void => {
         Effect.gen(function*() {
           const client = yield* LibraryHttpClient
           return yield* client.search({ payload: decoded.value })
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.libraryEntry, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(LibraryEntryIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* LibraryHttpClient
+          return yield* client.entry({ params: { id: decoded.value.entry_id } })
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.libraryNote, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(LibraryNoteIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    let session: Session
+    try {
+      session = requireSession()
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
+    return runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* LibraryHttpClient
+          return yield* client.entryCommand({
+            params: { id: decoded.value.entry_id },
+            payload: {
+              operation_id: randomUUID(),
+              instance_id: session.instanceId,
+              epoch: session.epoch,
+              expected_decision_version: decoded.value.expected_decision_version,
+              command: decoded.value.text.length === 0
+                ? { type: "clear-note" as const }
+                : { type: "set-note" as const, text: decoded.value.text }
+            }
+          })
         })
       )
     )

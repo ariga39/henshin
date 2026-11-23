@@ -1,6 +1,6 @@
 import { Effect, Layer } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
-import type { LibraryEntry, OpenBookIpcResult, ReaderProfile } from "@henshin/contracts"
+import type { LibraryEntry, LibraryEntryDetails, OpenBookIpcResult, ReaderProfile } from "@henshin/contracts"
 import { LibraryClient, type Result } from "../src/renderer/client"
 import {
   chooseLibraryOpenProfile,
@@ -8,7 +8,8 @@ import {
   loadActiveLibraryOpenState,
   openSelectedLibraryEntry,
   searchLibrary,
-  selectLibraryEntry
+  selectLibraryEntry,
+  updateLibraryNote
 } from "../src/renderer/workflows"
 import { viewStore } from "../src/renderer/store"
 
@@ -61,6 +62,16 @@ const accepted = (entryId: string, actionId = firstActionId): OpenBookIpcResult 
 const run = <A>(effect: Effect.Effect<A, unknown, LibraryClient>, client: LibraryClient["Service"]) =>
   Effect.runPromise(Effect.provide(effect, Layer.succeed(LibraryClient, client)))
 
+const makeLibraryClient = (overrides: Partial<LibraryClient["Service"]>): LibraryClient["Service"] => LibraryClient.of({
+  entry: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+  note: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+  search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+  open: () => Effect.succeed({ ok: true as const, data: accepted(entryAId) }),
+  status: () => Effect.succeed({ ok: true as const, data: null }),
+  getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() }),
+  ...overrides
+})
+
 const resetView = () => {
   viewStore.set({
     connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
@@ -75,10 +86,47 @@ const resetView = () => {
 afterEach(resetView)
 
 describe("library renderer workflow", () => {
+  it("retains draft text when a note save is stale and shows the current server note", async () => {
+    const currentEntry: LibraryEntryDetails = {
+      entry_id: entryAId,
+      library_id: libraryId,
+      root_id: "77777777-7777-4777-8777-777777777777",
+      relative_path: "book-a",
+      source_path: "/books/book-a",
+      kind: "image-directory",
+      title: "book-a",
+      page_count: 1,
+      state: "accepted",
+      decision_version: "2",
+      content_version: "1",
+      location_revision: "1",
+      cover: null,
+      replacement: null,
+      binding: null,
+      note: { text: "server text", revision: "1" }
+    }
+    const client = makeLibraryClient({
+      entry: () => Effect.succeed({ ok: true as const, data: currentEntry }),
+      note: () => Effect.succeed({ ok: false as const, error: { code: "revision_conflict", message: "stale", retryable: false } })
+    })
+    viewStore.set({
+      library_selected_entry_id: entryAId,
+      library_entry: { ...currentEntry, decision_version: "1", note: null },
+      library_note_text: "draft text"
+    })
+
+    await run(updateLibraryNote("draft text"), client)
+
+    expect(viewStore.getState().library_note_text).toBe("draft text")
+    expect(viewStore.getState().library_note_server_text).toBe("server text")
+    expect(viewStore.getState().library_note_error).toContain("retained")
+    expect(viewStore.getState().library_entry?.decision_version).toBe("2")
+  })
+
   it("does not open a replacement-pending entry", async () => {
     const state = "replacement-pending" as const
     let calls = 0
-    const client = LibraryClient.of({
+    const client = makeLibraryClient({
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
       open: () => {
         calls += 1
@@ -102,7 +150,7 @@ describe("library renderer workflow", () => {
   })
 
   it("clears the selected entry and profile when the Library query changes", async () => {
-    const client = LibraryClient.of({
+    const client = makeLibraryClient({
       search: (input) => {
         expect(input).toEqual({ query: "new query", page_size: 50 })
         return Effect.succeed({
@@ -157,7 +205,7 @@ describe("library renderer workflow", () => {
       event_durable: true
     }
     const statusRequests: Array<{ readonly entry_id?: string; readonly action_id?: string }> = []
-    const client = LibraryClient.of({
+    const client = makeLibraryClient({
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
       open: () => Effect.succeed({ ok: true as const, data: acceptedB }),
       status: (input) => {
@@ -226,7 +274,7 @@ describe("library renderer workflow", () => {
     let resolveOpen!: (value: Result<OpenBookIpcResult>) => void
     const delayed = new Promise<Result<OpenBookIpcResult>>((resolve) => { resolveOpen = resolve })
     const calls: Array<{ readonly entry_id: string; readonly profile_id: string }> = []
-    const client = LibraryClient.of({
+    const client = makeLibraryClient({
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
       open: (input) => {
         calls.push({ entry_id: input.entry_id, profile_id: input.profile_id })
@@ -282,7 +330,7 @@ describe("library renderer workflow", () => {
     const statusResult = new Promise<Result<OpenBookIpcResult | null>>((resolve) => { resolveStatus = resolve })
     const calls: Array<{ readonly entry_id: string; readonly profile_id: string; readonly action_id: string }> = []
     const statusCalls: Array<{ readonly entry_id?: string; readonly action_id?: string }> = []
-    const client = LibraryClient.of({
+    const client = makeLibraryClient({
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
       open: (input) => {
         calls.push(input)
@@ -354,7 +402,7 @@ describe("library renderer workflow", () => {
   it("reports unknown when active-action status lookup fails without resubmitting Open", async () => {
     const openCalls: Array<{ readonly entry_id: string; readonly profile_id: string; readonly action_id: string }> = []
     const statusCalls: Array<{ readonly action_id?: string; readonly entry_id?: string }> = []
-    const client = LibraryClient.of({
+    const client = makeLibraryClient({
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
       open: (input) => {
         openCalls.push(input)
@@ -407,7 +455,7 @@ describe("library renderer workflow", () => {
   it("ignores a delayed result after the verified namespace changes", async () => {
     let resolveOpen!: (value: Result<OpenBookIpcResult>) => void
     const delayed = new Promise<Result<OpenBookIpcResult>>((resolve) => { resolveOpen = resolve })
-    const client = LibraryClient.of({
+    const client = makeLibraryClient({
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
       open: () => Effect.promise(() => delayed),
       status: () => Effect.succeed({ ok: true as const, data: null }),
@@ -439,7 +487,7 @@ describe("library renderer workflow", () => {
     const delayedStatus = new Promise<Result<OpenBookIpcResult | null>>((resolve) => { resolveStatus = resolve })
     const statusRequests: Array<{ readonly entry_id?: string; readonly action_id?: string }> = []
     let currentStatusResult: Result<OpenBookIpcResult | null> = { ok: true, data: null }
-    const client = LibraryClient.of({
+    const client = makeLibraryClient({
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
       open: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
       status: (input) => {
@@ -519,7 +567,7 @@ describe("library renderer workflow", () => {
       message: "another reader handoff is already opening this entry; follow the active action",
       event_durable: false
     }
-    const client = LibraryClient.of({
+    const client = makeLibraryClient({
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
       open: () => {
         openCalls += 1
@@ -632,7 +680,7 @@ describe("library renderer workflow", () => {
       message: "another reader handoff is already opening this entry; follow the active action",
       event_durable: false
     }
-    const client = LibraryClient.of({
+    const client = makeLibraryClient({
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
       open: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
       status: () => {

@@ -1252,17 +1252,102 @@ const replaceLibraryOpenState = (
   next
 ]
 
-export const selectLibraryEntry = (entryId: string) => Effect.sync(() => {
-  const state = viewStore.getState()
-  const openState = libraryOpenStateFor(state, entryId)
-  const preserveManualProfile = state.library_selected_entry_id === entryId
-    ? state.library_open_profile_id
-    : null
-  viewStore.set({
-    library_selected_entry_id: entryId,
-    library_open_profile_id: preserveManualProfile ?? openState?.profile_id ?? null
+export const loadLibraryEntry = (entryId: string) =>
+  Effect.gen(function*() {
+    const client = yield* LibraryClient
+    yield* Effect.sync(() => viewStore.set({
+      library_entry_status: "loading",
+      library_entry_error: null,
+      library_note_status: "loading",
+      library_note_error: null,
+      library_note_server_text: null
+    }))
+    const result = yield* client.entry({ entry_id: entryId })
+    if (viewStore.getState().library_selected_entry_id !== entryId) return
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({
+        library_entry_status: "error",
+        library_entry_error: result.error.message,
+        library_note_status: "error",
+        library_note_error: result.error.message
+      }))
+      return
+    }
+    yield* Effect.sync(() => viewStore.set({
+      library_entry: result.data,
+      library_entry_status: "ready",
+      library_entry_error: null,
+      library_note_text: result.data.note?.text ?? "",
+      library_note_status: "idle",
+      library_note_error: null,
+      library_note_server_text: null
+    }))
   })
-})
+
+export const selectLibraryEntry = (entryId: string) =>
+  Effect.gen(function*() {
+    const state = viewStore.getState()
+    const openState = libraryOpenStateFor(state, entryId)
+    const preserveManualProfile = state.library_selected_entry_id === entryId
+      ? state.library_open_profile_id
+      : null
+    yield* Effect.sync(() => viewStore.set({
+      library_selected_entry_id: entryId,
+      library_open_profile_id: preserveManualProfile ?? openState?.profile_id ?? null,
+      library_entry: null,
+      library_entry_status: "loading",
+      library_entry_error: null,
+      library_note_text: "",
+      library_note_status: "idle",
+      library_note_error: null,
+      library_note_server_text: null
+    }))
+    yield* loadLibraryEntry(entryId)
+  })
+
+export const updateLibraryNote = (text: string) =>
+  Effect.gen(function*() {
+    const client = yield* LibraryClient
+    const state = viewStore.getState()
+    const entry = state.library_entry
+    const entryId = state.library_selected_entry_id
+    if (entry === null || entryId === null) return
+    const expectedDecisionVersion = entry.decision_version
+    yield* Effect.sync(() => viewStore.set({ library_note_status: "loading", library_note_error: null }))
+    const result = yield* client.note({
+      entry_id: entryId,
+      text,
+      expected_decision_version: expectedDecisionVersion
+    })
+    const current = viewStore.getState()
+    if (current.library_selected_entry_id !== entryId || current.library_entry?.decision_version !== expectedDecisionVersion) return
+    if (!result.ok) {
+      if (result.error.code === "revision_conflict") {
+        const refreshed = yield* client.entry({ entry_id: entryId })
+        if (refreshed.ok && viewStore.getState().library_selected_entry_id === entryId) {
+          yield* Effect.sync(() => viewStore.set({
+            library_entry: refreshed.data,
+            library_note_status: "error",
+            library_note_error: "This note changed on another desktop. Your text is retained below for comparison.",
+            library_note_server_text: refreshed.data.note?.text ?? ""
+          }))
+          return
+        }
+      }
+      yield* Effect.sync(() => viewStore.set({
+        library_note_status: "error",
+        library_note_error: result.error.message
+      }))
+      return
+    }
+    yield* Effect.sync(() => viewStore.set({
+      library_entry: result.data.entry,
+      library_note_text: result.data.entry.note?.text ?? "",
+      library_note_status: "idle",
+      library_note_error: null,
+      library_note_server_text: null
+    }))
+  })
 
 export const chooseLibraryOpenProfile = (profileId: string) => Effect.sync(() => {
   const state = viewStore.getState()
