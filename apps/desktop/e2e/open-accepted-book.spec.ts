@@ -350,13 +350,13 @@ test("delivers distinct accepted Library handoffs on the existing native connect
     await expect.poll(async () => {
       try { return await readFile(markerPath, "utf8") } catch { return "" }
     }).toBe(`${expectedTargetA}\n`)
-    const entryIdA = (await acceptedEntryA.locator("small").textContent())?.trim()
+    const entryIdA = (await acceptedEntryA.getByTestId("library-entry-id").textContent())?.trim()
     if (!entryIdA) throw new Error("accepted entry A id was not rendered")
 
     const acceptedEntryB = window.getByTestId("library-entry").filter({ has: window.getByText("accepted-book-b", { exact: true }) })
     await acceptedEntryB.getByTestId(/library-entry-details-/).click()
     await window.getByTestId("library-open-profile").selectOption(profileId)
-    const entryIdB = (await acceptedEntryB.locator("small").textContent())?.trim()
+    const entryIdB = (await acceptedEntryB.getByTestId("library-entry-id").textContent())?.trim()
     if (!entryIdB) throw new Error("accepted entry B id was not rendered")
     await window.getByTestId("library-open").click()
     await expect(window.getByTestId("library-open-result")).toHaveText(/^accepted:/)
