@@ -15,7 +15,7 @@ import type {
   RootRegistrationRequest,
   RecoverOpenJournalIpcRequest,
   LibrarySearchIpcRequest,
-  LibraryNoteIpcRequest
+  LibraryNoteIpcRequest,
   LibraryPersonalTitleIpcRequest
 } from "@henshin/contracts"
 import { IpcChannels } from "@henshin/contracts/channels"

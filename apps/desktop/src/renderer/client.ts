@@ -10,7 +10,6 @@ import type {
   LibraryEntryDetails,
   LibraryNoteIpcRequest,
   EntryCommandResult,
-  EntryCommandResult,
   LibraryPersonalTitleIpcRequest,
   OpenBookIpcRequest,
   OpenBookIpcResult,

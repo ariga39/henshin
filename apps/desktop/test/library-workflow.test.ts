@@ -138,6 +138,43 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_note_server_text).toBe("server text")
     expect(viewStore.getState().library_note_error).toContain("retained")
     expect(viewStore.getState().library_entry?.decision_version).toBe("2")
+  })
+
+  it("keeps title and note drafts independent while their saves overlap", async () => {
+    let resolveTitle!: (value: Result<ReturnType<typeof commandResult>>) => void
+    let resolveNote!: (value: Result<ReturnType<typeof commandResult>>) => void
+    const client = makeLibraryClient({
+      updatePersonalTitle: () => Effect.promise(() => new Promise<Result<ReturnType<typeof commandResult>>>((resolve) => { resolveTitle = resolve })),
+      note: () => Effect.promise(() => new Promise<Result<ReturnType<typeof commandResult>>>((resolve) => { resolveNote = resolve }))
+    })
+    viewStore.set({
+      library_selected_entry_id: entryAId,
+      library_entry: { ...details(entryAId, "Original title", "1"), note: null },
+      library_entry_status: "ready",
+      library_title_draft: "Draft title",
+      library_note_text: "Draft note",
+      library_entry_request_generation: 1
+    })
+
+    const noteSave = run(updateLibraryNote("Draft note"), client)
+    await Promise.resolve()
+    const titleSave = run(saveLibraryPersonalTitle("Draft title"), client)
+    await Promise.resolve()
+
+    resolveTitle({ ok: true, data: commandResult({ ...details(entryAId, "Draft title", "2"), note: null }) })
+    await titleSave
+    expect(viewStore.getState().library_note_text).toBe("Draft note")
+
+    resolveNote({
+      ok: true,
+      data: commandResult({ ...details(entryAId, "Draft title", "3"), note: { text: "Draft note", revision: "1" } })
+    })
+    await noteSave
+    expect(viewStore.getState().library_title_draft).toBe("Draft title")
+    expect(viewStore.getState().library_note_text).toBe("Draft note")
+    expect(viewStore.getState().library_entry?.title).toBe("Draft title")
+  })
+
   it("preserves a conflicted title draft and reapplies it after refreshing the revision", async () => {
     const refreshed = details(entryAId, "Concurrent title", "2")
     const applied = details(entryAId, "Draft title", "3")
