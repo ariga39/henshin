@@ -263,7 +263,7 @@ export const LibraryScreen = () => {
           <button type="submit" data-testid="library-search-submit">Search</button>
         </form>
         <div data-testid="library-tag-filter">
-          <label htmlFor="library-tag-picker">Filter by canonical tag</label>
+          <label htmlFor="library-tag-search">Search available tags</label>
           <input
             id="library-tag-search"
             data-testid="library-tag-search"
@@ -272,6 +272,7 @@ export const LibraryScreen = () => {
             onChange={(event) => setTagSearchText(event.target.value)}
             placeholder="Search tags"
           />
+          <label htmlFor="library-tag-picker">Choose a canonical tag</label>
           <select
             id="library-tag-picker"
             data-testid="library-tag-picker"

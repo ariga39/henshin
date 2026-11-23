@@ -1429,7 +1429,7 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
       viewStore.set({
         library_entries: entries,
         library_query: query,
-        library_tag_options: result.data.tag_options ?? [],
+        library_tag_options: result.data.tag_options ?? state.library_tag_options,
         library_filter_error: null,
         library_cursor: result.data.next_cursor,
         library_has_more: result.data.has_more,
@@ -1470,12 +1470,18 @@ export const setLibraryTagFilter = (tag: string, mode: "include" | "exclude") =>
       ? Array.from(new Set([...current.library_exclude_tags, tag])).sort()
       : current.library_exclude_tags
     const conflicting = includeTags.includes(tag) && excludeTags.includes(tag)
+    if (conflicting) {
+      yield* Effect.sync(() => viewStore.set({
+        library_filter_error: `“${tag}” cannot be both included and excluded.`
+      }))
+      return
+    }
     yield* Effect.sync(() => viewStore.set({
       library_include_tags: includeTags,
       library_exclude_tags: excludeTags,
-      library_filter_error: conflicting ? `“${tag}” cannot be both included and excluded.` : null
+      library_filter_error: null
     }))
-    if (!conflicting) yield* searchLibrary(current.library_query)
+    yield* searchLibrary(current.library_query)
   })
 
 export const clearLibraryTagFilter = (tag: string, mode: "include" | "exclude") =>

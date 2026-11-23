@@ -227,6 +227,7 @@ test("filters effective tags with the canonical picker after reopening the real 
       .sort((left, right) => left.entry_id < right.entry_id ? -1 : left.entry_id > right.entry_id ? 1 : 0)
     const orderedNames = entries.map((entry) => entry.relative_path)
     const excludedNames = new Set(orderedNames.slice(0, 70))
+    const untaggedNames = new Set(orderedNames.slice(130))
     const insertGallery = db.prepare(
       "INSERT INTO galleries(gallery_id, source, gid, token, preferred_domain, metadata_tags_json, created_at_ms, updated_at_ms) VALUES(?, 'EH', ?, 'token', 'e-hentai.org', ?, 0, 0)"
     )
@@ -235,7 +236,7 @@ test("filters effective tags with the canonical picker after reopening the real 
     )
     for (const [index, entry] of entries.entries()) {
       const galleryId = randomUUID()
-      const tags = ["artist:alpha", ...(index < 70 ? ["genre:comic"] : [])]
+      const tags = [...(index < 130 ? ["artist:alpha"] : []), ...(index < 70 ? ["genre:comic"] : [])]
       insertGallery.run(galleryId, String(index + 1), JSON.stringify(tags))
       insertBinding.run(entry.entry_id, galleryId)
     }
@@ -251,6 +252,8 @@ test("filters effective tags with the canonical picker after reopening the real 
 
     const picker = reopened.window.getByTestId("library-tag-picker")
     await expect(picker.locator("option")).toContainText(["artist:alpha", "genre:comic"])
+    await expect(reopened.window.getByLabel("Search available tags")).toHaveCount(1)
+    await expect(reopened.window.getByLabel("Choose a canonical tag")).toHaveCount(1)
     await reopened.window.getByTestId("library-search").fill("batch-")
     await reopened.window.getByTestId("library-search-submit").click()
     await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(50)
@@ -280,11 +283,18 @@ test("filters effective tags with the canonical picker after reopening the real 
     expect(excludedPageTwoNames.every((name) => !firstFilteredPageNames.has(name))).toBe(true)
 
     await reopened.window.getByTestId("library-load-more").click()
-    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(70)
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(60)
     const filteredNames = await reopened.window.getByTestId("library-entry").locator(".library-entry-details > strong").allTextContents()
-    expect(new Set(filteredNames)).toEqual(new Set(orderedNames.slice(70)))
+    expect(new Set(filteredNames)).toEqual(new Set(orderedNames.slice(70, 130)))
     expect(new Set(filteredNames).size).toBe(filteredNames.length)
+    expect(filteredNames.some((name) => untaggedNames.has(name))).toBe(false)
     await expect(reopened.window.getByTestId("library-load-more")).toHaveCount(0)
+
+    await picker.selectOption("genre:comic")
+    await reopened.window.getByTestId("library-include-tag").click()
+    await expect(reopened.window.getByTestId("library-filter-error")).toContainText("cannot be both included and excluded")
+    await expect(reopened.window.getByTestId("library-exclude-chip")).toContainText("genre:comic")
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(60)
 
     await reopened.window.getByTestId("library-clear-filters").click()
     await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(50)
