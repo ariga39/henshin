@@ -18,7 +18,8 @@ export const ReaderProfileRow = Schema.Struct({
   supportedFormats: Schema.Array(ReaderEntryFormat),
   targetMode: ReaderTargetMode,
   executablePath: Schema.NullOr(Schema.String),
-  argumentTokens: Schema.Array(Schema.String)
+  argumentTokens: Schema.Array(Schema.String),
+  requiresReauthorization: Schema.Boolean
 })
 export type ReaderProfileRow = typeof ReaderProfileRow.Type
 
@@ -110,7 +111,8 @@ export const LocalMappingRow = Schema.Struct({
   selectedPath: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   canonicalPath: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   admittedRootIdentity: Schema.NullOr(Schema.String),
-  mappingRevision: Revision
+  mappingRevision: Revision,
+  requiresReauthorization: Schema.Boolean
 })
 export type LocalMappingRow = typeof LocalMappingRow.Type
 

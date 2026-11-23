@@ -109,3 +109,114 @@ test("holds the desktop owner through durable work and permits maintenance after
   ).get()).toEqual({ status: "prepared" })
   snapshot.close()
 })
+
+test("recovers durable draft and requires explicit reader reauthorization across restart", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-recovery-e2e-"))
+  workspaces.push(workspace)
+  const dataDirectory = path.join(workspace, "desktop-data")
+  const outputDirectory = path.join(workspace, "backups")
+  const target = path.join(workspace, "target.cbz")
+  const olderArchive = path.join(outputDirectory, "older.henshin.zip")
+  await mkdir(outputDirectory)
+  await writeFile(target, "test archive")
+
+  const launch = async (): Promise<ElectronApplication> => {
+    const app = await electron.launch({
+      executablePath: electronPath as unknown as string,
+      args: [".", `--user-data-dir=${dataDirectory}`],
+      cwd: APP_DIR,
+      env: { ...process.env, HENSHIN_PROTOTYPE_MODE: "1" }
+    })
+    launched.push(app)
+    const resolvedUserData = await app.evaluate(({ app: electronApp }) => electronApp.getPath("userData"))
+    expect(await realpath(resolvedUserData)).toBe(await realpath(dataDirectory))
+    return app
+  }
+
+  const first = await launch()
+  const firstWindow = await first.firstWindow()
+  await firstWindow.getByTestId("load").click()
+  await expect(firstWindow.getByTestId("note-text")).toHaveText("hello")
+  await firstWindow.getByTestId("text-input").fill("older recovered draft")
+  await firstWindow.getByTestId("save-local-draft").click()
+  await expect(firstWindow.getByTestId("outcome")).toContainText("local draft saved")
+  const profileResult = await firstWindow.evaluate((executablePath) => window.henshinReaderProfiles.save({
+    profile_id: null,
+    expected_revision: "0",
+    name: "Recovered reader",
+    launch_mode: "explicit-executable",
+    supported_formats: ["archive"],
+    target_mode: "archive",
+    argument_tokens: ["{target}"],
+    selection_handle: null
+  }), await first.evaluate(() => process.execPath))
+  expect(profileResult).toMatchObject({ ok: true, data: { name: "Recovered reader", revision: "1" } })
+  await first.close()
+  launched.splice(launched.indexOf(first), 1)
+  await runBackup(olderArchive, dataDirectory)
+
+  const second = await launch()
+  const secondWindow = await second.firstWindow()
+  await secondWindow.getByTestId("load").click()
+  await secondWindow.getByTestId("load-local-draft").click()
+  await expect(secondWindow.getByTestId("text-input")).toHaveValue("older recovered draft")
+  await secondWindow.getByTestId("text-input").fill("newer lost draft")
+  await secondWindow.getByTestId("save-local-draft").click()
+  await expect(secondWindow.getByTestId("outcome")).toContainText("local draft saved")
+  await second.close()
+  launched.splice(launched.indexOf(second), 1)
+
+  await execFile(process.execPath, [
+    SERVER_PATH, "backup", "desktop", "restore", "--data-dir", dataDirectory, "--input", olderArchive, "--confirm"
+  ])
+
+  const recovered = await launch()
+  const recoveredWindow = await recovered.firstWindow()
+  await expect(recoveredWindow.getByTestId("connection-status")).toHaveText("disconnected")
+  const profiles = await recoveredWindow.evaluate(() => window.henshinReaderProfiles.list())
+  if (!profiles.ok || profiles.data[0] === undefined) throw new Error("recovered reader profile was absent")
+  const currentProfile = profiles.data[0]
+  await recovered.evaluate(({ dialog }, selected) => {
+    Object.defineProperty(dialog, "showOpenDialog", {
+      configurable: true,
+      value: async () => ({ canceled: false, filePaths: [selected] })
+    })
+  }, [target])
+  const targetSelection = await recoveredWindow.evaluate((profile) => window.henshinReaderProfiles.selectTestTarget({
+    profile_id: profile.profile_id,
+    expected_revision: profile.revision
+  }), currentProfile)
+  if (!targetSelection.ok || targetSelection.data === null) throw new Error("recovered reader target was not selected")
+  const heldTest = await recoveredWindow.evaluate((input) => window.henshinReaderProfiles.test(input), {
+    profile_id: currentProfile.profile_id,
+    expected_revision: currentProfile.revision,
+    selection_handle: targetSelection.data.selection_handle
+  })
+  expect(heldTest).toMatchObject({ ok: false, error: { message: expect.stringContaining("review and save") } })
+
+  const reauthorized = await recoveredWindow.evaluate((profile) => window.henshinReaderProfiles.save({
+    profile_id: profile.profile_id,
+    expected_revision: profile.revision,
+    name: profile.name,
+    launch_mode: profile.launch_mode,
+    supported_formats: profile.supported_formats,
+    target_mode: profile.target_mode,
+    argument_tokens: profile.argument_tokens,
+    selection_handle: null
+  }), currentProfile)
+  expect(reauthorized).toMatchObject({ ok: true, data: { revision: "2" } })
+  await recoveredWindow.getByTestId("reconnect").click()
+  await expect(recoveredWindow.getByTestId("connection-status")).toHaveText("connected")
+  await recoveredWindow.getByTestId("load").click()
+  await recoveredWindow.getByTestId("load-local-draft").click()
+  await expect(recoveredWindow.getByTestId("text-input")).toHaveValue("older recovered draft")
+  await recovered.close()
+  launched.splice(launched.indexOf(recovered), 1)
+
+  const state = JSON.parse(await readFile(path.join(dataDirectory, "desktop-recovery-state.json"), "utf8")) as Record<string, unknown>
+  expect(state).toMatchObject({ requires_fresh_authentication: false, reader_profiles_require_review: false })
+})
+
+const runBackup = async (archive: string, dataDirectory: string): Promise<void> => {
+  await execFile(process.execPath, [SERVER_PATH, "backup", "desktop", "--data-dir", dataDirectory, "--output", archive])
+}

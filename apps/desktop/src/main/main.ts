@@ -110,6 +110,12 @@ import {
 import { OpenCoordinator, type OpenCoordinatorPorts } from "./OpenCoordinator"
 import { loadDeviceId } from "./device-identity"
 import { acquireDesktopOwnership } from "../../../server/src/persistence/DesktopOwnership"
+import { recoverInterruptedDesktopRecovery } from "./DesktopRecoveryStartup"
+import {
+  readDesktopRecoveryState,
+  writeDesktopRecoveryState,
+  type DesktopRecoveryState
+} from "./DesktopRecoveryState"
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
 const LOCAL_MAPPING_REQUEST_TIMEOUT = Duration.seconds(12)
@@ -145,6 +151,8 @@ let desktopOwnership: DatabaseSync | null = null
 const prototypeMode = process.env.HENSHIN_PROTOTYPE_MODE === "1"
 let protectedWritablePaths: ReadonlyArray<string> = []
 let deviceId = ""
+let recoveryState: DesktopRecoveryState | undefined
+let recoveryRequiresFreshAuthentication = false
 const localMappingPreviews = new Map<string, {
   readonly epoch: string
   readonly previewToken: string
@@ -513,6 +521,35 @@ const runLocalResult = <A>(
   effect: Effect.Effect<IpcOk<A> | IpcErr, never, MainServices>
 ): Promise<IpcOk<A> | IpcErr> =>
   requireRuntime().runPromise(effect).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+
+const refreshRecoveryAuthorizationState = async (): Promise<void> => {
+  if (recoveryState === undefined) return
+  const currentState = recoveryState
+  const instanceId = connection?.getNamespace()
+  const authorization = await requireRuntime().runPromise(
+    Effect.gen(function*() {
+      const mappings = yield* LocalMappingStore
+      const profiles = yield* ReaderProfileStore
+      const profileRows = yield* profiles.list()
+      const mappingRows = instanceId === null || instanceId === undefined
+        ? undefined
+        : yield* mappings.list(instanceId)
+      return {
+        mappingsRequireReview: mappingRows === undefined
+          ? currentState.mappings_require_review
+          : mappingRows.some((mapping) => mapping.requiresReauthorization),
+        readerProfilesRequireReview: profileRows.some((profile) => profile.requiresReauthorization)
+      }
+    })
+  )
+  recoveryState = {
+    ...currentState,
+    mappings_require_review: authorization.mappingsRequireReview,
+    reader_profiles_require_review: authorization.readerProfilesRequireReview,
+    automatic_reader_launch_disabled: authorization.readerProfilesRequireReview
+  }
+  await writeDesktopRecoveryState(app.getPath("userData"), recoveryState)
+}
 
 const localMappingKey = (instanceId: string, rootId: string): string => `${instanceId}:${rootId}`
 
@@ -903,6 +940,7 @@ const registerIpc = (): void => {
       const outcome: LocalMappingActivationOutcome = stored.data
       switch (outcome.kind) {
         case "activated":
+          await refreshRecoveryAuthorizationState()
           return { ok: true as const, data: toDeviceMapping(outcome.mapping) }
         case "revision_conflict":
           return {
@@ -947,7 +985,7 @@ const registerIpc = (): void => {
         toResult(
           Effect.gen(function*() {
             const store = yield* ReaderProfileStore
-            return { data: yield* store.list() }
+            return { data: (yield* store.list()).map(toReaderProfileView) }
           })
         )
       )
@@ -1048,6 +1086,7 @@ const registerIpc = (): void => {
           })
         )
       )
+      if (saved.ok) await refreshRecoveryAuthorizationState()
       if (saved.ok && request.selection_handle !== null) executableSelections.delete(request.selection_handle)
       return saved
     } catch (error) {
@@ -1125,6 +1164,9 @@ const registerIpc = (): void => {
         })
       )
       if (profile === undefined) throw new ReaderProfileNotFoundError()
+      if (profile.requiresReauthorization) {
+        throw new ReaderTestLaunchError("review and save the recovered reader profile before testing it")
+      }
       if (profile.revision !== request.expected_revision) {
         throw new ReaderProfileConflictError({ currentRevision: profile.revision })
       }
@@ -1421,7 +1463,15 @@ const registerIpc = (): void => {
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return requireConnection()
       .connect()
-      .then((status) => {
+      .then(async (status) => {
+        if (recoveryState !== undefined) {
+          if (recoveryRequiresFreshAuthentication) {
+            recoveryRequiresFreshAuthentication = false
+            recoveryState = { ...recoveryState, requires_fresh_authentication: false }
+            await writeDesktopRecoveryState(app.getPath("userData"), recoveryState)
+          }
+          await refreshRecoveryAuthorizationState()
+        }
         openEventDeliveryScheduler.schedule()
         return connectionStatusResult(status)
       })
@@ -1770,7 +1820,13 @@ const bootstrap = async (): Promise<void> => {
   const clientDbPath =
     process.env.HENSHIN_PROTOTYPE_CLIENT_DB ?? path.join(app.getPath("userData"), "prototype-client.db")
   desktopOwnership = await acquireDesktopOwnership(app.getPath("userData"))
+  await recoverInterruptedDesktopRecovery(app.getPath("userData"))
   deviceId = await loadDeviceId(app.getPath("userData"))
+  recoveryState = await readDesktopRecoveryState(app.getPath("userData"))
+  if (recoveryState !== undefined && recoveryState.installation_id !== deviceId) {
+    throw new Error("desktop recovery state belongs to another installation")
+  }
+  recoveryRequiresFreshAuthentication = recoveryState?.requires_fresh_authentication === true
   protectedWritablePaths = [
     app.getPath("userData"),
     app.getPath("sessionData"),
@@ -1803,9 +1859,9 @@ const bootstrap = async (): Promise<void> => {
     baseUrl: serverChild.baseUrl,
     bearerToken: serverChild.bearerToken
   })
-  await connection.connect()
+  if (!recoveryRequiresFreshAuthentication) await connection.connect()
   openCoordinator = createOpenCoordinator()
-  openEventDeliveryScheduler.schedule()
+  if (!recoveryRequiresFreshAuthentication) openEventDeliveryScheduler.schedule()
 
   registerIpc()
   installApplicationMenu()

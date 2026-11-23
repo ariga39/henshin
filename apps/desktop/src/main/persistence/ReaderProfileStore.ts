@@ -28,6 +28,7 @@ export interface ReaderProfileInput {
 
 export interface StoredReaderProfile extends ReaderProfile {
   readonly executablePath: string | null
+  readonly requiresReauthorization: boolean
 }
 
 export class ReaderProfileConflictError extends Data.TaggedError("ReaderProfileConflictError")<{
@@ -56,7 +57,8 @@ const toStored = (row: ReaderProfileRow): StoredReaderProfile => ({
   target_mode: row.targetMode,
   executable_name: executableName(row.executablePath),
   argument_tokens: row.argumentTokens,
-  executablePath: row.executablePath
+  executablePath: row.executablePath,
+  requiresReauthorization: row.requiresReauthorization
 })
 
 export const toReaderProfileView = (profile: StoredReaderProfile): ReaderProfile => ({
@@ -70,7 +72,7 @@ export const toReaderProfileView = (profile: StoredReaderProfile): ReaderProfile
   argument_tokens: profile.argument_tokens
 })
 
-const toRowInput = (input: ReaderProfileInput): Omit<ReaderProfileRow, "revision"> => ({
+const toRowInput = (input: ReaderProfileInput): Omit<ReaderProfileRow, "revision" | "requiresReauthorization"> => ({
   profileId: input.profileId,
   name: input.name,
   launchMode: input.launchMode,
@@ -83,7 +85,7 @@ const toRowInput = (input: ReaderProfileInput): Omit<ReaderProfileRow, "revision
 export class ReaderProfileStore extends Context.Service<
   ReaderProfileStore,
   {
-    readonly list: () => Effect.Effect<ReadonlyArray<ReaderProfile>, LocalDatabaseWorkerError>
+    readonly list: () => Effect.Effect<ReadonlyArray<StoredReaderProfile>, LocalDatabaseWorkerError>
     readonly get: (profileId: string) => Effect.Effect<StoredReaderProfile | undefined, LocalDatabaseWorkerError>
     readonly save: (
       input: ReaderProfileInput
@@ -97,14 +99,14 @@ export class ReaderProfileStore extends Context.Service<
       const call = (request: DraftWorkerRequest): Effect.Effect<unknown, LocalDatabaseWorkerError> =>
         worker.call(request)
 
-      const list = (): Effect.Effect<ReadonlyArray<ReaderProfile>, LocalDatabaseWorkerError> =>
+      const list = (): Effect.Effect<ReadonlyArray<StoredReaderProfile>, LocalDatabaseWorkerError> =>
         call({ op: "listReaderProfiles" }).pipe(
-          Effect.flatMap((value): Effect.Effect<ReadonlyArray<ReaderProfile>, LocalDatabaseWorkerError> => {
+          Effect.flatMap((value): Effect.Effect<ReadonlyArray<StoredReaderProfile>, LocalDatabaseWorkerError> => {
             const decoded = decodeRows(value)
             if (Option.isNone(decoded)) {
               return Effect.fail(new LocalDatabaseWorkerError({ message: "invalid reader profile list" }))
             }
-            return Effect.succeed(decoded.value.map((row) => toReaderProfileView(toStored(row))))
+            return Effect.succeed(decoded.value.map(toStored))
           })
         )
 

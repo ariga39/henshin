@@ -251,3 +251,21 @@ The bundle records the client-store schema and installation identity; an
 unknown client schema is refused rather than published with omitted work.
 The backup cannot include local events created after the snapshot, and a
 recovered desktop must be reauthenticated before use.
+
+Preview and restore a stopped installation with the same exclusive ownership
+guard:
+
+```sh
+node apps/server/dist/server.mjs backup desktop restore \
+  --data-dir "$HOME/Library/Application Support/Henshin" \
+  --input "$PWD/henshin-desktop-backup.henshin.zip"
+node apps/server/dist/server.mjs backup desktop restore \
+  --data-dir "$HOME/Library/Application Support/Henshin" \
+  --input "$PWD/henshin-desktop-backup.henshin.zip" --confirm
+```
+
+Apply preserves a private rollback directory, marks recovered mappings and
+reader profiles for explicit local reauthorization, and turns prepared reader
+dispatches into diagnostic `unknown` records. Electron rolls back an
+interrupted replacement before startup; it does not serve a partially replaced
+store.

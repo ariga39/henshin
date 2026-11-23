@@ -665,8 +665,14 @@ export class OpenCoordinator {
       if (resolution.entry_id !== input.entryId) throw new Error("the selected entry resolution did not match")
       const mapping = await this.ports.loadMapping(input.instanceId, resolution.root_id)
       if (mapping === undefined) throw new OpenConfigurationError("configure a compatible local mapping before opening")
+      if (mapping.requiresReauthorization) {
+        throw new OpenConfigurationError("inspect and activate the recovered local mapping before opening")
+      }
       const profile = await this.ports.loadProfile(input.profileId)
       if (profile === undefined) throw new OpenConfigurationError("the selected reader profile is no longer configured")
+      if (profile.requiresReauthorization) {
+        throw new OpenConfigurationError("review and save the recovered reader profile before opening")
+      }
       const target = await resolveTargetWithDeadline(mapping, resolution, profile)
       if (!offline) this.ports.assertCurrent(input.instanceId, input.epoch)
       const admission = await this.ports.journal.prepare({
@@ -691,11 +697,13 @@ export class OpenCoordinator {
       const currentProfile = await this.ports.loadProfile(input.profileId)
       if (
         currentMapping === undefined ||
+        currentMapping.requiresReauthorization ||
         currentMapping.mappingRevision !== mapping.mappingRevision ||
         currentMapping.selectedPath !== mapping.selectedPath ||
         currentMapping.canonicalPath !== mapping.canonicalPath ||
         currentMapping.admittedRootIdentity !== mapping.admittedRootIdentity ||
         currentProfile === undefined ||
+        currentProfile.requiresReauthorization ||
         currentProfile.revision !== profile.revision ||
         !sameResolution(resolution, currentResolution)
       ) {

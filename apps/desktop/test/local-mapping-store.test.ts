@@ -175,7 +175,8 @@ describe("local mapping store", () => {
             selectedPath: collectionAlias,
             canonicalPath: renamedCollection,
             admittedRootIdentity: renamedCollectionIdentity,
-            mappingRevision: "1"
+            mappingRevision: "1",
+            requiresReauthorization: false
           }
         })
         expect(yield* store.list(instanceA)).toHaveLength(1)
@@ -196,7 +197,8 @@ describe("local mapping store", () => {
             selectedPath: renamedCollection,
             canonicalPath: renamedCollection,
             admittedRootIdentity: renamedCollectionIdentity,
-            mappingRevision: "2"
+            mappingRevision: "2",
+            requiresReauthorization: false
           }
         })
         expect(yield* store.load({ instanceId: instanceA, rootId: rootA })).toMatchObject({
@@ -341,7 +343,8 @@ describe("local mapping store", () => {
             selectedPath: linkedAlias,
             canonicalPath: linkedTargetA,
             admittedRootIdentity: linkedTargetAIdentity,
-            mappingRevision: "1"
+            mappingRevision: "1",
+            requiresReauthorization: false
           }
         })
         const linkedAliasParentRoot = yield* store.activate(
@@ -389,7 +392,8 @@ describe("local mapping store", () => {
             selectedPath: linkedAlias,
             canonicalPath: linkedTargetA,
             admittedRootIdentity: linkedTargetAIdentity,
-            mappingRevision: "1"
+            mappingRevision: "1",
+            requiresReauthorization: false
           })
           const retargetedRoot = yield* store.activate(
             activate(instanceE, rootI, linkedTargetB, linkedTargetB)
@@ -464,7 +468,8 @@ describe("local mapping store", () => {
         selectedPath: "/legacy/selected",
         canonicalPath: "/legacy/canonical",
         admittedRootIdentity: null,
-        mappingRevision: "4"
+        mappingRevision: "4",
+        requiresReauthorization: false
       })
     } finally {
       await rm(databaseDirectory, { recursive: true, force: true })

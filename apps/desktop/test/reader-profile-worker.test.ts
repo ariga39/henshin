@@ -1,6 +1,7 @@
 import { build } from "esbuild"
 import { Effect, Layer, ManagedRuntime } from "effect"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { DatabaseSync } from "node:sqlite"
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -72,6 +73,9 @@ describe("reader profile persistence", () => {
     }))).rejects.toBeInstanceOf(ReaderProfileConflictError)
 
     await runtime.dispose()
+    const database = new DatabaseSync(databasePath)
+    database.prepare("UPDATE reader_profiles SET requires_reauthorization = 1 WHERE profile_id = ?").run(profileInput.profileId)
+    database.close()
     runtime = openStore()
     const reopened = await runtime.runPromise(Effect.gen(function*() {
       const store = yield* ReaderProfileStore
@@ -85,6 +89,13 @@ describe("reader profile persistence", () => {
       supported_formats: profileInput.supportedFormats,
       argument_tokens: profileInput.argumentTokens
     })
+    expect(reopened?.requiresReauthorization).toBe(true)
+
+    const reviewed = await runtime.runPromise(Effect.gen(function*() {
+      const store = yield* ReaderProfileStore
+      return yield* store.save({ ...profileInput, expectedRevision: "1" })
+    }))
+    expect(reviewed.requiresReauthorization).toBe(false)
   })
 })
 

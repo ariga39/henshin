@@ -21,7 +21,8 @@ const profile = (profileId: string): StoredReaderProfile => ({
   target_mode: "archive",
   executable_name: "fixture-reader",
   argument_tokens: ["{target}"],
-  executablePath: process.execPath
+  executablePath: process.execPath,
+  requiresReauthorization: false
 })
 
 type TestJournal = OpenJournalPort & {
@@ -173,7 +174,8 @@ const mappingFor = async (root: string, rootId: string): Promise<LocalMapping> =
     selectedPath: root,
     canonicalPath: root,
     admittedRootIdentity: `${metadata.dev}:${metadata.ino}`,
-    mappingRevision: "1"
+    mappingRevision: "1",
+    requiresReauthorization: false
   }
 }
 
@@ -1046,6 +1048,32 @@ describe("desktop Open coordinator", () => {
         message: "sibling identity evidence could not be completed; refresh the entry before opening"
       })
       expect(queryCount).toBe(2)
+      expect(dispatchCount).toBe(0)
+      expect(fixture.journal.rows.size).toBe(0)
+    })
+  })
+
+  it("blocks recovered mappings and reader profiles before journal admission or dispatch", async () => {
+    await withCoordinatorFixture("recovery-reauthorization", async (fixture) => {
+      let dispatchCount = 0
+      const storedMapping = await mappingFor(fixture.canonicalRoot, fixture.resolution.root_id)
+      const storedProfile = profile(fixture.input.profileId)
+      const mappingBlocked = makeCoordinator(fixture, {
+        loadMapping: async () => ({ ...storedMapping, requiresReauthorization: true }),
+        dispatch: async () => { dispatchCount += 1 }
+      })
+      const mappingResult = await mappingBlocked.open(fixture.input)
+      expect(mappingResult).toMatchObject({ status: "failed", message: "inspect and activate the recovered local mapping before opening" })
+      expect(dispatchCount).toBe(0)
+      expect(fixture.journal.rows.size).toBe(0)
+
+      const profileBlocked = makeCoordinator(fixture, {
+        loadMapping: async () => storedMapping,
+        loadProfile: async () => ({ ...storedProfile, requiresReauthorization: true }),
+        dispatch: async () => { dispatchCount += 1 }
+      })
+      const profileResult = await profileBlocked.open({ ...fixture.input, actionId: randomUUID() })
+      expect(profileResult).toMatchObject({ status: "failed", message: "review and save the recovered reader profile before opening" })
       expect(dispatchCount).toBe(0)
       expect(fixture.journal.rows.size).toBe(0)
     })

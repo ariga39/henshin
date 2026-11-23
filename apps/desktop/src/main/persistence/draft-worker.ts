@@ -177,6 +177,7 @@ db.exec(`
     selected_resolution TEXT,
     canonical_resolution TEXT,
     state TEXT NOT NULL CHECK (state = 'active'),
+    requires_reauthorization INTEGER NOT NULL DEFAULT 0 CHECK (requires_reauthorization IN (0, 1)),
     PRIMARY KEY (instance_id, root_id)
   );
   CREATE TABLE IF NOT EXISTS reader_profiles (
@@ -188,7 +189,8 @@ db.exec(`
     target_mode TEXT NOT NULL CHECK (target_mode IN ('archive', 'directory', 'first-image')),
     executable_path TEXT,
     argument_tokens TEXT NOT NULL,
-    updated_at_ms INTEGER NOT NULL
+    updated_at_ms INTEGER NOT NULL,
+    requires_reauthorization INTEGER NOT NULL DEFAULT 0 CHECK (requires_reauthorization IN (0, 1))
   );
   CREATE TABLE IF NOT EXISTS launch_journal (
     instance_id TEXT NOT NULL,
@@ -284,6 +286,17 @@ if (!clientMappingColumns.has("selected_resolution")) {
 if (!clientMappingColumns.has("canonical_resolution")) {
   db.exec("ALTER TABLE client_mappings ADD COLUMN canonical_resolution TEXT")
 }
+if (!clientMappingColumns.has("requires_reauthorization")) {
+  db.exec("ALTER TABLE client_mappings ADD COLUMN requires_reauthorization INTEGER NOT NULL DEFAULT 0")
+}
+const readerProfileColumns = new Set(
+  (db.prepare("PRAGMA table_info(reader_profiles)").all() as unknown as ReadonlyArray<{ name: string }>).map(
+    (column) => column.name
+  )
+)
+if (!readerProfileColumns.has("requires_reauthorization")) {
+  db.exec("ALTER TABLE reader_profiles ADD COLUMN requires_reauthorization INTEGER NOT NULL DEFAULT 0")
+}
 // A prepared intent has no reliable dispatch outcome after this worker has
 // been closed and reopened. Preserve it as diagnostic unknown rather than
 // allowing any caller to turn it back into a launch.
@@ -320,14 +333,14 @@ const tombstoneDraft = db.prepare(`
 
 const selectReaderProfile = db.prepare(`
   SELECT profile_id, revision, name, launch_mode, supported_formats, target_mode,
-         executable_path, argument_tokens
+         executable_path, argument_tokens, requires_reauthorization
   FROM reader_profiles
   WHERE profile_id = ?
 `)
 selectReaderProfile.setReadBigInts(true)
 const listReaderProfiles = db.prepare(`
   SELECT profile_id, revision, name, launch_mode, supported_formats, target_mode,
-         executable_path, argument_tokens
+         executable_path, argument_tokens, requires_reauthorization
   FROM reader_profiles
   ORDER BY name COLLATE NOCASE ASC, profile_id ASC
 `)
@@ -488,13 +501,13 @@ selectReaderProfileCount.setReadBigInts(true)
 const insertReaderProfile = db.prepare(`
   INSERT INTO reader_profiles(
     profile_id, revision, name, launch_mode, supported_formats, target_mode,
-    executable_path, argument_tokens, updated_at_ms
-  ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+    executable_path, argument_tokens, updated_at_ms, requires_reauthorization
+  ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
 `)
 const updateReaderProfile = db.prepare(`
   UPDATE reader_profiles
   SET revision = ?, name = ?, launch_mode = ?, supported_formats = ?, target_mode = ?,
-      executable_path = ?, argument_tokens = ?, updated_at_ms = ?
+      executable_path = ?, argument_tokens = ?, updated_at_ms = ?, requires_reauthorization = 0
   WHERE profile_id = ? AND revision = ?
 `)
 
@@ -561,14 +574,16 @@ listCommandAttempts.setReadBigInts(true)
 
 const selectLocalMapping = db.prepare(`
   SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision,
-         selected_identity, canonical_identity, selected_resolution, canonical_resolution
+         selected_identity, canonical_identity, selected_resolution, canonical_resolution,
+         requires_reauthorization
   FROM client_mappings
   WHERE instance_id = ? AND root_id = ? AND state = 'active'
 `)
 selectLocalMapping.setReadBigInts(true)
 const listLocalMappings = db.prepare(`
   SELECT instance_id, root_id, selected_path, canonical_path, mapping_revision,
-         selected_identity, canonical_identity, selected_resolution, canonical_resolution
+         selected_identity, canonical_identity, selected_resolution, canonical_resolution,
+         requires_reauthorization
   FROM client_mappings
   WHERE instance_id = ? AND state = 'active'
   ORDER BY rowid ASC
@@ -578,7 +593,8 @@ const upsertLocalMapping = db.prepare(`
   INSERT INTO client_mappings(
     instance_id, root_id, selected_path, canonical_path, mapping_revision,
     selected_identity, canonical_identity, selected_resolution, canonical_resolution, state
-  ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+    , requires_reauthorization
+  ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0)
   ON CONFLICT(instance_id, root_id) DO UPDATE SET
     selected_path = excluded.selected_path,
     canonical_path = excluded.canonical_path,
@@ -587,6 +603,7 @@ const upsertLocalMapping = db.prepare(`
     canonical_identity = excluded.canonical_identity,
     selected_resolution = excluded.selected_resolution,
     canonical_resolution = excluded.canonical_resolution,
+    requires_reauthorization = excluded.requires_reauthorization,
     state = 'active'
 `)
 
@@ -625,6 +642,7 @@ const toReaderProfileRow = (row: {
   target_mode: ReaderProfileRow["targetMode"]
   executable_path: string | null
   argument_tokens: string
+  requires_reauthorization: bigint
 }): ReaderProfileRow => ({
   profileId: row.profile_id,
   revision: row.revision.toString(),
@@ -633,7 +651,8 @@ const toReaderProfileRow = (row: {
   supportedFormats: JSON.parse(row.supported_formats),
   targetMode: row.target_mode,
   executablePath: row.executable_path,
-  argumentTokens: JSON.parse(row.argument_tokens)
+  argumentTokens: JSON.parse(row.argument_tokens),
+  requiresReauthorization: row.requires_reauthorization === 1n
 })
 
 const readReaderProfile = (profileId: string): ReaderProfileRow | undefined => {
@@ -646,6 +665,7 @@ const readReaderProfile = (profileId: string): ReaderProfileRow | undefined => {
     target_mode: ReaderProfileRow["targetMode"]
     executable_path: string | null
     argument_tokens: string
+    requires_reauthorization: bigint
   } | undefined
   return row === undefined ? undefined : toReaderProfileRow(row)
 }
@@ -660,6 +680,7 @@ const readReaderProfiles = (): ReadonlyArray<ReaderProfileRow> =>
     target_mode: ReaderProfileRow["targetMode"]
     executable_path: string | null
     argument_tokens: string
+    requires_reauthorization: bigint
   }>).map(toReaderProfileRow)
 
 type OpenJournalDbRow = {
@@ -854,6 +875,7 @@ type PersistedLocalMapping = {
   readonly canonical_identity: string | null
   readonly selected_resolution: string | null
   readonly canonical_resolution: string | null
+  readonly requires_reauthorization: bigint
 }
 
 const usableIdentity = (identity: string | null | undefined): string | null => {
@@ -870,7 +892,8 @@ const readLocalMappingRow = (row: PersistedLocalMapping): LocalMappingRow => ({
   selectedPath: row.selected_path,
   canonicalPath: row.canonical_path,
   admittedRootIdentity: usableIdentity(row.canonical_identity),
-  mappingRevision: row.mapping_revision.toString()
+  mappingRevision: row.mapping_revision.toString(),
+  requiresReauthorization: row.requires_reauthorization === 1n
 })
 
 const readLocalMapping = (instanceId: string, rootId: string): LocalMappingRow | undefined => {
@@ -1107,7 +1130,8 @@ const handle = (request: DraftWorkerRequest): unknown => {
             supportedFormats: request.supportedFormats,
             targetMode: request.targetMode,
             executablePath: request.executablePath,
-            argumentTokens: request.argumentTokens
+            argumentTokens: request.argumentTokens,
+            requiresReauthorization: false
           }
           insertReaderProfile.run(
             profile.profileId,
@@ -1135,7 +1159,8 @@ const handle = (request: DraftWorkerRequest): unknown => {
           supportedFormats: request.supportedFormats,
           targetMode: request.targetMode,
           executablePath: request.executablePath,
-          argumentTokens: request.argumentTokens
+          argumentTokens: request.argumentTokens,
+          requiresReauthorization: false
         }
         updateReaderProfile.run(
           BigInt(profile.revision),
@@ -1501,7 +1526,8 @@ const handle = (request: DraftWorkerRequest): unknown => {
           selectedPath: request.selectedPath,
           canonicalPath: canonicalPath.comparisonPath,
           admittedRootIdentity: canonicalPath.endpointIdentity,
-          mappingRevision: (BigInt(request.expectedMappingRevision) + 1n).toString()
+          mappingRevision: (BigInt(request.expectedMappingRevision) + 1n).toString(),
+          requiresReauthorization: false
         }
         ensureBeforeDeadline()
         upsertLocalMapping.run(
