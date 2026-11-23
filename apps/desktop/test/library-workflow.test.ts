@@ -324,4 +324,133 @@ describe("library renderer workflow", () => {
     await activeRefresh
     expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({ status: "loading", result: activeResult })
   })
+
+  it("keeps missing outcomes unknown and makes transient lookup failure retryable", async () => {
+    let lookup: Result<OpenBookIpcResult | null> = { ok: true, data: null }
+    let openCalls = 0
+    const activeResult: OpenBookIpcResult = {
+      ...accepted(entryAId),
+      status: "in-flight",
+      message: "another reader handoff is already opening this entry; follow the active action",
+      event_durable: false
+    }
+    const client = LibraryClient.of({
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: () => {
+        openCalls += 1
+        return Effect.succeed({ ok: true as const, data: accepted(entryAId, "99999999-9999-4999-8999-999999999999") })
+      },
+      status: () => Effect.succeed(lookup),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      connection: { state: "connected", instance_id: namespaceId, epoch: "99999999-9999-4999-8999-999999999999", reason: null },
+      connection_generation: 7,
+      library_entries: [entry(entryAId, "book-a")],
+      library_selected_entry_id: entryAId,
+      library_open_profile_id: profileId,
+      library_open_states: [{
+        namespace_id: namespaceId,
+        entry_id: entryAId,
+        profile_id: profileId,
+        connection_generation: 7,
+        status: "loading",
+        result: activeResult
+      }]
+    })
+
+    await run(loadActiveLibraryOpenState(entryAId), client)
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
+      status: "unknown",
+      result: {
+        action_id: activeResult.action_id,
+        entry_id: entryAId,
+        profile_id: profileId,
+        status: "unknown",
+        message: "The reader handoff has no available terminal result; it may have opened. Retry status or open again deliberately.",
+        event_durable: false
+      }
+    })
+    expect(openCalls).toBe(0)
+
+    lookup = {
+      ok: false,
+      error: { code: "transport", message: "status lookup interrupted", retryable: true }
+    }
+    viewStore.set({ library_open_states: [{
+      namespace_id: namespaceId,
+      entry_id: entryAId,
+      profile_id: profileId,
+      connection_generation: 7,
+      status: "loading",
+      result: activeResult
+    }] })
+    await run(loadActiveLibraryOpenState(entryAId), client)
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
+      status: "unknown",
+      result: {
+        action_id: activeResult.action_id,
+        entry_id: entryAId,
+        profile_id: profileId,
+        status: "unknown",
+        message: "The reader handoff outcome is temporarily unavailable. Retry status before opening again.",
+        event_durable: false
+      }
+    })
+    expect(openCalls).toBe(0)
+
+    await run(openSelectedLibraryEntry, client)
+    expect(openCalls).toBe(1)
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({ status: "accepted" })
+  })
+
+  it("ignores a late successful status reply after a newer unavailable observation", async () => {
+    let resolveLate!: (value: Result<OpenBookIpcResult | null>) => void
+    const late = new Promise<Result<OpenBookIpcResult | null>>((resolve) => { resolveLate = resolve })
+    let statusCalls = 0
+    const activeResult: OpenBookIpcResult = {
+      ...accepted(entryAId),
+      status: "in-flight",
+      message: "another reader handoff is already opening this entry; follow the active action",
+      event_durable: false
+    }
+    const client = LibraryClient.of({
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+      status: () => {
+        statusCalls += 1
+        return statusCalls === 1
+          ? Effect.promise(() => late)
+          : Effect.succeed({ ok: false as const, error: { code: "transport", message: "status lookup interrupted", retryable: true } })
+      },
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      connection: { state: "connected", instance_id: namespaceId, epoch: "99999999-9999-4999-8999-999999999999", reason: null },
+      connection_generation: 7,
+      library_entries: [entry(entryAId, "book-a")],
+      library_selected_entry_id: entryAId,
+      library_open_profile_id: profileId,
+      library_open_states: [{
+        namespace_id: namespaceId,
+        entry_id: entryAId,
+        profile_id: profileId,
+        connection_generation: 7,
+        status: "loading",
+        result: activeResult
+      }]
+    })
+
+    const lateRefresh = run(loadActiveLibraryOpenState(entryAId), client)
+    await Promise.resolve()
+    await run(loadActiveLibraryOpenState(entryAId), client)
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({ status: "unknown" })
+
+    resolveLate({ ok: true, data: accepted(entryAId, activeResult.action_id) })
+    await lateRefresh
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
+      status: "unknown",
+      result: { status: "unknown", action_id: activeResult.action_id }
+    })
+  })
 })

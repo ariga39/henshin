@@ -1184,10 +1184,6 @@ export const loadActiveLibraryOpenState = (entryId: string) => Effect.gen(functi
     ? { action_id: observed.result.action_id }
     : { entry_id: entryId }
   const result = yield* client.status(request)
-  if (!result.ok || result.data === null) return
-  const data = result.data
-  if (data.profile_id === null) return
-  const profileId: string = data.profile_id
   const current = viewStore.getState()
   const currentObserved = libraryOpenStateFor(current, entryId)
   if (
@@ -1198,6 +1194,55 @@ export const loadActiveLibraryOpenState = (entryId: string) => Effect.gen(functi
     currentObserved?.profile_id !== observed?.profile_id ||
     currentObserved?.result?.action_id !== observed?.result?.action_id
   ) return
+  const activeResult = observed?.status === "loading" && observed.result?.status === "in-flight" && observed.result.profile_id !== null
+    ? observed.result
+    : null
+  const activeProfileId = activeResult?.profile_id ?? null
+  if (!result.ok) {
+    if (activeResult === null || activeProfileId === null) return
+    yield* Effect.sync(() => viewStore.set({
+      library_open_states: replaceLibraryOpenState(viewStore.getState().library_open_states, {
+        namespace_id: namespaceId,
+        entry_id: entryId,
+        profile_id: activeProfileId,
+        connection_generation: initialGeneration,
+        status: "unknown",
+        result: {
+          action_id: activeResult.action_id,
+          entry_id: entryId,
+          profile_id: activeProfileId,
+          status: "unknown",
+          message: "The reader handoff outcome is temporarily unavailable. Retry status before opening again.",
+          event_durable: false
+        }
+      })
+    }))
+    return
+  }
+  if (result.data === null) {
+    if (activeResult === null || activeProfileId === null) return
+    yield* Effect.sync(() => viewStore.set({
+      library_open_states: replaceLibraryOpenState(viewStore.getState().library_open_states, {
+        namespace_id: namespaceId,
+        entry_id: entryId,
+        profile_id: activeProfileId,
+        connection_generation: initialGeneration,
+        status: "unknown",
+        result: {
+          action_id: activeResult.action_id,
+          entry_id: entryId,
+          profile_id: activeProfileId,
+          status: "unknown",
+          message: "The reader handoff has no available terminal result; it may have opened. Retry status or open again deliberately.",
+          event_durable: false
+        }
+      })
+    }))
+    return
+  }
+  const data = result.data
+  if (data.profile_id === null) return
+  const profileId: string = data.profile_id
   yield* Effect.sync(() => viewStore.set({
     library_open_states: replaceLibraryOpenState(viewStore.getState().library_open_states, {
       namespace_id: namespaceId,

@@ -112,7 +112,48 @@ describe("Library reader profile details", () => {
     })
     const markup = renderLibraryDetails()
     expect(markup).toContain("failed: another reader handoff is already opening this entry")
+    expect(markup).toContain('data-testid="library-open"')
+    expect(markup).not.toContain('data-testid="library-open" disabled')
     expect(markup).not.toContain("accepted: The operating system accepted the reader handoff.")
+  })
+
+  it("renders an unavailable handoff as unknown with status retry and an enabled Open", () => {
+    setProfileState("ready")
+    viewStore.set({
+      connection: { state: "connected", instance_id: entry.library_id, epoch: "99999999-9999-4999-8999-999999999999", reason: null },
+      connection_generation: 1,
+      library_open_profile_id: "33333333-3333-4333-8333-333333333333",
+      reader_profiles: [{
+        profile_id: "33333333-3333-4333-8333-333333333333",
+        revision: "1",
+        name: "Reader",
+        launch_mode: "system-association",
+        supported_formats: ["image-directory"],
+        target_mode: "directory",
+        executable_name: null,
+        argument_tokens: []
+      }],
+      library_open_states: [{
+        namespace_id: entry.library_id,
+        entry_id: entry.entry_id,
+        profile_id: "33333333-3333-4333-8333-333333333333",
+        connection_generation: 1,
+        status: "unknown",
+        result: {
+          action_id: "99999999-9999-4999-8999-999999999999",
+          entry_id: entry.entry_id,
+          profile_id: "33333333-3333-4333-8333-333333333333",
+          status: "unknown",
+          message: "The reader handoff has no available terminal result; it may have opened. Retry status or open again deliberately.",
+          event_durable: false
+        }
+      }]
+    })
+    const markup = renderLibraryDetails()
+    expect(markup).toContain("unknown: The reader handoff has no available terminal result; it may have opened.")
+    expect(markup).toContain('data-testid="library-open-status-retry"')
+    expect(markup).toContain('data-testid="library-open"')
+    expect(markup).not.toContain('data-testid="library-open" disabled')
   })
 
   it.each([

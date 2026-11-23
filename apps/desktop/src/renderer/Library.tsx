@@ -363,6 +363,15 @@ export const LibraryScreen = () => {
                 {openResult.status === "accepted" && !openResult.event_durable ? " Local history is not durable yet." : ""}
               </p>
             )}
+            {openResult?.status === "unknown" && (
+              <button
+                type="button"
+                data-testid="library-open-status-retry"
+                onClick={() => void runtime.runPromise(loadActiveLibraryOpenState(selectedEntry.entry_id))}
+              >
+                Retry status
+              </button>
+            )}
           </section>
         )}
       </section>
