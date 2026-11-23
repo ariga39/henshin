@@ -261,7 +261,7 @@ export const validateDesktopSnapshot = (statePath: string, installationId: strin
     const integrity = snapshot.prepare("PRAGMA integrity_check").get() as { integrity_check: string }
     if (integrity.integrity_check !== "ok") throw new Error("desktop backup snapshot failed SQLite integrity check")
     if (snapshot.prepare("PRAGMA foreign_key_check").all().length !== 0) throw new Error("desktop backup snapshot failed SQLite foreign-key check")
-    const objects = snapshot.prepare("SELECT type, name, tbl_name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all() as unknown as ReadonlyArray<{ type: string; name: string; tbl_name: string }>
+    const objects = snapshot.prepare("SELECT type, name, tbl_name FROM sqlite_master WHERE substr(name, 1, 7) <> 'sqlite_'").all() as unknown as ReadonlyArray<{ type: string; name: string; tbl_name: string }>
     for (const object of objects) {
       if (object.type !== "table" || !DURABLE_TABLES.has(object.name)) throw new Error(`desktop backup snapshot has an unrecognized schema object: ${object.name}`)
     }
@@ -276,8 +276,8 @@ export const validateDesktopSnapshot = (statePath: string, installationId: strin
     }
     const pending = {
       drafts: Number((snapshot.prepare("SELECT COUNT(*) AS count FROM unsent_drafts WHERE present = 1").get() as { count: number }).count),
-      command_attempts: Number((snapshot.prepare("SELECT COUNT(*) AS count FROM command_attempts WHERE status IN ('prepared', 'unresolved') AND dismissed = 0").get() as { count: number }).count),
-      launch_journal: Number((snapshot.prepare("SELECT COUNT(*) AS count FROM launch_journal WHERE status IN ('prepared', 'unknown')").get() as { count: number }).count)
+      command_attempts: Number((snapshot.prepare("SELECT COUNT(*) AS count FROM command_attempts WHERE status IN ('prepared', 'submitted', 'unresolved') AND dismissed = 0").get() as { count: number }).count),
+      launch_journal: Number((snapshot.prepare("SELECT COUNT(*) AS count FROM launch_journal WHERE status IN ('prepared', 'unknown') OR (status = 'accepted' AND delivery_status <> 'acknowledged')").get() as { count: number }).count)
     }
     return { pending }
   } finally {

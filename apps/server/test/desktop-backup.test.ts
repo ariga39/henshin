@@ -231,7 +231,7 @@ describe("stopped desktop backup", () => {
     snapshot.close()
   })
 
-  it("previews the selected backup only for a matching live database identity and schema", async () => {
+  it.each(["held", "pending"])("previews %s events and submitted commands for a matching installation", async (delivery) => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-preview-"))
     workspaces.push(workspace)
     const dataDirectory = path.join(workspace, "client")
@@ -239,13 +239,18 @@ describe("stopped desktop backup", () => {
     const archive = path.join(outputDirectory, "point.zip")
     await Promise.all([mkdir(dataDirectory), mkdir(outputDirectory)])
     await createDesktopStore(dataDirectory)
+    const dbPath = path.join(dataDirectory, "prototype-client.db")
+    const fixture = new DatabaseSync(dbPath)
+    fixture.exec("UPDATE command_attempts SET status = 'submitted'")
+    fixture.prepare("UPDATE launch_journal SET status = 'accepted', delivery_status = ?").run(delivery)
+    fixture.close()
     await execFile(process.execPath, [SERVER_PATH, "backup", "desktop", "--data-dir", dataDirectory, "--output", archive])
     const preview = () => execFile(process.execPath, [SERVER_PATH, "backup", "desktop", "restore", "--data-dir", dataDirectory, "--input", archive])
     expect(JSON.parse((await preview()).stdout)).toMatchObject({
       pending_work: { drafts: 1, command_attempts: 1, launch_journal: 1 },
       requires_confirmation: true
     })
-    const dbPath = path.join(dataDirectory, "prototype-client.db")
+    await expect(execFile(process.execPath, [SERVER_PATH, "backup", "desktop", "restore", "--data-dir", dataDirectory, "--input", archive, "--confirm"])).rejects.toMatchObject({ code: 2 })
     const originalId = (await readFile(path.join(dataDirectory, "device-id"), "utf8")).trim()
     for (const [id, version, diagnostic] of [
       ["22222222-2222-4222-8222-222222222222", 1, "identity disagree"],
@@ -261,6 +266,24 @@ describe("stopped desktop backup", () => {
       await expect(preview()).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining(diagnostic) })
       expect((await readFile(dbPath)).equals(before)).toBe(true)
     }
+  })
+
+  it("refuses another installation's valid backup before touching the selected desktop", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-cross-install-"))
+    workspaces.push(workspace)
+    const original = path.join(workspace, "original")
+    const target = path.join(workspace, "target")
+    const backups = path.join(workspace, "backups")
+    await Promise.all([mkdir(original), mkdir(target), mkdir(backups)])
+    await createDesktopStore(original)
+    await createDesktopStore(target, "22222222-2222-4222-8222-222222222222")
+    const archive = path.join(backups, "original.zip")
+    await execFile(process.execPath, [SERVER_PATH, "backup", "desktop", "--data-dir", original, "--output", archive])
+    const targetDb = path.join(target, "prototype-client.db")
+    const before = await readFile(targetDb)
+    await expect(execFile(process.execPath, [SERVER_PATH, "backup", "desktop", "restore", "--preview", "--data-dir", target, "--input", archive]))
+      .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("belongs to another installation") })
+    expect(await readFile(targetDb)).toEqual(before)
   })
 
   it("removes a failed publication without leaving a private partial artifact", async () => {
