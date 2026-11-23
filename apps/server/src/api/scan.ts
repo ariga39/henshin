@@ -134,7 +134,7 @@ export const TaskHandlers = HttpApiBuilder.group(TaskApi, "tasks", (handlers) =>
       .handle("get", ({ params }) =>
         Effect.gen(function*() {
           const context = yield* RequestContext
-          const task = yield* scans.readTask(params.id).pipe(
+          const backupTask = yield* backups.read(params.id).pipe(
             Effect.mapError(() => new InternalError({
               code: "internal_error",
               message: "internal error",
@@ -142,10 +142,20 @@ export const TaskHandlers = HttpApiBuilder.group(TaskApi, "tasks", (handlers) =>
               ...errorBase(server, context.request_id)
             }))
           )
+          const task = backupTask === null
+            ? yield* scans.readTask(params.id).pipe(
+                Effect.mapError(() => new InternalError({
+                  code: "internal_error",
+                  message: "internal error",
+                  retryable: false,
+                  ...errorBase(server, context.request_id)
+                }))
+              )
+            : backupTask
           if (task === null) {
             return yield* new TaskNotFound({
               code: "not_found",
-              message: "scan task not found",
+              message: "task not found",
               retryable: false,
               ...errorBase(server, context.request_id)
             })

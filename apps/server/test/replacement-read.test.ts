@@ -16,7 +16,7 @@ import {
   type ScanTask,
   type ServerRoot
 } from "@henshin/contracts"
-import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
+import { cleanupTempDb, makeTempDbPath, requireScanTask, startServer, type RunningServer } from "./support/server-process"
 
 const servers: RunningServer[] = []
 const dbPaths = new Set<string>()
@@ -79,7 +79,8 @@ const waitForTerminal = async (server: RunningServer, taskId: string): Promise<S
     const task = await withTaskClient(server, Effect.gen(function*() {
       return yield* (yield* TaskHttpClient).get({ params: { id: taskId } })
     }))
-    if (task.data.status !== "queued" && task.data.status !== "running") return task.data
+    const scanTask = requireScanTask(task.data)
+    if (scanTask.status !== "queued" && scanTask.status !== "running") return scanTask
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error("replacement scan did not reach a terminal state")

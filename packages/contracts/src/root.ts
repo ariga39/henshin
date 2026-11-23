@@ -320,6 +320,9 @@ export type ScanTaskSubmission = typeof ScanTaskSubmission.Type
 export const Task = Schema.Union([ScanTask, BackupTask])
 export type Task = typeof Task.Type
 
+/** Narrows the shared task response for scan-owned callers, including scheduled scans. */
+export const isScanTask = (task: Task): task is ScanTask => Schema.is(ScanTask)(task)
+
 export const TaskList = Schema.Array(Task)
 export type TaskList = typeof TaskList.Type
 

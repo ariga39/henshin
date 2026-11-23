@@ -11,7 +11,7 @@ import { deliverOpenEvents, drainOpenEvents } from "../../desktop/src/main/OpenE
 import { ConnectionLifecycle } from "../../desktop/src/main/ConnectionLifecycle"
 import { LocalDatabaseWorker } from "../../desktop/src/main/persistence/LocalDatabaseWorker"
 import { OpenJournalStore } from "../../desktop/src/main/persistence/OpenJournalStore"
-import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
+import { cleanupTempDb, makeTempDbPath, requireScanTask, startServer, type RunningServer } from "./support/server-process"
 
 const workerUrl = new URL("../../desktop/dist/draft-worker.mjs", import.meta.url)
 const servers: RunningServer[] = []
@@ -35,7 +35,8 @@ const waitForTerminal = async (server: RunningServer, taskId: string): Promise<S
     const task = await withTaskClient(server, Effect.gen(function*() {
       return yield* (yield* TaskHttpClient).get({ params: { id: taskId } })
     }))
-    if (task.data.status !== "queued" && task.data.status !== "running") return task.data
+    const scanTask = requireScanTask(task.data)
+    if (scanTask.status !== "queued" && scanTask.status !== "running") return scanTask
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error("scan did not reach a terminal state")

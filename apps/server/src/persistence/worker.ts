@@ -974,7 +974,7 @@ const selectBackupTaskByOperation = db.prepare(
           t.destination_device, t.destination_inode
    FROM backup_tasks t
    JOIN backup_artifacts a ON a.artifact_id = t.artifact_id
-   WHERE t.epoch = ? AND t.operation_id = ?`
+   WHERE t.operation_id = ?`
 )
 const insertBackupTaskArtifact = db.prepare(
   `INSERT INTO backup_artifacts(
@@ -994,6 +994,9 @@ const updateBackupTaskRunning = db.prepare(
 )
 const updateBackupTaskFinished = db.prepare(
   "UPDATE backup_tasks SET status = ?, error_code = ?, error_message = ?, updated_at_ms = ? WHERE task_id = ?"
+)
+const recoverBackupTasks = db.prepare(
+  "UPDATE backup_tasks SET status = CASE WHEN status = 'queued' THEN 'failed' ELSE 'interrupted' END, error_code = 'server_restart', error_message = CASE WHEN status = 'queued' THEN 'backup did not start before server restart' ELSE 'backup interrupted by server restart' END, updated_at_ms = ? WHERE status IN ('queued', 'running')"
 )
 const selectBackupDrillRuns = db.prepare(
   `SELECT run_id, artifact_id, manifest_digest, status, started_at_ms, completed_at_ms,
@@ -1465,7 +1468,7 @@ const startBackupTask = (
 ): BackupTaskStartOutcome => {
   db.exec("BEGIN IMMEDIATE")
   try {
-    const existing = selectBackupTaskByOperation.get(request.epoch, request.operationId) as
+    const existing = selectBackupTaskByOperation.get(request.operationId) as
       | Parameters<typeof backupTaskRow>[0]
       | undefined
     if (existing !== undefined) {
@@ -3673,6 +3676,9 @@ const handle = (request: WorkerRequest): unknown => {
       return markBackupTaskRunning(request)
     case "finishBackupTask":
       return finishBackupTask(request)
+    case "recoverBackupTasks":
+      recoverBackupTasks.run(Date.now())
+      return null
     case "startBackupDrill":
       return startBackupDrill(request)
     case "completeBackupDrill":

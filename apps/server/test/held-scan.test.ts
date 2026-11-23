@@ -16,7 +16,7 @@ import {
 import { DatabaseWorker } from "../src/persistence/DatabaseWorker"
 import { RootStore } from "../src/persistence/RootStore"
 import { ScanStore } from "../src/persistence/ScanStore"
-import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
+import { cleanupTempDb, makeTempDbPath, requireScanTask, startServer, type RunningServer } from "./support/server-process"
 
 const servers: RunningServer[] = []
 const dbPaths = new Set<string>()
@@ -50,7 +50,8 @@ const waitForTerminal = async (server: RunningServer, taskId: string): Promise<S
       const client = yield* TaskHttpClient
       return yield* client.get({ params: { id: taskId } })
     }))
-    if (task.data.status !== "queued" && task.data.status !== "running") return task.data
+    const scanTask = requireScanTask(task.data)
+    if (scanTask.status !== "queued" && scanTask.status !== "running") return scanTask
     await sleep(25)
   }
   throw new Error("held scan did not reach a terminal state")

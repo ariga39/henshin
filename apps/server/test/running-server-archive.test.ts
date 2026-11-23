@@ -15,7 +15,7 @@ import {
   TaskHttpClient,
   type BackupTask
 } from "@henshin/contracts"
-import { startServer, type RunningServer } from "./support/server-process"
+import { requireScanTask, startServer, type RunningServer } from "./support/server-process"
 
 const execFile = promisify(execFileCallback)
 const SERVER_PATH = path.resolve("apps/server/dist/server.mjs")
@@ -35,9 +35,10 @@ const withClient = <A, E>(
 const waitForBackup = async (server: RunningServer, taskId: string): Promise<BackupTask> => {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const result = await withClient(server, Effect.gen(function*() {
-      return yield* (yield* MaintenanceHttpClient).getBackup({ params: { id: taskId } })
+      return yield* (yield* TaskHttpClient).get({ params: { id: taskId } })
     }))
-    if (result.data.task.status !== "queued" && result.data.task.status !== "running") return result.data.task
+    if (result.data.kind !== "backup") throw new Error("expected a backup task")
+    if (result.data.status !== "queued" && result.data.status !== "running") return result.data
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error("backup task did not reach a terminal state")
@@ -75,7 +76,7 @@ describe("running-server manual archive", () => {
     await writeFile(path.join(collection, "book", "001.jpg"), "page")
     const dbPath = path.join(dataDir, "server.sqlite")
     const destinationId = await registerDestination(dataDir, destination)
-    const server = await startServer(dbPath)
+    let server = await startServer(dbPath)
     servers.push(server)
 
     const preview = await withClient(server, Effect.gen(function*() {
@@ -114,7 +115,8 @@ describe("running-server manual archive", () => {
       const current = await withClient(server, Effect.gen(function*() {
         return yield* (yield* TaskHttpClient).get({ params: { id: scanTask.task_id } })
       }))
-      if (current.data.status !== "queued" && current.data.status !== "running") break
+      const currentScan = requireScanTask(current.data)
+      if (currentScan.status !== "queued" && currentScan.status !== "running") break
       await new Promise((resolve) => setTimeout(resolve, 25))
     }
 
@@ -174,6 +176,8 @@ describe("running-server manual archive", () => {
 
     const archivePath = path.join(destination, completed.relative_path)
     const archiveBytes = new Uint8Array(await readFile(archivePath))
+    const archiveIdentity = await stat(archivePath)
+    const archiveDigest = createHash("sha256").update(archiveBytes).digest("hex")
     const reader = new ZipReader(new Uint8ArrayReader(archiveBytes))
     const payloads = new Map<string, Uint8Array>()
     for (const member of await reader.getEntries()) {
@@ -238,6 +242,33 @@ describe("running-server manual archive", () => {
       snapshot.close()
       live.close()
     }
+
+    // Simulate a process stop after verified publication but before task
+    // completion. Restart recovery must expose Interrupted, and retry must
+    // reconcile the completed artifact without replacing its file.
+    const persisted = new DatabaseSync(dbPath)
+    try {
+      persisted.prepare(
+        "UPDATE backup_tasks SET status = 'running', error_code = NULL, error_message = NULL WHERE task_id = ?"
+      ).run(completed.task_id)
+    } finally {
+      persisted.close()
+    }
+    await server.stop()
+    server = await startServer(dbPath)
+    servers.push(server)
+    const recovered = await withClient(server, Effect.gen(function*() {
+      return yield* (yield* TaskHttpClient).get({ params: { id: completed.task_id } })
+    }))
+    if (recovered.data.kind !== "backup") throw new Error("expected recovered backup task")
+    expect(recovered.data.status).toBe("interrupted")
+    const retried = await withClient(server, Effect.gen(function*() {
+      return yield* (yield* MaintenanceHttpClient).createBackup({ payload })
+    }))
+    expect(retried.data.task.task_id).toBe(completed.task_id)
+    expect((await waitForBackup(server, completed.task_id)).status).toBe("succeeded")
+    expect(createHash("sha256").update(await readFile(archivePath)).digest("hex")).toBe(archiveDigest)
+    expect((await stat(archivePath)).ino).toBe(archiveIdentity.ino)
 
     const movedDestination = path.join(workspace, "previous-destination")
     await rename(destination, movedDestination)

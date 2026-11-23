@@ -253,7 +253,9 @@ export const makeAppLayer = (
       const httpServer = yield* HttpServer.HttpServer
       const state = yield* ServerState
       const scans = yield* ScanStore
+      const backups = yield* BackupTaskStore
       yield* scans.recoverInterrupted()
+      yield* backups.recoverInterrupted()
       const address = httpServer.address
       const port =
         address._tag === "InetAddressV4" || address._tag === "InetAddressV6" ? address.port : 0
@@ -274,6 +276,7 @@ export const makeAppLayer = (
     Layer.provide(Layer.succeed(HttpIncomingMessage.MaxBodySize, ByteSize.mebibytes(1))),
     Layer.provide(ServerState.layer),
     Layer.provide(ScanStore.layer),
+    Layer.provide(BackupTaskStoreLayer),
     Layer.provide(LibraryStore.layer),
     Layer.provide(OpenEventStore.layer),
     Layer.provide(AuthConfig.layer(options.auth)),

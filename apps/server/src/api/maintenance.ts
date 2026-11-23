@@ -75,32 +75,6 @@ export const MaintenanceHandlers = HttpApiBuilder.group(MaintenanceApi, "mainten
             }
         }
       })
-    )
-      .handle("getBackup", ({ params }) =>
-        Effect.gen(function*() {
-          const context = yield* RequestContext
-          const task = yield* backups.read(params.id).pipe(
-            Effect.mapError(() => new InternalError({
-              code: "internal_error",
-              message: "internal error",
-              retryable: true,
-              ...errorBase(server, context.request_id)
-            }))
-          )
-          if (task === null) {
-            return yield* new TaskNotFound({
-              code: "not_found",
-              message: "backup task not found",
-              retryable: false,
-              ...errorBase(server, context.request_id)
-            })
-          }
-          return {
-            ...errorBase(server, context.request_id),
-            server_time: Date.now(),
-            data: { task }
-          }
-        })
       )
   })
 )

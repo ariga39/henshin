@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { isScanTask, type ScanTask, type Task } from "@henshin/contracts"
 
 const SERVER_PATH = process.env.HENSHIN_SERVER_ENTRYPOINT ?? fileURLToPath(new URL("../../dist/server.mjs", import.meta.url))
 const SERVER_CWD = process.env.HENSHIN_SERVER_CWD ?? process.cwd()
@@ -51,6 +52,11 @@ export const makeTempDbPath = async (): Promise<string> => {
 }
 
 export const cleanupTempDb = removeTempDbDirectory
+
+export const requireScanTask = (task: Task): ScanTask => {
+  if (!isScanTask(task)) throw new Error("expected a scan task")
+  return task
+}
 
 const spawnServerProcess = (): ChildProcessWithoutNullStreams =>
   spawn(process.execPath, [SERVER_PATH], { cwd: SERVER_CWD, stdio: ["pipe", "pipe", "pipe"] })

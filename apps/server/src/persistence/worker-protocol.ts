@@ -573,6 +573,9 @@ export const WorkerRequest = Schema.Union([
     updatedAtMs: Schema.Int
   }),
   Schema.Struct({
+    op: Schema.Literal("recoverBackupTasks")
+  }),
+  Schema.Struct({
     op: Schema.Literal("startBackupDrill"),
     runId: Uuid,
     artifactId: Uuid,

@@ -32,6 +32,7 @@ import {
   RootPreviewResult,
   RootCommandRequest,
   ScanTask,
+  Task,
   TaskList,
   ScanTaskSubmission,
   StagedDiscoveryList,
@@ -162,7 +163,7 @@ export const TaskApi = HttpApi.make("henshin-task").add(
       }),
       HttpApiEndpoint.get("get", "/tasks/:id", {
         params: { id: Uuid },
-        success: SuccessEnvelope(ScanTask),
+        success: SuccessEnvelope(Task),
         error: [AuthenticationRequired, TaskNotFound, InternalError]
       })
     )
@@ -177,11 +178,6 @@ export const MaintenanceApi = HttpApi.make("henshin-maintenance").add(
         payload: BackupRequest,
         success: HttpApiSchema.status(202)(SuccessEnvelope(BackupTaskSubmission)),
         error: [AuthenticationRequired, InvalidRequest, OperationConflict, TaskNotFound, InternalError]
-      }),
-      HttpApiEndpoint.get("getBackup", "/maintenance/backups/:id", {
-        params: { id: Uuid },
-        success: SuccessEnvelope(BackupTaskSubmission),
-        error: [AuthenticationRequired, TaskNotFound, InternalError]
       })
     )
     .prefix("/api/v1")

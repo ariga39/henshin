@@ -55,6 +55,7 @@ export class BackupTaskStore extends Context.Service<
     readonly list: () => Effect.Effect<ReadonlyArray<BackupTaskType>, DatabaseWorkerError>
     readonly read: (taskId: string) => Effect.Effect<BackupTaskType | null, DatabaseWorkerError>
     readonly run: (taskId: string) => Effect.Effect<void>
+    readonly recoverInterrupted: () => Effect.Effect<void, DatabaseWorkerError>
   }
 >()("henshin/server/BackupTaskStore") {
   static readonly layer = (
@@ -157,6 +158,21 @@ export class BackupTaskStore extends Context.Service<
           const task = yield* readRow(taskId)
           if (task === null || task.status === "succeeded") return
 
+          // Artifact completion is the durable publication proof. If the
+          // process stopped after publication but before task completion, a
+          // retry reconciles the task without touching the verified file.
+          if (task.artifact_status === "completed") {
+            yield* worker.call({
+              op: "finishBackupTask",
+              taskId,
+              status: "succeeded",
+              errorCode: null,
+              errorMessage: null,
+              updatedAtMs: Date.now()
+            })
+            return
+          }
+
           yield* worker.call({ op: "markBackupTaskRunning", taskId, updatedAtMs: Date.now() })
           const currentRoots: ReadonlyArray<ServerRootRow> = yield* roots.list()
           const destination: BackupDestinationRow = {
@@ -201,7 +217,9 @@ export class BackupTaskStore extends Context.Service<
         )
       })
 
-      return BackupTaskStore.of({ start, list, read, run })
+      const recoverInterrupted = () => worker.call({ op: "recoverBackupTasks" }).pipe(Effect.asVoid)
+
+      return BackupTaskStore.of({ start, list, read, run, recoverInterrupted })
     })
   )
 }

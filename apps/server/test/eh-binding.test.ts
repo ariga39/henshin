@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto"
 import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import { LibraryHttpClient, ServerHttpClient, TaskHttpClient, type ScanTask } from "@henshin/contracts"
-import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
+import { cleanupTempDb, makeTempDbPath, requireScanTask, startServer, type RunningServer } from "./support/server-process"
 
 const servers: RunningServer[] = []
 const dbPaths = new Set<string>()
@@ -26,7 +26,8 @@ const waitForTerminal = async (server: RunningServer, taskId: string): Promise<S
     const result = await withTaskClient(server, Effect.gen(function*() {
       return yield* (yield* TaskHttpClient).get({ params: { id: taskId } })
     }))
-    if (result.data.status !== "queued" && result.data.status !== "running") return result.data
+    const scanTask = requireScanTask(result.data)
+    if (scanTask.status !== "queued" && scanTask.status !== "running") return scanTask
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error("scan did not reach a terminal state")

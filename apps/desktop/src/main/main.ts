@@ -26,6 +26,7 @@ import {
   OpenBookStatusIpcRequest,
   ThumbnailGetIpcRequest,
   ThumbnailHttpClient,
+  isScanTask,
   LoadDraftIpcRequest,
   ListCommandAttemptsIpcRequest,
   PrototypeHttpClient,
@@ -1247,7 +1248,7 @@ const registerIpc = (): void => {
           const listed = yield* client.list()
           return {
             ...listed,
-            data: listed.data.filter((task): task is import("@henshin/contracts").ScanTask => task.kind === "manual-scan")
+            data: listed.data.filter(isScanTask)
           }
         })
       )
