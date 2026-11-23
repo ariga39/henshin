@@ -103,10 +103,10 @@ on a configured loopback port:
 ```sh
 mkdir -p .henshin-server-data
 CI=true fnm exec --using=24 pnpm --filter @henshin/server build
-CI=true fnm exec --using=24 pnpm --filter @henshin/server start -- \
+CI=true fnm exec --using=24 pnpm --filter @henshin/server start \
   --data-dir "$PWD/.henshin-server-data" --initialize-owner
 # Save the owner_token printed by the initialization command locally.
-CI=true fnm exec --using=24 pnpm --filter @henshin/server start -- \
+CI=true fnm exec --using=24 pnpm --filter @henshin/server start \
   --data-dir "$PWD/.henshin-server-data" --port 4317
 ```
 
