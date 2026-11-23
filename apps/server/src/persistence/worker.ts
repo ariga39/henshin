@@ -2091,8 +2091,9 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
         request.manifestJson,
         request.analysisErrorJson
       ) === 1
-    const observedHeldPresence = request.holdState === "held" && request.analysisStatus === "ready" && request.manifestJson !== null && accepted !== undefined
-    const availabilityChanged = observedHeldPresence && Number(updateEntryAvailability.run("present", Date.now(), Date.now(), accepted.entry_id).changes) === 1
+    const observedAtMs = Date.now()
+    const observedPresence = accepted !== undefined
+    const availabilityChanged = observedPresence && Number(updateEntryAvailability.run("present", observedAtMs, observedAtMs, accepted.entry_id).changes) === 1
     const candidateObservationJson = JSON.stringify(replacementCandidateObservation(
       request.kind,
       request.analysisStatus,
@@ -2114,7 +2115,7 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
         request.analysisStatus,
         request.manifestJson,
         request.analysisErrorJson,
-        Date.now(),
+        observedAtMs,
         candidateObservationJson
       )
       if (

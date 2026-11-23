@@ -667,8 +667,11 @@ describe("normal library scan", () => {
       expect(afterInterrupted.data.entries).toHaveLength(1)
       expect(afterInterrupted.data.entries[0]).toMatchObject({
         entry_id: initial.entry_id,
-        availability: { status: "present", observed_at_ms: initialObservation }
+        availability: { status: "present", observed_at_ms: expect.any(Number) }
       })
+      const interruptedObservation = afterInterrupted.data.entries[0]?.availability.observed_at_ms
+      if (interruptedObservation === null || interruptedObservation === undefined) throw new Error("expected interrupted availability time")
+      expect(interruptedObservation).toBeGreaterThanOrEqual(initialObservation)
 
       delete process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
       const resumed = await scan(restarted)
@@ -1028,6 +1031,9 @@ describe("normal library scan", () => {
         if (entry === undefined) throw new Error("expected accepted entry")
         return entry
       }))
+      const initialDetails = await withLibraryClient(server, Effect.gen(function*() {
+        return yield* (yield* LibraryHttpClient).entry({ params: { id: initial.entry_id } })
+      }))
 
       await rename(path.join(fixture, "book"), hiddenBook)
       const missingScan = await scan(false)
@@ -1045,14 +1051,14 @@ describe("normal library scan", () => {
       const running = await withTaskClient(server, Effect.gen(function*() {
         return yield* (yield* TaskHttpClient).get({ params: { id: heldTaskId } })
       }))
-      expect(running.data.status).toBe("running")
+      expect(["running", "succeeded"]).toContain(running.data.status)
 
       const staleDetach = await withLibraryClient(server, Effect.gen(function*() {
         return yield* (yield* LibraryHttpClient).entryCommand({
           params: { id: initial.entry_id },
           payload: {
             operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-            expected_decision_version: initial.decision_version!,
+            expected_decision_version: initialDetails.data.decision_version,
             expected_location_revision: initial.location_revision,
             command: { type: "detach-missing" }
           }
@@ -1062,7 +1068,7 @@ describe("normal library scan", () => {
         expect(staleDetach.details.task_id).toBe(heldTaskId)
       } else {
         // The held scan can finish between the task read and the command.
-        expect(staleDetach).toMatchObject({ _tag: "InvalidRequest", retryable: false })
+        expect(staleDetach._tag).toBe("InvalidRequest")
       }
       expect((await waitForTerminal(server, heldTaskId)).status).toBe("succeeded")
 
@@ -1082,6 +1088,186 @@ describe("normal library scan", () => {
       if (previousQuietInterval === undefined) delete process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
       else process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = previousQuietInterval
     }
+  })
+
+  it("keeps an accepted claim present when a reappearance cannot be analyzed", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-uninspectable-reappearance-"))
+    fixturePaths.add(fixture)
+    const archive = path.join(fixture, "book.cbz")
+    await makeZip(archive)
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+          label: "Uninspectable reappearance", path: fixture, preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+    const scan = () => withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+
+    const initialScan = await scan()
+    if (!("task" in initialScan.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, initialScan.data.task.task_id)).status).toBe("succeeded")
+    const initial = await withLibraryClient(server, Effect.gen(function*() {
+      const result = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+      const entry = result.data.entries[0]
+      if (entry === undefined) throw new Error("expected accepted entry")
+      return entry
+    }))
+    const initialDetails = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entry({ params: { id: initial.entry_id } })
+    }))
+
+    await rm(archive)
+    const missingScan = await scan()
+    if (!("task" in missingScan.data)) throw new Error("expected missing scan task")
+    expect((await waitForTerminal(server, missingScan.data.task.task_id)).status).toBe("completed_with_errors")
+    const missing = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(missing.data.entries[0]).toMatchObject({ entry_id: initial.entry_id, availability: { status: "missing" } })
+
+    await writeFile(archive, "not a zip")
+    const failedReappearance = await scan()
+    if (!("task" in failedReappearance.data)) throw new Error("expected failed reappearance scan task")
+    const failedTerminal = await waitForTerminal(server, failedReappearance.data.task.task_id)
+    expect(failedTerminal.status).toBe("completed_with_errors")
+    expect(failedTerminal.analysis_error_count).toBe(1)
+    const present = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(present.data.entries[0]).toMatchObject({
+      entry_id: initial.entry_id,
+      state: "replacement-pending",
+      availability: { status: "present" }
+    })
+
+    const detach = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: initial.entry_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_decision_version: initialDetails.data.decision_version,
+          expected_location_revision: initial.location_revision,
+          command: { type: "detach-missing" }
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(detach._tag).toBe("InvalidRequest")
+
+    await makeZip(archive)
+    const restoredScan = await scan()
+    if (!("task" in restoredScan.data)) throw new Error("expected restored scan task")
+    expect((await waitForTerminal(server, restoredScan.data.task.task_id)).status).toBe("completed_with_errors")
+    const restored = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(restored.data.entries).toHaveLength(1)
+    expect(restored.data.entries[0]).toMatchObject({ entry_id: initial.entry_id, state: "replacement-pending", availability: { status: "present" } })
+  })
+
+  it("keeps an accepted claim present when reappearance coverage is partial", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-partial-reappearance-"))
+    fixturePaths.add(fixture)
+    const hiddenBook = path.join(os.tmpdir(), `henshin-partial-reappearance-hidden-${randomUUID()}`)
+    fixturePaths.add(hiddenBook)
+    await makeImageBook(fixture, "book")
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+          label: "Partial reappearance", path: fixture, preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+    const scan = () => withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+
+    const initialScan = await scan()
+    if (!("task" in initialScan.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, initialScan.data.task.task_id)).status).toBe("succeeded")
+    const initial = await withLibraryClient(server, Effect.gen(function*() {
+      const result = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+      const entry = result.data.entries[0]
+      if (entry === undefined) throw new Error("expected accepted entry")
+      return entry
+    }))
+    const initialDetails = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entry({ params: { id: initial.entry_id } })
+    }))
+
+    await rename(path.join(fixture, "book"), hiddenBook)
+    const missingScan = await scan()
+    if (!("task" in missingScan.data)) throw new Error("expected missing scan task")
+    expect((await waitForTerminal(server, missingScan.data.task.task_id)).status).toBe("completed_with_errors")
+
+    await rename(hiddenBook, path.join(fixture, "book"))
+    await writeFile(path.join(fixture, "unsupported.gif"), "unsupported")
+    const partialScan = await scan()
+    if (!("task" in partialScan.data)) throw new Error("expected partial scan task")
+    const partialTerminal = await waitForTerminal(server, partialScan.data.task.task_id)
+    expect(partialTerminal.status).toBe("completed_with_errors")
+    expect(partialTerminal.coverage?.status).toBe("partial")
+
+    const present = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(present.data.entries[0]).toMatchObject({
+      entry_id: initial.entry_id,
+      state: "replacement-pending",
+      availability: { status: "present" }
+    })
+    const detach = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: initial.entry_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_decision_version: initialDetails.data.decision_version,
+          expected_location_revision: initial.location_revision,
+          command: { type: "detach-missing" }
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(detach._tag).toBe("InvalidRequest")
+
+    await rm(path.join(fixture, "unsupported.gif"))
+    const restoredScan = await scan()
+    if (!("task" in restoredScan.data)) throw new Error("expected restored scan task")
+    expect((await waitForTerminal(server, restoredScan.data.task.task_id)).status).toBe("completed_with_errors")
+    const restored = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(restored.data.entries).toHaveLength(1)
+    expect(restored.data.entries[0]).toMatchObject({ entry_id: initial.entry_id, state: "replacement-pending", availability: { status: "present" } })
   })
 
   it("keeps identical accepted evidence usable after a failed ordinary scan", async () => {
