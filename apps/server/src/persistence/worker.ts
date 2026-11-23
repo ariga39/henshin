@@ -181,6 +181,45 @@ const fingerprintFromManifest = (value: string): { readonly profile: string; rea
   }
 }
 
+const fingerprintPrefilterFromManifest = (value: string): string | null => {
+  try {
+    const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
+    if (Option.isNone(decoded)) return null
+    const pages = [...decoded.value.pages]
+      .sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)))
+      .map((page) => [page.name, page.declared_bytes] as const)
+    return JSON.stringify({
+      source_kind: decoded.value.source_kind,
+      bytes: decoded.value.after.bytes,
+      pages
+    })
+  } catch {
+    return null
+  }
+}
+
+type ManifestMetadata = {
+  readonly comparable: ReturnType<typeof comparableManifest>
+  readonly fingerprint: { readonly profile: string; readonly digest: string } | null
+  readonly prefilter: string | null
+}
+
+const manifestMetadata = (value: string | null): ManifestMetadata => value === null
+  ? { comparable: null, fingerprint: null, prefilter: null }
+  : {
+      comparable: comparableManifest(value),
+      fingerprint: fingerprintFromManifest(value),
+      prefilter: fingerprintPrefilterFromManifest(value)
+    }
+
+const manifestsEquivalentMetadata = (left: ManifestMetadata, right: ManifestMetadata): boolean =>
+  left.comparable !== null && right.comparable !== null &&
+  left.comparable.value === right.comparable.value &&
+  observationsEquivalent(left.comparable.beforeToken, right.comparable.beforeToken) &&
+  observationsEquivalent(left.comparable.afterToken, right.comparable.afterToken) &&
+  (left.fingerprint === null || right.fingerprint === null ||
+    (left.fingerprint.profile === right.fingerprint.profile && left.fingerprint.digest === right.fingerprint.digest))
+
 const refreshManifest = (accepted: string, candidate: string): string => {
   const acceptedFingerprint = fingerprintFromManifest(accepted)
   if (acceptedFingerprint === null || fingerprintFromManifest(candidate) !== null) return candidate
@@ -1020,7 +1059,7 @@ const selectNormalScanFingerprintPlan = db.prepare(
    LEFT JOIN library_entries e ON e.root_id = s.root_id AND e.relative_path = s.relative_path
      AND e.state IN ('accepted', 'replacement-pending')
    WHERE s.task_id = ? AND s.root_id = ? AND s.hold_state = 'eligible'
-     AND s.analysis_status = 'ready' AND s.manifest_json IS NOT NULL AND e.entry_id IS NULL
+     AND s.analysis_status = 'ready' AND s.manifest_json IS NOT NULL
    ORDER BY s.relative_path ASC`
 )
 const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path, state, decision_version, location_revision, content_version, page_count FROM library_entries WHERE root_id = ? AND relative_path = ? AND state IN ('accepted', 'replacement-pending')")
@@ -2845,6 +2884,8 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       analysis_status: "ready" | "error"
       manifest_json: string | null
     }>
+    const existingMetadata = new Map(existingEntries.map((entry) => [entry.entry_id, manifestMetadata(entry.manifest_json)]))
+    const stagedMetadata = new Map(staged.map((candidate) => [candidate.candidate_id, manifestMetadata(candidate.manifest_json)]))
     const sourcePathFor = (relativePath: string): string => join(root.selectedPath, ...relativePath.split("/"))
     const changedPaths: Array<string> = []
     const existingForCandidate = new Map<string, {
@@ -2877,8 +2918,11 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       } | undefined
       if (existing !== undefined) {
         existingForCandidate.set(candidate.relative_path, existing)
+        const existingManifest = existingMetadata.get(existing.entry_id)
+        const candidateManifest = stagedMetadata.get(candidate.candidate_id)
         if (
-          !manifestsEquivalent(existing.manifest_json, candidate.manifest_json) ||
+          existingManifest === undefined || candidateManifest === undefined ||
+          !manifestsEquivalentMetadata(existingManifest, candidateManifest) ||
           existing.kind !== candidate.kind ||
           existing.title !== title ||
           existing.source_path !== sourcePath
@@ -2895,7 +2939,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       if (candidate.hold_state !== "eligible" || candidate.analysis_status !== "ready") continue
       if (!observedCandidates.has(candidate.relative_path) || candidate.manifest_json === null) continue
       if (existingForCandidate.has(candidate.relative_path)) continue
-      const fingerprint = fingerprintFromManifest(candidate.manifest_json)
+      const fingerprint = stagedMetadata.get(candidate.candidate_id)?.fingerprint ?? null
       if (fingerprint === null) continue
       const key = `${fingerprint.profile}:${fingerprint.digest}`
       const matches = candidatesByFingerprint.get(key) ?? []
@@ -2903,31 +2947,29 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       candidatesByFingerprint.set(key, matches)
     }
     const existingPathSet = new Set(existingEntries.map((entry) => entry.relative_path))
-    const couldMatchSource = (candidate: (typeof staged)[number], key: string): boolean => {
-      if (candidate.hold_state !== "eligible" || candidate.analysis_status !== "ready") return true
-      if (candidate.manifest_json === null) return true
-      const fingerprint = fingerprintFromManifest(candidate.manifest_json)
-      return fingerprint === null || `${fingerprint.profile}:${fingerprint.digest}` === key
-    }
     for (const [key, targets] of candidatesByFingerprint) {
       if (targets.length !== 1) continue
       const sourceMatches = existingEntries.filter((entry) =>
         missingPaths.includes(entry.relative_path) &&
         entry.state === "accepted" &&
-        fingerprintFromManifest(entry.manifest_json) !== null &&
-        `${fingerprintFromManifest(entry.manifest_json)?.profile}:${fingerprintFromManifest(entry.manifest_json)?.digest}` === key
+        existingMetadata.get(entry.entry_id)?.fingerprint !== null &&
+        `${existingMetadata.get(entry.entry_id)?.fingerprint?.profile}:${existingMetadata.get(entry.entry_id)?.fingerprint?.digest}` === key
       )
       if (sourceMatches.length !== 1) continue
       const source = sourceMatches[0]
       if (source === undefined || source.state !== "accepted") continue
+      const sourceMetadata = existingMetadata.get(source.entry_id)
       const hasUnresolvedCandidate = staged.some((candidate) =>
         observed.has(candidate.relative_path) &&
         !existingPathSet.has(candidate.relative_path) &&
-        couldMatchSource(candidate, key) &&
         (candidate.hold_state !== "eligible" ||
           candidate.analysis_status !== "ready" ||
           !observedCandidates.has(candidate.relative_path) ||
-          fingerprintFromManifest(candidate.manifest_json ?? "") === null)
+          (() => {
+            const candidateManifest = stagedMetadata.get(candidate.candidate_id)
+            return candidateManifest?.fingerprint === null &&
+              (sourceMetadata === undefined || candidateManifest.prefilter === null || sourceMetadata.prefilter === null || candidateManifest.prefilter === sourceMetadata.prefilter)
+          })())
       )
       if (hasUnresolvedCandidate) continue
       const hasPresentPending = existingEntries.some((entry) =>
@@ -2936,8 +2978,8 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       const hasPresentMatchingCopy = existingEntries.some((entry) =>
         entry.entry_id !== source.entry_id &&
         observed.has(entry.relative_path) &&
-        fingerprintFromManifest(entry.manifest_json) !== null &&
-        `${fingerprintFromManifest(entry.manifest_json)?.profile}:${fingerprintFromManifest(entry.manifest_json)?.digest}` === key
+        existingMetadata.get(entry.entry_id)?.fingerprint !== null &&
+        `${existingMetadata.get(entry.entry_id)?.fingerprint?.profile}:${existingMetadata.get(entry.entry_id)?.fingerprint?.digest}` === key
       )
       if (hasPresentPending || hasPresentMatchingCopy) continue
       const target = targets[0]
@@ -3179,9 +3221,9 @@ const normalScanFingerprintPlan = (
     accepted_state: "accepted" | "replacement-pending" | null
   }>)
     .filter((row) => row.accepted_manifest_json === null || (
-      row.accepted_state === "accepted" &&
-      fingerprintFromManifest(row.accepted_manifest_json) !== null &&
-      !manifestsEquivalent(row.accepted_manifest_json, row.manifest_json)
+      (row.accepted_state === "accepted" || row.accepted_state === "replacement-pending") &&
+      (fingerprintFromManifest(row.accepted_manifest_json) === null ||
+        !manifestsEquivalent(row.accepted_manifest_json, row.manifest_json))
     ))
     .map((row) => row.relative_path)
 

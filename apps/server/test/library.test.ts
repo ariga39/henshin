@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises"
+import { chmod, copyFile, mkdir, mkdtemp, open, rename, rm, writeFile } from "node:fs/promises"
 import { DatabaseSync } from "node:sqlite"
 import os from "node:os"
 import path from "node:path"
@@ -70,6 +70,19 @@ const makeImageBook = async (rootPath: string, name: string, page = "page"): Pro
   const book = path.join(rootPath, name)
   await mkdir(book)
   await writeFile(path.join(book, "001.jpg"), page)
+}
+
+const makeOversizedImageBook = async (rootPath: string, name: string): Promise<void> => {
+  const book = path.join(rootPath, name)
+  await mkdir(book)
+  for (let index = 1; index <= 5; index += 1) {
+    const page = await open(path.join(book, `${String(index).padStart(3, "0")}.jpg`), "w")
+    try {
+      await page.truncate(1024 ** 3)
+    } finally {
+      await page.close()
+    }
+  }
 }
 
 const registerRoot = (server: RunningServer, fixture: string, label: string) => withServerClient(server, Effect.gen(function*() {
@@ -373,6 +386,98 @@ describe("normal library scan", () => {
     const history = db.prepare("SELECT entry_id, observed_location_revision, observed_content_version FROM open_events WHERE entry_id = ? ORDER BY occurred_at_ms").all(initial.entry_id) as Array<{ entry_id: string; observed_location_revision: number; observed_content_version: number }>
     db.close()
     expect(history).toEqual([{ entry_id: initial.entry_id, observed_location_revision: 1, observed_content_version: 1 }])
+  })
+
+  it("baselines an accepted entry missing its fingerprint before retaining a later rename", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-rename-baseline-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "before")
+    const root = await registerRoot(server, fixture, "Rename baseline")
+
+    const first = await scanRoot(server, root)
+    if (!("task" in first.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
+    const initial = (await withLibraryClient(server, Effect.gen(function*() {
+      return (yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })).data.entries[0]
+    })))
+    if (initial === undefined) throw new Error("expected accepted entry")
+
+    await server.stop()
+    const db = new DatabaseSync(server.dbPath)
+    const row = db.prepare("SELECT manifest_json FROM library_entries WHERE entry_id = ?").get(initial.entry_id) as { manifest_json: string } | undefined
+    if (row === undefined) throw new Error("expected accepted manifest")
+    const manifest = JSON.parse(row.manifest_json) as { fingerprint?: unknown }
+    delete manifest.fingerprint
+    db.prepare("UPDATE library_entries SET manifest_json = ? WHERE entry_id = ?").run(JSON.stringify(manifest), initial.entry_id)
+    db.close()
+
+    const restarted = await startServer(server.dbPath)
+    servers.push(restarted)
+    const baseline = await scanRoot(restarted, root)
+    if (!("task" in baseline.data)) throw new Error("expected baseline scan task")
+    expect((await waitForTerminal(restarted, baseline.data.task.task_id)).status).toBe("succeeded")
+
+    const baselined = new DatabaseSync(server.dbPath)
+    const stored = baselined.prepare("SELECT manifest_json FROM library_entries WHERE entry_id = ?").get(initial.entry_id) as { manifest_json: string } | undefined
+    baselined.close()
+    expect(stored === undefined ? undefined : JSON.parse(stored.manifest_json).fingerprint).toEqual({
+      profile: "directory-pages-sha256-v1",
+      digest: expect.any(String)
+    })
+
+    await rename(path.join(fixture, "before"), path.join(fixture, "after"))
+    const renamedScan = await scanRoot(restarted, root)
+    if (!("task" in renamedScan.data)) throw new Error("expected rename scan task")
+    expect((await waitForTerminal(restarted, renamedScan.data.task.task_id)).status).toBe("succeeded")
+    const renamed = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(renamed.data.entries).toMatchObject([{
+      entry_id: initial.entry_id,
+      relative_path: "after",
+      title: "after",
+      location_revision: "2"
+    }])
+  })
+
+  it("imports an oversized book while retaining unrelated rename safety", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-fingerprint-limit-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "source", "source")
+    await makeOversizedImageBook(fixture, "oversized")
+    const root = await registerRoot(server, fixture, "Fingerprint limits")
+
+    const first = await scanRoot(server, root)
+    if (!("task" in first.data)) throw new Error("expected initial scan task")
+    const firstTerminal = await waitForTerminal(server, first.data.task.task_id)
+    expect(firstTerminal.status).toBe("completed_with_errors")
+    expect(firstTerminal.error?.code).toBe("fingerprint_unavailable")
+    const initial = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(initial.data.entries.map((entry) => entry.relative_path).sort()).toEqual(["oversized", "source"])
+    const source = initial.data.entries.find((entry) => entry.relative_path === "source")
+    if (source === undefined) throw new Error("expected source entry")
+
+    await rename(path.join(fixture, "source"), path.join(fixture, "renamed"))
+    const moved = await scanRoot(server, root)
+    if (!("task" in moved.data)) throw new Error("expected rename scan task")
+    const movedTerminal = await waitForTerminal(server, moved.data.task.task_id)
+    expect(movedTerminal.status).toBe("completed_with_errors")
+    expect(movedTerminal.error?.code).toBe("fingerprint_unavailable")
+    expect(movedTerminal.readiness_error).toBeNull()
+    const after = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(after.data.entries).toHaveLength(2)
+    expect(after.data.entries.find((entry) => entry.entry_id === source.entry_id)).toMatchObject({
+      relative_path: "renamed",
+      title: "renamed",
+      location_revision: "2"
+    })
+    expect(after.data.entries.find((entry) => entry.relative_path === "oversized")).toBeDefined()
   })
 
   it("keeps an identical copy as a separate entry without transferring open history", async () => {

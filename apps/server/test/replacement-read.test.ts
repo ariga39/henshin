@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rename, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { DatabaseSync } from "node:sqlite"
 import os from "node:os"
 import path from "node:path"
@@ -956,5 +956,69 @@ describe("replacement comparison read model", () => {
     expect(oldRow?.state).toBe("detached")
     expect(history?.count).toBe(2)
     expect(newHistory?.count).toBe(0)
+  })
+
+  it("retains replacement identity through a later same-root rename", async () => {
+    const { server, fixture, root } = await makeScenario(
+      "henshin-replacement-rename-",
+      "Replacement rename",
+      async (fixture) => {
+        await mkdir(path.join(fixture, "book"))
+        await writeFile(path.join(fixture, "book", "001.jpg"), "Book A")
+      }
+    )
+    const book = path.join(fixture, "book")
+    const page = path.join(book, "001.jpg")
+
+    expect((await scan(server, root)).status).toBe("succeeded")
+    const initial = (await listLibrary(server)).entries[0]
+    if (initial === undefined) throw new Error("expected initial entry")
+    const resolution = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: initial.entry_id }, query: {} })
+    }))
+
+    await writeFile(page, "Book B")
+    await writeFile(path.join(book, "002.jpg"), "Book B second page")
+    expect((await scan(server, root)).readiness_error?.code).toBe("allocation_deferred")
+    const candidate = (await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).candidates()
+    }))).data[0]
+    if (candidate === undefined) throw new Error("expected replacement candidate")
+    expect(candidate.manifest?.fingerprint).toEqual({
+      profile: "directory-pages-sha256-v1",
+      digest: expect.any(String)
+    })
+
+    const resolved = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).command({
+        params: { id: candidate.candidate_id },
+        payload: {
+          root_id: root.root_id,
+          operation_id: randomUUID(),
+          instance_id: server.instanceId,
+          epoch: server.epoch,
+          expected_candidate_version: candidate.candidate_version,
+          expected_mapping_revision: root.mapping_revision,
+          expected_policy_revision: root.policy_revision,
+          expected_decision_version: resolution.data.decision_version,
+          expected_location_revision: resolution.data.location_revision,
+          command: { type: "resolve-replacement" as const, entry_id: initial.entry_id, decision: "replace" as const }
+        }
+      })
+    }))
+    const replacementId = resolved.data.resolution?.entry.entry_id
+    if (replacementId === undefined || replacementId === initial.entry_id) throw new Error("expected distinct replacement entry")
+
+    await rename(book, path.join(fixture, "renamed"))
+    const renamed = await scan(server, root)
+    expect(renamed.status).toBe("succeeded")
+    const after = await listLibrary(server)
+    expect(after.entries).toMatchObject([{
+      entry_id: replacementId,
+      relative_path: "renamed",
+      title: "renamed",
+      content_version: "1",
+      location_revision: "2"
+    }])
   })
 })

@@ -342,7 +342,6 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
           const observedManifest = JSON.stringify(manifestView)
           const stable = firstObservations.get(candidate.relativePath) === observedManifest
           let stagedManifest: typeof ScanManifest.Type = manifestView
-          let fingerprintCompleted = true
           if (stable && fingerprintPaths.has(candidate.relativePath)) {
             const fingerprintResult = yield* Effect.result(Effect.tryPromise({
               try: (signal) => fingerprintSource(resolved.value.nativePath, result.success, {
@@ -356,10 +355,9 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
               stagedManifest = { ...manifestView, fingerprint: fingerprintResult.success }
             } else {
               fingerprintFailureCount += 1
-              fingerprintCompleted = false
             }
           }
-          if (stable && fingerprintCompleted) {
+          if (stable) {
             verifiedCandidatePaths.push(candidate.relativePath)
           } else {
             unstableCandidateCount += 1
