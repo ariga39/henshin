@@ -713,7 +713,8 @@ describe("held scan renderer workflows", () => {
       page_count: 1,
       state: "accepted" as const,
       content_version: "1",
-      location_revision: "1"
+      location_revision: "1",
+      replacement: null
     }
     const appended = {
       ...existing,

@@ -351,7 +351,7 @@ describe("normal library scan", () => {
 
   })
 
-  it("keeps a changed occupied path staged without changing the accepted identity", async () => {
+  it("blocks Open resolution for a pending changed occupied path without changing accepted identity", async () => {
     const server = await start()
     const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-replacement-"))
     fixturePaths.add(fixture)
@@ -369,12 +369,12 @@ describe("normal library scan", () => {
       })
     }))
 
-    const scan = async () => withServerClient(server, Effect.gen(function*() {
+    const scan = async (activeServer: RunningServer = server) => withServerClient(activeServer, Effect.gen(function*() {
       const client = yield* ServerHttpClient
       return yield* client.command({
         params: { id: root.data.root_id },
         payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          operation_id: randomUUID(), instance_id: activeServer.instanceId, epoch: activeServer.epoch,
           expected_mapping_revision: root.data.mapping_revision,
           expected_policy_revision: root.data.policy_revision,
           command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
@@ -411,9 +411,13 @@ describe("normal library scan", () => {
     expect(after.data.entries[0]).toMatchObject({
       entry_id: accepted.entry_id,
       relative_path: "book",
+      state: "replacement-pending",
       page_count: 1,
       content_version: "1",
       location_revision: "1"
+    })
+    expect(after.data.entries[0]?.replacement).toMatchObject({
+      candidate_observation: { analysis_status: "ready" }
     })
 
     const changedResolution = await withLibraryClient(server, Effect.gen(function*() {
@@ -430,7 +434,34 @@ describe("normal library scan", () => {
       first_page: { name: "001.jpg" }
     })
 
-    const staged = await withReviewClient(server, Effect.gen(function*() {
+    await server.stop()
+    const db = new DatabaseSync(server.dbPath)
+    const acceptedRow = db.prepare(
+      "SELECT manifest_json FROM library_entries WHERE entry_id = ?"
+    ).get(accepted.entry_id) as { manifest_json: string } | undefined
+    if (acceptedRow === undefined) throw new Error("expected accepted manifest")
+    db.prepare(
+      "UPDATE staged_discoveries SET analysis_status = 'ready', manifest_json = ?, analysis_error_json = NULL WHERE root_id = ? AND relative_path = ?"
+    ).run(acceptedRow.manifest_json, root.data.root_id, "book")
+    db.close()
+
+    const restarted = await startServer(server.dbPath)
+    servers.push(restarted)
+    const restoredResolution = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+    }))
+    expect(restoredResolution.data).toMatchObject({ status: "unresolved", reason: "known-change" })
+
+    await rm(path.join(fixture, "book", "001.jpg"))
+    const failedRescan = await scan(restarted)
+    if (!("task" in failedRescan.data)) throw new Error("expected failed replacement scan task")
+    expect((await waitForTerminal(restarted, failedRescan.data.task.task_id)).status).toBe("completed_with_errors")
+    const afterReadFailure = await withLibraryClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: accepted.entry_id }, query: {} })
+    }))
+    expect(afterReadFailure.data).toMatchObject({ status: "unresolved", reason: "known-change" })
+
+    const staged = await withReviewClient(restarted, Effect.gen(function*() {
       const client = yield* ReviewHttpClient
       return yield* client.candidates()
     }))
@@ -840,10 +871,26 @@ describe("normal library scan", () => {
     if (target === undefined) throw new Error("expected target entry")
     expect(entries.data.entries).toHaveLength(131)
 
+    await writeFile(path.join(fixture, "book-127", "001.jpg"), "changed")
+    const replacementScan = await withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+    if (!("task" in replacementScan.data)) throw new Error("expected replacement scan task")
+    expect((await waitForTerminal(server, replacementScan.data.task.task_id)).status).toBe("completed_with_errors")
+
     const beforeRestart = await withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).resolution({ params: { id: target.entry_id }, query: {} })
     }))
     expect(beforeRestart.data.sibling_claims_truncated).toBe(true)
+    expect(beforeRestart.data.sibling_claims.at(-1)?.relative_path).toBe("book-127")
 
     await server.stop()
     const db = new DatabaseSync(server.dbPath)
@@ -901,6 +948,7 @@ describe("normal library scan", () => {
     expect(first.data.sibling_claims_revision).not.toBe(beforeRestart.data.sibling_claims_revision)
     expect(first.data.sibling_claims).toHaveLength(128)
     expect(first.data.sibling_claims.map((claim) => claim.relative_path)).not.toContain("book-999")
+    expect(first.data.sibling_claims.at(-1)?.relative_path).toBe("book-127")
     expect(first.data.sibling_claims_next_cursor).not.toBeNull()
 
     const second = await withLibraryClient(restarted, Effect.gen(function*() {
@@ -920,6 +968,7 @@ describe("normal library scan", () => {
       sibling_claims_revision: first.data.sibling_claims_revision
     })
     expect(second.data.sibling_claims.map((claim) => claim.relative_path)).toContain("book-999")
+    expect(second.data.sibling_claims.map((claim) => claim.relative_path)).toContain("book-128")
   })
 
   it("pages nested mixed-case and normalization-equivalent sibling claims through HTTP", async () => {

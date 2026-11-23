@@ -284,6 +284,11 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
         )
         if (accepted === null || accepted.content_version !== parsed.contentVersion) return null
 
+        const readCache = () => cache.read(key).pipe(
+          Effect.catchTag("ThumbnailCacheError", () => Effect.succeed(null))
+        )
+        if (accepted.state === "replacement-pending") return yield* readCache()
+
         const persistedManifest = yield* Effect.sync(() => {
           try {
             return JSON.parse(accepted.manifest_json) as unknown
@@ -344,9 +349,6 @@ export class ThumbnailProducer extends Context.Service<ThumbnailProducer, {
           if (!sameObservation(cheapObservation.success, acceptedManifest.after)) return null
         }
 
-        const readCache = () => cache.read(key).pipe(
-          Effect.catchTag("ThumbnailCacheError", () => Effect.succeed(null))
-        )
         let cached: Uint8Array | null = null
         if (hasAcceptedTokens) {
           cached = yield* readCache()

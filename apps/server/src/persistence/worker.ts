@@ -4,8 +4,13 @@ import { basename, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contracts/canonical"
-import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanAnalysisError, ScanManifest } from "@henshin/contracts/root"
-import { INDEXED_ROOT_SAMPLE_LIMIT } from "@henshin/contracts"
+import {
+  INDEXED_ROOT_SAMPLE_LIMIT,
+  ReplacementCandidateObservation,
+  ReplacementObservation,
+  ScanManifest
+} from "@henshin/contracts"
+import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanAnalysisError } from "@henshin/contracts/root"
 import { caseFold } from "unicode-case-folding"
 import {
   WorkerMessage,
@@ -38,13 +43,192 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
-const CURRENT_SCHEMA_VERSION = 6
+const CURRENT_SCHEMA_VERSION = 8
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
 const MAX_POLICY_OPERATION_RESULTS = 1024
 const COMPACTION_BATCH = 64
 const MAX_REPORTED_DEFERRED_PATHS = 32
+
+const persistedManifest = (value: string, field: string): typeof ScanManifest.Type => {
+  const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
+  if (Option.isNone(decoded)) throw new Error(`invalid persisted ${field}`)
+  return decoded.value
+}
+
+const persistedAnalysisError = (value: string | null): typeof ScanAnalysisError.Type | null => {
+  if (value === null) return null
+  const decoded = Schema.decodeUnknownOption(ScanAnalysisError)(JSON.parse(value))
+  if (Option.isNone(decoded)) throw new Error("invalid persisted candidate analysis error")
+  return decoded.value
+}
+
+const replacementObservation = (
+  manifest: typeof ScanManifest.Type,
+  kind: "archive" | "image-directory"
+): import("@henshin/contracts").ReplacementObservation => ({
+  kind,
+  page_count: manifest.pages.length,
+  format_evidence: Array.from(new Set(manifest.pages.map((page) => page.format))).slice(0, 8),
+  size_bytes: kind === "archive"
+    ? manifest.after.bytes
+    : manifest.pages.reduce((total, page) => total + page.declared_bytes, 0),
+  entry_count: manifest.after.entry_count,
+  diagnostics: manifest.diagnostics
+})
+
+const emptyDiagnostics = {
+  supported_pages: 0,
+  unsupported_pages: 0,
+  ignored_entries: 0,
+  directory_records: 0
+} as const
+
+const replacementCandidateObservation = (
+  kind: "archive" | "image-directory",
+  analysisStatus: "ready" | "error",
+  manifestJson: string | null,
+  analysisErrorJson: string | null
+): import("@henshin/contracts").ReplacementCandidateObservation => {
+  const analysisError = persistedAnalysisError(analysisErrorJson)
+  const observation = manifestJson === null
+    ? {
+        kind,
+        page_count: 0,
+        format_evidence: [],
+        size_bytes: null,
+        entry_count: 0,
+        diagnostics: analysisError?.diagnostics ?? emptyDiagnostics
+      }
+    : replacementObservation(persistedManifest(manifestJson, "candidate manifest"), kind)
+  return {
+    ...observation,
+    analysis_status: analysisStatus,
+    analysis_error: analysisError
+  }
+}
+
+const persistedReplacementObservation = (value: string, field: string): import("@henshin/contracts").ReplacementObservation => {
+  const decoded = Schema.decodeUnknownOption(ReplacementObservation)(JSON.parse(value))
+  if (Option.isNone(decoded)) throw new Error(`invalid persisted ${field}`)
+  return decoded.value
+}
+
+const persistedReplacementCandidateObservation = (value: string, field: string): import("@henshin/contracts").ReplacementCandidateObservation => {
+  const decoded = Schema.decodeUnknownOption(ReplacementCandidateObservation)(JSON.parse(value))
+  if (Option.isNone(decoded)) throw new Error(`invalid persisted ${field}`)
+  return decoded.value
+}
+
+const comparableManifest = (value: string): {
+  readonly value: string
+  readonly beforeToken?: string
+  readonly afterToken?: string
+} | null => {
+  try {
+    const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
+    if (Option.isNone(decoded)) return null
+    const { observation_token: beforeToken, ...before } = decoded.value.before
+    const { observation_token: afterToken, ...after } = decoded.value.after
+    return {
+      value: JSON.stringify({ ...decoded.value, before, after }),
+      beforeToken,
+      afterToken
+    }
+  } catch {
+    return null
+  }
+}
+
+const observationsEquivalent = (left: string | undefined, right: string | undefined): boolean =>
+  left === undefined || left.length === 0 || right === undefined || right.length === 0 || left === right
+
+const manifestsEquivalent = (left: string, right: string): boolean => {
+  const comparableLeft = comparableManifest(left)
+  const comparableRight = comparableManifest(right)
+  return comparableLeft !== null && comparableRight !== null &&
+    comparableLeft.value === comparableRight.value &&
+    observationsEquivalent(comparableLeft.beforeToken, comparableRight.beforeToken) &&
+    observationsEquivalent(comparableLeft.afterToken, comparableRight.afterToken)
+}
+
+type ReplacementEvidence = "confirmed-change" | "recoverable" | "insufficient"
+
+const CONFIRMED_REPLACEMENT_ERROR_CODES = new Set([
+  "candidate-changed",
+  "source-changed",
+  "source-link",
+  "unsupported-source",
+  "unsupported-candidate",
+  "not-a-directory",
+  "unsafe-name",
+  "lossy-name-decoding",
+  "duplicate-name",
+  "unsupported-pages",
+  "encrypted",
+  "structural-corruption",
+  "zero-pages"
+])
+
+const RECOVERABLE_REPLACEMENT_ERROR_CODES = new Set([
+  "location-unavailable",
+  "missing-target",
+  "read-failure",
+  "root-changed",
+  "root-unavailable"
+])
+
+const classifyReplacement = (
+  acceptedKind: unknown,
+  candidateKind: unknown,
+  analysisStatus: unknown,
+  acceptedManifest: unknown,
+  candidateManifest: unknown,
+  analysisError: unknown
+): ReplacementEvidence => {
+  if (acceptedKind !== candidateKind) return "confirmed-change"
+  if (analysisStatus === "ready" && typeof acceptedManifest === "string" && typeof candidateManifest === "string") {
+    return manifestsEquivalent(acceptedManifest, candidateManifest) ? "recoverable" : "confirmed-change"
+  }
+  if (analysisStatus === "error" && typeof analysisError === "string") {
+    try {
+      const decoded = Schema.decodeUnknownOption(ScanAnalysisError)(JSON.parse(analysisError))
+      if (Option.isNone(decoded)) return "insufficient"
+      if (CONFIRMED_REPLACEMENT_ERROR_CODES.has(decoded.value.code)) return "confirmed-change"
+      if (RECOVERABLE_REPLACEMENT_ERROR_CODES.has(decoded.value.code)) return "recoverable"
+      return "insufficient"
+    } catch {
+      return "insufficient"
+    }
+  }
+  return "insufficient"
+}
+
+const confirmedReplacement = (
+  acceptedKind: unknown,
+  candidateKind: unknown,
+  analysisStatus: unknown,
+  acceptedManifest: unknown,
+  candidateManifest: unknown,
+  analysisError: unknown
+): number => classifyReplacement(
+  acceptedKind,
+  candidateKind,
+  analysisStatus,
+  acceptedManifest,
+  candidateManifest,
+  analysisError
+) === "confirmed-change" ? 1 : 0
+
+const resolutionReplacementReason = (...args: Parameters<typeof classifyReplacement>): "known-change" | "insufficient-evidence" | null => {
+  const evidence = classifyReplacement(...args)
+  return evidence === "confirmed-change"
+    ? "known-change"
+    : evidence === "insufficient"
+      ? "insufficient-evidence"
+      : null
+}
 
 const resolutionParentKey = (relativePath: string): string => {
   const separator = relativePath.lastIndexOf("/")
@@ -80,6 +264,11 @@ db.function(
   "henshin_resolution_parent_key",
   { deterministic: true },
   (relativePath) => typeof relativePath === "string" ? resolutionParentKey(relativePath) : null
+)
+db.function(
+  "henshin_confirmed_replacement",
+  { deterministic: true },
+  confirmedReplacement
 )
 
 db.exec("PRAGMA journal_mode = WAL")
@@ -170,6 +359,7 @@ db.exec(`
     manifest_json TEXT,
     analysis_error_json TEXT,
     updated_at_ms INTEGER NOT NULL,
+    candidate_observation_json TEXT,
     UNIQUE (root_id, relative_path)
   );
   CREATE TABLE IF NOT EXISTS root_policy_operations (
@@ -199,13 +389,14 @@ db.exec(`
     kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
     title TEXT NOT NULL,
     page_count INTEGER NOT NULL,
-    state TEXT NOT NULL CHECK (state = 'accepted'),
+    state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending')),
     content_version INTEGER NOT NULL,
     location_revision INTEGER NOT NULL,
     decision_version INTEGER NOT NULL DEFAULT 1,
     manifest_json TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
+    accepted_observation_json TEXT,
     UNIQUE (root_id, relative_path)
   );
   CREATE TABLE IF NOT EXISTS open_events (
@@ -227,6 +418,10 @@ db.exec(`
   );
 `)
 
+const existingServerState = db.prepare(
+  "SELECT schema_version FROM server_state WHERE id = 1"
+).get() as { schema_version: number } | undefined
+
 const rootColumns = new Set(
   (db.prepare("PRAGMA table_info(server_roots)").all() as unknown as ReadonlyArray<{ name: string }>).map(
     (column) => column.name
@@ -247,6 +442,16 @@ if (!serverLibraryColumns.some((column) => column.name === "change_revision")) {
 const libraryEntryColumns = db.prepare("PRAGMA table_info(library_entries)").all() as unknown as ReadonlyArray<{ name: string }>
 if (!libraryEntryColumns.some((column) => column.name === "decision_version")) {
   db.exec("ALTER TABLE library_entries ADD COLUMN decision_version INTEGER NOT NULL DEFAULT 1")
+}
+const addedAcceptedObservationSummary = !libraryEntryColumns.some((column) => column.name === "accepted_observation_json")
+if (addedAcceptedObservationSummary) {
+  db.exec("ALTER TABLE library_entries ADD COLUMN accepted_observation_json TEXT")
+}
+
+const stagedDiscoveryColumns = db.prepare("PRAGMA table_info(staged_discoveries)").all() as unknown as ReadonlyArray<{ name: string }>
+const addedCandidateObservationSummary = !stagedDiscoveryColumns.some((column) => column.name === "candidate_observation_json")
+if (addedCandidateObservationSummary) {
+  db.exec("ALTER TABLE staged_discoveries ADD COLUMN candidate_observation_json TEXT")
 }
 
 const scanTaskTable = db.prepare(
@@ -299,6 +504,7 @@ if (needsScanSchemaMigration) {
         manifest_json TEXT,
         analysis_error_json TEXT,
         updated_at_ms INTEGER NOT NULL,
+        candidate_observation_json TEXT,
         UNIQUE (root_id, relative_path)
       );
       INSERT INTO scan_tasks_v4 SELECT * FROM scan_tasks;
@@ -320,6 +526,120 @@ if (needsScanSchemaMigration) {
 if (!db.prepare("SELECT 1 FROM pragma_table_info('root_policy_operations') WHERE name = 'created_at_ms'").get()) {
   db.exec("ALTER TABLE root_policy_operations ADD COLUMN created_at_ms INTEGER NOT NULL DEFAULT 0")
   db.prepare("UPDATE root_policy_operations SET created_at_ms = ?").run(Date.now())
+}
+
+const libraryEntriesTable = db.prepare(
+  "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'library_entries'"
+).get() as { sql: string } | undefined
+if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("replacement-pending")) {
+  db.exec("PRAGMA foreign_keys = OFF")
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    db.exec(`
+      CREATE TABLE library_entries_v7 (
+        entry_id TEXT PRIMARY KEY,
+        library_id TEXT NOT NULL REFERENCES server_library(library_id),
+        root_id TEXT NOT NULL REFERENCES server_roots(root_id),
+        relative_path TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
+        title TEXT NOT NULL,
+        page_count INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending')),
+        content_version INTEGER NOT NULL,
+        location_revision INTEGER NOT NULL,
+        decision_version INTEGER NOT NULL DEFAULT 1,
+        manifest_json TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        accepted_observation_json TEXT,
+        UNIQUE (root_id, relative_path)
+      );
+      INSERT INTO library_entries_v7
+        SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count,
+          state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms,
+          accepted_observation_json
+        FROM library_entries;
+      DROP TABLE library_entries;
+      ALTER TABLE library_entries_v7 RENAME TO library_entries;
+    `)
+    const migratedAt = Date.now()
+    const migrated = db.prepare(`
+      UPDATE library_entries
+      SET state = 'replacement-pending', updated_at_ms = ?
+      WHERE state = 'accepted'
+        AND EXISTS (
+          SELECT 1 FROM staged_discoveries s
+          WHERE s.root_id = library_entries.root_id
+            AND s.relative_path = library_entries.relative_path
+            AND henshin_confirmed_replacement(
+              library_entries.kind,
+              s.kind,
+              s.analysis_status,
+              library_entries.manifest_json,
+              s.manifest_json,
+              s.analysis_error_json
+            ) = 1
+        )
+    `).run(migratedAt)
+    if (Number(migrated.changes) > 0) {
+      db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1").run()
+    }
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON")
+  }
+}
+
+const needsSummaryBackfill = addedAcceptedObservationSummary || addedCandidateObservationSummary ||
+  (existingServerState !== undefined && existingServerState.schema_version < CURRENT_SCHEMA_VERSION)
+
+if (needsSummaryBackfill) {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const acceptedWithoutSummary = db.prepare(
+      "SELECT entry_id, kind, manifest_json FROM library_entries WHERE accepted_observation_json IS NULL"
+    ).iterate() as unknown as Iterable<{
+      entry_id: string
+      kind: "archive" | "image-directory"
+      manifest_json: string
+    }>
+    const updateAcceptedSummary = db.prepare(
+      "UPDATE library_entries SET accepted_observation_json = ? WHERE entry_id = ?"
+    )
+    for (const row of acceptedWithoutSummary) {
+      updateAcceptedSummary.run(
+        JSON.stringify(replacementObservation(persistedManifest(row.manifest_json, "accepted manifest"), row.kind)),
+        row.entry_id
+      )
+    }
+
+    const candidatesWithoutSummary = db.prepare(
+      "SELECT candidate_id, kind, analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE candidate_observation_json IS NULL"
+    ).iterate() as unknown as Iterable<{
+      candidate_id: string
+      kind: "archive" | "image-directory"
+      analysis_status: "ready" | "error"
+      manifest_json: string | null
+      analysis_error_json: string | null
+    }>
+    const updateCandidateSummary = db.prepare(
+      "UPDATE staged_discoveries SET candidate_observation_json = ? WHERE candidate_id = ?"
+    )
+    for (const row of candidatesWithoutSummary) {
+      updateCandidateSummary.run(
+        JSON.stringify(replacementCandidateObservation(row.kind, row.analysis_status, row.manifest_json, row.analysis_error_json)),
+        row.candidate_id
+      )
+    }
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
 }
 
 const selectNote = db.prepare("SELECT note_id, text, revision FROM prototype_note WHERE note_id = ?")
@@ -378,37 +698,37 @@ const selectStagedDiscoveries = db.prepare(
 )
 selectStagedDiscoveries.setReadBigInts(true)
 const selectStaged = db.prepare(
-  "SELECT candidate_id, candidate_version, task_id, analysis_status, hold_state FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
+  "SELECT candidate_id, candidate_version, task_id, kind, analysis_status, hold_state, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
 selectStaged.setReadBigInts(true)
 const selectAcceptedThumbnailEntry = db.prepare(
-  "SELECT entry_id, root_id, relative_path, kind, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
+  "SELECT entry_id, root_id, relative_path, kind, state, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
 )
 selectAcceptedThumbnailEntry.setReadBigInts(true)
 const selectStagedById = db.prepare(
   "SELECT candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms FROM staged_discoveries WHERE candidate_id = ? AND root_id = ?"
 )
 selectStagedById.setReadBigInts(true)
-const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC")
-const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path FROM library_entries WHERE root_id = ? AND relative_path = ? AND state = 'accepted'")
+const selectEntriesForRoot = db.prepare("SELECT relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') ORDER BY relative_path ASC")
+const selectEntry = db.prepare("SELECT entry_id, manifest_json, kind, title, source_path, state FROM library_entries WHERE root_id = ? AND relative_path = ? AND state IN ('accepted', 'replacement-pending')")
 const selectEntryResolution = db.prepare(
-  "SELECT entry_id, root_id, relative_path, kind, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
+  "SELECT entry_id, root_id, relative_path, kind, state, decision_version, location_revision, content_version, manifest_json FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
 )
 selectEntryResolution.setReadBigInts(true)
 const selectStagedForResolution = db.prepare(
-  "SELECT analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
+  "SELECT kind, analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
 const selectResolutionSiblingClaims = db.prepare(
-  "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
+  "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
 )
 const selectResolutionSiblingClaimsAfter = db.prepare(
-  "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state = 'accepted' AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? AND (relative_path > ? OR (relative_path = ? AND entry_id > ?)) ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
+  "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? AND (relative_path > ? OR (relative_path = ? AND entry_id > ?)) ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
 )
 const selectResolutionSiblingCursor = db.prepare(
-  "SELECT entry_id, root_id, relative_path FROM library_entries WHERE entry_id = ? AND state = 'accepted'"
+  "SELECT entry_id, root_id, relative_path FROM library_entries WHERE entry_id = ? AND state IN ('accepted', 'replacement-pending')"
 )
 const MAX_RESOLUTION_SIBLINGS = 128
-const selectEntryById = db.prepare("SELECT entry_id FROM library_entries WHERE entry_id = ? AND state = 'accepted'")
+const selectEntryById = db.prepare("SELECT entry_id FROM library_entries WHERE entry_id = ?")
 const selectOpenEvent = db.prepare(
   "SELECT event_id, instance_id, entry_id, device_id, observed_location_revision, observed_content_version, occurred_at_ms, receipt_at_ms FROM open_events WHERE event_id = ?"
 )
@@ -423,14 +743,37 @@ const updateEntryStatistics = db.prepare(
   "UPDATE entry_statistics SET open_count = open_count + 1, last_opened_at_ms = CASE WHEN last_opened_at_ms IS NULL OR last_opened_at_ms < ? THEN ? ELSE last_opened_at_ms END WHERE entry_id = ?"
 )
 const insertEntry = db.prepare(
-  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?)"
+  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms, accepted_observation_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?, ?)"
+)
+const markEntryPending = db.prepare(
+  "UPDATE library_entries SET state = 'replacement-pending', updated_at_ms = ? WHERE entry_id = ? AND state = 'accepted'"
 )
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
 const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
 const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
-const selectLibraryEntries = (cursor: string | null, limit: number) => cursor === null
-  ? db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision FROM library_entries ORDER BY entry_id ASC LIMIT ?").all(limit)
-  : db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision FROM library_entries WHERE entry_id > ? ORDER BY entry_id ASC LIMIT ?").all(cursor, limit)
+const selectLibraryEntries = (cursor: string | null, limit: number) => {
+  const statement = db.prepare(cursor === null
+    ? `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
+         e.page_count, e.state, e.content_version, e.location_revision,
+         CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
+         s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
+         s.candidate_observation_json
+       FROM library_entries e
+       LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
+       WHERE e.state IN ('accepted', 'replacement-pending')
+       ORDER BY e.entry_id ASC LIMIT ?`
+    : `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
+         e.page_count, e.state, e.content_version, e.location_revision,
+         CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
+         s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
+         s.candidate_observation_json
+       FROM library_entries e
+       LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
+       WHERE e.entry_id > ? AND e.state IN ('accepted', 'replacement-pending')
+       ORDER BY e.entry_id ASC LIMIT ?`)
+  statement.setReadBigInts(true)
+  return cursor === null ? statement.all(limit) : statement.all(cursor, limit)
+}
 const selectIndexedRootSamples = db.prepare(
   "SELECT relative_path, kind, manifest_json FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC LIMIT ?"
 )
@@ -452,7 +795,7 @@ const selectScanFence = db.prepare(`
 `)
 selectScanFence.setReadBigInts(true)
 const upsertStagedDiscovery = db.prepare(
-  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = excluded.hold_state, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms"
+  "INSERT INTO staged_discoveries(candidate_id, task_id, root_id, relative_path, kind, candidate_version, hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms, candidate_observation_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind, candidate_version = staged_discoveries.candidate_version + 1, hold_state = excluded.hold_state, analysis_status = excluded.analysis_status, manifest_json = excluded.manifest_json, analysis_error_json = excluded.analysis_error_json, updated_at_ms = excluded.updated_at_ms, candidate_observation_json = excluded.candidate_observation_json"
 )
 const recoverScanTasks = db.prepare(
   "UPDATE scan_tasks SET status = CASE WHEN status = 'queued' THEN 'failed' ELSE 'interrupted' END, error_code = 'server_restart', error_message = CASE WHEN status = 'queued' THEN 'scan did not start before server restart' ELSE 'scan interrupted by server restart' END, updated_at_ms = ? WHERE status IN ('queued', 'running')"
@@ -958,12 +1301,43 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
   try {
     requireCurrentScanFence(request.taskId, request.rootId)
     const existing = selectStaged.get(request.rootId, request.relativePath) as
-      | { candidate_id: string; candidate_version: bigint; task_id: string; analysis_status: string; hold_state: string }
+      | {
+          candidate_id: string
+          candidate_version: bigint
+          task_id: string
+          kind: "archive" | "image-directory"
+          analysis_status: "ready" | "error"
+          hold_state: "held" | "eligible"
+          manifest_json: string | null
+          analysis_error_json: string | null
+        }
       | undefined
-    const accepted = selectEntry.get(request.rootId, request.relativePath)
-    const unchangedHeldScan = request.holdState === "held" && request.analysisStatus === "ready"
-      && accepted !== undefined && accepted.kind === request.kind && accepted.manifest_json === request.manifestJson
-    if (unchangedHeldScan) {
+    const accepted = selectEntry.get(request.rootId, request.relativePath) as {
+      entry_id: string
+      manifest_json: string
+      kind: "archive" | "image-directory"
+      title: string
+      source_path: string
+      state: "accepted" | "replacement-pending"
+    } | undefined
+    const sameAcceptedObservation = request.holdState === "held" && request.analysisStatus === "ready" && request.manifestJson !== null && accepted !== undefined &&
+      accepted.state === "accepted" && accepted.kind === request.kind && accepted.manifest_json === request.manifestJson
+    const knownReplacement = accepted !== undefined && accepted.state === "accepted" &&
+      confirmedReplacement(
+        accepted.kind,
+        request.kind,
+        request.analysisStatus,
+        accepted.manifest_json,
+        request.manifestJson,
+        request.analysisErrorJson
+      ) === 1
+    const candidateObservationJson = JSON.stringify(replacementCandidateObservation(
+      request.kind,
+      request.analysisStatus,
+      request.manifestJson,
+      request.analysisErrorJson
+    ))
+    if (sameAcceptedObservation) {
       if (existing !== undefined) deleteStaged.run(existing.candidate_id)
     } else {
       const held = accepted === undefined && (request.holdState === "held" || existing?.hold_state === "held")
@@ -978,8 +1352,16 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
         request.analysisStatus,
         request.manifestJson,
         request.analysisErrorJson,
-        Date.now()
+        Date.now(),
+        candidateObservationJson
       )
+      if (
+        knownReplacement
+      ) {
+        if (Number(markEntryPending.run(Date.now(), accepted.entry_id).changes) === 1) bumpLibraryRevision.run()
+      } else if (accepted?.state === "replacement-pending" && existing !== undefined) {
+        bumpLibraryRevision.run()
+      }
     }
     const priorStatus = existing?.task_id === request.taskId ? existing.analysis_status : undefined
     requireScanTransition(db.prepare(`UPDATE scan_tasks SET
@@ -987,7 +1369,7 @@ const stageDiscovery = (request: Extract<WorkerRequest, { op: "stageDiscovery" }
       review_needed_count = review_needed_count + ?, updated_at_ms = ? WHERE task_id = ? AND root_id = ? AND status = 'running'`).run(
       Number(request.analysisStatus === "ready") - Number(priorStatus === "ready"),
       Number(request.analysisStatus === "error") - Number(priorStatus === "error"),
-      Number(!unchangedHeldScan && priorStatus === undefined), Date.now(), request.taskId, request.rootId
+      Number(!sameAcceptedObservation && priorStatus === undefined), Date.now(), request.taskId, request.rootId
     ))
     db.exec("COMMIT")
   } catch (error) {
@@ -1105,9 +1487,15 @@ const entryRow = (row: {
   kind: "archive" | "image-directory"
   title: string
   page_count: bigint
-  state: "accepted"
+  state: "accepted" | "replacement-pending"
   content_version: bigint
   location_revision: bigint
+  accepted_observation_json: string | null
+  candidate_id: string | null
+  candidate_version: bigint | null
+  candidate_kind: "archive" | "image-directory" | null
+  candidate_analysis_status: "ready" | "error" | null
+  candidate_observation_json: string | null
 }): import("./worker-protocol").LibraryEntryRow => ({
   entry_id: row.entry_id,
   library_id: row.library_id,
@@ -1120,6 +1508,14 @@ const entryRow = (row: {
   state: row.state,
   content_version: row.content_version.toString(),
   location_revision: row.location_revision.toString(),
+  replacement: row.candidate_id === null || row.candidate_version === null || row.candidate_kind === null || row.candidate_analysis_status === null || row.accepted_observation_json === null || row.candidate_observation_json === null
+    ? null
+    : {
+        candidate_id: row.candidate_id,
+        candidate_version: Number(row.candidate_version),
+        old_observation: persistedReplacementObservation(row.accepted_observation_json, "accepted observation summary"),
+        candidate_observation: persistedReplacementCandidateObservation(row.candidate_observation_json, "candidate observation summary")
+      },
   cover: {
     key: `default-v1.${row.entry_id}.${row.content_version.toString()}`,
     profile: "default-cover-v1"
@@ -1131,6 +1527,7 @@ const acceptedThumbnailEntryRow = (row: {
   root_id: string
   relative_path: string
   kind: "archive" | "image-directory"
+  state: "accepted" | "replacement-pending"
   content_version: bigint
   manifest_json: string
 }): import("./worker-protocol").AcceptedThumbnailEntryRow => ({
@@ -1138,6 +1535,7 @@ const acceptedThumbnailEntryRow = (row: {
   root_id: row.root_id,
   relative_path: row.relative_path,
   kind: row.kind,
+  state: row.state,
   content_version: row.content_version.toString(),
   manifest_json: row.manifest_json
 })
@@ -1146,38 +1544,6 @@ const titleForCandidate = (relativePath: string, kind: "archive" | "image-direct
   const name = basename(relativePath)
   if (kind === "archive") return name.replace(/\.(?:cbz|zip)$/iu, "")
   return name
-}
-
-const comparableManifest = (value: string): {
-  readonly value: string
-  readonly beforeToken?: string
-  readonly afterToken?: string
-} | null => {
-  try {
-    const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
-    if (Option.isNone(decoded)) return null
-    const { observation_token: beforeToken, ...before } = decoded.value.before
-    const { observation_token: afterToken, ...after } = decoded.value.after
-    return {
-      value: JSON.stringify({ ...decoded.value, before, after }),
-      beforeToken,
-      afterToken
-    }
-  } catch {
-    return null
-  }
-}
-
-const observationsEquivalent = (left: string | undefined, right: string | undefined): boolean =>
-  left === undefined || left.length === 0 || right === undefined || right.length === 0 || left === right
-
-const manifestsEquivalent = (left: string, right: string): boolean => {
-  const comparableLeft = comparableManifest(left)
-  const comparableRight = comparableManifest(right)
-  return comparableLeft !== null && comparableRight !== null &&
-    comparableLeft.value === comparableRight.value &&
-    observationsEquivalent(comparableLeft.beforeToken, comparableRight.beforeToken) &&
-    observationsEquivalent(comparableLeft.afterToken, comparableRight.afterToken)
 }
 
 const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalScan" }>): import("./worker-protocol").NormalPublishOutcome => {
@@ -1223,6 +1589,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       kind: "archive" | "image-directory"
       title: string
       source_path: string
+      state: "accepted" | "replacement-pending"
     }>()
     for (const candidate of staged) {
       if (!observed.has(candidate.relative_path) || candidate.manifest_json === null) continue
@@ -1237,6 +1604,7 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
         kind: "archive" | "image-directory"
         title: string
         source_path: string
+        state: "accepted" | "replacement-pending"
       } | undefined
       if (existing !== undefined) {
         existingForCandidate.set(candidate.relative_path, existing)
@@ -1271,9 +1639,13 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
               Date.now(),
               existing.entry_id
             )
+            db.prepare("UPDATE library_entries SET accepted_observation_json = ? WHERE entry_id = ?").run(
+              JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind)),
+              existing.entry_id
+            )
             changed = true
           }
-          deleteStaged.run(candidate.candidate_id)
+          if (existing.state === "accepted") deleteStaged.run(candidate.candidate_id)
         }
         continue
       }
@@ -1290,7 +1662,8 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
         BigInt(pageCount),
         candidate.manifest_json,
         Date.now(),
-        Date.now()
+        Date.now(),
+        JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind))
       )
       deleteStaged.run(candidate.candidate_id)
       changed = true
@@ -1336,9 +1709,15 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
     kind: "archive" | "image-directory"
     title: string
     page_count: bigint
-    state: "accepted"
+    state: "accepted" | "replacement-pending"
     content_version: bigint
     location_revision: bigint
+    accepted_observation_json: string | null
+    candidate_id: string | null
+    candidate_version: bigint | null
+    candidate_kind: "archive" | "image-directory" | null
+    candidate_analysis_status: "ready" | "error" | null
+    candidate_observation_json: string | null
   }>
   const page = rows.slice(0, request.pageSize)
   const hasMore = rows.length > request.pageSize
@@ -1387,6 +1766,7 @@ const entryResolution = (
     root_id: string
     relative_path: string
     kind: "archive" | "image-directory"
+    state: "accepted" | "replacement-pending"
     decision_version: bigint
     location_revision: bigint
     content_version: bigint
@@ -1459,28 +1839,23 @@ const entryResolution = (
     : null
 
   const staged = selectStagedForResolution.get(row.root_id, row.relative_path) as {
+    kind: "archive" | "image-directory"
     analysis_status: "ready" | "error"
     manifest_json: string | null
     analysis_error_json: string | null
   } | undefined
   let reason: "known-change" | "insufficient-evidence" | null = null
-  if (staged !== undefined) {
-    if (staged.analysis_status === "ready" && staged.manifest_json !== null) {
-      reason = manifestsEquivalent(row.manifest_json, staged.manifest_json) ? null : "known-change"
-    } else {
-      const stagedError = staged.analysis_error_json === null
-        ? null
-        : Schema.decodeUnknownOption(ScanAnalysisError)(JSON.parse(staged.analysis_error_json))
-      if (stagedError !== null && !Option.isNone(stagedError) && stagedError.value.code === "candidate-changed") {
-        reason = "known-change"
-      } else if (
-        stagedError === null ||
-        Option.isNone(stagedError) ||
-        !["location-unavailable", "missing-target", "read-failure", "root-changed", "root-unavailable"].includes(stagedError.value.code)
-      ) {
-        reason = "insufficient-evidence"
-      }
-    }
+  if (row.state === "replacement-pending") {
+    reason = "known-change"
+  } else if (staged !== undefined) {
+    reason = resolutionReplacementReason(
+      row.kind,
+      staged.kind,
+      staged.analysis_status,
+      row.manifest_json,
+      staged.manifest_json,
+      staged.analysis_error_json
+    )
   }
   if (manifest.value.pages[0] === undefined) {
     reason = reason ?? "insufficient-evidence"

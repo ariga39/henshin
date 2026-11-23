@@ -1,7 +1,34 @@
 import { Schema } from "effect"
 import { Revision, Uuid } from "./ids"
-import { RootRelativePath, ScanManifestObservation, ScanManifestPage, ServerRootList } from "./root"
+import { RootRelativePath, ScanAnalysisError, ScanManifestDiagnostics, ScanManifestObservation, ScanManifestPage, ServerRootList } from "./root"
 import { ThumbnailReference } from "./thumbnail"
+
+const replacementObservationFields = {
+  kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  page_count: Schema.Natural,
+  format_evidence: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
+  size_bytes: Schema.NullOr(Schema.Natural),
+  entry_count: Schema.Natural,
+  diagnostics: ScanManifestDiagnostics
+} as const
+
+export const ReplacementObservation = Schema.Struct(replacementObservationFields)
+export type ReplacementObservation = typeof ReplacementObservation.Type
+
+export const ReplacementCandidateObservation = Schema.Struct({
+  ...replacementObservationFields,
+  analysis_status: Schema.Union([Schema.Literal("ready"), Schema.Literal("error")]),
+  analysis_error: Schema.NullOr(ScanAnalysisError)
+})
+export type ReplacementCandidateObservation = typeof ReplacementCandidateObservation.Type
+
+export const ReplacementComparison = Schema.Struct({
+  candidate_id: Uuid,
+  candidate_version: Schema.Natural,
+  old_observation: ReplacementObservation,
+  candidate_observation: ReplacementCandidateObservation
+})
+export type ReplacementComparison = typeof ReplacementComparison.Type
 
 export const LibraryEntry = Schema.Struct({
   entry_id: Uuid,
@@ -12,10 +39,11 @@ export const LibraryEntry = Schema.Struct({
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
   title: Schema.String,
   page_count: Schema.Natural,
-  state: Schema.Literal("accepted"),
+  state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending")]),
   content_version: Revision,
   location_revision: Revision,
-  cover: Schema.NullOr(ThumbnailReference)
+  cover: Schema.NullOr(ThumbnailReference),
+  replacement: Schema.NullOr(ReplacementComparison)
 })
 export type LibraryEntry = typeof LibraryEntry.Type
 

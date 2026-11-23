@@ -4,6 +4,7 @@ import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import { OpenEvent, OpenEventOutcome } from "@henshin/contracts/event"
 import { RootExclusions, RootPolicyCommand, RootRelativePath, ScanManifestObservation, ScanManifestPage } from "@henshin/contracts/root"
 import { ThumbnailReference } from "@henshin/contracts/thumbnail"
+import { ReplacementComparison } from "@henshin/contracts"
 
 /** A persisted prototype note row, always with a canonical decimal revision. */
 export const NoteRow = Schema.Struct({
@@ -138,10 +139,11 @@ export const LibraryEntryRow = Schema.Struct({
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
   title: Schema.String,
   page_count: Schema.Natural,
-  state: Schema.Literal("accepted"),
+  state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending")]),
   content_version: Revision,
   location_revision: Revision,
-  cover: Schema.NullOr(ThumbnailReference)
+  cover: Schema.NullOr(ThumbnailReference),
+  replacement: Schema.NullOr(ReplacementComparison)
 })
 export type LibraryEntryRow = typeof LibraryEntryRow.Type
 
@@ -178,6 +180,7 @@ export const AcceptedThumbnailEntryRow = Schema.Struct({
   root_id: Uuid,
   relative_path: Schema.String,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
+  state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending")]),
   content_version: Revision,
   manifest_json: Schema.String
 })
