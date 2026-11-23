@@ -12,7 +12,7 @@ import {
 } from "effect/http"
 import type { ServeError } from "effect/http/HttpServerError"
 import { HttpApiBuilder } from "effect/http-api"
-import { LibraryApi, OpenEventApi, PrototypeApi, ReviewApi, ServerApi, TaskApi, ThumbnailApi } from "@henshin/contracts"
+import { EhApi, LibraryApi, OpenEventApi, PrototypeApi, ReviewApi, ServerApi, TaskApi, ThumbnailApi } from "@henshin/contracts"
 import { AuthenticationLayer } from "./api/AuthenticationLayer"
 import { PrototypeHandlers } from "./api/handlers"
 import { RootHandlers } from "./api/root-preview"
@@ -20,6 +20,7 @@ import { ReviewHandlers, TaskHandlers } from "./api/scan"
 import { LibraryHandlers } from "./api/library"
 import { ThumbnailHandlers } from "./api/thumbnails"
 import { OpenEventHandlers } from "./api/open-events"
+import { EhHandlers } from "./api/eh"
 import { AuthConfig, ServerState } from "./identity"
 import { DatabaseWorker, type DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { NoteStore } from "./persistence/NoteStore"
@@ -226,6 +227,8 @@ export const makeAppLayer = (
     Layer.provide(Layer.mergeAll(AuthenticationLayer, OpenEventStore.layer))
   )
   const OpenEventRoutesLayer = HttpApiBuilder.layer(OpenEventApi).pipe(Layer.provide(OpenEventHandlersLayer))
+  const EhHandlersLayer = EhHandlers.pipe(Layer.provide(Layer.mergeAll(AuthenticationLayer)))
+  const EhRoutesLayer = HttpApiBuilder.layer(EhApi).pipe(Layer.provide(EhHandlersLayer))
   const AllRoutes = Layer.mergeAll(
     RoutesLayer,
     RootPreviewRoutesLayer,
@@ -233,7 +236,8 @@ export const makeAppLayer = (
     ReviewRoutesLayer,
     LibraryRoutesLayer,
     ThumbnailRoutesLayer,
-    OpenEventRoutesLayer
+    OpenEventRoutesLayer,
+    EhRoutesLayer
   )
 
   const ReadyLayer = Layer.effectDiscard(

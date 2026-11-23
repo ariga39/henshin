@@ -52,16 +52,16 @@ export const makeTempDbPath = async (): Promise<string> => {
 
 export const cleanupTempDb = removeTempDbDirectory
 
-const spawnServerProcess = (): ChildProcessWithoutNullStreams =>
-  spawn(process.execPath, [SERVER_PATH], { cwd: SERVER_CWD, stdio: ["pipe", "pipe", "pipe"] })
+const spawnServerProcess = (env: NodeJS.ProcessEnv): ChildProcessWithoutNullStreams =>
+  spawn(process.execPath, [SERVER_PATH], { cwd: SERVER_CWD, stdio: ["pipe", "pipe", "pipe"], env })
 
 /**
  * Spawns the built independent server with the same private bootstrap channel
  * the desktop uses, and waits for its readiness line.
  */
-export const startServer = async (dbPath: string): Promise<RunningServer> => {
+export const startServer = async (dbPath: string, options: { readonly env?: NodeJS.ProcessEnv } = {}): Promise<RunningServer> => {
   const bearerToken = randomBytes(32).toString("base64url")
-  const child = spawnServerProcess()
+  const child = spawnServerProcess({ ...process.env, ...options.env })
 
   let stderr = ""
   child.stderr.on("data", (chunk: Buffer) => {

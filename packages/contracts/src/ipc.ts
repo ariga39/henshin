@@ -9,6 +9,7 @@ import {
   LocalMappingPreview
 } from "./root"
 import { LibrarySearchRequest, ReplacementResolutionCommand } from "./library"
+import { EhCandidateSearchRequest } from "./eh"
 import { ThumbnailKey } from "./thumbnail"
 import { ReleaseHoldCommand } from "./review"
 import type {
@@ -194,6 +195,9 @@ export type RootCommandIpcRequest = typeof RootCommandIpcRequest.Type
 export const LibrarySearchIpcRequest = LibrarySearchRequest
 export type LibrarySearchIpcRequest = typeof LibrarySearchIpcRequest.Type
 
+export const EhCandidateSearchIpcRequest = EhCandidateSearchRequest
+export type EhCandidateSearchIpcRequest = typeof EhCandidateSearchIpcRequest.Type
+
 export const LibraryEntryIpcRequest = Schema.Struct({ entry_id: Uuid })
 export type LibraryEntryIpcRequest = typeof LibraryEntryIpcRequest.Type
 
@@ -203,6 +207,14 @@ export const LibraryNoteIpcRequest = Schema.Struct({
   expected_decision_version: Revision
 })
 export type LibraryNoteIpcRequest = typeof LibraryNoteIpcRequest.Type
+
+export const LibraryBindIpcRequest = Schema.Struct({
+  operation_id: Uuid,
+  entry_id: Uuid,
+  url: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)),
+  expected_decision_version: Revision
+})
+export type LibraryBindIpcRequest = typeof LibraryBindIpcRequest.Type
 
 export const ThumbnailGetIpcRequest = Schema.Struct({ key: ThumbnailKey })
 export type ThumbnailGetIpcRequest = typeof ThumbnailGetIpcRequest.Type

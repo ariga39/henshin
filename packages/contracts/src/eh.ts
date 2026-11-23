@@ -99,3 +99,27 @@ export const EntryCommandResult = Schema.Struct({
   entry: LibraryEntryDetails
 })
 export type EntryCommandResult = typeof EntryCommandResult.Type
+
+export const EhCandidateSearchRequest = Schema.Struct({
+  title: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512)),
+  author: Schema.optional(Schema.String.check(Schema.isMaxLength(256))),
+  language: Schema.optional(Schema.String.check(Schema.isMaxLength(128)))
+})
+export type EhCandidateSearchRequest = typeof EhCandidateSearchRequest.Type
+
+export const EhGalleryCandidate = Schema.Struct({
+  source: Schema.Literal("EH"),
+  gid: Schema.String.check(Schema.isPattern(/^[0-9]{1,20}$/)),
+  canonical_url: Schema.String.check(Schema.isMaxLength(2048)),
+  title: Schema.String,
+  language_evidence: Schema.Array(Schema.String).check(Schema.isMaxLength(16)),
+  page_count: Schema.NullOr(Schema.Natural),
+  rating: Schema.NullOr(Schema.Number)
+})
+export type EhGalleryCandidate = typeof EhGalleryCandidate.Type
+
+export const EhCandidateSearchResult = Schema.Struct({
+  status: Schema.Literals(["results", "empty", "access_failed", "rate_limited", "restricted", "unrecognized_layout"]),
+  candidates: Schema.Array(EhGalleryCandidate)
+})
+export type EhCandidateSearchResult = typeof EhCandidateSearchResult.Type

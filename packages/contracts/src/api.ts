@@ -23,7 +23,13 @@ import {
   ThumbnailMissing,
   ThumbnailUpdating
 } from "./errors"
-import { EntryCommandRequest, EntryCommandResult, LibraryEntryDetails } from "./eh"
+import {
+  EhCandidateSearchRequest,
+  EhCandidateSearchResult,
+  EntryCommandRequest,
+  EntryCommandResult,
+  LibraryEntryDetails
+} from "./eh"
 import { NoteId, Uuid } from "./ids"
 import { EditNotePayload, HandshakeData, Note, OperationResult } from "./note"
 import {
@@ -243,6 +249,19 @@ export const LibraryApi = HttpApi.make("henshin-library").add(
         query: EntryResolutionQuery,
         success: SuccessEnvelope(EntryResolution),
         error: [AuthenticationRequired, EntryNotFound, InvalidRequest, InternalError]
+      })
+    )
+    .prefix("/api/v1")
+    .middleware(Authentication)
+)
+
+export const EhApi = HttpApi.make("henshin-eh").add(
+  HttpApiGroup.make("eh", { topLevel: true })
+    .add(
+      HttpApiEndpoint.post("candidates", "/eh/candidates", {
+        payload: EhCandidateSearchRequest,
+        success: SuccessEnvelope(EhCandidateSearchResult),
+        error: [AuthenticationRequired, InvalidRequest, InternalError]
       })
     )
     .prefix("/api/v1")
