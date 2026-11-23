@@ -233,7 +233,8 @@ describe("library renderer workflow", () => {
     viewStore.resetConnectionTarget({
       mode: "remote",
       base_url: "https://new.example.test",
-      instance_id: otherProfileId
+      instance_id: otherProfileId,
+      saved: false
     })
     resolveSearch({
       ok: true,

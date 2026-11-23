@@ -4,6 +4,7 @@ import { Deferred, Effect, ManagedRuntime } from "effect"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { HANDSHAKE_API_VERSION, HANDSHAKE_CAPABILITY, PrototypeHttpClient } from "@henshin/contracts"
 import {
+  CONNECTION_IDENTITY_CHANGED_MESSAGE,
   ConnectionCompatibilityError,
   ConnectionLifecycle,
   ConnectionPausedError
@@ -295,7 +296,7 @@ describe("main-owned connection lifecycle", () => {
     expect(lifecycle.getStatus()).toMatchObject({
       state: "blocked",
       instance_id: INSTANCE_ID,
-      reason: "instance_mismatch"
+      reason: CONNECTION_IDENTITY_CHANGED_MESSAGE
     })
     expect(lifecycle.getNamespace()).toBe(INSTANCE_ID)
     expect(lifecycle.getSession()).toBeNull()

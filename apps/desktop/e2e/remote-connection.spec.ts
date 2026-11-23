@@ -462,20 +462,10 @@ test("connects the normal desktop to the correct TLS library and rejects redirec
     await first.app.close()
     launchedApps.splice(launchedApps.indexOf(first.app), 1)
 
-    let profileText: string | null = null
-    try {
-      profileText = await readFile(path.join(userData, "connection-profile.json"), "utf8")
-    } catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
-    }
+    const profileText = await readFile(path.join(userData, "connection-profile.json"), "utf8")
+    expect(profileText).not.toContain(remoteToken)
     if (sessionOnly) {
-      if (profileText !== null) {
-        expect(JSON.parse(profileText)).toEqual({ active: "managed", remote: null })
-        expect(profileText).not.toContain(remoteToken)
-      }
-    } else {
-      expect(profileText).not.toBeNull()
-      expect(profileText).not.toContain(remoteToken)
+      expect(JSON.parse(profileText)).toEqual({ active: "managed", remote: null })
     }
 
     let ownedLocal: RunningServer | null = null

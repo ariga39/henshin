@@ -924,6 +924,8 @@ const registerIpc = (): void => {
         if (pending.storageMode === "protected") {
           if (connectionProfileStore === null) throw new ConnectionProfileStoreError("connection profile storage is not ready")
           await connectionProfileStore.saveRemote(pending.profile)
+        } else {
+          await connectionProfileStore?.useManaged()
         }
       } catch (error) {
         await pending.candidate.close()
