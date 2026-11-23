@@ -304,7 +304,11 @@ export const LibraryScreen = () => {
           </>
         )}
         {state.library_status === "ready" && state.library_entries.length === 0 && !hasLibraryQuery && (
-          <p data-testid="library-empty">No accepted books yet. Start a normal scan from a saved root.</p>
+          <p data-testid="library-empty">
+            {state.library_freshness?.source === "cached"
+              ? "No cached books are available for this server. Reconnect to refresh the Library."
+              : "No accepted books yet. Start a normal scan from a saved root."}
+          </p>
         )}
         <ul data-testid="library-entries">
           {state.library_entries.map((entry) => (
@@ -330,7 +334,7 @@ export const LibraryScreen = () => {
             </li>
           ))}
         </ul>
-        {state.library_has_more && (
+        {state.library_status === "ready" && state.library_has_more && (
           <button data-testid="library-load-more" onClick={() => void runtime.runPromise(loadLibrary(true))}>
             Load more
           </button>

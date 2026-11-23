@@ -156,6 +156,10 @@ test("browses the exact cached namespace after disconnect with stale paging", as
     await second.window.getByTestId("library-refresh").click()
     await expect(second.window.getByTestId("library-cache-status")).toContainText("partial and stale")
     await expect(second.window.getByTestId("library-entry")).toHaveCount(0)
+    await expect(second.window.getByTestId("library-empty")).toHaveText(
+      "No cached books are available for this server. Reconnect to refresh the Library."
+    )
+    await expect(second.window.getByTestId("library-empty")).not.toContainText("Start a normal scan")
   } finally {
     await rm(directory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })

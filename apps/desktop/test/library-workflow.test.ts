@@ -1,11 +1,13 @@
 import { Effect, Layer } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
-import type { LibraryEntry, LibraryEntryDetails, OpenBookIpcResult, ReaderProfile } from "@henshin/contracts"
+import type { LibraryEntry, LibraryEntryDetails, LibraryEntryPage, OpenBookIpcResult, ReaderProfile } from "@henshin/contracts"
 import { LibraryClient, type Result } from "../src/renderer/client"
 import {
   chooseLibraryOpenProfile,
   libraryOpenStateFor,
   loadActiveLibraryOpenState,
+    loadLibrary,
+  loadLibrary,
   openSelectedLibraryEntry,
   searchLibrary,
   selectLibraryEntry,
@@ -77,6 +79,13 @@ const resetView = () => {
     connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
     connection_generation: 0,
     library_entries: [],
+    library_query: "",
+    library_cursor: null,
+    library_has_more: false,
+    library_status: "idle",
+    library_error: null,
+    library_freshness: null,
+    library_request_generation: 0,
     library_selected_entry_id: null,
     library_open_profile_id: null,
     library_open_states: []
@@ -183,6 +192,108 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_open_profile_id).toBeNull()
     expect(viewStore.getState().library_entries).toEqual([entry(entryBId, "book-b")])
     expect(viewStore.getState().library_open_states).toHaveLength(1)
+  })
+
+  it("clears stale paging state before a fresh Library load", async () => {
+    const client = LibraryClient.of({
+      search: (input) => {
+        expect(input).toEqual({ query: "", page_size: 50 })
+        return Effect.succeed({
+          ok: true as const,
+          data: { entries: [entry(entryAId, "book-a")], has_more: false, next_cursor: null, library_change_revision: "2" }
+        })
+      },
+      open: () => Effect.succeed({ ok: false as const, error: { code: "unused", message: "unused", retryable: false } }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      connection: { state: "connected", instance_id: namespaceId, epoch: "99999999-9999-4999-8999-999999999999", reason: null },
+      connection_generation: 7,
+      library_entries: [entry(entryBId, "book-b")],
+      library_cursor: "old-epoch-cursor",
+      library_has_more: true,
+      library_status: "ready",
+      library_request_generation: 4
+    })
+
+    const pending = run(loadLibrary(false), client)
+    expect(viewStore.getState().library_cursor).toBeNull()
+    expect(viewStore.getState().library_has_more).toBe(false)
+    await pending
+
+    expect(viewStore.getState().library_entries).toEqual([entry(entryAId, "book-a")])
+    expect(viewStore.getState().library_has_more).toBe(false)
+  })
+
+  it("ignores a late page from the previous connection epoch after reconnect", async () => {
+    let resolveOld!: (value: Result<LibraryEntryPage>) => void
+    let calls = 0
+    const client = LibraryClient.of({
+      search: (input) => {
+        calls += 1
+        expect(input).toEqual({ query: "", page_size: 50 })
+        if (calls === 1) return Effect.promise(() => new Promise<Result<LibraryEntryPage>>((resolve) => { resolveOld = resolve }))
+        return Effect.succeed({
+          ok: true as const,
+          data: { entries: [entry(entryBId, "book-b")], has_more: false, next_cursor: null, library_change_revision: "3" }
+        })
+      },
+      open: () => Effect.succeed({ ok: false as const, error: { code: "unused", message: "unused", retryable: false } }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      connection: { state: "connected", instance_id: namespaceId, epoch: "99999999-9999-4999-8999-999999999999", reason: null },
+      connection_generation: 7,
+      library_entries: [],
+      library_status: "idle",
+      library_request_generation: 4
+    })
+
+    const oldLoad = run(loadLibrary(false), client)
+    await Promise.resolve()
+    viewStore.beginConnectionTransition("connecting")
+    viewStore.set({
+      connection: { state: "connected", instance_id: namespaceId, epoch: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", reason: null }
+    })
+    await run(loadLibrary(false), client)
+    expect(viewStore.getState().library_entries).toEqual([entry(entryBId, "book-b")])
+
+    resolveOld({
+      ok: true,
+      data: { entries: [entry(entryAId, "book-a")], has_more: true, next_cursor: "old-next", library_change_revision: "2" }
+    })
+    await oldLoad
+
+    expect(viewStore.getState().library_entries).toEqual([entry(entryBId, "book-b")])
+    expect(viewStore.getState().library_cursor).toBeNull()
+    expect(viewStore.getState().library_has_more).toBe(false)
+  })
+
+  it("does not label a connected Library failure as cached", async () => {
+    const client = LibraryClient.of({
+      search: () => Effect.succeed({
+        ok: false as const,
+        error: { code: "transport", message: "temporary response failure", retryable: true }
+      }),
+      open: () => Effect.succeed({ ok: false as const, error: { code: "unused", message: "unused", retryable: false } }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      connection: { state: "connected", instance_id: namespaceId, epoch: "99999999-9999-4999-8999-999999999999", reason: null },
+      connection_generation: 7,
+      library_entries: [entry(entryAId, "book-a")],
+      library_freshness: { source: "live", stale: false, partial: false, observed_at_ms: 1, instance_id: namespaceId },
+      library_status: "ready"
+    })
+
+    await run(loadLibrary(false), client)
+
+    expect(viewStore.getState().library_status).toBe("error")
+    expect(viewStore.getState().library_freshness?.source).toBe("live")
+    expect(viewStore.getState().library_freshness?.stale).toBe(false)
   })
 
   it("keeps the latest terminal action through reselection and follows a newer active action", async () => {

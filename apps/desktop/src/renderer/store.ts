@@ -301,7 +301,10 @@ const createViewStore = () => {
       state = {
         ...state,
         connection,
-        connection_generation: state.connection_generation + 1
+        connection_generation: state.connection_generation + 1,
+        library_request_generation: state.library_request_generation + 1,
+        library_cursor: null,
+        library_has_more: false
       }
       for (const listener of listeners) listener()
     },
@@ -316,7 +319,10 @@ const createViewStore = () => {
               ? "idle"
               : "ready"
             : state.status,
-        connection_generation: state.connection_generation + 1
+        connection_generation: state.connection_generation + 1,
+        library_request_generation: state.library_request_generation + 1,
+        library_cursor: null,
+        library_has_more: false
       }
       for (const listener of listeners) listener()
       return state.connection_generation

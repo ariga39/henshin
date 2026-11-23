@@ -1487,16 +1487,27 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
     const client = yield* LibraryClient
     const current = viewStore.getState()
     const cursor = append ? current.library_cursor : null
+    const connectionGeneration = current.connection_generation
+    const ownerInstanceId = verifiedInstanceId(current)
+    const ownerEpoch = current.connection.epoch ?? current.epoch
     const requestGeneration = current.library_request_generation + 1
     yield* Effect.sync(() => viewStore.set({
       library_status: "loading",
       library_error: null,
-      library_request_generation: requestGeneration
+      library_request_generation: requestGeneration,
+      ...(append ? {} : { library_cursor: null, library_has_more: false })
     }))
     const result = yield* client.search(cursor === null
       ? { query, page_size: 50 }
       : { query, page_size: 50, cursor })
-    if (viewStore.getState().library_request_generation !== requestGeneration) return
+    const isCurrentRequest = (): boolean => {
+      const state = viewStore.getState()
+      return state.library_request_generation === requestGeneration &&
+        state.connection_generation === connectionGeneration &&
+        verifiedInstanceId(state) === ownerInstanceId &&
+        (state.connection.epoch ?? state.epoch) === ownerEpoch
+    }
+    if (!isCurrentRequest()) return
     if (!result.ok) {
       yield* Effect.sync(() => {
         const state = viewStore.getState()
@@ -1513,7 +1524,7 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
           : {
               library_status: "error",
               library_error: result.error.message,
-              ...(state.library_freshness !== null
+              ...(state.connection.state !== "connected" && state.library_freshness !== null
                 ? { library_freshness: { ...state.library_freshness, source: "cached", stale: true, partial: true } }
                 : {})
             })
@@ -1521,6 +1532,7 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
       return
     }
     yield* Effect.sync(() => {
+      if (!isCurrentRequest()) return
       const state = viewStore.getState()
       const existing = append ? state.library_entries : []
       const ids = new Set(existing.map((entry) => entry.entry_id))
