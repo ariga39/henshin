@@ -1151,16 +1151,21 @@ export const canSaveRoot = (state: ViewState): boolean => {
 export const showLibrary = Effect.sync(() => viewStore.set({ screen: "library" }))
 export const showSetup = Effect.sync(() => viewStore.set({ screen: "setup" }))
 
-export const loadLibrary = (append = false) =>
+export const loadLibrary = (append = false, query = viewStore.getState().library_query) =>
   Effect.gen(function*() {
     const client = yield* LibraryClient
     const current = viewStore.getState()
     const cursor = append ? current.library_cursor : null
+    const requestGeneration = current.library_request_generation + 1
     yield* Effect.sync(() => viewStore.set({
       library_status: "loading",
-      library_error: null
+      library_error: null,
+      library_request_generation: requestGeneration
     }))
-    const result = yield* client.search(cursor === null ? { page_size: 50 } : { page_size: 50, cursor })
+    const result = yield* client.search(cursor === null
+      ? { query, page_size: 50 }
+      : { query, page_size: 50, cursor })
+    if (viewStore.getState().library_request_generation !== requestGeneration) return
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({ library_status: "error", library_error: result.error.message }))
       return
@@ -1175,6 +1180,7 @@ export const loadLibrary = (append = false) =>
       }
       viewStore.set({
         library_entries: entries,
+        library_query: query,
         library_cursor: result.data.next_cursor,
         library_has_more: result.data.has_more,
         library_status: "ready",
@@ -1184,6 +1190,17 @@ export const loadLibrary = (append = false) =>
           : state.library_cover_generation + 1
       })
     })
+  })
+
+export const searchLibrary = (query: string) =>
+  Effect.gen(function*() {
+    yield* Effect.sync(() => viewStore.set({
+      library_query: query,
+      library_entries: [],
+      library_cursor: null,
+      library_has_more: false
+    }))
+    yield* loadLibrary(false, query)
   })
 
 export const saveRoot = Effect.gen(function*() {

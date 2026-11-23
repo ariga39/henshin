@@ -5,7 +5,7 @@ import { LibraryClient } from "./client"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
 import { createThumbnailLoadRequest } from "./thumbnail-loading"
-import { loadLibrary, showSetup } from "./workflows"
+import { loadLibrary, searchLibrary, showSetup } from "./workflows"
 
 type CoverState =
   | { readonly key: string | null; readonly request: number; readonly status: "loading" | "unavailable"; readonly src: null }
@@ -146,6 +146,7 @@ const LibraryCover = ({
 
 export const LibraryScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
+  const [searchText, setSearchText] = useState(state.library_query)
 
   useEffect(() => {
     if (viewStore.getState().library_status === "idle") void runtime.runPromise(loadLibrary())
@@ -182,6 +183,24 @@ export const LibraryScreen = () => {
 
       <section aria-labelledby="library-entries-heading">
         <h2 id="library-entries-heading">Books</h2>
+        <form
+          role="search"
+          onSubmit={(event) => {
+            event.preventDefault()
+            void runtime.runPromise(searchLibrary(searchText))
+          }}
+        >
+          <label htmlFor="library-search">Search books</label>
+          <input
+            id="library-search"
+            data-testid="library-search"
+            type="search"
+            value={searchText}
+            onChange={(event) => setSearchText(event.target.value)}
+            placeholder="Search by book name"
+          />
+          <button type="submit" data-testid="library-search-submit">Search</button>
+        </form>
         <button data-testid="library-refresh" onClick={() => void runtime.runPromise(loadLibrary())}>
           Refresh
         </button>
@@ -197,6 +216,11 @@ export const LibraryScreen = () => {
               <div className="library-entry-details">
                 <strong>{entry.title}</strong>
                 <span>{entry.source_path}</span>
+                {entry.match_fields.length > 0 && (
+                  <small data-testid="library-match-evidence">
+                    Matched in {entry.match_fields.map((field) => field === "title" ? "book name" : "filename").join(" and ")}.
+                  </small>
+                )}
                 <small>{entry.entry_id}</small>
               </div>
             </li>

@@ -150,3 +150,41 @@ test("loads covers in the viewport and releases them after scrolling away", asyn
     await rm(fixtureDirectory, { recursive: true, force: true })
   }
 })
+
+test("searches the real Library screen and shows field match evidence", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-search-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-search-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+
+  try {
+    for (const name of ["book-alpha", "book-beta", "other-title"]) {
+      const book = path.join(fixtureDirectory, name)
+      await mkdir(book)
+      await writeFile(path.join(book, "001.png"), validPng)
+    }
+
+    const { window } = await launch(dbPath)
+    await expect(window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await window.getByTestId("root-preview-submit").click()
+    await window.getByTestId("root-label").fill("Search cases")
+    await window.getByTestId("root-save").click()
+    await window.getByTestId("root-saved-preview").click()
+    await window.getByTestId("scan-hold-new-discoveries").uncheck()
+    await window.getByTestId("start-held-scan").click()
+
+    await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(3, { timeout: 30_000 })
+    await window.getByTestId("library-search").fill("book-beta")
+    await window.getByTestId("library-search-submit").click()
+    await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(1)
+    await expect(window.getByTestId("library-entry")).toContainText("book-beta")
+    await expect(window.getByTestId("library-match-evidence")).toContainText("Matched in book name and filename")
+
+    await window.getByTestId("library-search").fill("")
+    await window.getByTestId("library-search-submit").click()
+    await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(3)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+  }
+})
