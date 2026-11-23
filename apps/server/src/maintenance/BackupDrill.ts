@@ -33,7 +33,7 @@ import type {
 const retentionDirectory = (retentionClass: BackupArtifactRow["retentionClass"]): string =>
   retentionClass === "archive" ? "archives" : "rotating"
 const ARCHIVE_SUFFIX = ".henshin.zip"
-const CURRENT_SCHEMA_VERSION = 12
+const CURRENT_SCHEMA_VERSION = 13
 const textDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
 
 const Digest = Schema.String.check(Schema.isMinLength(64), Schema.isMaxLength(64))

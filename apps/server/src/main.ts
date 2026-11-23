@@ -15,9 +15,11 @@ import {
 } from "./persistence/ServerOwnership"
 import { DatabaseWorker, DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { createBackupArchive } from "./maintenance/BackupArchive"
+import { applyBackupRetention } from "./maintenance/BackupRetention"
 import { runBackupDrill } from "./maintenance/BackupDrill"
 import {
   NEWER_DATABASE_SCHEMA,
+  BackupArtifactDeletionOutcome,
   BackupArtifactRow,
   BackupArtifactCompletionOutcome,
   BackupArtifactReservationOutcome,
@@ -27,6 +29,8 @@ import {
   BackupDrillRunRow,
   BackupDrillStartOutcome,
   BackupRetentionClass,
+  BackupRetentionPolicyMutationOutcome,
+  BackupRetentionPolicyRow,
   ServerRootRow,
 } from "./persistence/worker-protocol"
 import {
@@ -65,6 +69,7 @@ const usage = (): string =>
   "       server.mjs backup-destination <list|register|replace> (--data-dir <directory> | --database <path>) [--name <name>] [--path <directory>] [--id <destination-id>] [--confirm]\n" +
   "       server.mjs backup create (--data-dir <directory> | --database <path>) --destination-id <destination-id> [--retention-class <archive|rotating>] [--label <label>]\n" +
   "       server.mjs backup list (--data-dir <directory> | --database <path>)\n" +
+  "       server.mjs backup retention <list|enable|disable> (--data-dir <directory> | --database <path>) [--destination-id <destination-id>] [--confirm]\n" +
   "       server.mjs backup drill [list] (--data-dir <directory> | --database <path>) [--artifact-id <artifact-id>]"
 
 interface BackupDestinationOptions {
@@ -90,6 +95,15 @@ interface BackupListOptions {
   readonly kind: "list"
   readonly dataDir?: string
   readonly database?: string
+}
+
+interface BackupRetentionOptions {
+  readonly kind: "retention"
+  readonly command: "list" | "enable" | "disable"
+  readonly dataDir?: string
+  readonly database?: string
+  readonly destinationId?: string
+  readonly confirmed: boolean
 }
 
 interface BackupDrillOptions {
@@ -163,6 +177,44 @@ const parseBackupListOptions = (args: ReadonlyArray<string>): BackupListOptions 
   }
   if ((dataDir === undefined) === (database === undefined)) throw new Error(usage())
   return { kind: "list", dataDir, database }
+}
+
+const parseBackupRetentionOptions = (args: ReadonlyArray<string>): BackupRetentionOptions => {
+  if (args[1] !== "retention") throw new Error(usage())
+  const command = args[2] === "list" || args[2] === "enable" || args[2] === "disable" ? args[2] : undefined
+  if (command === undefined) throw new Error(usage())
+  let dataDir: string | undefined
+  let database: string | undefined
+  let destinationId: string | undefined
+  let confirmed = false
+  for (let index = 3; index < args.length; index += 1) {
+    switch (args[index]) {
+      case "--data-dir":
+        dataDir = args[++index]
+        if (dataDir === undefined || dataDir.startsWith("--")) throw new Error(usage())
+        break
+      case "--database":
+        database = args[++index]
+        if (database === undefined || database.startsWith("--")) throw new Error(usage())
+        break
+      case "--destination-id":
+        destinationId = args[++index]
+        if (destinationId === undefined || destinationId.startsWith("--")) throw new Error(usage())
+        break
+      case "--confirm":
+        confirmed = true
+        break
+      case "--help":
+        throw new Error(usage())
+      default:
+        throw new Error(usage())
+    }
+  }
+  if ((dataDir === undefined) === (database === undefined)) throw new Error(usage())
+  if (command === "list" && (destinationId !== undefined || confirmed)) throw new Error(usage())
+  if ((command === "enable" || command === "disable") && destinationId === undefined) throw new Error(usage())
+  if (command === "disable" && !confirmed) throw new Error("backup retention disable requires --confirm")
+  return { kind: "retention", command, dataDir, database, destinationId, confirmed }
 }
 
 const parseBackupDrillOptions = (args: ReadonlyArray<string>): BackupDrillOptions => {
@@ -517,6 +569,24 @@ const decodeBackupArtifacts = (value: unknown): ReadonlyArray<typeof BackupArtif
   return decoded.value
 }
 
+const decodeBackupRetentionPolicies = (value: unknown): ReadonlyArray<typeof BackupRetentionPolicyRow.Type> => {
+  const decoded = Schema.decodeUnknownOption(Schema.Array(BackupRetentionPolicyRow))(value)
+  if (Option.isNone(decoded)) throw new Error("database returned invalid backup retention policies")
+  return decoded.value
+}
+
+const decodeBackupRetentionPolicyOutcome = (value: unknown): typeof BackupRetentionPolicyMutationOutcome.Type => {
+  const decoded = Schema.decodeUnknownOption(BackupRetentionPolicyMutationOutcome)(value)
+  if (Option.isNone(decoded)) throw new Error("database returned invalid backup retention policy result")
+  return decoded.value
+}
+
+const decodeBackupArtifactDeletionOutcome = (value: unknown): typeof BackupArtifactDeletionOutcome.Type => {
+  const decoded = Schema.decodeUnknownOption(BackupArtifactDeletionOutcome)(value)
+  if (Option.isNone(decoded)) throw new Error("database returned invalid backup artifact deletion result")
+  return decoded.value
+}
+
 const decodeBackupDrillStartOutcome = (value: unknown): typeof BackupDrillStartOutcome.Type => {
   const decoded = Schema.decodeUnknownOption(BackupDrillStartOutcome)(value)
   if (Option.isNone(decoded)) throw new Error("database returned invalid backup drill start result")
@@ -696,6 +766,26 @@ const runBackupCreateCommand = async (options: BackupCreateOptions): Promise<voi
           ...request
         })))
       }))
+      const policies = decodeBackupRetentionPolicies(yield* worker.call({ op: "listBackupRetentionPolicies" }))
+      const policy = policies.find((candidate) => candidate.destinationId === destination.destinationId)
+      const artifacts = decodeBackupArtifacts(yield* worker.call({ op: "listBackupArtifacts" }))
+      const retention = policy === undefined
+        ? null
+        : yield* Effect.promise(() => applyBackupRetention({
+            dbPath,
+            destination,
+            roots,
+            policy,
+            artifacts,
+            markDeleted: async (request) => decodeBackupArtifactDeletionOutcome(await Effect.runPromise(worker.call({
+              op: "deleteBackupArtifact",
+              ...request
+            }))),
+            recordOutcome: async (request) => decodeBackupRetentionPolicyOutcome(await Effect.runPromise(worker.call({
+              op: "recordBackupRetentionOutcome",
+              ...request
+            })))
+          }))
       return {
         artifact_id: archive.artifact.artifactId,
         destination_id: archive.artifact.destinationId,
@@ -706,7 +796,15 @@ const runBackupCreateCommand = async (options: BackupCreateOptions): Promise<voi
         status: archive.artifact.status,
         retention_class: archive.artifact.retentionClass,
         manifest_digest: archive.manifestDigest,
-        archive_size_bytes: archive.archiveSizeBytes
+        archive_size_bytes: archive.archiveSizeBytes,
+        retention: retention === null ? null : {
+          state: retention.state,
+          keep_count: retention.keepCount,
+          deleted_artifact_ids: retention.deletedArtifactIds,
+          warning: retention.warningCode === null
+            ? null
+            : { code: retention.warningCode, message: retention.warningMessage }
+        }
       }
     })
   )
@@ -733,6 +831,78 @@ const runBackupListCommand = async (options: BackupListOptions): Promise<void> =
           created_at_ms: artifact.createdAtMs,
           completed_at_ms: artifact.completedAtMs
         }))
+      }
+    })
+  )
+  process.stdout.write(JSON.stringify(result) + "\n")
+}
+
+const retentionView = (
+  policy: typeof BackupRetentionPolicyRow.Type,
+  destination: BackupDestination
+) => ({
+  store_kind: policy.storeKind,
+  destination_id: destination.destinationId,
+  destination_name: destination.name,
+  enabled: policy.enabled,
+  keep_count: policy.keepCount,
+  state: policy.state,
+  last_cleanup_at_ms: policy.lastCleanupAtMs,
+  warning: policy.warningCode === null
+    ? null
+    : { code: policy.warningCode, message: policy.warningMessage }
+})
+
+const runBackupRetentionCommand = async (options: BackupRetentionOptions): Promise<void> => {
+  const dbPath = await resolveIndependentDatabasePath(options)
+  const result = await runDestinationWorker(dbPath, (worker) =>
+    Effect.gen(function*() {
+      const destinations = decodeBackupDestinations(yield* worker.call({ op: "listBackupDestinations" }))
+      const policies = decodeBackupRetentionPolicies(yield* worker.call({ op: "listBackupRetentionPolicies" }))
+      if (options.command === "list") {
+        return {
+          retention: policies.map((policy) => {
+            const destination = destinations.find((candidate) => candidate.destinationId === policy.destinationId)
+            if (destination === undefined) throw new Error("database returned retention policy for unknown destination")
+            return retentionView(policy, destination)
+          })
+        }
+      }
+      const destinationId = options.destinationId
+      if (destinationId === undefined) return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination id is required" }))
+      const destination = destinations.find((candidate) => candidate.destinationId === destinationId)
+      if (destination === undefined) return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination was not found" }))
+      const selected = yield* Effect.promise(() => selectWritableLocation(destination.selectedPath))
+      if (!selected.ok || selected.value.canonicalPath !== destination.canonicalPath ||
+        selected.value.identity.device !== destination.device || selected.value.identity.inode !== destination.inode) {
+        return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination changed and requires replacement" }))
+      }
+      const policy = policies.find((candidate) => candidate.destinationId === destinationId)
+      if (policy === undefined) return yield* Effect.fail(new DatabaseWorkerError({ message: "backup retention policy was not found" }))
+      if (options.command === "enable" && !options.confirmed) {
+        return {
+          proposal: {
+            store_kind: "server",
+            destination_id: destination.destinationId,
+            destination_name: destination.name,
+            keep_count: 7,
+            current_state: policy.state,
+            requires_confirmation: true
+          }
+        }
+      }
+      const updated = decodeBackupRetentionPolicyOutcome(yield* worker.call({
+        op: "setBackupRetentionPolicy",
+        destinationId,
+        enabled: options.command === "enable",
+        device: destination.device,
+        inode: destination.inode,
+        authorizedAtMs: Date.now()
+      }))
+      if (updated.kind === "destination_not_found") return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination was not found" }))
+      return {
+        retention: retentionView(updated.policy, destination),
+        confirmed: true
       }
     })
   )
@@ -808,12 +978,14 @@ const main = async () => {
   }
 
   if (args[0] === "backup") {
-    let options: BackupCreateOptions | BackupListOptions | BackupDrillOptions
+    let options: BackupCreateOptions | BackupListOptions | BackupRetentionOptions | BackupDrillOptions
     try {
       options = args[1] === "create"
         ? parseBackupCreateOptions(args)
         : args[1] === "list"
           ? parseBackupListOptions(args)
+          : args[1] === "retention"
+            ? parseBackupRetentionOptions(args)
           : parseBackupDrillOptions(args)
     } catch (error) {
       console.error(error instanceof Error ? error.message : usage())
@@ -823,6 +995,7 @@ const main = async () => {
     try {
       if (options.kind === "create") await runBackupCreateCommand(options)
       else if (options.kind === "drill") await runBackupDrillCommand(options)
+      else if (options.kind === "retention") await runBackupRetentionCommand(options)
       else await runBackupListCommand(options)
     } catch (error) {
       console.error(error instanceof Error ? error.message : "backup creation failed")

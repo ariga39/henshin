@@ -235,7 +235,7 @@ describe("server backup archive", () => {
     const recoveredDatabase = new DatabaseSync(path.join(dataDir, "server.sqlite"), { readOnly: true })
     try {
       expect((recoveredDatabase.prepare("SELECT schema_version FROM server_state WHERE id = 1").get() as { schema_version: number }).schema_version)
-        .toBe(12)
+        .toBe(13)
       expect((recoveredDatabase.prepare("SELECT title_search, basename_search FROM library_entries WHERE entry_id = ?").get(entryId) as {
         title_search: string
         basename_search: string
@@ -272,7 +272,7 @@ describe("server backup archive", () => {
       schema_version: number
     }
     expect(manifest.application_version).toBe(serverPackage.version)
-    expect(manifest.schema_version).toBe(12)
+    expect(manifest.schema_version).toBe(13)
     for (const name of ["state.sqlite", "configuration.json"]) {
       const payload = payloads.get(name)
       if (payload === undefined) throw new Error(`missing ${name}`)
@@ -480,7 +480,7 @@ describe("server backup archive", () => {
     const migratedState = new DatabaseSync(path.join(dataDir, "server.sqlite"), { readOnly: true })
     try {
       expect((migratedState.prepare("SELECT schema_version FROM server_state WHERE id = 1").get() as { schema_version: number }).schema_version)
-        .toBe(12)
+        .toBe(13)
       expect((migratedState.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'backup_artifacts'").get() as { sql: string }).sql)
         .toContain("'rotating'")
     } finally {
