@@ -3,6 +3,8 @@ import type {
   LocalMappingActivateIpcRequest,
   LocalMappingListIpcRequest,
   LocalMappingPreviewIpcRequest,
+  OpenBookIpcRequest,
+  OpenBookStatusIpcRequest,
   ReaderProfileSaveIpcRequest,
   ReaderProfileTestIpcRequest,
   ReaderProfileTestTargetSelectIpcRequest,
@@ -51,6 +53,13 @@ contextBridge.exposeInMainWorld("henshinReaderProfiles", {
 contextBridge.exposeInMainWorld("henshinLibrary", {
   search: (input: LibrarySearchIpcRequest) =>
     ipcRenderer.invoke(IpcChannels.librarySearch, input),
+  open: (input: OpenBookIpcRequest) => ipcRenderer.invoke(IpcChannels.openBook, input),
+  status: (input: OpenBookStatusIpcRequest) => ipcRenderer.invoke(IpcChannels.openBookStatus, input),
+  onOpenStateChanged: (listener: () => void) => {
+    const handler = () => listener()
+    ipcRenderer.on(IpcChannels.openStateChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.openStateChanged, handler)
+  },
   getThumbnail: (key: string) => ipcRenderer.invoke(IpcChannels.thumbnailGet, { key })
 })
 

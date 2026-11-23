@@ -8,9 +8,10 @@ import os from "node:os"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
 import { fileURLToPath, pathToFileURL } from "node:url"
-import { OpenEventHttpClient } from "@henshin/contracts"
+import { OpenEventHttpClient, type EntryResolution } from "@henshin/contracts"
 import { deliverOpenEvents } from "../src/main/OpenEventDelivery"
 import type { OpenJournalStore } from "../src/main/persistence/OpenJournalStore"
+import { OPEN_RESOLUTION_CACHE_BUDGET_BYTES } from "../src/main/persistence/draft-worker-protocol"
 import type { OpenJournalRow } from "../src/main/persistence/draft-worker-protocol"
 
 const repoDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..")
@@ -102,6 +103,30 @@ const eventFor = (input: {
   occurred_at_ms: input.occurredAtMs ?? 1_700_000_000_000
 })
 
+const resolutionFor = (entryId: string, rootId: string): EntryResolution => ({
+  entry_id: entryId,
+  root_id: rootId,
+  relative_path: "fixture.cbz",
+  kind: "archive",
+  decision_version: "2",
+  location_revision: "3",
+  content_version: "5",
+  status: "usable",
+  reason: null,
+  accepted_observation: {
+    kind: "archive",
+    bytes: 7,
+    mtime_ms: 1_700_000_000_000,
+    entry_count: 1,
+    observation_token: "fixture"
+  },
+  first_page: null,
+  sibling_claims: [],
+  sibling_claims_truncated: false,
+  sibling_claims_next_cursor: null,
+  sibling_claims_revision: "1"
+})
+
 beforeAll(async () => {
   workerBuildDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-open-journal-build-"))
   const workerPath = path.join(workerBuildDirectory, "draft-worker.mjs")
@@ -132,13 +157,156 @@ afterAll(async () => {
 })
 
 describe("desktop open journal SQLite worker", () => {
+  it("durably records ambiguous dispatch as unknown and allows explicit recovery", async () => {
+    const running = await startWorker()
+    const instanceId = randomUUID()
+    const actionId = randomUUID()
+    const entryId = randomUUID()
+    await expect(prepare(running.running, { instanceId, actionId, entryId })).resolves.toMatchObject({
+      kind: "admitted",
+      entry: { status: "prepared" }
+    })
+    await expect(running.running.call({ op: "recordOpenUnknown", instanceId, actionId })).resolves.toMatchObject({
+      kind: "updated",
+      entry: { status: "unknown", event: null }
+    })
+    await expect(running.running.call({ op: "getOpenJournal", instanceId, actionId })).resolves.toMatchObject({
+      status: "unknown"
+    })
+    const deliberateActionId = randomUUID()
+    await expect(prepare(running.running, { instanceId, actionId: deliberateActionId, entryId })).resolves.toMatchObject({
+      kind: "admitted",
+      entry: { entryId, status: "prepared" }
+    })
+    await expect(running.running.call({ op: "getOpenJournal", instanceId, actionId })).resolves.toMatchObject({
+      status: "unknown"
+    })
+    await expect(running.running.call({ op: "dismissUnknownOpen", instanceId, actionId })).resolves.toEqual({ kind: "deleted" })
+    await expect(running.running.call({ op: "getOpenJournal", instanceId, actionId })).resolves.toBeNull()
+    await running.running.close()
+    workers.delete(running.running)
+  })
+
+  it("orders entry diagnostics by the latest action, not an older unknown", async () => {
+    const running = await startWorker()
+    const instanceId = randomUUID()
+    const entryId = randomUUID()
+    const olderActionId = randomUUID()
+    const newerActionId = randomUUID()
+    await expect(prepare(running.running, { instanceId, actionId: olderActionId, entryId })).resolves.toMatchObject({
+      kind: "admitted"
+    })
+    await expect(running.running.call({ op: "recordOpenUnknown", instanceId, actionId: olderActionId })).resolves.toMatchObject({
+      kind: "updated",
+      entry: { status: "unknown" }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    await expect(prepare(running.running, { instanceId, actionId: newerActionId, entryId })).resolves.toMatchObject({
+      kind: "admitted"
+    })
+    await expect(running.running.call({
+      op: "recordOpenFailed",
+      instanceId,
+      actionId: newerActionId,
+      failureCode: "open_failed",
+      failureMessage: "the later target was unavailable"
+    })).resolves.toMatchObject({ kind: "updated", entry: { status: "failed" } })
+    await expect(running.running.call({ op: "getLatestOpenJournalByEntry", instanceId, entryId })).resolves.toMatchObject({
+      actionId: newerActionId,
+      status: "failed",
+      failureMessage: "the later target was unavailable"
+    })
+    await expect(running.running.call({ op: "getUnresolvedOpenJournalByEntry", instanceId, entryId })).resolves.toMatchObject({
+      actionId: olderActionId,
+      status: "unknown"
+    })
+    await running.running.close()
+    workers.delete(running.running)
+  })
+
+  it("persists the server-scoped Open resolution cache across a worker restart", async () => {
+    const first = await startWorker()
+    const instanceId = randomUUID()
+    const entryId = randomUUID()
+    const epoch = randomUUID()
+    const resolution = resolutionFor(entryId, randomUUID())
+    await expect(first.running.call({
+      op: "saveOpenResolution",
+      instanceId,
+      entryId,
+      epoch,
+      resolution
+    })).resolves.toMatchObject({
+      instanceId,
+      entryId,
+      epoch,
+      resolution
+    })
+    await expect(first.running.call({ op: "getOpenResolution", instanceId, entryId })).resolves.toMatchObject({
+      instanceId,
+      entryId,
+      epoch,
+      resolution
+    })
+    await first.running.close()
+    workers.delete(first.running)
+
+    const reopened = await startWorker(first.dbPath)
+    await expect(reopened.running.call({ op: "getOpenResolution", instanceId, entryId })).resolves.toMatchObject({
+      instanceId,
+      entryId,
+      epoch,
+      resolution
+    })
+    await reopened.running.close()
+    workers.delete(reopened.running)
+  })
+
+  it("bounds repeated sibling evidence in the persistent resolution cache", async () => {
+    const running = await startWorker()
+    const instanceId = randomUUID()
+    const rootId = randomUUID()
+    const siblingClaims = Array.from({ length: 1_024 }, () => ({
+      entry_id: randomUUID(),
+      relative_path: `Books/${randomUUID()}.cbz`
+    }))
+    const entryIds: Array<string> = []
+    for (let index = 0; index < 48; index += 1) {
+      const entryId = randomUUID()
+      entryIds.push(entryId)
+      await running.running.call({
+        op: "saveOpenResolution",
+        instanceId,
+        entryId,
+        epoch: randomUUID(),
+        resolution: {
+          ...resolutionFor(entryId, rootId),
+          relative_path: `Books/book-${index}.cbz`,
+          sibling_claims: siblingClaims
+        }
+      })
+    }
+    await running.running.close()
+    workers.delete(running.running)
+
+    const database = new DatabaseSync(running.dbPath)
+    const size = database.prepare(
+      "SELECT COUNT(*) AS rows, COALESCE(SUM(length(CAST(resolution_json AS BLOB))), 0) AS bytes FROM open_resolution_cache"
+    ).get() as { rows: number; bytes: number }
+    console.info(`[resolution-cache-benchmark] rows=${size.rows} bytes=${size.bytes} budget=${OPEN_RESOLUTION_CACHE_BUDGET_BYTES}`)
+    expect(size.bytes).toBeLessThanOrEqual(OPEN_RESOLUTION_CACHE_BUDGET_BYTES)
+    expect(size.rows).toBeLessThan(entryIds.length)
+    database.close()
+  })
+
   it("keeps an accepted Open event immutable across a fresh worker restart", async () => {
     const first = await startWorker()
     const instanceId = randomUUID()
     const actionId = randomUUID()
     const entryId = randomUUID()
     const deviceId = randomUUID()
-    const input = { instanceId, actionId, entryId, deviceId }
+    const profileId = randomUUID()
+    const input = { instanceId, actionId, entryId, deviceId, profileId }
     const event = eventFor(input)
 
     await expect(prepare(first.running, input)).resolves.toMatchObject({
@@ -159,9 +327,15 @@ describe("desktop open journal SQLite worker", () => {
     const reopened = await startWorker(first.dbPath)
     await expect(reopened.running.call({ op: "getOpenJournal", instanceId, actionId })).resolves.toMatchObject({
       status: "accepted",
+      profileId,
       deliveryStatus: "pending",
       event: { event_id: actionId, occurred_at_ms: event.occurred_at_ms }
     })
+    await expect(prepare(reopened.running, input)).resolves.toMatchObject({
+      kind: "existing",
+      entry: { profileId }
+    })
+    await expect(prepare(reopened.running, { ...input, profileId: randomUUID() })).resolves.toEqual({ kind: "conflict" })
     await expect(reopened.running.call({ op: "acknowledgeOpenEvent", instanceId, actionId })).resolves.toMatchObject({
       kind: "updated",
       entry: { status: "accepted", deliveryStatus: "acknowledged", event }
@@ -238,11 +412,20 @@ describe("desktop open journal SQLite worker", () => {
     const firstEntry = randomUUID()
     const secondEntry = randomUUID()
     const deviceId = randomUUID()
+    const profileId = randomUUID()
 
-    await expect(prepare(running, { instanceId, actionId, entryId: firstEntry, deviceId })).resolves.toMatchObject({
-      kind: "admitted"
+    await expect(prepare(running, { instanceId, actionId, entryId: firstEntry, deviceId, profileId })).resolves.toMatchObject({
+      kind: "admitted",
+      entry: { profileId }
     })
-    await expect(prepare(running, { instanceId, actionId, entryId: secondEntry, deviceId })).resolves.toEqual({
+    await expect(prepare(running, { instanceId, actionId, entryId: firstEntry, deviceId, profileId })).resolves.toMatchObject({
+      kind: "existing",
+      entry: { profileId }
+    })
+    await expect(prepare(running, { instanceId, actionId, entryId: secondEntry, deviceId, profileId })).resolves.toEqual({
+      kind: "conflict"
+    })
+    await expect(prepare(running, { instanceId, actionId, entryId: firstEntry, deviceId, profileId: randomUUID() })).resolves.toEqual({
       kind: "conflict"
     })
     await expect(running.call({
@@ -253,9 +436,65 @@ describe("desktop open journal SQLite worker", () => {
     })).resolves.toEqual({ kind: "conflict" })
     await expect(running.call({ op: "getOpenJournal", instanceId, actionId })).resolves.toMatchObject({
       entryId: firstEntry,
+      profileId,
       status: "prepared",
       event: null
     })
+  })
+
+  it("migrates a legacy launch journal row without inventing a profile binding", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "henshin-open-journal-legacy-"))
+    workerDirectories.add(directory)
+    const dbPath = path.join(directory, "desktop.db")
+    const instanceId = randomUUID()
+    const actionId = randomUUID()
+    const entryId = randomUUID()
+    const deviceId = randomUUID()
+    const database = new DatabaseSync(dbPath)
+    try {
+      database.exec(`
+        CREATE TABLE launch_journal (
+          instance_id TEXT NOT NULL,
+          action_id TEXT NOT NULL,
+          entry_id TEXT NOT NULL,
+          device_id TEXT NOT NULL,
+          observed_location_revision INTEGER NOT NULL,
+          observed_content_version INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          event_json TEXT,
+          failure_code TEXT,
+          failure_message TEXT,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (instance_id, action_id)
+        );
+      `)
+      database.prepare(`
+        INSERT INTO launch_journal(
+          instance_id, action_id, entry_id, device_id,
+          observed_location_revision, observed_content_version, status,
+          event_json, failure_code, failure_message, created_at_ms, updated_at_ms
+        ) VALUES(?, ?, ?, ?, ?, ?, 'prepared', NULL, NULL, NULL, ?, ?)
+      `).run(instanceId, actionId, entryId, deviceId, 3, 5, 1_700_000_000_000, 1_700_000_000_000)
+    } finally {
+      database.close()
+    }
+
+    const { running } = await startWorker(dbPath)
+    await expect(running.call({ op: "getOpenJournal", instanceId, actionId })).resolves.toMatchObject({
+      entryId,
+      deviceId,
+      profileId: null,
+      status: "unknown",
+      event: null
+    })
+    await expect(prepare(running, {
+      instanceId,
+      actionId,
+      entryId,
+      deviceId,
+      profileId: randomUUID()
+    })).resolves.toEqual({ kind: "conflict" })
   })
 
   it("records definite failure without an event and recovers an unresolved intent as unknown", async () => {

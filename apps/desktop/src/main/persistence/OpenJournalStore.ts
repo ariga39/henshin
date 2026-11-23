@@ -15,6 +15,7 @@ export interface OpenJournalInput {
   readonly instanceId: string
   readonly actionId: string
   readonly entryId: string
+  readonly profileId?: string | null
   readonly deviceId: string
   readonly observedLocationRevision: string
   readonly observedContentVersion: string
@@ -72,6 +73,12 @@ export class OpenJournalStore extends Context.Service<
       OpenJournalRow,
       LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError
     >
+    readonly recordUnknown: (
+      key: Pick<OpenJournalInput, "instanceId" | "actionId">
+    ) => Effect.Effect<
+      OpenJournalRow,
+      LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError
+    >
     readonly dismissUnknown: (
       key: Pick<OpenJournalInput, "instanceId" | "actionId">
     ) => Effect.Effect<void, LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalNotFoundError>
@@ -81,6 +88,12 @@ export class OpenJournalStore extends Context.Service<
     readonly list: (instanceId: string) => Effect.Effect<ReadonlyArray<OpenJournalRow>, LocalDatabaseWorkerError>
     readonly get: (
       key: Pick<OpenJournalInput, "instanceId" | "actionId">
+    ) => Effect.Effect<OpenJournalRow | undefined, LocalDatabaseWorkerError>
+    readonly findLatestByEntry: (
+      key: Pick<OpenJournalInput, "instanceId" | "entryId">
+    ) => Effect.Effect<OpenJournalRow | undefined, LocalDatabaseWorkerError>
+    readonly findUnresolvedByEntry: (
+      key: Pick<OpenJournalInput, "instanceId" | "entryId">
     ) => Effect.Effect<OpenJournalRow | undefined, LocalDatabaseWorkerError>
   }
 >()("henshin/desktop/OpenJournalStore") {
@@ -97,7 +110,7 @@ export class OpenJournalStore extends Context.Service<
         { readonly admitted: boolean; readonly entry: OpenJournalRow },
         LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalStoreFullError
       > =>
-        call({ op: "prepareOpen", ...input }).pipe(
+        call({ op: "prepareOpen", ...input, profileId: input.profileId ?? null }).pipe(
           Effect.flatMap((value): Effect.Effect<
             { readonly admitted: boolean; readonly entry: OpenJournalRow },
             LocalDatabaseWorkerError | OpenJournalConflictError | OpenJournalStoreFullError
@@ -167,6 +180,10 @@ export class OpenJournalStore extends Context.Service<
         key: Pick<OpenJournalInput, "instanceId" | "actionId"> & OpenJournalFailure
       ) => mutation({ op: "recordOpenFailed", ...key }, "record failed open")
 
+      const recordUnknown = (
+        key: Pick<OpenJournalInput, "instanceId" | "actionId">
+      ) => mutation({ op: "recordOpenUnknown", ...key }, "record unknown open")
+
       const removal = (
         request: DraftWorkerRequest,
         operation: string
@@ -221,16 +238,43 @@ export class OpenJournalStore extends Context.Service<
           })
         )
 
+      const findLatestByEntry = (
+        key: Pick<OpenJournalInput, "instanceId" | "entryId">
+      ): Effect.Effect<OpenJournalRow | undefined, LocalDatabaseWorkerError> =>
+        call({ op: "getLatestOpenJournalByEntry", ...key }).pipe(
+          Effect.flatMap((value) => {
+            const decoded = decodeRow(value)
+            return Option.isNone(decoded)
+              ? Effect.fail(new LocalDatabaseWorkerError({ message: "invalid latest open journal read" }))
+              : Effect.succeed(decoded.value ?? undefined)
+          })
+        )
+
+      const findUnresolvedByEntry = (
+        key: Pick<OpenJournalInput, "instanceId" | "entryId">
+      ): Effect.Effect<OpenJournalRow | undefined, LocalDatabaseWorkerError> =>
+        call({ op: "getUnresolvedOpenJournalByEntry", ...key }).pipe(
+          Effect.flatMap((value) => {
+            const decoded = decodeRow(value)
+            return Option.isNone(decoded)
+              ? Effect.fail(new LocalDatabaseWorkerError({ message: "invalid unresolved open journal read" }))
+              : Effect.succeed(decoded.value ?? undefined)
+          })
+        )
+
       return OpenJournalStore.of({
         prepare,
         recordAccepted,
         acknowledge,
         hold,
         recordFailed,
+        recordUnknown,
         dismissUnknown,
         discardHeld,
         list,
-        get
+        get,
+        findLatestByEntry,
+        findUnresolvedByEntry
       })
     })
   )

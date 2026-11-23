@@ -12,6 +12,9 @@ const container = document.getElementById("root")
 if (container === null) throw new Error("missing #root container")
 
 const prototype = new URLSearchParams(location.search).get("mode") === "prototype"
+if (!prototype && new URLSearchParams(location.search).get("screen") === "library") {
+  viewStore.set({ screen: "library" })
+}
 
 const Root = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)

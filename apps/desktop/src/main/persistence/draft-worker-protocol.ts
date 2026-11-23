@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path"
 import { OpenEvent } from "@henshin/contracts/event"
 import { DraftFormId, NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import {
+  EntryResolution,
   ReaderEntryFormat,
   ReaderLaunchMode,
   ReaderTargetMode
@@ -162,6 +163,7 @@ export const OpenJournalRow = Schema.Struct({
   instanceId: Uuid,
   actionId: Uuid,
   entryId: Uuid,
+  profileId: Schema.optional(Schema.NullOr(Uuid)),
   deviceId: Uuid,
   observedLocationRevision: Revision,
   observedContentVersion: Revision,
@@ -179,6 +181,19 @@ export type OpenJournalRow = typeof OpenJournalRow.Type
 
 export const OpenJournalRows = Schema.Array(OpenJournalRow)
 export type OpenJournalRows = typeof OpenJournalRows.Type
+
+export const OpenResolutionCacheRow = Schema.Struct({
+  instanceId: Uuid,
+  entryId: Uuid,
+  epoch: Uuid,
+  resolution: EntryResolution,
+  cachedAtMs: Schema.Int
+})
+export type OpenResolutionCacheRow = typeof OpenResolutionCacheRow.Type
+export const OpenResolutionCacheReadResult = Schema.NullOr(OpenResolutionCacheRow)
+
+/** Maximum UTF-8 bytes retained for persisted accepted-resolution evidence. */
+export const OPEN_RESOLUTION_CACHE_BUDGET_BYTES = 4 * 1024 * 1024
 
 export const OpenJournalReadResult = Schema.NullOr(OpenJournalRow)
 export type OpenJournalReadResult = typeof OpenJournalReadResult.Type
@@ -284,6 +299,7 @@ export const DraftWorkerRequest = Schema.Union([
     instanceId: Uuid,
     actionId: Uuid,
     entryId: Uuid,
+    profileId: Schema.optional(Schema.NullOr(Uuid)),
     deviceId: Uuid,
     observedLocationRevision: Revision,
     observedContentVersion: Revision
@@ -304,10 +320,21 @@ export const DraftWorkerRequest = Schema.Union([
     failureCode: Schema.String,
     failureMessage: Schema.String
   }),
+  Schema.Struct({ op: Schema.Literal("recordOpenUnknown"), instanceId: Uuid, actionId: Uuid }),
   Schema.Struct({ op: Schema.Literal("dismissUnknownOpen"), instanceId: Uuid, actionId: Uuid }),
   Schema.Struct({ op: Schema.Literal("discardHeldOpenEvent"), instanceId: Uuid, actionId: Uuid }),
   Schema.Struct({ op: Schema.Literal("listOpenJournal"), instanceId: Uuid }),
   Schema.Struct({ op: Schema.Literal("getOpenJournal"), instanceId: Uuid, actionId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("getLatestOpenJournalByEntry"), instanceId: Uuid, entryId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("getUnresolvedOpenJournalByEntry"), instanceId: Uuid, entryId: Uuid }),
+  Schema.Struct({ op: Schema.Literal("getOpenResolution"), instanceId: Uuid, entryId: Uuid }),
+  Schema.Struct({
+    op: Schema.Literal("saveOpenResolution"),
+    instanceId: Uuid,
+    entryId: Uuid,
+    epoch: Uuid,
+    resolution: EntryResolution
+  }),
   Schema.Struct({ op: Schema.Literal("close") })
 ])
 export type DraftWorkerRequest = typeof DraftWorkerRequest.Type

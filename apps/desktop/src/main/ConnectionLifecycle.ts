@@ -72,6 +72,7 @@ export class ConnectionLifecycle {
     reason: null
   }
   private expectedInstanceId: string | null = null
+  private cachedSession: { readonly instanceId: string; readonly epoch: string } | null = null
   private readonly candidates = new Map<number, Candidate>()
   private readonly activeFibers = new Map<number, Set<Fiber.Fiber<unknown, unknown>>>()
 
@@ -90,6 +91,10 @@ export class ConnectionLifecycle {
 
   getNamespace(): string | null {
     return this.expectedInstanceId
+  }
+
+  getCachedSession(): { readonly instanceId: string; readonly epoch: string } | null {
+    return this.cachedSession
   }
 
   currentGeneration(): number | null {
@@ -166,6 +171,7 @@ export class ConnectionLifecycle {
         instanceId: handshake.instance_id,
         epoch: handshake.epoch
       }
+      this.cachedSession = { instanceId: handshake.instance_id, epoch: handshake.epoch }
       this.status = {
         state: "connected",
         instance_id: handshake.instance_id,

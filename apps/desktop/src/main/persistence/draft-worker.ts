@@ -5,6 +5,7 @@ import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalOpenEventPayload } from "@henshin/contracts/canonical"
 import { OpenEvent } from "@henshin/contracts/event"
+import { EntryResolution } from "@henshin/contracts"
 import {
   CommandAttemptAdmission,
   CommandAttemptMutation,
@@ -16,7 +17,9 @@ import {
   type LocalMappingRow,
   type DraftRow,
   type OpenJournalRow,
-  type DraftWorkerRequest
+  type OpenResolutionCacheRow,
+  type DraftWorkerRequest,
+  OPEN_RESOLUTION_CACHE_BUDGET_BYTES
 } from "./draft-worker-protocol"
 
 const MAX_DRAFT_ROWS = 64
@@ -31,6 +34,7 @@ const COMMAND_ATTEMPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const COMMAND_ATTEMPT_COMPACTION_BATCH = 64
 const OPEN_JOURNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const OPEN_JOURNAL_COMPACTION_BATCH = 64
+const MAX_OPEN_RESOLUTION_CACHE_ROWS = 256
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const db = new DatabaseSync(dbPath)
 
@@ -105,6 +109,7 @@ db.exec(`
     instance_id TEXT NOT NULL,
     action_id TEXT NOT NULL,
     entry_id TEXT NOT NULL,
+    profile_id TEXT,
     device_id TEXT NOT NULL,
     observed_location_revision INTEGER NOT NULL,
     observed_content_version INTEGER NOT NULL,
@@ -122,6 +127,14 @@ db.exec(`
     CHECK ((status = 'failed' AND failure_code IS NOT NULL AND failure_message IS NOT NULL) OR
       (status <> 'failed' AND failure_code IS NULL AND failure_message IS NULL))
   );
+  CREATE TABLE IF NOT EXISTS open_resolution_cache (
+    instance_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    resolution_json TEXT NOT NULL,
+    cached_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (instance_id, entry_id)
+  );
 `)
 
 const launchJournalColumns = new Set(
@@ -135,6 +148,9 @@ if (!launchJournalColumns.has("delivery_error_code")) {
 }
 if (!launchJournalColumns.has("delivery_error_message")) {
   db.exec("ALTER TABLE launch_journal ADD COLUMN delivery_error_message TEXT")
+}
+if (!launchJournalColumns.has("profile_id")) {
+  db.exec("ALTER TABLE launch_journal ADD COLUMN profile_id TEXT")
 }
 
 const clientMappingColumns = new Set(
@@ -204,7 +220,7 @@ const listReaderProfiles = db.prepare(`
 listReaderProfiles.setReadBigInts(true)
 
 const selectOpenJournal = db.prepare(`
-  SELECT instance_id, action_id, entry_id, device_id,
+  SELECT instance_id, action_id, entry_id, profile_id, device_id,
          observed_location_revision, observed_content_version, status,
          event_json, delivery_status, delivery_error_code, delivery_error_message,
          failure_code, failure_message, created_at_ms, updated_at_ms
@@ -212,8 +228,31 @@ const selectOpenJournal = db.prepare(`
   WHERE instance_id = ? AND action_id = ?
 `)
 selectOpenJournal.setReadBigInts(true)
+const selectLatestOpenJournalByEntry = db.prepare(`
+  SELECT instance_id, action_id, entry_id, profile_id, device_id,
+         observed_location_revision, observed_content_version, status,
+         event_json, delivery_status, delivery_error_code, delivery_error_message,
+         failure_code, failure_message, created_at_ms, updated_at_ms
+  FROM launch_journal
+  WHERE instance_id = ? AND entry_id = ?
+  ORDER BY updated_at_ms DESC, created_at_ms DESC, action_id DESC
+  LIMIT 1
+`)
+selectLatestOpenJournalByEntry.setReadBigInts(true)
+const selectUnresolvedOpenJournalByEntry = db.prepare(`
+  SELECT instance_id, action_id, entry_id, profile_id, device_id,
+         observed_location_revision, observed_content_version, status,
+         event_json, delivery_status, delivery_error_code, delivery_error_message,
+         failure_code, failure_message, created_at_ms, updated_at_ms
+  FROM launch_journal
+  WHERE instance_id = ? AND entry_id = ? AND status IN ('prepared', 'unknown')
+  ORDER BY CASE WHEN status = 'prepared' THEN 0 ELSE 1 END,
+           updated_at_ms DESC, created_at_ms DESC, action_id DESC
+  LIMIT 1
+`)
+selectUnresolvedOpenJournalByEntry.setReadBigInts(true)
 const listOpenJournal = db.prepare(`
-  SELECT instance_id, action_id, entry_id, device_id,
+  SELECT instance_id, action_id, entry_id, profile_id, device_id,
          observed_location_revision, observed_content_version, status,
          event_json, delivery_status, delivery_error_code, delivery_error_message,
          failure_code, failure_message, created_at_ms, updated_at_ms
@@ -260,10 +299,10 @@ const compactOpenJournal = db.prepare(`
 `)
 const insertOpenJournal = db.prepare(`
   INSERT INTO launch_journal(
-    instance_id, action_id, entry_id, device_id,
+    instance_id, action_id, entry_id, profile_id, device_id,
     observed_location_revision, observed_content_version, status,
     event_json, failure_code, failure_message, created_at_ms, updated_at_ms
-  ) VALUES(?, ?, ?, ?, ?, ?, 'prepared', NULL, NULL, NULL, ?, ?)
+  ) VALUES(?, ?, ?, ?, ?, ?, ?, 'prepared', NULL, NULL, NULL, ?, ?)
 `)
 const updateOpenAccepted = db.prepare(`
   UPDATE launch_journal
@@ -281,7 +320,55 @@ const updateOpenFailed = db.prepare(`
   SET status = 'failed', failure_code = ?, failure_message = ?, updated_at_ms = ?
   WHERE instance_id = ? AND action_id = ? AND status = 'prepared'
 `)
+const updateOpenUnknown = db.prepare(`
+  UPDATE launch_journal
+  SET status = 'unknown', updated_at_ms = ?
+  WHERE instance_id = ? AND action_id = ? AND status = 'prepared'
+`)
 const deleteOpenJournal = db.prepare("DELETE FROM launch_journal WHERE instance_id = ? AND action_id = ?")
+const selectOpenResolution = db.prepare(`
+  SELECT instance_id, entry_id, epoch, resolution_json, cached_at_ms
+  FROM open_resolution_cache
+  WHERE instance_id = ? AND entry_id = ?
+`)
+selectOpenResolution.setReadBigInts(true)
+const compactOpenResolutions = db.prepare(`
+  DELETE FROM open_resolution_cache
+  WHERE rowid IN (
+    SELECT rowid
+    FROM open_resolution_cache
+    ORDER BY cached_at_ms ASC, rowid ASC
+    LIMIT -1 OFFSET ${MAX_OPEN_RESOLUTION_CACHE_ROWS}
+  )
+`)
+const selectOpenResolutionBytes = db.prepare(
+  "SELECT COALESCE(SUM(length(CAST(resolution_json AS BLOB))), 0) AS bytes FROM open_resolution_cache"
+)
+selectOpenResolutionBytes.setReadBigInts(true)
+const deleteOldestOpenResolution = db.prepare(`
+  DELETE FROM open_resolution_cache
+  WHERE rowid = (
+    SELECT rowid FROM open_resolution_cache
+    ORDER BY cached_at_ms ASC, rowid ASC
+    LIMIT 1
+  )
+`)
+const upsertOpenResolution = db.prepare(`
+  INSERT INTO open_resolution_cache(instance_id, entry_id, epoch, resolution_json, cached_at_ms)
+  VALUES(?, ?, ?, ?, ?)
+  ON CONFLICT(instance_id, entry_id) DO UPDATE SET
+    epoch = excluded.epoch,
+    resolution_json = excluded.resolution_json,
+    cached_at_ms = excluded.cached_at_ms
+`)
+const compactOpenResolutionCache = (): void => {
+  compactOpenResolutions.run()
+  while (true) {
+    const row = selectOpenResolutionBytes.get() as { readonly bytes: bigint }
+    if (row.bytes <= BigInt(OPEN_RESOLUTION_CACHE_BUDGET_BYTES)) return
+    deleteOldestOpenResolution.run()
+  }
+}
 const selectReaderProfileCount = db.prepare("SELECT COUNT(*) AS count FROM reader_profiles")
 selectReaderProfileCount.setReadBigInts(true)
 const insertReaderProfile = db.prepare(`
@@ -465,6 +552,7 @@ type OpenJournalDbRow = {
   instance_id: string
   action_id: string
   entry_id: string
+  profile_id: string | null
   device_id: string
   observed_location_revision: bigint
   observed_content_version: bigint
@@ -483,6 +571,7 @@ const toOpenJournalRow = (row: OpenJournalDbRow): OpenJournalRow => ({
   instanceId: row.instance_id,
   actionId: row.action_id,
   entryId: row.entry_id,
+  profileId: row.profile_id,
   deviceId: row.device_id,
   observedLocationRevision: row.observed_location_revision.toString(),
   observedContentVersion: row.observed_content_version.toString(),
@@ -504,8 +593,38 @@ const readOpenJournal = (instanceId: string, actionId: string): OpenJournalRow |
   return row === undefined ? undefined : toOpenJournalRow(row)
 }
 
+const readLatestOpenJournalByEntry = (instanceId: string, entryId: string): OpenJournalRow | undefined => {
+  const row = selectLatestOpenJournalByEntry.get(instanceId, entryId) as OpenJournalDbRow | undefined
+  return row === undefined ? undefined : toOpenJournalRow(row)
+}
+
+const readUnresolvedOpenJournalByEntry = (instanceId: string, entryId: string): OpenJournalRow | undefined => {
+  const row = selectUnresolvedOpenJournalByEntry.get(instanceId, entryId) as OpenJournalDbRow | undefined
+  return row === undefined ? undefined : toOpenJournalRow(row)
+}
+
 const readOpenJournalRows = (instanceId: string): ReadonlyArray<OpenJournalRow> =>
   (listOpenJournal.all(instanceId) as unknown as ReadonlyArray<OpenJournalDbRow>).map(toOpenJournalRow)
+
+type OpenResolutionCacheDbRow = {
+  readonly instance_id: string
+  readonly entry_id: string
+  readonly epoch: string
+  readonly resolution_json: string
+  readonly cached_at_ms: bigint
+}
+
+const readOpenResolution = (instanceId: string, entryId: string): OpenResolutionCacheRow | undefined => {
+  const row = selectOpenResolution.get(instanceId, entryId) as OpenResolutionCacheDbRow | undefined
+  if (row === undefined) return undefined
+  return {
+    instanceId: row.instance_id,
+    entryId: row.entry_id,
+    epoch: row.epoch,
+    resolution: Schema.decodeUnknownSync(EntryResolution)(JSON.parse(row.resolution_json)),
+    cachedAtMs: Number(row.cached_at_ms)
+  }
+}
 
 const sameOpenIntent = (
   row: OpenJournalRow,
@@ -514,6 +633,7 @@ const sameOpenIntent = (
   row.instanceId === request.instanceId &&
   row.actionId === request.actionId &&
   row.entryId === request.entryId &&
+  (row.profileId ?? null) === (request.profileId ?? null) &&
   row.deviceId === request.deviceId &&
   row.observedLocationRevision === request.observedLocationRevision &&
   row.observedContentVersion === request.observedContentVersion
@@ -1318,6 +1438,7 @@ const handle = (request: DraftWorkerRequest): unknown => {
           request.instanceId,
           request.actionId,
           request.entryId,
+          request.profileId ?? null,
           request.deviceId,
           BigInt(request.observedLocationRevision),
           BigInt(request.observedContentVersion),
@@ -1445,6 +1566,32 @@ const handle = (request: DraftWorkerRequest): unknown => {
         throw error
       }
     }
+    case "recordOpenUnknown": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const current = readOpenJournal(request.instanceId, request.actionId)
+        if (current === undefined) {
+          db.exec("ROLLBACK")
+          return { kind: "not_found" }
+        }
+        if (current.status === "unknown") {
+          db.exec("COMMIT")
+          return { kind: "existing", entry: current }
+        }
+        if (current.status !== "prepared") {
+          db.exec("COMMIT")
+          return { kind: "conflict" }
+        }
+        updateOpenUnknown.run(Date.now(), request.instanceId, request.actionId)
+        db.exec("COMMIT")
+        const entry = readOpenJournal(request.instanceId, request.actionId)
+        if (entry === undefined) throw new Error("unknown open intent was not readable")
+        return { kind: "updated", entry }
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
     case "dismissUnknownOpen": {
       db.exec("BEGIN IMMEDIATE")
       try {
@@ -1489,6 +1636,32 @@ const handle = (request: DraftWorkerRequest): unknown => {
       return readOpenJournalRows(request.instanceId)
     case "getOpenJournal":
       return readOpenJournal(request.instanceId, request.actionId) ?? null
+    case "getLatestOpenJournalByEntry":
+      return readLatestOpenJournalByEntry(request.instanceId, request.entryId) ?? null
+    case "getUnresolvedOpenJournalByEntry":
+      return readUnresolvedOpenJournalByEntry(request.instanceId, request.entryId) ?? null
+    case "getOpenResolution":
+      return readOpenResolution(request.instanceId, request.entryId) ?? null
+    case "saveOpenResolution": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        upsertOpenResolution.run(
+          request.instanceId,
+          request.entryId,
+          request.epoch,
+          JSON.stringify(request.resolution),
+          Date.now()
+        )
+        compactOpenResolutionCache()
+        db.exec("COMMIT")
+        const row = readOpenResolution(request.instanceId, request.entryId)
+        if (row === undefined) throw new Error("saved open resolution was not readable")
+        return row
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
     case "close":
       db.close()
       return null
