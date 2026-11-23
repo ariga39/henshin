@@ -1483,26 +1483,6 @@ const registerIpc = (): void => {
     }
   })
 
-  if (!prototypeMode) return
-
-  ipcMain.handle(IpcChannels.handshake, (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(HandshakeIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-
-    try {
-      const view = requireConnection().handshakeView()
-      return connectionStatusResult({
-        state: "connected",
-        instance_id: view.instance_id,
-        epoch: view.epoch,
-        reason: null
-      })
-    } catch (error) {
-      return { ok: false as const, error: toPublicError(error) }
-    }
-  })
-
   ipcMain.handle(IpcChannels.connect, (event, raw: unknown) => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(ConnectIpcRequest)(raw)
@@ -1528,6 +1508,26 @@ const registerIpc = (): void => {
     const decoded = Schema.decodeUnknownOption(ConnectionStatusIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return connectionStatusResult(requireConnection().getStatus())
+  })
+
+  if (!prototypeMode) return
+
+  ipcMain.handle(IpcChannels.handshake, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(HandshakeIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+
+    try {
+      const view = requireConnection().handshakeView()
+      return connectionStatusResult({
+        state: "connected",
+        instance_id: view.instance_id,
+        epoch: view.epoch,
+        reason: null
+      })
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
   })
 
   ipcMain.handle(IpcChannels.getNote, (event, raw: unknown) => {

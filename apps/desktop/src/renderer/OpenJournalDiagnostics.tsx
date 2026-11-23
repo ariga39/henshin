@@ -1,7 +1,8 @@
+import { Effect } from "effect"
 import { useEffect, useSyncExternalStore } from "react"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { discardHeldOpenEvent, dismissUnknownOpenJournal, loadOpenJournal } from "./workflows"
+import { discardHeldOpenEvent, dismissUnknownOpenJournal, loadLibraryConnectionStatus, loadOpenJournal } from "./workflows"
 import {
   acceptedOpenJournalRows,
   nonAcceptedOpenJournalRows,
@@ -17,7 +18,10 @@ export const OpenJournalDiagnostics = () => {
 
   useEffect(() => {
     const onOpenJournalChanged = window.henshinOpenJournal?.onChanged
-    void runtime.runPromise(loadOpenJournal)
+    void runtime.runPromise(Effect.gen(function*() {
+      yield* loadLibraryConnectionStatus
+      yield* loadOpenJournal
+    }))
     if (onOpenJournalChanged === undefined) return undefined
     return onOpenJournalChanged(() => {
       void runtime.runPromise(loadOpenJournal)
