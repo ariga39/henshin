@@ -695,13 +695,23 @@ const entryOverrideColumns = new Set(
     (column) => column.name
   )
 )
-if (!entryOverrideColumns.has("title_search")) {
-  db.exec("ALTER TABLE entry_overrides ADD COLUMN title_search TEXT")
-  const existingOverrides = db.prepare(
-    "SELECT entry_id, title FROM entry_overrides WHERE title_present = 1 AND title IS NOT NULL"
-  ).all() as unknown as ReadonlyArray<{ entry_id: string; title: string }>
-  const updateOverrideSearch = db.prepare("UPDATE entry_overrides SET title_search = ? WHERE entry_id = ?")
-  for (const row of existingOverrides) updateOverrideSearch.run(normalizeSearchText(row.title), row.entry_id)
+const missingOverrideSearch = entryOverrideColumns.has("title_search")
+  ? db.prepare("SELECT 1 FROM entry_overrides WHERE title_present = 1 AND title IS NOT NULL AND title_search IS NULL LIMIT 1")
+  : undefined
+if (!entryOverrideColumns.has("title_search") || missingOverrideSearch?.get() !== undefined) {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    if (!entryOverrideColumns.has("title_search")) db.exec("ALTER TABLE entry_overrides ADD COLUMN title_search TEXT")
+    const existingOverrides = db.prepare(
+      "SELECT entry_id, title FROM entry_overrides WHERE title_present = 1 AND title IS NOT NULL AND title_search IS NULL"
+    ).all() as unknown as ReadonlyArray<{ entry_id: string; title: string }>
+    const updateOverrideSearch = db.prepare("UPDATE entry_overrides SET title_search = ? WHERE entry_id = ?")
+    for (const row of existingOverrides) updateOverrideSearch.run(normalizeSearchText(row.title), row.entry_id)
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
 }
 if (!currentLibraryEntryColumns.has("availability_status")) {
   db.exec("ALTER TABLE library_entries ADD COLUMN availability_status TEXT NOT NULL DEFAULT 'unknown' CHECK (availability_status IN ('present', 'missing', 'inaccessible', 'unknown'))")
@@ -1777,21 +1787,9 @@ const resolveReplacement = (
       db.exec("ROLLBACK")
       return { kind: "candidate_version_conflict", currentCandidateVersion }
     }
-    const entry = selectEntryForResolution.get(request.entryId, request.rootId) as {
-      entry_id: string
-      library_id: string
-      root_id: string
-      relative_path: string
-      source_path: string
-      kind: "archive" | "image-directory"
-      title: string
-      page_count: bigint
-      state: "accepted" | "replacement-pending" | "detached"
-      decision_version: bigint
-      content_version: bigint
-      location_revision: bigint
-      accepted_observation_json: string
-    } | undefined
+    const entry = selectEntryForResolution.get(request.entryId, request.rootId) as
+      | Parameters<typeof entryRow>[0]
+      | undefined
     if (entry === undefined || entry.relative_path !== candidate.relative_path) {
       db.exec("ROLLBACK")
       return { kind: "entry_not_found" }
@@ -2136,10 +2134,13 @@ const bindEntry = (
 const updatePersonalTitle = (
   request: Extract<WorkerRequest, { op: "updatePersonalTitle" }>
 ): import("./worker-protocol").PersonalTitleOutcome => {
+  const command = request.command.type === "set-personal-title"
+    ? { type: "set-personal-title" as const, title: request.command.title }
+    : { type: "remove-personal-title" as const }
   const canonicalPayload = JSON.stringify({
     entry_id: request.entryId,
     expected_decision_version: request.expectedDecisionVersion,
-    command: request.command
+    command
   })
 
   db.exec("BEGIN IMMEDIATE")

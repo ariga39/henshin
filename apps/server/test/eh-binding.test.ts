@@ -441,4 +441,41 @@ describe("durable EH binding", () => {
       expect.objectContaining({ entry_id: entry.entry_id, title: "Legacy Straße", title_override: "Legacy Straße", match_fields: ["title"] })
     ])
   })
+
+  it("repairs a personal title search backfill left after the column was added", async () => {
+    const server = await start()
+    const entries = await indexEntries(server)
+    const entry = entries[0]
+    if (entry === undefined) throw new Error("expected an indexed entry")
+
+    await server.stop()
+    const interrupted = new DatabaseSync(server.dbPath)
+    interrupted.exec("DROP TABLE entry_overrides")
+    interrupted.exec(`
+      CREATE TABLE entry_overrides (
+        entry_id TEXT PRIMARY KEY REFERENCES library_entries(entry_id) ON DELETE CASCADE,
+        title_present INTEGER NOT NULL CHECK (title_present IN (0, 1)),
+        title TEXT,
+        CHECK ((title_present = 0 AND title IS NULL) OR (title_present = 1 AND title IS NOT NULL))
+      )
+    `)
+    interrupted.prepare("INSERT INTO entry_overrides(entry_id, title_present, title) VALUES(?, 1, ?)")
+      .run(entry.entry_id, "Interrupted Title")
+    interrupted.exec("ALTER TABLE entry_overrides ADD COLUMN title_search TEXT")
+    interrupted.close()
+
+    const repaired = await startServer(server.dbPath)
+    servers.push(repaired)
+    const columns = new DatabaseSync(server.dbPath)
+    expect(columns.prepare("SELECT title_search FROM entry_overrides WHERE entry_id = ?").get(entry.entry_id))
+      .toEqual({ title_search: "interrupted title" })
+    columns.close()
+
+    const search = await withLibraryClient(repaired, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "interrupted title" } })
+    }))
+    expect(search.data.entries).toEqual([
+      expect.objectContaining({ entry_id: entry.entry_id, title: "Interrupted Title", title_override: "Interrupted Title", match_fields: ["title"] })
+    ])
+  })
 })
