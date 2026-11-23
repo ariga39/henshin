@@ -833,9 +833,13 @@ const main = async () => {
   }
 
   if (args[0] === "backup") {
-    let options: BackupCreateOptions | BackupDrillOptions
+    let options: BackupCreateOptions | BackupDrillOptions | BackupRestoreOptions
     try {
-      options = args[1] === "create" ? parseBackupCreateOptions(args) : parseBackupDrillOptions(args)
+      options = args[1] === "create"
+        ? parseBackupCreateOptions(args)
+        : args[1] === "drill"
+          ? parseBackupDrillOptions(args)
+          : parseBackupRestoreOptions(args)
     } catch (error) {
       console.error(error instanceof Error ? error.message : usage())
       process.exitCode = 2
@@ -843,7 +847,8 @@ const main = async () => {
     }
     try {
       if ("label" in options) await runBackupCreateCommand(options)
-      else await runBackupDrillCommand(options)
+      else if (args[1] === "restore") await runBackupRestoreCommand(options as BackupRestoreOptions)
+      else await runBackupDrillCommand(options as BackupDrillOptions)
     } catch (error) {
       console.error(error instanceof Error ? error.message : "backup creation failed")
       process.exitCode = 1
