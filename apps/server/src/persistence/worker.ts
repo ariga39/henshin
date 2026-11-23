@@ -335,7 +335,7 @@ const db = new DatabaseSync(dbPath)
 const cleanupBackupDrillStaging = (): void => {
   const dataDirectory = dirname(dbPath)
   for (const entry of readdirSync(dataDirectory, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !entry.name.startsWith(".backup-drill-")) continue
+    if (!entry.isDirectory() || (!entry.name.startsWith(".backup-drill-") && !entry.name.startsWith(".backup-restore-preview-"))) continue
     rmSync(join(dataDirectory, entry.name), { recursive: true, force: true })
   }
 }

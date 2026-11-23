@@ -21,6 +21,7 @@ import {
   currentIdentity,
   listRestoreArtifacts,
   readRestorePoint,
+  cleanupRestorePreviewStaging,
   type RestoreArtifact
 } from "./maintenance/BackupRestoreArchive"
 import {
@@ -695,16 +696,24 @@ const runBackupRestoreCommand = async (options: BackupRestoreOptions): Promise<v
   const dbPath = await resolveIndependentDatabasePath(options)
   const guard = await acquireServerOwnership(dbPath)
   try {
+    await cleanupRestorePreviewStaging(path.dirname(dbPath))
     const target = currentIdentity(dbPath)
     const artifacts = listRestoreArtifacts(dbPath)
     if (options.command === "list") {
-      const points = await Promise.all(artifacts.map(async (artifact) => {
+      const points = []
+      for (const artifact of artifacts) {
         try {
-          return await readRestorePoint(artifact, target, path.dirname(dbPath))
+          points.push(await readRestorePoint(artifact, target, path.dirname(dbPath)))
         } catch (error) {
-          return { artifactId: artifact.artifactId, status: "unavailable", diagnostic: error instanceof Error ? error.message : "recovery point unavailable" }
+          points.push({
+            artifactId: artifact.artifactId,
+            destinationId: artifact.destinationId,
+            status: "unavailable",
+            code: error instanceof BackupRestoreFailure ? error.code : "recovery-point-unavailable",
+            diagnostic: error instanceof Error ? error.message : "recovery point unavailable"
+          })
         }
-      }))
+      }
       process.stdout.write(JSON.stringify({ recovery_points: points }) + "\n")
       return
     }
