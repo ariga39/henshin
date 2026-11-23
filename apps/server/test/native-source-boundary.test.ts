@@ -1,7 +1,7 @@
 import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   discoverSourceRoot,
   resolveSourceCandidate,
@@ -57,6 +57,32 @@ describe("native source boundary precursor", () => {
       { limits: { maxLogicalSegments: 1, deadlineMs: Number.NaN } }
     )
     expect(bounded).toMatchObject({ ok: false, code: "directory-limit" })
+  })
+
+  it("reports a directory limit when a valid lookup reaches its deadline", async () => {
+    const directory = await makeTempRoot()
+    const name = "book.cbz"
+    await writeFile(join(directory, name), "book")
+    const root = await selectedRoot(directory)
+    const limits = { deadlineMs: 30_000 }
+    const start = 1_000
+    const now = vi.spyOn(Date, "now").mockReturnValue(start)
+    try {
+      const control = await resolveSourceCandidate(root, name, { limits })
+      const finalCheck = now.mock.calls.length
+      expect(control).toMatchObject({ ok: true })
+      expect(finalCheck).toBeGreaterThan(1)
+
+      // Replay the successful lookup, reaching the inclusive deadline only
+      // on its final check, after the candidate and root have been revalidated.
+      let calls = 0
+      now.mockImplementation(() => ++calls < finalCheck ? start : start + limits.deadlineMs)
+      const expired = await resolveSourceCandidate(root, name, { limits })
+      expect(calls).toBe(finalCheck)
+      expect(expired).toMatchObject({ ok: false, code: "directory-limit" })
+    } finally {
+      now.mockRestore()
+    }
   })
 
   it("resolves exact Unicode and literal metacharacter names without rewriting them", async () => {
