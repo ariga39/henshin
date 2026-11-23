@@ -24,6 +24,23 @@ The bounded native source-boundary precursor is recorded in
 [docs/validation/native-source-boundaries-prototype.md](docs/validation/native-source-boundaries-prototype.md);
 it is not a G3 completion claim.
 
+## Build the standalone server archive
+
+The repository build produces a platform-specific archive under
+`dist/standalone/`. Build-time pnpm stages the locked production dependencies;
+the unpacked archive requires only the documented Node.js prerequisite and does
+not require pnpm or a repository checkout at runtime.
+
+```sh
+CI=true fnm exec --using=24.19.0 node apps/server/distribution.mjs
+```
+
+The archive includes the server, persistence, manifest, and thumbnail workers,
+the host-native Sharp/libvips codec, and third-party redistribution notices. It
+is not a release upload or a cross-platform support claim. The archive README
+records the exact platform exercised and the remaining limits; a separate
+archive is required for each advertised host architecture.
+
 ## Runtime persistence prototype
 
 The prototype lives in `apps/server`, `apps/desktop`, and `packages/contracts`.

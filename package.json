@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "pnpm --filter @henshin/server build && pnpm --filter @henshin/desktop build",
+    "build:server:distribution": "node apps/server/distribution.mjs",
     "typecheck": "pnpm -r typecheck",
     "test:http": "vitest run",
     "test:e2e": "playwright test",

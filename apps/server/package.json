@@ -6,6 +6,7 @@
   "main": "dist/server.mjs",
   "scripts": {
     "build": "node build.mjs",
+    "build:distribution": "node distribution.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "node dist/server.mjs"
   },
