@@ -22,7 +22,11 @@ import {
 const MAX_DRAFT_ROWS = 64
 const MAX_COMMAND_ATTEMPTS = 64
 const MAX_READER_PROFILES = 64
-const MAX_OPEN_JOURNAL_ROWS = 64
+const MAX_OPEN_JOURNAL_OUTSTANDING_ROWS = 64
+const MAX_OPEN_JOURNAL_TERMINAL_ADMISSION_ROWS = 8_192
+const MAX_OPEN_JOURNAL_TOTAL_ROWS = MAX_OPEN_JOURNAL_TERMINAL_ADMISSION_ROWS + MAX_OPEN_JOURNAL_OUTSTANDING_ROWS
+const OPEN_JOURNAL_TERMINAL_TAIL_ROWS = 64
+const OPEN_JOURNAL_LIST_LIMIT = MAX_OPEN_JOURNAL_OUTSTANDING_ROWS + OPEN_JOURNAL_TERMINAL_TAIL_ROWS
 const COMMAND_ATTEMPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const COMMAND_ATTEMPT_COMPACTION_BATCH = 64
 const OPEN_JOURNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
@@ -215,11 +219,31 @@ const listOpenJournal = db.prepare(`
          failure_code, failure_message, created_at_ms, updated_at_ms
   FROM launch_journal
   WHERE instance_id = ?
-  ORDER BY updated_at_ms DESC, action_id ASC
+  ORDER BY CASE
+    WHEN status IN ('prepared', 'unknown')
+      OR (status = 'accepted' AND delivery_status <> 'acknowledged')
+    THEN 0 ELSE 1 END,
+    updated_at_ms DESC,
+    action_id ASC
+  LIMIT ${OPEN_JOURNAL_LIST_LIMIT}
 `)
 listOpenJournal.setReadBigInts(true)
-const selectOpenJournalCount = db.prepare("SELECT COUNT(*) AS count FROM launch_journal")
-selectOpenJournalCount.setReadBigInts(true)
+const selectOpenJournalTotalCount = db.prepare("SELECT COUNT(*) AS count FROM launch_journal")
+selectOpenJournalTotalCount.setReadBigInts(true)
+const selectOpenJournalOutstandingCount = db.prepare(`
+  SELECT COUNT(*) AS count
+  FROM launch_journal
+  WHERE status IN ('prepared', 'unknown')
+     OR (status = 'accepted' AND delivery_status <> 'acknowledged')
+`)
+selectOpenJournalOutstandingCount.setReadBigInts(true)
+const selectOpenJournalTerminalCount = db.prepare(`
+  SELECT COUNT(*) AS count
+  FROM launch_journal
+  WHERE status = 'failed'
+     OR (status = 'accepted' AND delivery_status = 'acknowledged')
+`)
+selectOpenJournalTerminalCount.setReadBigInts(true)
 const compactOpenJournal = db.prepare(`
   DELETE FROM launch_journal
   WHERE rowid IN (
@@ -1278,8 +1302,14 @@ const handle = (request: DraftWorkerRequest): unknown => {
 
         const now = Date.now()
         compactOpenJournal.run(OPEN_JOURNAL_RETENTION_MS, now, OPEN_JOURNAL_COMPACTION_BATCH)
-        const count = (selectOpenJournalCount.get() as { count: bigint }).count
-        if (count >= BigInt(MAX_OPEN_JOURNAL_ROWS)) {
+        const totalCount = (selectOpenJournalTotalCount.get() as { count: bigint }).count
+        const outstandingCount = (selectOpenJournalOutstandingCount.get() as { count: bigint }).count
+        const terminalCount = (selectOpenJournalTerminalCount.get() as { count: bigint }).count
+        if (
+          totalCount >= BigInt(MAX_OPEN_JOURNAL_TOTAL_ROWS) ||
+          outstandingCount >= BigInt(MAX_OPEN_JOURNAL_OUTSTANDING_ROWS) ||
+          terminalCount >= BigInt(MAX_OPEN_JOURNAL_TERMINAL_ADMISSION_ROWS)
+        ) {
           db.exec("COMMIT")
           return { kind: "full" }
         }
