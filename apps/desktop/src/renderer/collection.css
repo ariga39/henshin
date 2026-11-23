@@ -37,7 +37,20 @@
   padding: .45rem 0;
   border-bottom: 1px solid #dce2df;
 }
-.library-entry-details { display: grid; flex: 1; min-width: 0; gap: .15rem; align-content: center; }
+.library-entry-details {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: .15rem;
+  align-content: center;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: inherit !important;
+  padding: 0 !important;
+  text-align: left;
+}
+.library-entry-details:focus-visible { outline: 2px solid #17554d; outline-offset: .2rem; }
 .library-cover-frame, .library-cover-image, .library-cover-placeholder {
   width: 4.5rem;
   height: 6.75rem;

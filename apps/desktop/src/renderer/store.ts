@@ -14,7 +14,8 @@ import type {
   SavedDraft,
   ReaderProfile,
   ReaderProfileTestResult,
-  ReaderProfileTestTarget
+  ReaderProfileTestTarget,
+  OpenBookIpcResult
 } from "@henshin/contracts"
 import type { OpenJournalView } from "./client"
 
@@ -27,6 +28,17 @@ export type Outcome =
   | { readonly kind: "draft_conflict"; readonly current_local_revision: string }
   | { readonly kind: "reconciled"; readonly requires_reconciliation: boolean }
   | { readonly kind: "error"; readonly message: string }
+
+export type LibraryOpenStatus = "idle" | "loading" | "accepted" | "failed" | "unknown"
+
+export interface LibraryOpenState {
+  readonly namespace_id: string
+  readonly entry_id: string
+  readonly profile_id: string
+  readonly connection_generation: number
+  readonly status: LibraryOpenStatus
+  readonly result: OpenBookIpcResult | null
+}
 
 export interface ViewState {
   readonly screen: "setup" | "library"
@@ -129,6 +141,9 @@ export interface ViewState {
   readonly library_scan_status: "idle" | "starting" | "started" | "error"
   readonly library_scan_error: string | null
   readonly library_scan_task: ScanTask | null
+  readonly library_selected_entry_id: string | null
+  readonly library_open_profile_id: string | null
+  readonly library_open_states: ReadonlyArray<LibraryOpenState>
 }
 
 const initialState: ViewState = {
@@ -231,7 +246,10 @@ const initialState: ViewState = {
   pending_replacement_error: null,
   library_scan_status: "idle",
   library_scan_error: null,
-  library_scan_task: null
+  library_scan_task: null,
+  library_selected_entry_id: null,
+  library_open_profile_id: null,
+  library_open_states: []
 }
 
 const sameConnection = (left: ConnectionStatusView, right: ConnectionStatusView): boolean =>
