@@ -140,7 +140,15 @@ test("recovers durable draft and requires explicit reader reauthorization across
   await firstWindow.getByTestId("text-input").fill("older recovered draft")
   await firstWindow.getByTestId("save-local-draft").click()
   await expect(firstWindow.getByTestId("outcome")).toContainText("local draft saved")
-  const profileResult = await firstWindow.evaluate((executablePath) => window.henshinReaderProfiles.save({
+  await first.evaluate(({ dialog }) => {
+    Object.defineProperty(dialog, "showOpenDialog", {
+      configurable: true,
+      value: async () => ({ canceled: false, filePaths: [process.execPath] })
+    })
+  })
+  const executable = await firstWindow.evaluate(() => window.henshinReaderProfiles.selectExecutable())
+  if (!executable.ok || executable.data === null) throw new Error("reader executable was not selected")
+  const profileResult = await firstWindow.evaluate((handle) => window.henshinReaderProfiles.save({
     profile_id: null,
     expected_revision: "0",
     name: "Recovered reader",
@@ -148,8 +156,8 @@ test("recovers durable draft and requires explicit reader reauthorization across
     supported_formats: ["archive"],
     target_mode: "archive",
     argument_tokens: ["{target}"],
-    selection_handle: null
-  }), await first.evaluate(() => process.execPath))
+    selection_handle: handle
+  }), executable.data.selection_handle)
   expect(profileResult).toMatchObject({ ok: true, data: { name: "Recovered reader", revision: "1" } })
   await first.close()
   launched.splice(launched.indexOf(first), 1)
@@ -181,7 +189,7 @@ test("recovers durable draft and requires explicit reader reauthorization across
       configurable: true,
       value: async () => ({ canceled: false, filePaths: [selected] })
     })
-  }, [target])
+  }, target)
   const targetSelection = await recoveredWindow.evaluate((profile) => window.henshinReaderProfiles.selectTestTarget({
     profile_id: profile.profile_id,
     expected_revision: profile.revision
