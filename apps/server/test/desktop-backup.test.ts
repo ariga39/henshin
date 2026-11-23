@@ -265,7 +265,10 @@ describe("stopped desktop backup", () => {
       pending_work: { drafts: 1, command_attempts: 1, launch_journal: 1 },
       requires_confirmation: true
     })
-    await expect(execFile(process.execPath, [SERVER_PATH, "backup", "desktop", "restore", "--data-dir", dataDirectory, "--input", archive, "--confirm"])).rejects.toMatchObject({ code: 2 })
+    for (const flags of [["--confirm", "--preview"], ["--preview", "--confirm"]]) {
+      await expect(execFile(process.execPath, [SERVER_PATH, "backup", "desktop", "restore", "--data-dir", dataDirectory, "--input", archive, ...flags]))
+        .rejects.toMatchObject({ code: 2 })
+    }
     const originalId = (await readFile(path.join(dataDirectory, "device-id"), "utf8")).trim()
     for (const [id, version, diagnostic] of [
       ["22222222-2222-4222-8222-222222222222", 1, "identity disagree"],

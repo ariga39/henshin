@@ -80,7 +80,7 @@ const usage = (): string =>
   "       server.mjs backup create (--data-dir <directory> | --database <path>) --destination-id <destination-id> [--label <label>]\n" +
   "       server.mjs backup drill [list] (--data-dir <directory> | --database <path>) [--artifact-id <artifact-id>]"
   + "\n       server.mjs backup desktop --data-dir <directory> --output <archive> [--label <label>]"
-  + "\n       server.mjs backup desktop restore --data-dir <directory> --input <archive> [--preview]"
+  + "\n       server.mjs backup desktop restore --data-dir <directory> --input <archive> [--preview|--confirm]"
 
 interface BackupDestinationOptions {
   readonly command: "list" | "register" | "replace"
@@ -115,6 +115,7 @@ interface DesktopBackupOptions {
 interface DesktopRestoreOptions {
   readonly dataDirectory: string
   readonly inputPath: string
+  readonly confirmed: boolean
 }
 
 const parseBackupCreateOptions = (args: ReadonlyArray<string>): BackupCreateOptions => {
@@ -217,6 +218,8 @@ const parseDesktopRestoreOptions = (args: ReadonlyArray<string>): DesktopRestore
   if (args[1] !== "desktop" || args[2] !== "restore") throw new Error(usage())
   let dataDirectory: string | undefined
   let inputPath: string | undefined
+  let confirmed = false
+  let preview = false
   for (let index = 3; index < args.length; index += 1) {
     switch (args[index]) {
       case "--data-dir":
@@ -227,7 +230,11 @@ const parseDesktopRestoreOptions = (args: ReadonlyArray<string>): DesktopRestore
         inputPath = args[++index]
         if (inputPath === undefined || inputPath.startsWith("--")) throw new Error(usage())
         break
+      case "--confirm":
+        confirmed = true
+        break
       case "--preview":
+        preview = true
         break
       case "--help":
         throw new Error(usage())
@@ -236,7 +243,8 @@ const parseDesktopRestoreOptions = (args: ReadonlyArray<string>): DesktopRestore
     }
   }
   if (dataDirectory === undefined || inputPath === undefined) throw new Error(usage())
-  return { dataDirectory, inputPath }
+  if (confirmed && preview) throw new Error(usage())
+  return { dataDirectory, inputPath, confirmed }
 }
 
 const parseBackupDestinationOptions = (args: ReadonlyArray<string>): BackupDestinationOptions => {
