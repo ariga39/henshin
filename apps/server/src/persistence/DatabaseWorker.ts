@@ -10,7 +10,23 @@ const MAX_PENDING_CALLS = 64
 const CALL_DEADLINE = Duration.seconds(5)
 const SHUTDOWN_DEADLINE_MS = 2_000
 
-const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+type Settlement = "completed" | "failed" | "timed-out"
+
+const settleWithin = (promise: Promise<unknown>, timeoutMs: number): Promise<Settlement> =>
+  new Promise((resolve) => {
+    let settled = false
+    const finish = (result: Settlement) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(result)
+    }
+    const timer = setTimeout(() => finish("timed-out"), timeoutMs)
+    promise.then(
+      () => finish("completed"),
+      () => finish("failed")
+    )
+  })
 
 export interface DatabaseWorkerOptions {
   /** Test-only worker replacement and data used by worker fault fixtures. */
@@ -47,6 +63,11 @@ export class DatabaseWorker extends Context.Service<
         >()
         let nextId = 1
         let alive = true
+        let stopped = false
+        let resolveStopped: () => void = () => undefined
+        const stoppedPromise = new Promise<void>((resolve) => {
+          resolveStopped = resolve
+        })
 
         const failPending = (message: string) => {
           const entries = Array.from(pending.values())
@@ -75,11 +96,15 @@ export class DatabaseWorker extends Context.Service<
             })
 
             instance.on("error", (error: Error) => {
+              stopped = true
+              resolveStopped()
               alive = false
               failPending(error.message)
             })
 
             instance.on("exit", () => {
+              stopped = true
+              resolveStopped()
               alive = false
               failPending("database worker exited")
             })
@@ -89,23 +114,33 @@ export class DatabaseWorker extends Context.Service<
           (instance) =>
             Effect.promise(async () => {
               alive = false
-              if (instance.threadId === -1) return
+              if (stopped || instance.threadId === -1) return
+              const shutdownDeadlineMs = options.shutdownDeadlineMs ?? SHUTDOWN_DEADLINE_MS
+              let closeId: number | undefined
               const ack = new Promise<void>((resolve) => {
-                const id = nextId++
-                pending.set(id, { resolve: () => resolve(), reject: () => resolve() })
+                closeId = nextId++
+                pending.set(closeId, { resolve: () => resolve(), reject: () => resolve() })
                 try {
-                  instance.postMessage({ id, request: { op: "close" } })
+                  instance.postMessage({ id: closeId, request: { op: "close" } })
                 } catch {
-                  pending.delete(id)
+                  pending.delete(closeId)
                   resolve()
                 }
               })
-              await Promise.race([ack, delay(options.shutdownDeadlineMs ?? SHUTDOWN_DEADLINE_MS)])
+              const closeResult = await Promise.race([
+                settleWithin(ack, shutdownDeadlineMs),
+                stoppedPromise.then((): Settlement => "completed")
+              ])
+              if (closeId !== undefined) pending.delete(closeId)
+              if (closeResult === "timed-out") {
+                console.error("database worker shutdown timed out waiting for close acknowledgement")
+              }
+              if (stopped || closeResult === "completed" && instance.threadId === -1) return
               if (instance.threadId !== -1) {
-                await Promise.race([
-                  instance.terminate(),
-                  delay(options.shutdownDeadlineMs ?? SHUTDOWN_DEADLINE_MS)
-                ])
+                const terminateResult = await settleWithin(instance.terminate(), shutdownDeadlineMs)
+                if (terminateResult === "timed-out") {
+                  console.error("database worker shutdown timed out waiting for termination")
+                }
               }
             })
         )
