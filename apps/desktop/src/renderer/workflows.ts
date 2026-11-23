@@ -12,6 +12,7 @@ import type {
 } from "@henshin/contracts"
 import {
   LibraryClient,
+  EhClient,
   OpenJournalClient,
   LocalMappingClient,
   PrototypeClient,
@@ -1252,7 +1253,7 @@ const replaceLibraryOpenState = (
   next
 ]
 
-export const loadLibraryEntry = (entryId: string) =>
+export const loadLibraryEntry = (entryId: string, generation = viewStore.getState().gallery_search_generation) =>
   Effect.gen(function*() {
     const client = yield* LibraryClient
     yield* Effect.sync(() => viewStore.set({
@@ -1263,7 +1264,8 @@ export const loadLibraryEntry = (entryId: string) =>
       library_note_server_text: null
     }))
     const result = yield* client.entry({ entry_id: entryId })
-    if (viewStore.getState().library_selected_entry_id !== entryId) return
+    const current = viewStore.getState()
+    if (current.library_selected_entry_id !== entryId || current.gallery_search_generation !== generation) return
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({
         library_entry_status: "error",
@@ -1280,7 +1282,9 @@ export const loadLibraryEntry = (entryId: string) =>
       library_note_text: result.data.note?.text ?? "",
       library_note_status: "idle",
       library_note_error: null,
-      library_note_server_text: null
+      library_note_server_text: null,
+      gallery_search_title: result.data.title,
+      gallery_search_status: "idle"
     }))
   })
 
@@ -1291,6 +1295,7 @@ export const selectLibraryEntry = (entryId: string) =>
     const preserveManualProfile = state.library_selected_entry_id === entryId
       ? state.library_open_profile_id
       : null
+    const generation = state.gallery_search_generation + 1
     yield* Effect.sync(() => viewStore.set({
       library_selected_entry_id: entryId,
       library_open_profile_id: preserveManualProfile ?? openState?.profile_id ?? null,
@@ -1300,9 +1305,20 @@ export const selectLibraryEntry = (entryId: string) =>
       library_note_text: "",
       library_note_status: "idle",
       library_note_error: null,
-      library_note_server_text: null
+      library_note_server_text: null,
+      gallery_search_title: "",
+      gallery_search_author: "",
+      gallery_search_language: "",
+      gallery_search_generation: generation,
+      gallery_search_status: "idle",
+      gallery_search_error: null,
+      gallery_candidates: [],
+      gallery_selected_candidate_url: null,
+      gallery_bind_status: "idle",
+      gallery_bind_error: null,
+      gallery_bind_operation_id: null
     }))
-    yield* loadLibraryEntry(entryId)
+    yield* loadLibraryEntry(entryId, generation)
   })
 
 export const updateLibraryNote = (text: string) =>
@@ -1537,6 +1553,101 @@ export const searchLibrary = (query: string) =>
           })
     }))
     yield* loadLibrary(false, query)
+  })
+
+export const searchGalleryCandidates = () =>
+  Effect.gen(function*() {
+    const client = yield* EhClient
+    const state = viewStore.getState()
+    if (state.library_selected_entry_id === null || state.gallery_search_title.trim().length === 0) return
+    const generation = state.gallery_search_generation + 1
+    yield* Effect.sync(() => viewStore.set({
+      gallery_search_generation: generation,
+      gallery_search_status: "loading",
+      gallery_search_error: null,
+      gallery_candidates: [],
+      gallery_selected_candidate_url: null,
+      gallery_bind_status: "idle",
+      gallery_bind_error: null,
+      gallery_bind_operation_id: null
+    }))
+    const current = viewStore.getState()
+    const result = yield* client.candidates({
+      title: current.gallery_search_title,
+      ...(current.gallery_search_author.trim().length === 0 ? {} : { author: current.gallery_search_author }),
+      ...(current.gallery_search_language.trim().length === 0 ? {} : { language: current.gallery_search_language })
+    })
+    if (viewStore.getState().gallery_search_generation !== generation) return
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({ gallery_search_status: "error", gallery_search_error: result.error.message }))
+      return
+    }
+    yield* Effect.sync(() => viewStore.set({
+      gallery_search_status: result.data.status,
+      gallery_search_error: null,
+      gallery_candidates: result.data.candidates,
+      gallery_selected_candidate_url: null
+    }))
+  })
+
+export const cancelGallerySearch = Effect.sync(() => {
+  const state = viewStore.getState()
+  if (state.gallery_search_status !== "loading") return
+  viewStore.set({
+    gallery_search_generation: state.gallery_search_generation + 1,
+    gallery_search_status: "cancelled",
+    gallery_search_error: null,
+    gallery_candidates: [],
+      gallery_selected_candidate_url: null,
+      gallery_bind_operation_id: null
+  })
+})
+
+export const bindSelectedGalleryCandidate = () =>
+  Effect.gen(function*() {
+    const client = yield* LibraryClient
+    const state = viewStore.getState()
+    const entry = state.library_entry
+    const entryId = state.library_selected_entry_id
+    const url = state.gallery_selected_candidate_url
+    if (entry === null || entryId === null || url === null) return
+    const operationId = state.gallery_bind_operation_id ?? newOperationId()
+    yield* Effect.sync(() => viewStore.set({
+      gallery_bind_status: "loading",
+      gallery_bind_error: null,
+      gallery_bind_operation_id: operationId
+    }))
+    const result = yield* client.bind({ operation_id: operationId, entry_id: entryId, url, expected_decision_version: entry.decision_version })
+    const current = viewStore.getState()
+    if (current.library_selected_entry_id !== entryId) return
+    if (!result.ok) {
+      const refreshed = yield* client.entry({ entry_id: entryId })
+      const afterRefresh = viewStore.getState()
+      if (afterRefresh.library_selected_entry_id !== entryId) return
+      if (refreshed.ok) {
+        yield* Effect.sync(() => viewStore.set({
+          library_entry: refreshed.data,
+          library_entry_status: "ready",
+          library_entry_error: null,
+          gallery_bind_status: "error",
+          gallery_bind_error: result.error.message
+        }))
+      } else {
+        yield* Effect.sync(() => viewStore.set({
+          library_entry: null,
+          library_entry_status: "error",
+          library_entry_error: refreshed.error.message,
+          gallery_bind_status: "error",
+          gallery_bind_error: result.error.message
+        }))
+      }
+      return
+    }
+    yield* Effect.sync(() => viewStore.set({
+      library_entry: result.data.entry,
+      gallery_bind_status: "confirmed",
+      gallery_bind_error: null
+    }))
   })
 
 export const saveRoot = Effect.gen(function*() {

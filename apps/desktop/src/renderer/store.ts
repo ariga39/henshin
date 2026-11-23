@@ -6,6 +6,7 @@ import type {
   LocalMappingPreview,
   LibraryEntry,
   LibraryEntryDetails,
+  EhGalleryCandidate,
   NoteView,
   RootPreviewRequest,
   RootPreviewResult,
@@ -127,6 +128,21 @@ export interface ViewState {
   readonly reader_profile_test_result: ReaderProfileTestResult | null
   readonly reader_profile_test_error: string | null
   readonly library_entries: ReadonlyArray<LibraryEntry>
+  readonly library_selected_entry_id: string | null
+  readonly library_entry: LibraryEntryDetails | null
+  readonly library_entry_status: "idle" | "loading" | "ready" | "error"
+  readonly library_entry_error: string | null
+  readonly gallery_search_title: string
+  readonly gallery_search_author: string
+  readonly gallery_search_language: string
+  readonly gallery_search_status: "idle" | "loading" | "results" | "empty" | "access_failed" | "rate_limited" | "restricted" | "unrecognized_layout" | "cancelled" | "error"
+  readonly gallery_search_error: string | null
+  readonly gallery_candidates: ReadonlyArray<EhGalleryCandidate>
+  readonly gallery_selected_candidate_url: string | null
+  readonly gallery_search_generation: number
+  readonly gallery_bind_status: "idle" | "loading" | "confirmed" | "error"
+  readonly gallery_bind_error: string | null
+  readonly gallery_bind_operation_id: string | null
   readonly library_query: string
   readonly library_entry: LibraryEntryDetails | null
   readonly library_entry_status: "idle" | "loading" | "ready" | "error"
@@ -149,7 +165,6 @@ export interface ViewState {
   readonly library_scan_status: "idle" | "starting" | "started" | "error"
   readonly library_scan_error: string | null
   readonly library_scan_task: ScanTask | null
-  readonly library_selected_entry_id: string | null
   readonly library_open_profile_id: string | null
   readonly library_open_states: ReadonlyArray<LibraryOpenState>
 }
@@ -240,6 +255,21 @@ const initialState: ViewState = {
   reader_profile_test_result: null,
   reader_profile_test_error: null,
   library_entries: [],
+  library_selected_entry_id: null,
+  library_entry: null,
+  library_entry_status: "idle",
+  library_entry_error: null,
+  gallery_search_title: "",
+  gallery_search_author: "",
+  gallery_search_language: "",
+  gallery_search_status: "idle",
+  gallery_search_error: null,
+  gallery_candidates: [],
+  gallery_selected_candidate_url: null,
+  gallery_search_generation: 0,
+  gallery_bind_status: "idle",
+  gallery_bind_error: null,
+  gallery_bind_operation_id: null,
   library_query: "",
   library_entry: null,
   library_entry_status: "idle",
@@ -262,7 +292,6 @@ const initialState: ViewState = {
   library_scan_status: "idle",
   library_scan_error: null,
   library_scan_task: null,
-  library_selected_entry_id: null,
   library_open_profile_id: null,
   library_open_states: []
 }

@@ -1,6 +1,7 @@
 import { Layer, ManagedRuntime } from "effect"
 import {
   LibraryClient,
+  EhClient,
   OpenJournalClient,
   LocalMappingClient,
   PrototypeClient,
@@ -20,6 +21,7 @@ export const runtime = ManagedRuntime.make(
     RootPreviewClient.layer,
     LocalMappingClient.layer,
     ScanReviewClient.layer,
-    LibraryClient.layer
+    LibraryClient.layer,
+    EhClient.layer
   )
 )

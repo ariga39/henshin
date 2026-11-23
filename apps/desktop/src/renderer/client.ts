@@ -6,6 +6,10 @@ import type {
   DeviceRootMapping,
   DiscardedDraft,
   HandshakeView,
+  EhCandidateSearchRequest,
+  EhCandidateSearchResult,
+  EntryCommandResult,
+  LibraryEntryDetails,
   LibraryEntryPage,
   LibraryEntryDetails,
   LibraryNoteIpcRequest,
@@ -125,6 +129,7 @@ declare global {
     readonly henshinScanReview: ScanReviewBridge
     readonly henshinReaderProfiles: ReaderProfileBridge
     readonly henshinLibrary: LibraryBridge
+    readonly henshinEh: EhBridge
   }
 }
 
@@ -167,7 +172,13 @@ export interface LibraryBridge {
   open(input: OpenBookIpcRequest): Promise<Result<OpenBookIpcResult>>
   status(input: OpenBookStatusIpcRequest): Promise<Result<OpenBookIpcResult | null>>
   onOpenStateChanged(listener: () => void): () => void
+  entry(input: { readonly entry_id: string }): Promise<Result<LibraryEntryDetails>>
+  bind(input: { readonly operation_id: string; readonly entry_id: string; readonly url: string; readonly expected_decision_version: string }): Promise<Result<EntryCommandResult>>
   getThumbnail(key: ThumbnailKey): Promise<Result<Uint8Array>>
+}
+
+export interface EhBridge {
+  candidates(input: EhCandidateSearchRequest): Promise<Result<EhCandidateSearchResult>>
 }
 
 /**
@@ -338,6 +349,8 @@ export class LibraryClient extends Context.Service<
     readonly open: (input: OpenBookIpcRequest) => Effect.Effect<Result<OpenBookIpcResult>>
     readonly status: (input: OpenBookStatusIpcRequest) => Effect.Effect<Result<OpenBookIpcResult | null>>
     readonly getThumbnail: (key: ThumbnailKey) => Effect.Effect<Result<Uint8Array>>
+    readonly entry: (input: { readonly entry_id: string }) => Effect.Effect<Result<LibraryEntryDetails>>
+    readonly bind: (input: { readonly operation_id: string; readonly entry_id: string; readonly url: string; readonly expected_decision_version: string }) => Effect.Effect<Result<EntryCommandResult>>
   }
 >()("henshin/desktop/renderer/LibraryClient") {
   static readonly layer = Layer.succeed(
@@ -348,7 +361,19 @@ export class LibraryClient extends Context.Service<
       note: (input) => callIpc(() => window.henshinLibrary.note(input)),
       open: (input) => callIpc(() => window.henshinLibrary.open(input)),
       status: (input) => callIpc(() => window.henshinLibrary.status(input)),
+      entry: (input) => callIpc(() => window.henshinLibrary.entry(input)),
+      bind: (input) => callIpc(() => window.henshinLibrary.bind(input)),
       getThumbnail: (key) => callIpc(() => window.henshinLibrary.getThumbnail(key))
     })
+  )
+}
+
+export class EhClient extends Context.Service<
+  EhClient,
+  { readonly candidates: (input: EhCandidateSearchRequest) => Effect.Effect<Result<EhCandidateSearchResult>> }
+>()("henshin/desktop/renderer/EhClient") {
+  static readonly layer = Layer.succeed(
+    EhClient,
+    EhClient.of({ candidates: (input) => callIpc(() => window.henshinEh.candidates(input)) })
   )
 }

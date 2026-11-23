@@ -14,6 +14,10 @@ import {
   GetNoteIpcRequest,
   HandshakeIpcRequest,
   IpcChannels,
+  EhCandidateSearchIpcRequest,
+  EhHttpClient,
+  LibraryEntryIpcRequest,
+  LibraryBindIpcRequest,
   LibraryHttpClient,
   OpenEventHttpClient,
   ListOpenJournalIpcRequest,
@@ -114,6 +118,7 @@ const LOCAL_MAPPING_REQUEST_TIMEOUT = Duration.seconds(12)
 // The server gives one thumbnail request a 30-second aggregate producer
 // budget; keep a small allowance for HTTP and IPC teardown.
 const THUMBNAIL_NETWORK_DEADLINE = Duration.seconds(32)
+const EH_CANDIDATE_SEARCH_DEADLINE = Duration.seconds(20)
 
 interface Session {
   readonly instanceId: string
@@ -497,7 +502,7 @@ const runNetworkResult = <A>(
   effect: Effect.Effect<
     IpcOk<A> | IpcErr,
     never,
-    PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient | ThumbnailHttpClient
+  PrototypeHttpClient | ServerHttpClient | LibraryHttpClient | EhHttpClient | TaskHttpClient | ReviewHttpClient | OpenEventHttpClient | ThumbnailHttpClient
   >,
   timeout?: Duration.Duration,
   errorMapper: (error: unknown) => PublicError = toPublicError
@@ -1266,6 +1271,64 @@ const registerIpc = (): void => {
     } catch (error) {
       return Promise.resolve({ ok: false as const, error: toPublicError(error) })
     }
+  })
+
+  ipcMain.handle(IpcChannels.libraryEntry, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(LibraryEntryIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* LibraryHttpClient
+          return yield* client.entry({ params: { id: decoded.value.entry_id } })
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.libraryBind, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(LibraryBindIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    let session: Session
+    try {
+      session = requireSession()
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
+    return runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* LibraryHttpClient
+          return yield* client.entryCommand({
+            params: { id: decoded.value.entry_id },
+            payload: {
+              operation_id: decoded.value.operation_id,
+              instance_id: session.instanceId,
+              epoch: session.epoch,
+              expected_decision_version: decoded.value.expected_decision_version,
+              command: { type: "bind", url: decoded.value.url }
+            }
+          })
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.ehCandidates, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(EhCandidateSearchIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* EhHttpClient
+          return yield* client.candidates({ payload: decoded.value })
+        })
+      ),
+      EH_CANDIDATE_SEARCH_DEADLINE
+    )
   })
 
   ipcMain.handle(IpcChannels.thumbnailGet, (event, raw: unknown) => {

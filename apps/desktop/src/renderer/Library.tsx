@@ -6,12 +6,15 @@ import { runtime } from "./runtime"
 import { viewStore } from "./store"
 import { createThumbnailLoadRequest } from "./thumbnail-loading"
 import {
+  bindSelectedGalleryCandidate,
+  cancelGallerySearch,
   chooseLibraryOpenProfile,
   libraryOpenStateFor,
   loadLibrary,
   loadActiveLibraryOpenState,
   loadReaderProfiles,
   openSelectedLibraryEntry,
+  searchGalleryCandidates,
   searchLibrary,
   updateLibraryNote,
   selectLibraryEntry,
@@ -350,6 +353,91 @@ export const LibraryScreen = () => {
                 )}
               </form>
             )}
+            <section aria-labelledby="gallery-search-heading" data-testid="gallery-search-panel">
+              <h4 id="gallery-search-heading">Compare gallery candidates</h4>
+              {state.library_entry_status === "loading" && <p role="status">Loading book details…</p>}
+              {state.library_entry_status === "error" && <p role="alert">Could not load book details: {state.library_entry_error}</p>}
+              {state.library_entry_status === "ready" && state.library_entry?.entry_id === selectedEntry.entry_id && (
+                <>
+                  {state.library_entry.binding === null ? (
+                    <p data-testid="gallery-binding-status">Unbound; review candidates before confirming a binding.</p>
+                  ) : (
+                    <p data-testid="gallery-binding-status">Bound to {state.library_entry.binding.canonical_url}</p>
+                  )}
+                  <form onSubmit={(event) => { event.preventDefault(); void runtime.runPromise(searchGalleryCandidates()) }}>
+                    <label htmlFor="gallery-search-title">Title</label>
+                    <input
+                      id="gallery-search-title"
+                      data-testid="gallery-search-title"
+                      value={state.gallery_search_title}
+                      onChange={(event) => viewStore.set({ gallery_search_title: event.target.value })}
+                      disabled={state.gallery_search_status === "loading"}
+                    />
+                    <label htmlFor="gallery-search-author">Author</label>
+                    <input
+                      id="gallery-search-author"
+                      data-testid="gallery-search-author"
+                      value={state.gallery_search_author}
+                      onChange={(event) => viewStore.set({ gallery_search_author: event.target.value })}
+                      disabled={state.gallery_search_status === "loading"}
+                    />
+                    <label htmlFor="gallery-search-language">Language</label>
+                    <input
+                      id="gallery-search-language"
+                      data-testid="gallery-search-language"
+                      value={state.gallery_search_language}
+                      onChange={(event) => viewStore.set({ gallery_search_language: event.target.value })}
+                      disabled={state.gallery_search_status === "loading"}
+                    />
+                    <button type="submit" data-testid="gallery-search-submit" disabled={state.gallery_search_status === "loading" || state.gallery_search_title.trim().length === 0}>
+                      Search galleries
+                    </button>
+                    {state.gallery_search_status === "loading" && (
+                      <button type="button" data-testid="gallery-search-cancel" onClick={() => void runtime.runPromise(cancelGallerySearch)}>
+                        Cancel search
+                      </button>
+                    )}
+                  </form>
+                  {state.gallery_search_status === "empty" && <p data-testid="gallery-search-empty">No gallery candidates matched this query.</p>}
+                  {state.gallery_search_status === "access_failed" && <p role="alert" data-testid="gallery-search-access-failed">Gallery search could not access the upstream service.</p>}
+                  {state.gallery_search_status === "rate_limited" && <p role="alert" data-testid="gallery-search-rate-limited">Gallery search is rate limited; retry later.</p>}
+                  {state.gallery_search_status === "restricted" && <p role="alert" data-testid="gallery-search-restricted">Gallery search access is restricted by the upstream service.</p>}
+                  {state.gallery_search_status === "unrecognized_layout" && <p role="alert" data-testid="gallery-search-unrecognized">Gallery search returned an unrecognized upstream layout.</p>}
+                  {state.gallery_search_status === "cancelled" && <p data-testid="gallery-search-cancelled">Gallery search cancelled; this book remains unchanged.</p>}
+                  {state.gallery_search_status === "error" && <p role="alert">Gallery search failed: {state.gallery_search_error}</p>}
+                  {state.gallery_candidates.length > 0 && (
+                    <fieldset data-testid="gallery-candidates">
+                      <legend>Review candidates before binding</legend>
+                      {state.gallery_candidates.map((candidate) => (
+                        <label key={candidate.canonical_url} data-testid="gallery-candidate">
+                          <input
+                            type="radio"
+                            name="gallery-candidate"
+                            value={candidate.canonical_url}
+                            checked={state.gallery_selected_candidate_url === candidate.canonical_url}
+                            onChange={() => viewStore.set({ gallery_selected_candidate_url: candidate.canonical_url, gallery_bind_operation_id: null })}
+                          />
+                          <span>
+                            <strong>{candidate.title}</strong> — <span data-testid="gallery-candidate-url">{candidate.canonical_url}</span>
+                            <small>Language: {candidate.language_evidence.join(", ") || "unknown"}; pages: {candidate.page_count ?? "unknown"}; rating: {candidate.rating ?? "unknown"}</small>
+                          </span>
+                        </label>
+                      ))}
+                      <button
+                        type="button"
+                        data-testid="gallery-confirm"
+                        disabled={state.gallery_selected_candidate_url === null || state.gallery_bind_status === "loading" || state.library_entry.binding !== null}
+                        onClick={() => void runtime.runPromise(bindSelectedGalleryCandidate())}
+                      >
+                        {state.gallery_bind_status === "loading" ? "Binding…" : "Confirm selected gallery"}
+                      </button>
+                      {state.gallery_bind_error !== null && <p role="alert">Could not bind gallery: {state.gallery_bind_error}</p>}
+                      {state.gallery_bind_status === "confirmed" && <p role="status" data-testid="gallery-bind-confirmed">Gallery binding confirmed.</p>}
+                    </fieldset>
+                  )}
+                </>
+              )}
+            </section>
             {selectedEntryCanOpen ? (
               <>
                 <p>Accepted {selectedEntry.kind}; target resolution is checked by the desktop main process.</p>

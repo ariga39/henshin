@@ -15,6 +15,9 @@ import type {
   RootRegistrationRequest,
   RecoverOpenJournalIpcRequest,
   LibrarySearchIpcRequest,
+  EhCandidateSearchIpcRequest,
+  LibraryEntryIpcRequest,
+  LibraryBindIpcRequest,
   LibraryNoteIpcRequest
 } from "@henshin/contracts"
 import { IpcChannels } from "@henshin/contracts/channels"
@@ -54,10 +57,6 @@ contextBridge.exposeInMainWorld("henshinReaderProfiles", {
 contextBridge.exposeInMainWorld("henshinLibrary", {
   search: (input: LibrarySearchIpcRequest) =>
     ipcRenderer.invoke(IpcChannels.librarySearch, input),
-  entry: (input: { readonly entry_id: string }) =>
-    ipcRenderer.invoke(IpcChannels.libraryEntry, input),
-  note: (input: LibraryNoteIpcRequest) =>
-    ipcRenderer.invoke(IpcChannels.libraryNote, input),
   open: (input: OpenBookIpcRequest) => ipcRenderer.invoke(IpcChannels.openBook, input),
   status: (input: OpenBookStatusIpcRequest) => ipcRenderer.invoke(IpcChannels.openBookStatus, input),
   onOpenStateChanged: (listener: () => void) => {
@@ -65,7 +64,14 @@ contextBridge.exposeInMainWorld("henshinLibrary", {
     ipcRenderer.on(IpcChannels.openStateChanged, handler)
     return () => ipcRenderer.removeListener(IpcChannels.openStateChanged, handler)
   },
+  entry: (input: LibraryEntryIpcRequest) => ipcRenderer.invoke(IpcChannels.libraryEntry, input),
+  bind: (input: LibraryBindIpcRequest) => ipcRenderer.invoke(IpcChannels.libraryBind, input),
+  note: (input: LibraryNoteIpcRequest) => ipcRenderer.invoke(IpcChannels.libraryNote, input),
   getThumbnail: (key: string) => ipcRenderer.invoke(IpcChannels.thumbnailGet, { key })
+})
+
+contextBridge.exposeInMainWorld("henshinEh", {
+  candidates: (input: EhCandidateSearchIpcRequest) => ipcRenderer.invoke(IpcChannels.ehCandidates, input)
 })
 
 contextBridge.exposeInMainWorld("henshinOpenJournal", {

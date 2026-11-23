@@ -242,6 +242,8 @@ function libraryClientWith(overrides: Partial<LibraryClient["Service"]> = {}): L
     search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "0" } }),
     open: () => Effect.succeed({ ok: false as const, error: { code: "open_not_used", message: "not used", retryable: false } }),
     status: () => Effect.succeed({ ok: true as const, data: null }),
+    entry: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+    bind: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
     getThumbnail: () => Effect.succeed({ ok: false as const, error: { code: "thumbnail_missing", message: "not used", retryable: false } }),
     ...overrides
   })
