@@ -1,9 +1,11 @@
 import { execFile as execFileCallback } from "node:child_process"
+import { spawnSync } from "node:child_process"
 import { DatabaseSync } from "node:sqlite"
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
+import { Worker } from "node:worker_threads"
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js"
 import { afterEach, describe, expect, it } from "vitest"
 import { createDesktopBackupArchive } from "../src/maintenance/DesktopBackupArchive"
@@ -11,7 +13,30 @@ import { acquireDesktopOwnership } from "../src/persistence/DesktopOwnership"
 
 const execFile = promisify(execFileCallback)
 const SERVER_PATH = path.resolve("apps/server/dist/server.mjs")
+const DRAFT_WORKER_URL = new URL("../../desktop/dist/draft-worker.mjs", import.meta.url)
 const workspaces: Array<string> = []
+
+const runDesktopWorker = async (dbPath: string, applicationVersion: string): Promise<void> => {
+  const worker = new Worker(DRAFT_WORKER_URL, {
+    workerData: {
+      dbPath,
+      installationId: "11111111-1111-4111-8111-111111111111",
+      applicationVersion
+    }
+  })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      worker.once("error", reject)
+      worker.once("message", (message: { readonly ok: boolean; readonly error?: string }) => {
+        if (message.ok) resolve()
+        else reject(new Error(message.error ?? "desktop worker close failed"))
+      })
+      worker.postMessage({ id: 1, request: { op: "close" } })
+    })
+  } finally {
+    await worker.terminate()
+  }
+}
 
 const createDesktopStore = async (
   dataDirectory: string,
@@ -112,6 +137,36 @@ afterEach(async () => {
 })
 
 describe("stopped desktop backup", () => {
+  it("refreshes producer version on desktop upgrade before backup", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-backup-upgrade-"))
+    workspaces.push(workspace)
+    const dataDirectory = path.join(workspace, "desktop-data")
+    const outputDirectory = path.join(workspace, "backups")
+    const destination = path.join(outputDirectory, "upgraded.henshin.zip")
+    await mkdir(dataDirectory)
+    await mkdir(outputDirectory)
+    await createDesktopStore(dataDirectory)
+    const dbPath = path.join(dataDirectory, "prototype-client.db")
+
+    await runDesktopWorker(dbPath, "desktop-upgraded-version")
+    const result = await execFile(process.execPath, [
+      SERVER_PATH,
+      "backup", "desktop",
+      "--data-dir", dataDirectory,
+      "--output", destination
+    ])
+    const payloads = await readArchivePayloads(destination)
+    const configuration = JSON.parse(new TextDecoder().decode(payloads.get("configuration.json"))) as {
+      application_version: string
+    }
+    const manifest = JSON.parse(new TextDecoder().decode(payloads.get("manifest.json"))) as {
+      application_version: string
+    }
+    expect(result.stdout).toContain("11111111-1111-4111-8111-111111111111")
+    expect(configuration.application_version).toBe("desktop-upgraded-version")
+    expect(manifest.application_version).toBe("desktop-upgraded-version")
+  })
+
   it("refuses a live desktop owner, then publishes durable work without caches or secrets", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-backup-"))
     workspaces.push(workspace)
@@ -204,6 +259,57 @@ describe("stopped desktop backup", () => {
     await expect(stat(destination)).rejects.toMatchObject({ code: "ENOENT" })
     expect((await readdir(outputDirectory)).filter((name) => name.endsWith(".tmp"))).toEqual([])
     expect((await readdir(dataDirectory)).filter((name) => name.startsWith(".desktop-backup-staging-"))).toEqual([])
+  })
+
+  it("backs up a dirty WAL through private staging without changing the source store", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-backup-dirty-wal-"))
+    workspaces.push(workspace)
+    const dataDirectory = path.join(workspace, "desktop-data")
+    const outputDirectory = path.join(workspace, "backups")
+    const destination = path.join(outputDirectory, "dirty.henshin.zip")
+    await mkdir(dataDirectory)
+    await mkdir(outputDirectory)
+    await createDesktopStore(dataDirectory)
+    const dbPath = path.join(dataDirectory, "prototype-client.db")
+    const child = spawnSync(process.execPath, ["-e", `
+      const { DatabaseSync } = require("node:sqlite")
+      const db = new DatabaseSync(process.argv[1])
+      db.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0")
+      db.prepare("UPDATE unsent_drafts SET text = 'dirty WAL draft', updated_at_ms = 2").run()
+      process.kill(process.pid, "SIGKILL")
+    `, dbPath])
+    expect(child.signal).toBe("SIGKILL")
+    const walPath = `${dbPath}-wal`
+    expect((await stat(walPath)).size).toBeGreaterThan(0)
+    const sourceBefore = await readFile(dbPath)
+    const walBefore = await readFile(walPath)
+
+    await createDesktopBackupArchive({
+      dataDirectory,
+      outputPath: destination,
+      installationId: "11111111-1111-4111-8111-111111111111",
+      label: null,
+      beforePublish: async () => {
+        const stagingDirectories = (await readdir(dataDirectory)).filter((name) => name.startsWith(".desktop-backup-staging-"))
+        expect(stagingDirectories).toHaveLength(1)
+        const stagingDirectory = path.join(dataDirectory, stagingDirectories[0])
+        expect((await stat(stagingDirectory)).mode & 0o777).toBe(0o700)
+        expect((await stat(path.join(stagingDirectory, "source.sqlite"))).mode & 0o777).toBe(0o600)
+      }
+    })
+    expect((await stat(destination)).isFile()).toBe(true)
+
+    expect(await readFile(dbPath)).toEqual(sourceBefore)
+    expect(await readFile(walPath)).toEqual(walBefore)
+    const payloads = await readArchivePayloads(destination)
+    const snapshotPath = path.join(workspace, "dirty-snapshot.sqlite")
+    await writeFile(snapshotPath, payloads.get("state.sqlite") as Uint8Array)
+    const snapshot = new DatabaseSync(snapshotPath, { readOnly: true })
+    expect((snapshot.prepare("SELECT text FROM unsent_drafts").get() as { text: string }).text)
+      .toBe("dirty WAL draft")
+    snapshot.close()
+    expect((await readdir(dataDirectory)).filter((name) => name.startsWith(".desktop-backup-staging-"))).toEqual([])
+    expect((await readdir(outputDirectory)).filter((name) => name.endsWith(".tmp"))).toEqual([])
   })
 
   it.each([

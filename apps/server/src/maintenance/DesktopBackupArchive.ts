@@ -1,5 +1,5 @@
 import { backup, DatabaseSync } from "node:sqlite"
-import { chmod, lstat, link, mkdtemp, open, realpath, rm, stat, unlink } from "node:fs/promises"
+import { chmod, copyFile, lstat, link, mkdtemp, open, realpath, rm, stat, unlink } from "node:fs/promises"
 import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
 import {
@@ -218,6 +218,36 @@ const syncDirectory = async (directory: string): Promise<void> => {
   }
 }
 
+interface PreparedBackupSource {
+  readonly path: string
+  readonly readOnly: boolean
+}
+
+const prepareBackupSource = async (databasePath: string, stagingDirectory: string): Promise<PreparedBackupSource> => {
+  const dirtySidecars: Array<"-wal" | "-journal"> = []
+  for (const suffix of ["-wal", "-journal"] as const) {
+    try {
+      if ((await stat(databasePath + suffix)).size > 0) dirtySidecars.push(suffix)
+    } catch (error) {
+      if (!isMissing(error)) throw error
+    }
+  }
+  if (dirtySidecars.length === 0) return { path: databasePath, readOnly: true }
+
+  // Replaying a dirty journal must never open the user's store read-write. Copy
+  // the database and its non-empty journals into the private staging directory;
+  // SQLite can recover the copy while the original sidecars remain untouched.
+  const stagedDatabasePath = path.join(stagingDirectory, "source.sqlite")
+  await copyFile(databasePath, stagedDatabasePath)
+  await chmod(stagedDatabasePath, 0o600)
+  for (const suffix of dirtySidecars) {
+    const stagedSidecarPath = stagedDatabasePath + suffix
+    await copyFile(databasePath + suffix, stagedSidecarPath)
+    await chmod(stagedSidecarPath, 0o600)
+  }
+  return { path: stagedDatabasePath, readOnly: false }
+}
+
 const publishWithoutReplacement = async (
   temporaryArchivePath: string,
   outputPath: string
@@ -274,7 +304,10 @@ export const createDesktopBackupArchive = async (
   try {
     const snapshotPath = path.join(stagingDirectory, "state.sqlite")
     const snapshotStartedAt = new Date().toISOString()
-    const source = new DatabaseSync(canonicalDatabasePath, { readOnly: true })
+    const preparedSource = await prepareBackupSource(canonicalDatabasePath, stagingDirectory)
+    const source = preparedSource.readOnly
+      ? new DatabaseSync(preparedSource.path, { readOnly: true })
+      : new DatabaseSync(preparedSource.path)
     let mappedSources: ReadonlyArray<string>
     try {
       mappedSources = await sourcePaths(source)
