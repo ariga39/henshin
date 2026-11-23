@@ -82,6 +82,35 @@ describe("Library reader profile details", () => {
     expect(markup).toContain('aria-label="Open details for Book"')
   })
 
+  it("shows a cached paging miss while retaining the cached page", () => {
+    viewStore.set({
+      library_entries: [entry],
+      library_status: "error",
+      library_error: "this server's cached Library is not available on this device",
+      library_freshness: { source: "cached", stale: true, partial: true, observed_at_ms: 1, instance_id: entry.library_id },
+      library_has_more: false,
+      connection: { state: "disconnected", instance_id: entry.library_id, epoch: null, reason: "explicit_disconnect" }
+    })
+    const markup = renderLibraryDetails()
+    expect(markup).toContain('role="alert"')
+    expect(markup).toContain("cached Library is not available")
+    expect(markup).not.toContain('data-testid="library-load-more"')
+  })
+
+  it("distinguishes a cached empty page from a cache miss", () => {
+    viewStore.set({
+      library_entries: [],
+      library_status: "ready",
+      library_error: null,
+      library_freshness: { source: "cached", stale: true, partial: true, observed_at_ms: 1, instance_id: entry.library_id },
+      library_has_more: false,
+      connection: { state: "disconnected", instance_id: entry.library_id, epoch: null, reason: "explicit_disconnect" }
+    })
+    const markup = renderLibraryDetails()
+    expect(markup).toContain("The retained cached page is empty for this server")
+    expect(markup).not.toContain("No cached books are available for this server")
+  })
+
   it("renders a busy failure result instead of a successful launch", () => {
     setProfileState("ready")
     viewStore.set({

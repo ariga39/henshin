@@ -284,7 +284,7 @@ export const LibraryScreen = () => {
           Refresh
         </button>
         {state.library_status === "loading" && <p role="status">Loading library…</p>}
-        {state.library_status === "error" && <p role="alert">Could not load library: {state.library_error}</p>}
+        {state.library_error !== null && <p role="alert">Could not load library: {state.library_error}</p>}
         {state.library_freshness?.source === "cached" && (
           <p role="status" data-testid="library-cache-status">
             Cached Library — partial and stale. Last observed {observedAtText(state.library_freshness.observed_at_ms)}. Only previously loaded books are shown.
@@ -308,7 +308,7 @@ export const LibraryScreen = () => {
         {state.library_status === "ready" && state.library_entries.length === 0 && !hasLibraryQuery && (
           <p data-testid="library-empty">
             {state.library_freshness?.source === "cached"
-              ? "No cached books are available for this server. Reconnect to refresh the Library."
+              ? "The retained cached page is empty for this server. Reconnect to search beyond cached pages."
               : "No accepted books yet. Start a normal scan from a saved root."}
           </p>
         )}

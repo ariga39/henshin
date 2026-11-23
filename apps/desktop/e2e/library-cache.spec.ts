@@ -82,6 +82,12 @@ test("browses the exact cached namespace after disconnect with stale paging", as
     const secondPageId = allPageIds.find((id) => !firstPageIds.includes(id))
     if (secondPageId === undefined) throw new Error("cached test fixture did not produce a second page")
     await expect(first.window.getByText(secondPageId, { exact: true })).toHaveCount(1)
+    const firstPageCursor = await first.window.evaluate(async () => {
+      const result = await window.henshinLibrary.search({ query: "", page_size: 50 })
+      if (!result.ok) throw new Error(result.error.message)
+      return ("page" in result.data ? result.data.page : result.data).next_cursor
+    })
+    if (firstPageCursor === null) throw new Error("cached test fixture did not produce a first-page cursor")
     await first.window.getByTestId("library-disconnect").click()
     await expect(first.window.getByTestId("library-connection-status")).toHaveText("disconnected")
     await first.window.getByTestId("library-refresh").click()
@@ -153,11 +159,14 @@ test("browses the exact cached namespace after disconnect with stale paging", as
     await expect(second.window.getByTestId("library-empty")).toBeVisible()
     await second.window.getByTestId("library-disconnect").click()
     await expect(second.window.getByTestId("library-connection-status")).toHaveText("disconnected")
+    const wrongNamespacePage = await second.window.evaluate(async (cursor) =>
+      window.henshinLibrary.search({ query: "", page_size: 50, cursor }), firstPageCursor)
+    expect(wrongNamespacePage).toMatchObject({ ok: false, error: { code: "offline_library_unavailable" } })
     await second.window.getByTestId("library-refresh").click()
     await expect(second.window.getByTestId("library-cache-status")).toContainText("partial and stale")
     await expect(second.window.getByTestId("library-entry")).toHaveCount(0)
     await expect(second.window.getByTestId("library-empty")).toHaveText(
-      "No cached books are available for this server. Reconnect to refresh the Library."
+      "The retained cached page is empty for this server. Reconnect to search beyond cached pages."
     )
     await expect(second.window.getByTestId("library-empty")).not.toContainText("Start a normal scan")
   } finally {

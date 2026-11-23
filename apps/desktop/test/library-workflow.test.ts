@@ -342,7 +342,7 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_freshness?.stale).toBe(false)
   })
 
-  it("keeps an empty cached miss in the explicit partial-cache state", async () => {
+  it("distinguishes an offline cache miss from a cached empty page", async () => {
     const client = LibraryClient.of({
       search: () => Effect.succeed({
         ok: false as const,
@@ -362,7 +362,9 @@ describe("library renderer workflow", () => {
 
     await run(loadLibrary(false), client)
 
-    expect(viewStore.getState().library_status).toBe("ready")
+    expect(viewStore.getState().library_status).toBe("error")
+    expect(viewStore.getState().library_has_more).toBe(false)
+    expect(viewStore.getState().library_cursor).toBeNull()
     expect(viewStore.getState().library_freshness).toMatchObject({ source: "cached", stale: true, partial: true })
     expect(viewStore.getState().library_error).toBe("cached Library is not available")
   })

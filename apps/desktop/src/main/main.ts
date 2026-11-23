@@ -1188,7 +1188,7 @@ const registerIpc = (): void => {
     const request = decoded.value
     const pageSize = request.page_size ?? 50
     const cursor = request.cursor ?? null
-    const cacheableLibrary = request.state === undefined && (request.query === undefined || request.query.trim() === "")
+    const cacheableLibrary = request.state === undefined && (request.query === undefined || request.query === "")
     const activeSession = requireConnection().getSession()
     if (activeSession !== null) {
       return runNetworkResult(

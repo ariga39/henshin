@@ -1530,9 +1530,9 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
               library_error: result.error.message
             }
           : {
-              library_status: state.connection.state !== "connected" && state.library_freshness?.source === "cached"
-                ? "ready"
-                : "error",
+              library_cursor: null,
+              library_has_more: false,
+              library_status: "error",
               library_error: result.error.message,
               ...(state.connection.state !== "connected" && state.library_freshness !== null
                 ? { library_freshness: { ...state.library_freshness, source: "cached", stale: true, partial: true } }
