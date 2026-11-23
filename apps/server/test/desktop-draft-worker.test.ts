@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
-import { readFileSync, statSync } from "node:fs"
+import { readdirSync, readFileSync, statSync } from "node:fs"
 import { afterEach, describe, expect, it } from "vitest"
 
 const workerUrl = new URL("../../desktop/dist/draft-worker.mjs", import.meta.url)
@@ -159,12 +159,15 @@ describe("desktop draft SQLite worker", () => {
       INSERT INTO desktop_store_metadata VALUES(1, '11111111-1111-4111-8111-111111111111', 2, 'future');
     `)
     const sidecars = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]
+    const preflightEntriesBefore = readdirSync(os.tmpdir()).filter((name) => name.startsWith("henshin-desktop-store-preflight-"))
     const before = new Map(sidecars.map((filePath) => [
       filePath,
       { bytes: readFileSync(filePath), stat: statSync(filePath) }
     ]))
 
     await expect(expectWorkerStartupFailure(dbPath)).resolves.toContain("newer")
+    expect(readdirSync(os.tmpdir()).filter((name) => name.startsWith("henshin-desktop-store-preflight-")))
+      .toEqual(preflightEntriesBefore)
     for (const [filePath, snapshot] of before) {
       expect(readFileSync(filePath)).toEqual(snapshot.bytes)
       const after = statSync(filePath)

@@ -59,20 +59,21 @@ const preflightExistingStore = (): void => {
   }
 
   const preflightDirectory = mkdtempSync(join(tmpdir(), "henshin-desktop-store-preflight-"))
-  chmodSync(preflightDirectory, 0o700)
-  const inspectionPath = join(preflightDirectory, basename(dbPath))
-  copyFileSync(dbPath, inspectionPath)
-  chmodSync(inspectionPath, 0o600)
-  for (const suffix of ["-wal", "-shm"]) {
-    const sidecarPath = `${dbPath}${suffix}`
-    if (!existsSync(sidecarPath)) continue
-    const copiedSidecarPath = `${inspectionPath}${suffix}`
-    copyFileSync(sidecarPath, copiedSidecarPath)
-    chmodSync(copiedSidecarPath, 0o600)
-  }
-
-  const inspection = new DatabaseSync(inspectionPath, { readOnly: true })
+  let inspection: DatabaseSync | undefined
   try {
+    chmodSync(preflightDirectory, 0o700)
+    const inspectionPath = join(preflightDirectory, basename(dbPath))
+    copyFileSync(dbPath, inspectionPath)
+    chmodSync(inspectionPath, 0o600)
+    for (const suffix of ["-wal", "-shm"]) {
+      const sidecarPath = `${dbPath}${suffix}`
+      if (!existsSync(sidecarPath)) continue
+      const copiedSidecarPath = `${inspectionPath}${suffix}`
+      copyFileSync(sidecarPath, copiedSidecarPath)
+      chmodSync(copiedSidecarPath, 0o600)
+    }
+
+    inspection = new DatabaseSync(inspectionPath, { readOnly: true })
     const userVersion = Number((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version)
     if (userVersion > DESKTOP_STORE_SCHEMA_VERSION) {
       throw new Error("desktop client store schema is newer than this desktop")
@@ -110,7 +111,7 @@ const preflightExistingStore = (): void => {
       throw new Error("desktop client store schema is unsupported")
     }
   } finally {
-    inspection.close()
+    inspection?.close()
     rmSync(preflightDirectory, { recursive: true, force: true })
   }
 }
