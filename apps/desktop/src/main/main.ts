@@ -1783,7 +1783,8 @@ const bootstrap = async (): Promise<void> => {
   const draftWorkerUrl = pathToFileURL(path.join(app.getAppPath(), "dist", "draft-worker.mjs"))
   const localWorker = LocalDatabaseWorker.layer(clientDbPath, {
     workerUrl: draftWorkerUrl,
-    installationId: deviceId
+    installationId: deviceId,
+    applicationVersion: app.getVersion()
   })
   runtime = ManagedRuntime.make(
     Layer.mergeAll(

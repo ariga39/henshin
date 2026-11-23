@@ -2,7 +2,6 @@ import { backup, DatabaseSync } from "node:sqlite"
 import { chmod, lstat, link, mkdtemp, open, realpath, rm, stat, unlink } from "node:fs/promises"
 import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
-import serverPackage from "../../package.json"
 import {
   digest,
   jsonBytes,
@@ -125,7 +124,7 @@ const retainDurableSchema = (snapshot: DatabaseSync): void => {
   const objects = snapshot.prepare(`
     SELECT type, name, tbl_name
     FROM sqlite_master
-    WHERE name NOT LIKE 'sqlite_%'
+    WHERE substr(name, 1, 7) <> 'sqlite_'
     ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 WHEN 'table' THEN 2 ELSE 3 END
   `).all() as unknown as ReadonlyArray<{ type: string; name: string; tbl_name: string }>
   for (const object of objects) {
@@ -149,10 +148,11 @@ const retainDurableSchema = (snapshot: DatabaseSync): void => {
   snapshot.exec("VACUUM")
 }
 
-const readConfiguration = (installationId: string) => ({
+const readConfiguration = (installationId: string, applicationVersion: string) => ({
   format_version: 1,
   store_kind: "desktop",
   schema_version: DESKTOP_STORE_SCHEMA_VERSION,
+  application_version: applicationVersion,
   installation_id: installationId,
   included_data_classes: [
     "local mappings",
@@ -171,16 +171,29 @@ const readConfiguration = (installationId: string) => ({
   credential_reset_instructions: "Reauthenticate the recovered desktop explicitly; copied connection credentials are not restored."
 })
 
-const snapshotIdentity = (snapshotPath: string): { readonly installationId: string; readonly schemaVersion: number } => {
+const snapshotIdentity = (snapshotPath: string): {
+  readonly installationId: string
+  readonly schemaVersion: number
+  readonly applicationVersion: string
+} => {
   const snapshot = new DatabaseSync(snapshotPath, { readOnly: true })
   try {
     const row = snapshot.prepare(
-      "SELECT installation_id, schema_version FROM desktop_store_metadata WHERE id = 1"
-    ).get() as { installation_id: string; schema_version: number } | undefined
-    if (row === undefined || !INSTALLATION_ID_PATTERN.test(row.installation_id)) {
+      "SELECT installation_id, schema_version, application_version FROM desktop_store_metadata WHERE id = 1"
+    ).get() as { installation_id: string; schema_version: number; application_version: string | null } | undefined
+    if (
+      row === undefined ||
+      !INSTALLATION_ID_PATTERN.test(row.installation_id) ||
+      typeof row.application_version !== "string" ||
+      row.application_version.length === 0
+    ) {
       throw new Error("desktop backup snapshot is missing installation identity")
     }
-    return { installationId: row.installation_id, schemaVersion: row.schema_version }
+    return {
+      installationId: row.installation_id,
+      schemaVersion: row.schema_version,
+      applicationVersion: row.application_version
+    }
   } finally {
     snapshot.close()
   }
@@ -301,7 +314,9 @@ export const createDesktopBackupArchive = async (
     if (storedIdentity.schemaVersion !== DESKTOP_STORE_SCHEMA_VERSION) {
       throw new Error("desktop client database schema is not supported by this maintenance tool")
     }
-    const configurationBytes = jsonBytes(readConfiguration(storedIdentity.installationId))
+    const configurationBytes = jsonBytes(
+      readConfiguration(storedIdentity.installationId, storedIdentity.applicationVersion)
+    )
     if (configurationBytes.byteLength > MAX_CONFIGURATION_BYTES) {
       throw new Error("desktop backup configuration exceeds the size limit")
     }
@@ -313,7 +328,7 @@ export const createDesktopBackupArchive = async (
       snapshot_started_at: snapshotStartedAt,
       snapshot_completed_at: new Date().toISOString(),
       retention_class: "archive",
-      application_version: serverPackage.version,
+      application_version: storedIdentity.applicationVersion,
       schema_version: storedIdentity.schemaVersion,
       label: context.label,
       payloads: {

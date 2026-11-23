@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite"
-import { realpathSync, statSync } from "node:fs"
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path"
+import { tmpdir } from "node:os"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalOpenEventPayload } from "@henshin/contracts/canonical"
@@ -37,7 +38,85 @@ const OPEN_JOURNAL_COMPACTION_BATCH = 64
 const MAX_OPEN_RESOLUTION_CACHE_ROWS = 256
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const installationId = (workerData as { readonly installationId?: string }).installationId
+const applicationVersion = (workerData as { readonly applicationVersion?: string }).applicationVersion
 const DESKTOP_STORE_SCHEMA_VERSION = 1
+const DESKTOP_STORE_TABLES = new Set([
+  "unsent_drafts",
+  "command_attempts",
+  "client_mappings",
+  "reader_profiles",
+  "launch_journal",
+  "open_resolution_cache",
+  "desktop_store_metadata"
+])
+
+const preflightExistingStore = (): void => {
+  try {
+    if (!statSync(dbPath).isFile()) throw new Error("desktop client store path is not a file")
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return
+    throw error
+  }
+
+  const preflightDirectory = mkdtempSync(join(tmpdir(), "henshin-desktop-store-preflight-"))
+  chmodSync(preflightDirectory, 0o700)
+  const inspectionPath = join(preflightDirectory, basename(dbPath))
+  copyFileSync(dbPath, inspectionPath)
+  chmodSync(inspectionPath, 0o600)
+  for (const suffix of ["-wal", "-shm"]) {
+    const sidecarPath = `${dbPath}${suffix}`
+    if (!existsSync(sidecarPath)) continue
+    const copiedSidecarPath = `${inspectionPath}${suffix}`
+    copyFileSync(sidecarPath, copiedSidecarPath)
+    chmodSync(copiedSidecarPath, 0o600)
+  }
+
+  const inspection = new DatabaseSync(inspectionPath, { readOnly: true })
+  try {
+    const userVersion = Number((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version)
+    if (userVersion > DESKTOP_STORE_SCHEMA_VERSION) {
+      throw new Error("desktop client store schema is newer than this desktop")
+    }
+
+    const objects = inspection.prepare(`
+      SELECT type, name
+      FROM sqlite_master
+      WHERE substr(name, 1, 7) <> 'sqlite_'
+    `).all() as unknown as ReadonlyArray<{ type: string; name: string }>
+    for (const object of objects) {
+      if (object.type !== "table" || !DESKTOP_STORE_TABLES.has(object.name)) {
+        throw new Error(`desktop client store contains an unrecognized schema object: ${object.name}`)
+      }
+    }
+
+    const metadataTable = inspection.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'desktop_store_metadata'"
+    ).get()
+    if (metadataTable === undefined) return
+    const columns = new Set(
+      (inspection.prepare("PRAGMA table_info(desktop_store_metadata)").all() as unknown as ReadonlyArray<{ name: string }>)
+        .map((column) => column.name)
+    )
+    if (!columns.has("schema_version")) {
+      throw new Error("desktop client store schema marker is unavailable")
+    }
+    const row = inspection.prepare(
+      "SELECT schema_version FROM desktop_store_metadata WHERE id = 1"
+    ).get() as { schema_version: number } | undefined
+    if (row !== undefined && row.schema_version > DESKTOP_STORE_SCHEMA_VERSION) {
+      throw new Error("desktop client store schema is newer than this desktop")
+    }
+    if (row !== undefined && row.schema_version !== DESKTOP_STORE_SCHEMA_VERSION) {
+      throw new Error("desktop client store schema is unsupported")
+    }
+  } finally {
+    inspection.close()
+    rmSync(preflightDirectory, { recursive: true, force: true })
+  }
+}
+
+preflightExistingStore()
+
 const db = new DatabaseSync(dbPath)
 
 const rollbackIfActive = (): void => {
@@ -140,20 +219,31 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS desktop_store_metadata (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     installation_id TEXT NOT NULL,
-    schema_version INTEGER NOT NULL
+    schema_version INTEGER NOT NULL,
+    application_version TEXT
   );
 `)
 
+const metadataColumns = new Set(
+  (db.prepare("PRAGMA table_info(desktop_store_metadata)").all() as unknown as ReadonlyArray<{ name: string }>)
+    .map((column) => column.name)
+)
+if (!metadataColumns.has("application_version")) {
+  db.exec("ALTER TABLE desktop_store_metadata ADD COLUMN application_version TEXT")
+}
+
 if (installationId !== undefined) {
   const storedIdentity = db.prepare(
-    "SELECT installation_id, schema_version FROM desktop_store_metadata WHERE id = 1"
-  ).get() as { installation_id: string; schema_version: number } | undefined
+    "SELECT installation_id, schema_version, application_version FROM desktop_store_metadata WHERE id = 1"
+  ).get() as { installation_id: string; schema_version: number; application_version: string | null } | undefined
   if (storedIdentity === undefined) {
     db.prepare(
-      "INSERT INTO desktop_store_metadata(id, installation_id, schema_version) VALUES(1, ?, ?)"
-    ).run(installationId, DESKTOP_STORE_SCHEMA_VERSION)
+      "INSERT INTO desktop_store_metadata(id, installation_id, schema_version, application_version) VALUES(1, ?, ?, ?)"
+    ).run(installationId, DESKTOP_STORE_SCHEMA_VERSION, applicationVersion ?? null)
   } else if (storedIdentity.installation_id !== installationId || storedIdentity.schema_version !== DESKTOP_STORE_SCHEMA_VERSION) {
     throw new Error("desktop client store identity or schema version is incompatible")
+  } else if (storedIdentity.application_version === null && applicationVersion !== undefined) {
+    db.prepare("UPDATE desktop_store_metadata SET application_version = ? WHERE id = 1").run(applicationVersion)
   }
 }
 

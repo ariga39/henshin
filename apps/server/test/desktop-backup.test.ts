@@ -62,10 +62,11 @@ const createDesktopStore = async (
     CREATE TABLE desktop_store_metadata(
       id INTEGER PRIMARY KEY CHECK (id = 1),
       installation_id TEXT NOT NULL,
-      schema_version INTEGER NOT NULL
+      schema_version INTEGER NOT NULL,
+      application_version TEXT
     );
   `)
-  database.prepare("INSERT INTO desktop_store_metadata VALUES(1, ?, 1)").run(installationId)
+  database.prepare("INSERT INTO desktop_store_metadata VALUES(1, ?, 1, 'desktop-test-version')").run(installationId)
   database.prepare(`
     INSERT INTO unsent_drafts(
       instance_id, note_id, form_id, text, local_revision, base_server_revision,
@@ -152,8 +153,14 @@ describe("stopped desktop backup", () => {
     expect([...payloads.keys()].sort()).toEqual(["configuration.json", "manifest.json", "state.sqlite"])
     const configuration = JSON.parse(new TextDecoder().decode(payloads.get("configuration.json"))) as {
       excluded_data_classes: ReadonlyArray<string>
+      application_version: string
     }
     expect(configuration.excluded_data_classes).toContain("desktop connection credentials")
+    expect(configuration.application_version).toBe("desktop-test-version")
+    const manifest = JSON.parse(new TextDecoder().decode(payloads.get("manifest.json"))) as {
+      application_version: string
+    }
+    expect(manifest.application_version).toBe("desktop-test-version")
     const snapshotPath = path.join(workspace, "snapshot.sqlite")
     await writeFile(snapshotPath, payloads.get("state.sqlite") as Uint8Array)
     const snapshot = new DatabaseSync(snapshotPath, { readOnly: true })
@@ -164,8 +171,8 @@ describe("stopped desktop backup", () => {
     expect(snapshot.prepare("SELECT name FROM sqlite_master WHERE name = 'open_resolution_cache'").get()).toBeUndefined()
     expect((snapshot.prepare("SELECT status FROM launch_journal WHERE action_id = '55555555-5555-4555-8555-555555555555'").get() as { status: string }).status)
       .toBe("prepared")
-    expect(snapshot.prepare("SELECT installation_id, schema_version FROM desktop_store_metadata WHERE id = 1").get())
-      .toEqual({ installation_id: "11111111-1111-4111-8111-111111111111", schema_version: 1 })
+    expect(snapshot.prepare("SELECT installation_id, schema_version, application_version FROM desktop_store_metadata WHERE id = 1").get())
+      .toEqual({ installation_id: "11111111-1111-4111-8111-111111111111", schema_version: 1, application_version: "desktop-test-version" })
     snapshot.close()
   })
 
@@ -209,7 +216,7 @@ describe("stopped desktop backup", () => {
     await mkdir(outputDirectory)
     await createDesktopStore(dataDirectory)
     const database = new DatabaseSync(path.join(dataDirectory, "prototype-client.db"))
-    database.exec("CREATE TABLE future_durable_work(id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+    database.exec("CREATE TABLE sqliteXfoo(id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
     database.close()
 
     await expect(createDesktopBackupArchive({

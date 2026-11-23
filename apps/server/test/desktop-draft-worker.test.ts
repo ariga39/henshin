@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
+import { readFileSync, statSync } from "node:fs"
 import { afterEach, describe, expect, it } from "vitest"
 
 const workerUrl = new URL("../../desktop/dist/draft-worker.mjs", import.meta.url)
@@ -25,11 +26,18 @@ const tempDirectories = new Set<string>()
 const workers = new Set<RunningWorker>()
 const COMMAND_ATTEMPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
-const startWorker = async (): Promise<{ readonly running: RunningWorker; readonly dbPath: string }> => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "henshin-draft-worker-"))
+const startWorker = async (options: {
+  readonly dbPath?: string
+  readonly installationId?: string
+  readonly applicationVersion?: string
+} = {}): Promise<{ readonly running: RunningWorker; readonly dbPath: string }> => {
+  const directory = options.dbPath === undefined
+    ? await mkdtemp(path.join(os.tmpdir(), "henshin-draft-worker-"))
+    : path.dirname(options.dbPath)
   tempDirectories.add(directory)
-  const dbPath = path.join(directory, "desktop.db")
-  const worker = new Worker(workerUrl, { workerData: { dbPath } })
+  const dbPath = options.dbPath ?? path.join(directory, "desktop.db")
+  const { dbPath: _ignoredDbPath, ...workerOptions } = options
+  const worker = new Worker(workerUrl, { workerData: { dbPath, ...workerOptions } })
   let nextId = 1
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
 
@@ -63,6 +71,33 @@ const startWorker = async (): Promise<{ readonly running: RunningWorker; readonl
   const running = { worker, call, close }
   workers.add(running)
   return { running, dbPath }
+}
+
+const expectWorkerStartupFailure = async (dbPath: string, options: {
+  readonly installationId?: string
+  readonly applicationVersion?: string
+} = {}): Promise<string> => {
+  const worker = new Worker(workerUrl, { workerData: { dbPath, ...options } })
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (callback: () => void) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      callback()
+    }
+    const timeout = setTimeout(() => finish(() => reject(new Error("worker startup failure timed out"))), 5_000)
+    worker.once("error", (error: Error) => {
+      finish(() => {
+        void worker.terminate()
+        resolve(error.message)
+      })
+    })
+    worker.once("exit", (code) => {
+      if (code === 0) finish(() => reject(new Error("worker unexpectedly started")))
+      else finish(() => resolve(`worker exited with code ${code}`))
+    })
+  })
 }
 
 const key = (instanceId: string, noteId: string) => ({
@@ -107,6 +142,73 @@ afterEach(async () => {
 })
 
 describe("desktop draft SQLite worker", () => {
+  it("refuses a future WAL store read-only, including without an installation id", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "henshin-draft-worker-future-"))
+    tempDirectories.add(directory)
+    const dbPath = path.join(directory, "desktop.db")
+    const writer = new DatabaseSync(dbPath)
+    writer.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA wal_autocheckpoint = 0;
+      CREATE TABLE desktop_store_metadata(
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        installation_id TEXT NOT NULL,
+        schema_version INTEGER NOT NULL,
+        application_version TEXT
+      );
+      INSERT INTO desktop_store_metadata VALUES(1, '11111111-1111-4111-8111-111111111111', 2, 'future');
+    `)
+    const sidecars = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]
+    const before = new Map(sidecars.map((filePath) => [
+      filePath,
+      { bytes: readFileSync(filePath), stat: statSync(filePath) }
+    ]))
+
+    await expect(expectWorkerStartupFailure(dbPath)).resolves.toContain("newer")
+    for (const [filePath, snapshot] of before) {
+      expect(readFileSync(filePath)).toEqual(snapshot.bytes)
+      const after = statSync(filePath)
+      expect(after.size).toBe(snapshot.stat.size)
+      expect(after.mtimeMs).toBe(snapshot.stat.mtimeMs)
+      expect(after.mode).toBe(snapshot.stat.mode)
+    }
+    writer.close()
+  })
+
+  it("upgrades a legacy store with the desktop origin version", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "henshin-draft-worker-legacy-"))
+    tempDirectories.add(directory)
+    const dbPath = path.join(directory, "desktop.db")
+    const legacy = new DatabaseSync(dbPath)
+    legacy.exec(`
+      CREATE TABLE unsent_drafts(
+        instance_id TEXT NOT NULL, note_id TEXT NOT NULL, form_id TEXT NOT NULL,
+        text TEXT NOT NULL, local_revision INTEGER NOT NULL, base_server_revision INTEGER NOT NULL,
+        base_epoch TEXT NOT NULL, present INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+        PRIMARY KEY(instance_id, note_id, form_id)
+      );
+    `)
+    legacy.close()
+
+    const { running } = await startWorker({
+      dbPath,
+      installationId: "11111111-1111-4111-8111-111111111111",
+      applicationVersion: "desktop-test-version"
+    })
+    await running.close()
+    workers.delete(running)
+
+    const upgraded = new DatabaseSync(dbPath, { readOnly: true })
+    expect(upgraded.prepare(
+      "SELECT installation_id, schema_version, application_version FROM desktop_store_metadata WHERE id = 1"
+    ).get()).toEqual({
+      installation_id: "11111111-1111-4111-8111-111111111111",
+      schema_version: 1,
+      application_version: "desktop-test-version"
+    })
+    upgraded.close()
+  })
+
   it("counts tombstones toward the finite 64-key capacity and preserves existing rows on overflow", async () => {
     const { running } = await startWorker()
     const instanceId = randomUUID()
