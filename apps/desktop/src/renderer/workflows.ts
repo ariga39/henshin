@@ -3,6 +3,7 @@ import { localMappingPreviewCanActivate } from "@henshin/contracts"
 import type {
   ConnectionStatusView,
   LibraryEntry,
+  ConnectionTargetView,
   RootPreviewRequest,
   RootPreviewResult,
   ScanTask,
@@ -13,6 +14,7 @@ import type {
 } from "@henshin/contracts"
 import {
   LibraryClient,
+  ConnectionClient,
   OpenJournalClient,
   LocalMappingClient,
   PrototypeClient,
@@ -80,6 +82,7 @@ export const previewRoot = (selection: RootPreviewRequest | string) =>
 export const previewLocalMapping = (rootId: string) =>
   Effect.gen(function*() {
     const client = yield* LocalMappingClient
+    const connectionGeneration = viewStore.getState().connection_generation
     yield* Effect.sync(() => viewStore.set({
       local_mapping_root_id: rootId,
       local_mapping_status: "loading",
@@ -88,6 +91,7 @@ export const previewLocalMapping = (rootId: string) =>
       local_mapping_activation_error: null
     }))
     const result = yield* client.preview(rootId)
+    if (!isCurrent(connectionGeneration)) return
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({
         local_mapping_status: "error",
@@ -121,11 +125,13 @@ export const previewLocalMapping = (rootId: string) =>
 
 export const loadLocalMappings = Effect.gen(function*() {
   const client = yield* LocalMappingClient
+  const connectionGeneration = viewStore.getState().connection_generation
   yield* Effect.sync(() => viewStore.set({
     local_mapping_list_status: "loading",
     local_mapping_list_error: null
   }))
   const result = yield* client.list()
+  if (!isCurrent(connectionGeneration)) return false
   if (result.ok) {
     yield* Effect.sync(() => viewStore.set({
       local_mappings: result.data,
@@ -358,8 +364,10 @@ export const saveReaderProfile = (input: ReaderProfileSaveIpcRequest) =>
 
 export const loadRoots = Effect.gen(function*() {
   const client = yield* RootPreviewClient
+  const connectionGeneration = viewStore.getState().connection_generation
   yield* Effect.sync(() => viewStore.set({ root_roots_status: "loading", root_roots_error: null }))
   const result = yield* client.list()
+  if (!isCurrent(connectionGeneration)) return false
   if (result.ok) {
     yield* Effect.sync(() => viewStore.set({ root_saved_roots: result.data, root_roots_status: "ready" }))
   } else {
@@ -377,8 +385,11 @@ const releaseErrorMessage = (error: { readonly code: string; readonly message: s
     : error.message
 
 const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
+  const connectionGeneration = viewStore.getState().connection_generation
+  const isCurrentScanRequest = (): boolean => isCurrent(connectionGeneration)
   yield* Effect.sync(() => viewStore.set({ scan_status: "loading", scan_error: null }))
   const tasks = yield* client.listTasks()
+  if (!isCurrentScanRequest()) return false
   if (!tasks.ok) {
     yield* Effect.sync(() => viewStore.set({ scan_status: "error", scan_error: tasks.error.message }))
     return false
@@ -386,6 +397,7 @@ const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(f
   yield* Effect.sync(() => viewStore.set({ scan_tasks: tasks.data }))
 
   const candidates = yield* client.candidates()
+  if (!isCurrentScanRequest()) return false
   if (!candidates.ok) {
     yield* Effect.sync(() => viewStore.set({ scan_status: "error", scan_error: candidates.error.message }))
     return false
@@ -907,6 +919,29 @@ export const loadRootWorkspace = Effect.gen(function*() {
     yield* loadPendingReplacements()
   }
 })
+
+export const loadConnectionWorkspace = Effect.gen(function*() {
+  const connectionClient = yield* ConnectionClient
+  const generation = viewStore.getState().connection_generation
+  const target = yield* connectionClient.target()
+  if (target.ok && isCurrent(generation)) yield* Effect.sync(() => viewStore.set({ connection_target: target.data }))
+  const status = yield* connectionClient.status()
+  if (!isCurrent(generation)) return
+  if (status.ok) yield* Effect.sync(() => viewStore.publishConnection(status.data, generation))
+  yield* loadRootWorkspace
+  if (!isCurrent(generation)) return
+  if (target.ok && target.data.mode === "remote" && status.ok && status.data.state === "connected" && isCurrent(generation)) {
+    yield* loadLibrary()
+    yield* Effect.sync(() => viewStore.set({ screen: "library" }))
+  }
+})
+
+export const handleConnectionTargetChanged = (target: ConnectionTargetView) =>
+  Effect.gen(function*() {
+    viewStore.resetConnectionTarget(target)
+    yield* failScanWaiters("connection target changed")
+    yield* loadConnectionWorkspace
+  })
 
 const watchScanTask = (taskId: string) =>
   Effect.gen(function*() {
@@ -1479,6 +1514,142 @@ export const openSelectedLibraryEntry = Effect.gen(function*() {
       result: result.data
     })
   }))
+})
+export const connectRemote = (baseUrl: string, bearerToken: string) =>
+  Effect.gen(function*() {
+    const client = yield* ConnectionClient
+    const generation = viewStore.beginConnectionTransition("connecting")
+    const result = yield* client.connectRemote({ base_url: baseUrl, bearer_token: bearerToken })
+    if (!result.ok) {
+      if (isCurrent(generation)) {
+        const status = yield* client.status()
+        const target = yield* client.target()
+        yield* Effect.sync(() => viewStore.set({
+          ...(status.ok ? { connection: status.data } : {}),
+          ...(target.ok ? { connection_target: target.data } : {}),
+          outcome: { kind: "error", message: result.error.message }
+        }))
+      }
+      return false
+    }
+    if (!isCurrent(generation)) return false
+    const status = yield* client.status()
+    const target = yield* client.target()
+    yield* Effect.sync(() => {
+      if (status.ok) viewStore.publishConnection(status.data, generation)
+      viewStore.set({
+        ...(target.ok ? { connection_target: target.data } : {}),
+        pending_remote_connection: result.data,
+        outcome: null
+      })
+    })
+    return true
+  })
+
+export const confirmRemote = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const pending = viewStore.getState().pending_remote_connection
+  if (pending === null) return false
+  const generation = viewStore.beginConnectionTransition("connecting")
+  const result = yield* client.confirmRemote({ candidate_id: pending.candidate_id })
+  if (!result.ok) {
+    if (isCurrent(generation)) {
+      const status = yield* client.status()
+      const target = yield* client.target()
+      yield* Effect.sync(() => viewStore.set({
+        ...(status.ok ? { connection: status.data } : {}),
+        ...(target.ok ? { connection_target: target.data } : {}),
+        pending_remote_connection: null,
+        outcome: { kind: "error", message: result.error.message }
+      }))
+    }
+    return false
+  }
+  if (!isCurrent(generation)) return false
+  yield* Effect.sync(() => viewStore.set({ pending_remote_connection: null, outcome: null }))
+  yield* Effect.sync(() => viewStore.publishConnection(result.data, generation))
+  const target = yield* client.target()
+  if (target.ok) yield* Effect.sync(() => viewStore.set({ connection_target: target.data }))
+  yield* loadRootWorkspace
+  yield* loadLibrary()
+  yield* Effect.sync(() => viewStore.set({ screen: "library" }))
+  return true
+})
+
+export const cancelRemote = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const generation = viewStore.getState().connection_generation
+  const result = yield* client.cancelRemote()
+  if (!result.ok) {
+    yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+    return
+  }
+  yield* Effect.sync(() => {
+    viewStore.set({ pending_remote_connection: null, outcome: null })
+    viewStore.publishConnection(result.data, generation)
+  })
+})
+
+export const useManagedConnection = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const generation = viewStore.beginConnectionTransition("connecting")
+  const result = yield* client.useManaged()
+  if (!result.ok) {
+    if (isCurrent(generation)) {
+      const status = yield* client.status()
+      const target = yield* client.target()
+      yield* Effect.sync(() => viewStore.set({
+        ...(status.ok ? { connection: status.data } : {}),
+        ...(target.ok ? { connection_target: target.data } : {}),
+        pending_remote_connection: null,
+        outcome: { kind: "error", message: result.error.message }
+      }))
+    }
+    return false
+  }
+  if (!isCurrent(generation)) return false
+  yield* Effect.sync(() => viewStore.set({ pending_remote_connection: null, outcome: null }))
+  yield* Effect.sync(() => viewStore.publishConnection(result.data, generation))
+  const target = yield* client.target()
+  if (target.ok) yield* Effect.sync(() => viewStore.set({ connection_target: target.data }))
+  yield* loadRootWorkspace
+  return true
+})
+
+export const disconnectNormal = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const generation = viewStore.beginConnectionTransition("disconnected")
+  const result = yield* client.disconnect()
+  if (result.ok && isCurrent(generation)) yield* Effect.sync(() => {
+    viewStore.set({ pending_remote_connection: null, outcome: null })
+    viewStore.publishConnection(result.data, generation)
+  })
+  if (!result.ok && isCurrent(generation)) {
+    yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+  }
+})
+
+export const reconnectNormal = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const generation = viewStore.beginConnectionTransition("connecting")
+  const result = yield* client.reconnect()
+  if (!result.ok) {
+    if (isCurrent(generation)) {
+      const status = yield* client.status()
+      if (status.ok) yield* Effect.sync(() => viewStore.publishConnection(status.data, generation))
+      yield* Effect.sync(() => viewStore.set({ pending_remote_connection: null }))
+      yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+    }
+    return
+  }
+  if (!isCurrent(generation)) return
+  yield* Effect.sync(() => viewStore.set({ pending_remote_connection: null, outcome: null }))
+  yield* Effect.sync(() => viewStore.publishConnection(result.data, generation))
+  const target = yield* client.target()
+  if (target.ok) yield* Effect.sync(() => viewStore.set({ connection_target: target.data }))
+  yield* loadRootWorkspace
+  yield* loadLibrary()
+  yield* Effect.sync(() => viewStore.set({ screen: "library" }))
 })
 
 export const loadLibrary = (append = false, query = viewStore.getState().library_query) =>

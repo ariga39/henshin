@@ -51,11 +51,42 @@ export type HandshakeIpcRequest = typeof HandshakeIpcRequest.Type
 export const ConnectIpcRequest = Schema.Struct({})
 export type ConnectIpcRequest = typeof ConnectIpcRequest.Type
 
+export const RemoteConnectIpcRequest = Schema.Struct({
+  base_url: Schema.String,
+  bearer_token: Schema.String
+})
+export type RemoteConnectIpcRequest = typeof RemoteConnectIpcRequest.Type
+
+export const RemoteConnectionCandidateView = Schema.Struct({
+  candidate_id: Uuid,
+  base_url: Schema.String,
+  instance_id: Uuid
+})
+export type RemoteConnectionCandidateView = typeof RemoteConnectionCandidateView.Type
+
+export const ConfirmRemoteIpcRequest = Schema.Struct({
+  candidate_id: Uuid
+})
+export type ConfirmRemoteIpcRequest = typeof ConfirmRemoteIpcRequest.Type
+
+export const CancelRemoteIpcRequest = Schema.Struct({})
+export type CancelRemoteIpcRequest = typeof CancelRemoteIpcRequest.Type
+
+export const ManagedConnectIpcRequest = Schema.Struct({})
+export type ManagedConnectIpcRequest = typeof ManagedConnectIpcRequest.Type
+
 export const DisconnectIpcRequest = Schema.Struct({})
 export type DisconnectIpcRequest = typeof DisconnectIpcRequest.Type
 
 export const ConnectionStatusIpcRequest = Schema.Struct({})
 export type ConnectionStatusIpcRequest = typeof ConnectionStatusIpcRequest.Type
+
+export const ConnectionTargetView = Schema.Struct({
+  mode: Schema.Union([Schema.Literal("managed"), Schema.Literal("remote")]),
+  base_url: Schema.NullOr(Schema.String),
+  instance_id: Schema.NullOr(Uuid)
+})
+export type ConnectionTargetView = typeof ConnectionTargetView.Type
 
 export const ListOpenJournalIpcRequest = Schema.Struct({})
 export type ListOpenJournalIpcRequest = typeof ListOpenJournalIpcRequest.Type

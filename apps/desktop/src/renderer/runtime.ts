@@ -1,6 +1,7 @@
 import { Layer, ManagedRuntime } from "effect"
 import {
   LibraryClient,
+  ConnectionClient,
   OpenJournalClient,
   LocalMappingClient,
   PrototypeClient,
@@ -15,6 +16,7 @@ import {
 export const runtime = ManagedRuntime.make(
   Layer.mergeAll(
     PrototypeClient.layer,
+    ConnectionClient.layer,
     OpenJournalClient.layer,
     ReaderProfileClient.layer,
     RootPreviewClient.layer,

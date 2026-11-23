@@ -1,6 +1,9 @@
-import { Data, Duration, Effect, Fiber, Layer, ManagedRuntime } from "effect"
+import { Data, Duration, Effect, Fiber, Layer, ManagedRuntime, Schema } from "effect"
+import * as HttpClientError from "effect/http/HttpClientError"
 import { NodeHttpClient } from "@effect/platform-node"
 import {
+  HANDSHAKE_API_VERSION,
+  HANDSHAKE_CAPABILITY,
   LibraryHttpClient,
   OpenEventHttpClient,
   PrototypeHttpClient,
@@ -23,9 +26,44 @@ export class ConnectionInstanceMismatchError extends Data.TaggedError("Connectio
   readonly actualInstanceId: string
 }> {}
 
+export type ConnectionFailureCode =
+  | "connection_authentication_failed"
+  | "connection_tls_expired"
+  | "connection_tls_hostname"
+  | "connection_tls_untrusted"
+  | "connection_tls_failed"
+  | "connection_redirect_refused"
+  | "connection_endpoint_failed"
+  | "connection_server_failed"
+  | "connection_response_invalid"
+  | "connection_failed"
+
+export interface ConnectionFailureInfo {
+  readonly code: ConnectionFailureCode
+  readonly message: string
+  readonly retryable: boolean
+}
+
+export class ConnectionCompatibilityError extends Data.TaggedError("ConnectionCompatibilityError")<{
+  readonly message: string
+  readonly apiVersion: string
+  readonly missingCapabilities: ReadonlyArray<string>
+}> {}
+
+export class ConnectionFailureError extends Data.TaggedError("ConnectionFailureError")<ConnectionFailureInfo> {}
+
+export class ConnectionEndpointError extends Data.TaggedError("ConnectionEndpointError")<{
+  readonly message: string
+}> {}
+
+export class ConnectionConfirmationError extends Data.TaggedError("ConnectionConfirmationError")<{
+  readonly message: string
+}> {}
+
 export interface ConnectionLifecycleOptions {
   readonly baseUrl: string
   readonly bearerToken: string
+  readonly expectedInstanceId?: string | null
 }
 
 interface Lease {
@@ -47,6 +85,126 @@ interface Candidate {
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+const tlsCauseCodes = new Set([
+  "CERT_HAS_EXPIRED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+])
+
+type TlsFailureKind = "expired" | "hostname" | "untrusted"
+
+const tlsFailureKind = (cause: unknown): TlsFailureKind | null => {
+  if (cause === null || typeof cause !== "object") return null
+  const code = "code" in cause && typeof cause.code === "string" ? cause.code : ""
+  const message = "message" in cause && typeof cause.message === "string" ? cause.message : ""
+  const details = `${code} ${message}`
+  if (code === "CERT_HAS_EXPIRED" || /certificate has expired/iu.test(details)) return "expired"
+  if (code === "ERR_TLS_CERT_ALTNAME_INVALID" || /hostname|host name|altname|ip address.*(match|mismatch)/iu.test(details)) {
+    return "hostname"
+  }
+  if (tlsCauseCodes.has(code) || /certificate|\btls\b|\bssl\b/iu.test(details)) return "untrusted"
+  return null
+}
+
+const errorCode = (error: unknown): string | null => {
+  if (error === null || typeof error !== "object" || !("code" in error) || typeof error.code !== "string") return null
+  return error.code
+}
+
+const classifyHttpStatus = (status: number): ConnectionFailureInfo | null => {
+  if (status === 401 || status === 403) {
+    return {
+      code: "connection_authentication_failed",
+      message: "The server rejected the owner credential. Verify the token and try again.",
+      retryable: false
+    }
+  }
+  if (status >= 300 && status < 400) {
+    return {
+      code: "connection_redirect_refused",
+      message: "The endpoint redirected the request. Enter the final HTTPS endpoint; credentials are not sent through redirects.",
+      retryable: false
+    }
+  }
+  if (status >= 400 && status < 500) {
+    return {
+      code: "connection_endpoint_failed",
+      message: `The endpoint returned HTTP ${status}. Check that the URL points to the Henshin HTTPS endpoint, then try again.`,
+      retryable: false
+    }
+  }
+  if (status >= 500) {
+    return {
+      code: "connection_server_failed",
+      message: `The remote server returned HTTP ${status}. Check the server health and logs, fix the service, then retry.`,
+      retryable: true
+    }
+  }
+  return null
+}
+
+export const classifyConnectionFailure = (error: unknown): ConnectionFailureInfo => {
+  if (errorCode(error) === "authentication_required") {
+    return {
+      code: "connection_authentication_failed",
+      message: "The server rejected the owner credential. Verify the token and try again.",
+      retryable: false
+    }
+  }
+  if (HttpClientError.isHttpClientError(error)) {
+    const reason = error.reason
+    if ("response" in reason) {
+      const statusFailure = classifyHttpStatus(reason.response.status)
+      if (statusFailure !== null) return statusFailure
+    }
+    if (reason._tag === "DecodeError" || reason._tag === "EmptyBodyError") {
+      return {
+        code: "connection_response_invalid",
+        message: "The endpoint returned an invalid or incomplete handshake. Check that the URL points to a compatible Henshin server, then try again.",
+        retryable: false
+      }
+    }
+    if (reason._tag === "TransportError") {
+      const kind = tlsFailureKind(reason.cause)
+      if (kind === "expired") {
+        return {
+          code: "connection_tls_expired",
+          message: "The server certificate has expired. Renew the certificate on the server, then retry.",
+          retryable: false
+        }
+      }
+      if (kind === "hostname") {
+        return {
+          code: "connection_tls_hostname",
+          message: "The server certificate does not cover this hostname. Use the hostname covered by the certificate, or fix the certificate, then retry.",
+          retryable: false
+        }
+      }
+      if (kind === "untrusted") {
+        return {
+          code: "connection_tls_untrusted",
+          message: "The server certificate is not trusted. Configure the desktop's Node HTTPS trust store (for example with NODE_EXTRA_CA_CERTS), restart the desktop so Node loads it, then retry.",
+          retryable: false
+        }
+      }
+    }
+  }
+  if (Schema.isSchemaError(error)) {
+    return {
+      code: "connection_response_invalid",
+      message: "The endpoint returned an invalid or incomplete handshake. Check that the URL points to a compatible Henshin server, then try again.",
+      retryable: false
+    }
+  }
+  return {
+    code: "connection_failed",
+    message: "The HTTPS server could not be reached. Check the endpoint and that the service is running, then retry.",
+    retryable: true
+  }
+}
 
 const disposeBounded = async (
   runtime: ManagedRuntime.ManagedRuntime<
@@ -78,6 +236,26 @@ export class ConnectionLifecycle {
 
   constructor(options: ConnectionLifecycleOptions) {
     this.options = options
+    this.expectedInstanceId = options.expectedInstanceId ?? null
+  }
+
+  static validateRemoteEndpoint(raw: string): string {
+    let parsed: URL
+    try {
+      parsed = new URL(raw)
+    } catch {
+      throw new ConnectionEndpointError({ message: "enter a valid HTTPS server endpoint" })
+    }
+    if (parsed.protocol !== "https:") {
+      throw new ConnectionEndpointError({ message: "remote server endpoints must use HTTPS" })
+    }
+    if (/[?#]/u.test(raw) || parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "") {
+      throw new ConnectionEndpointError({ message: "server endpoints cannot contain credentials, queries, or fragments" })
+    }
+    if (parsed.hostname === "") {
+      throw new ConnectionEndpointError({ message: "enter a valid HTTPS server endpoint" })
+    }
+    return parsed.toString().replace(/\/+$/u, "")
   }
 
   getStatus(): ConnectionStatusView {
@@ -158,6 +336,16 @@ export class ConnectionLifecycle {
         await disposeBounded(runtime)
         return this.status
       }
+      const missingCapabilities = [HANDSHAKE_CAPABILITY.libraryBrowse].filter(
+        (capability) => !handshake.data.capabilities.includes(capability)
+      )
+      if (handshake.data.api_version !== HANDSHAKE_API_VERSION || missingCapabilities.length > 0) {
+        throw new ConnectionCompatibilityError({
+          message: "The server does not support the desktop Library API; use a compatible Henshin server.",
+          apiVersion: handshake.data.api_version,
+          missingCapabilities
+        })
+      }
       if (this.expectedInstanceId !== null && handshake.instance_id !== this.expectedInstanceId) {
         throw new ConnectionInstanceMismatchError({
           expectedInstanceId: this.expectedInstanceId,
@@ -183,14 +371,19 @@ export class ConnectionLifecycle {
       this.candidates.delete(generation)
       await disposeBounded(runtime)
       if (generation !== this.generation) return this.status
+      const failure = error instanceof ConnectionInstanceMismatchError || error instanceof ConnectionCompatibilityError
+        ? error
+        : new ConnectionFailureError(classifyConnectionFailure(error))
       this.lease = null
       this.status = {
         state: "blocked",
         instance_id: this.expectedInstanceId,
         epoch: null,
-        reason: error instanceof ConnectionInstanceMismatchError ? "instance_mismatch" : "authentication_or_network_failure"
+        reason: failure instanceof ConnectionInstanceMismatchError
+          ? "instance_mismatch"
+          : failure.message
       }
-      throw error
+      throw failure
     }
   }
 

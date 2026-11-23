@@ -7,6 +7,10 @@ import { pathToFileURL } from "node:url"
 import {
   DiscardDraftIpcRequest,
   ConnectIpcRequest,
+  RemoteConnectIpcRequest,
+  ConfirmRemoteIpcRequest,
+  CancelRemoteIpcRequest,
+  ManagedConnectIpcRequest,
   ConnectionStatusIpcRequest,
   DisconnectIpcRequest,
   DismissCommandIpcRequest,
@@ -48,6 +52,8 @@ import {
   ReconcileCommandIpcRequest,
   RecoverOpenJournalIpcRequest,
   ConnectionStatusView,
+  ConnectionTargetView,
+  RemoteConnectionCandidateView,
   localMappingSampleCanActivate,
   type PublicError,
   type LocalMappingPreview,
@@ -104,6 +110,10 @@ import { drainOpenEvents } from "./OpenEventDelivery"
 import { OpenEventDeliveryScheduler } from "./OpenEventDeliveryScheduler"
 import {
   ConnectionInstanceMismatchError,
+  ConnectionCompatibilityError,
+  ConnectionFailureError,
+  ConnectionEndpointError,
+  ConnectionConfirmationError,
   ConnectionLifecycle,
   ConnectionPausedError
 } from "./ConnectionLifecycle"
@@ -138,6 +148,22 @@ type MainServices = DraftStore | CommandAttemptStore | OpenJournalStore | LocalM
 let runtime: ManagedRuntime.ManagedRuntime<MainServices, never> | null = null
 let connection: ConnectionLifecycle | null = null
 let openCoordinator: OpenCoordinator | null = null
+let managedDatabasePath: string | null = null
+let managedChildStart: Promise<ServerChild> | null = null
+let connectionTarget: ConnectionTargetView = {
+  mode: "managed",
+  base_url: null,
+  instance_id: null
+}
+interface PendingRemoteConnection {
+  readonly candidateId: string
+  readonly candidate: ConnectionLifecycle
+  readonly instanceId: string
+  readonly baseUrl: string
+}
+let pendingRemoteConnection: PendingRemoteConnection | null = null
+let connectionOperation: Promise<void> = Promise.resolve()
+let rendererUrl = ""
 let shutdownPromise: Promise<void> | null = null
 let readyToQuit = false
 const prototypeMode = process.env.HENSHIN_PROTOTYPE_MODE === "1"
@@ -269,6 +295,22 @@ const toPublicError = (error: unknown): PublicError => {
       message: "managed endpoint identity changed; reconnect requires endpoint recovery",
       retryable: false
     }
+  }
+  if (error instanceof ConnectionCompatibilityError) {
+    return {
+      code: "connection_incompatible",
+      message: error.message,
+      retryable: false
+    }
+  }
+  if (error instanceof ConnectionFailureError) {
+    return { code: error.code, message: error.message, retryable: error.retryable }
+  }
+  if (error instanceof ConnectionEndpointError) {
+    return { code: "invalid_connection_endpoint", message: error.message, retryable: false }
+  }
+  if (error instanceof ConnectionConfirmationError) {
+    return { code: "connection_confirmation_required", message: error.message, retryable: false }
   }
   if (error instanceof CommandAttemptStoreFullError) {
     return {
@@ -436,6 +478,37 @@ const requireNamespace = (): string => {
 const requireConnection = (): ConnectionLifecycle => {
   if (connection === null) throw new Error("connection lifecycle is not ready")
   return connection
+}
+
+const ensureManagedChild = async (): Promise<ServerChild> => {
+  if (serverChild !== null) return serverChild
+  if (managedDatabasePath === null) throw new Error("managed service configuration is not ready")
+  if (managedChildStart !== null) return managedChildStart
+  managedChildStart = startServerChild(managedDatabasePath)
+  try {
+    serverChild = await managedChildStart
+    return serverChild
+  } finally {
+    managedChildStart = null
+  }
+}
+
+const serializeConnectionOperation = <A>(operation: () => Promise<A>): Promise<A> => {
+  const result = connectionOperation.then(operation, operation)
+  connectionOperation = result.then(() => undefined, () => undefined)
+  return result
+}
+
+const discardPendingRemoteConnection = async (): Promise<void> => {
+  const pending = pendingRemoteConnection
+  pendingRemoteConnection = null
+  if (pending !== null) await pending.candidate.close()
+}
+
+const setPendingRemoteConnection = async (pending: PendingRemoteConnection): Promise<void> => {
+  const previous = pendingRemoteConnection
+  pendingRemoteConnection = pending
+  if (previous !== null) await previous.candidate.close()
 }
 
 const notifyOpenJournalChanged = (): void => {
@@ -657,7 +730,179 @@ const connectionStatusResult = (status: ConnectionStatusView): IpcOk<ConnectionS
   data: status
 })
 
+const connectionTargetResult = (): IpcOk<ConnectionTargetView> => ({
+  ok: true,
+  data: connectionTarget
+})
+
+const notifyConnectionTargetChanged = (): void => {
+  for (const window of appWindows) {
+    if (!window.isDestroyed()) window.webContents.send(IpcChannels.connectionChanged, connectionTarget)
+  }
+}
+
+const setConnectionTarget = (target: ConnectionTargetView): void => {
+  if (
+    connectionTarget.mode === target.mode &&
+    connectionTarget.base_url === target.base_url &&
+    connectionTarget.instance_id === target.instance_id
+  ) return
+  connectionTarget = target
+  notifyConnectionTargetChanged()
+}
+
+const updateTargetFromStatus = (status: ConnectionStatusView): void => {
+  setConnectionTarget({
+    ...connectionTarget,
+    instance_id: status.instance_id
+  })
+}
+
 const registerIpc = (): void => {
+  ipcMain.handle(IpcChannels.connectionStatus, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ConnectionStatusIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return connectionStatusResult(requireConnection().getStatus())
+  })
+
+  ipcMain.handle(IpcChannels.connectionTarget, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ConnectionStatusIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return connectionTargetResult()
+  })
+
+  ipcMain.handle(IpcChannels.connect, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ConnectIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return serializeConnectionOperation(async () => {
+      await discardPendingRemoteConnection()
+      return requireConnection()
+        .connect()
+        .then((status) => {
+          updateTargetFromStatus(status)
+          openEventDeliveryScheduler.schedule()
+          return connectionStatusResult(status)
+        })
+    }).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+  })
+
+  ipcMain.handle(IpcChannels.disconnect, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(DisconnectIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return serializeConnectionOperation(async () => {
+      await discardPendingRemoteConnection()
+      return requireConnection().disconnect().then(connectionStatusResult)
+    }).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+  })
+
+  ipcMain.handle(IpcChannels.connectRemote, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(RemoteConnectIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    const request = decoded.value
+    if (request.bearer_token.length === 0) {
+      return {
+        ok: false as const,
+        error: { code: "invalid_connection_credential", message: "enter the server owner credential", retryable: false }
+      }
+    }
+    let baseUrl: string
+    try {
+      baseUrl = ConnectionLifecycle.validateRemoteEndpoint(request.base_url)
+    } catch (error) {
+      return { ok: false as const, error: toPublicError(error) }
+    }
+    return serializeConnectionOperation(async () => {
+      await discardPendingRemoteConnection()
+      const candidate = new ConnectionLifecycle({ baseUrl, bearerToken: request.bearer_token })
+      try {
+        const status = await candidate.connect()
+        if (status.instance_id === null) throw new ConnectionEndpointError({ message: "server identity was not provided" })
+        const candidateId = randomUUID()
+        await setPendingRemoteConnection({
+          candidateId,
+          candidate,
+          instanceId: status.instance_id,
+          baseUrl
+        })
+        return {
+          ok: true as const,
+          data: {
+            candidate_id: candidateId,
+            base_url: baseUrl,
+            instance_id: status.instance_id
+          } satisfies RemoteConnectionCandidateView
+        }
+      } catch (error) {
+        await candidate.close()
+        throw error
+      }
+    }).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+  })
+
+  ipcMain.handle(IpcChannels.confirmRemote, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ConfirmRemoteIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return serializeConnectionOperation(async () => {
+      const pending = pendingRemoteConnection
+      if (pending === null || pending.candidateId !== decoded.value.candidate_id) {
+        throw new ConnectionConfirmationError({ message: "remote server confirmation has expired" })
+      }
+      pendingRemoteConnection = null
+      try {
+        const previous = requireConnection()
+        connection = pending.candidate
+        setConnectionTarget({
+          mode: "remote",
+          base_url: pending.baseUrl,
+          instance_id: pending.instanceId
+        })
+        await previous.close()
+        openEventDeliveryScheduler.schedule()
+        return connectionStatusResult(pending.candidate.getStatus())
+      } catch (error) {
+        await pending.candidate.close()
+        throw error
+      }
+    }).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+  })
+
+  ipcMain.handle(IpcChannels.cancelRemote, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(CancelRemoteIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return serializeConnectionOperation(async () => {
+      await discardPendingRemoteConnection()
+      return connectionStatusResult(requireConnection().getStatus())
+    }).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+  })
+
+  ipcMain.handle(IpcChannels.useManaged, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ManagedConnectIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return serializeConnectionOperation(async () => {
+      await discardPendingRemoteConnection()
+      return ensureManagedChild()
+      .then(async (child) => {
+        const candidate = new ConnectionLifecycle({ baseUrl: child.baseUrl, bearerToken: child.bearerToken })
+        const status = await candidate.connect()
+        const previous = requireConnection()
+        connection = candidate
+        setConnectionTarget({ mode: "managed", base_url: null, instance_id: status.instance_id })
+        await previous.close()
+        updateTargetFromStatus(status)
+        openEventDeliveryScheduler.schedule()
+        return connectionStatusResult(status)
+      })
+    }).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+  })
+
   ipcMain.handle(IpcChannels.rootPreview, (event, raw: unknown) => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(RootPreviewIpcRequest)(raw)
@@ -1444,33 +1689,6 @@ const registerIpc = (): void => {
     }
   })
 
-  ipcMain.handle(IpcChannels.connect, (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ConnectIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    return requireConnection()
-      .connect()
-      .then((status) => {
-        openEventDeliveryScheduler.schedule()
-        return connectionStatusResult(status)
-      })
-      .catch((error) => ({ ok: false as const, error: toPublicError(error) }))
-  })
-
-  ipcMain.handle(IpcChannels.disconnect, (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(DisconnectIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    return requireConnection().disconnect().then(connectionStatusResult)
-  })
-
-  ipcMain.handle(IpcChannels.connectionStatus, (event, raw: unknown) => {
-    assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ConnectionStatusIpcRequest)(raw)
-    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    return connectionStatusResult(requireConnection().getStatus())
-  })
-
   ipcMain.handle(IpcChannels.getNote, (event, raw: unknown) => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(GetNoteIpcRequest)(raw)
@@ -1781,6 +1999,7 @@ const shutdown = (): Promise<void> => {
     connection = null
     openCoordinator = null
     if (activeConnection !== null) await activeConnection.close()
+    await discardPendingRemoteConnection()
     if (activeRuntime !== null) {
       await Promise.race([activeRuntime.dispose(), delay(SHUTDOWN_TIMEOUT_MS)])
     }
@@ -1803,7 +2022,7 @@ const bootstrap = async (): Promise<void> => {
     path.dirname(dbPath),
     path.dirname(clientDbPath)
   ]
-  serverChild = await startServerChild(dbPath)
+  managedDatabasePath = dbPath
 
   const draftWorkerUrl = pathToFileURL(path.join(app.getAppPath(), "dist", "draft-worker.mjs"))
   const localWorker = LocalDatabaseWorker.layer(clientDbPath, { workerUrl: draftWorkerUrl })
@@ -1818,13 +2037,18 @@ const bootstrap = async (): Promise<void> => {
     ).pipe(Layer.provide(localWorker))
   )
 
-  // The owned child remains supervised independently; disconnect only pauses
-  // the authenticated HTTP scope for this managed endpoint.
+  // The owned child remains supervised independently. A remote session only
+  // changes the authenticated HTTP target; it never grants main permission to
+  // stop the independently running service.
+  const child = await ensureManagedChild()
+  connectionTarget = { mode: "managed", base_url: null, instance_id: null }
   connection = new ConnectionLifecycle({
-    baseUrl: serverChild.baseUrl,
-    bearerToken: serverChild.bearerToken
+    baseUrl: child.baseUrl,
+    bearerToken: child.bearerToken
   })
   await connection.connect()
+  updateTargetFromStatus(connection.getStatus())
+  openEventDeliveryScheduler.schedule()
   openCoordinator = createOpenCoordinator()
   openEventDeliveryScheduler.schedule()
 

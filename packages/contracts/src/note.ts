@@ -116,3 +116,10 @@ export const HandshakeData = Schema.Struct({
   capabilities: Schema.Array(Schema.String)
 })
 export type HandshakeData = typeof HandshakeData.Type
+
+/** The only handshake version and capability currently consumed by the desktop Library surface. */
+export const HANDSHAKE_API_VERSION = "prototype/1"
+export const HANDSHAKE_CAPABILITY = {
+  libraryBrowse: "library-browse",
+  prototypeNoteEdit: "prototype-note-edit"
+} as const

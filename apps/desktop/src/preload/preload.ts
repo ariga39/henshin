@@ -16,7 +16,8 @@ import type {
   RecoverOpenJournalIpcRequest,
   LibrarySearchIpcRequest,
   LibraryNoteIpcRequest,
-  LibraryEntryCommandIpcRequest
+  LibraryEntryCommandIpcRequest,
+  ConnectionTargetView
 } from "@henshin/contracts"
 import { IpcChannels } from "@henshin/contracts/channels"
 
@@ -80,6 +81,24 @@ contextBridge.exposeInMainWorld("henshinOpenJournal", {
   list: () => ipcRenderer.invoke(IpcChannels.listOpenJournal, {}),
   recover: (input: RecoverOpenJournalIpcRequest) =>
     ipcRenderer.invoke(IpcChannels.recoverOpenJournal, input)
+})
+
+contextBridge.exposeInMainWorld("henshinConnection", {
+  status: () => ipcRenderer.invoke(IpcChannels.connectionStatus, {}),
+  target: () => ipcRenderer.invoke(IpcChannels.connectionTarget, {}),
+  reconnect: () => ipcRenderer.invoke(IpcChannels.connect, {}),
+  disconnect: () => ipcRenderer.invoke(IpcChannels.disconnect, {}),
+  connectRemote: (input: { readonly base_url: string; readonly bearer_token: string }) =>
+    ipcRenderer.invoke(IpcChannels.connectRemote, input),
+  confirmRemote: (input: { readonly candidate_id: string }) =>
+    ipcRenderer.invoke(IpcChannels.confirmRemote, input),
+  cancelRemote: () => ipcRenderer.invoke(IpcChannels.cancelRemote, {}),
+  useManaged: () => ipcRenderer.invoke(IpcChannels.useManaged, {}),
+  onChanged: (listener: (target: ConnectionTargetView) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, target: ConnectionTargetView) => listener(target)
+    ipcRenderer.on(IpcChannels.connectionChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.connectionChanged, handler)
+  }
 })
 
 if (new URLSearchParams(window.location.search).get("mode") === "prototype") {

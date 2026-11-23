@@ -1,9 +1,10 @@
 import { Effect, Layer } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
-import type { LibraryEntry, LibraryEntryDetails, OpenBookIpcResult, ReaderProfile } from "@henshin/contracts"
+import type { LibraryEntry, LibraryEntryDetails, OpenBookIpcResult, ReaderProfile, RootPreviewResult } from "@henshin/contracts"
 import { LibraryClient, type Result } from "../src/renderer/client"
 import {
   chooseLibraryOpenProfile,
+  loadLibrary,
   libraryOpenStateFor,
   loadActiveLibraryOpenState,
   openSelectedLibraryEntry,
@@ -183,6 +184,74 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_open_profile_id).toBeNull()
     expect(viewStore.getState().library_entries).toEqual([entry(entryBId, "book-b")])
     expect(viewStore.getState().library_open_states).toHaveLength(1)
+  })
+
+  it("discards a pending library response when the connection target changes", async () => {
+    let resolveSearch!: (value: Result<{
+      readonly entries: ReadonlyArray<LibraryEntry>
+      readonly has_more: boolean
+      readonly next_cursor: string | null
+      readonly library_change_revision: string
+    }>) => void
+    const delayed = new Promise<Result<{
+      readonly entries: ReadonlyArray<LibraryEntry>
+      readonly has_more: boolean
+      readonly next_cursor: string | null
+      readonly library_change_revision: string
+    }>>((resolve) => { resolveSearch = resolve })
+    const client = LibraryClient.of({
+      search: () => Effect.promise(() => delayed),
+      open: () => Effect.succeed({ ok: true as const, data: accepted(entryAId) }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      connection_generation: 7,
+      library_request_generation: 10,
+      library_entries: [entry(entryAId, "old-book")],
+      library_selected_entry_id: entryAId,
+      library_open_profile_id: profileId,
+      library_entry_status: "ready",
+      library_note_text: "old private note",
+      library_note_status: "error",
+      library_note_error: "old note error",
+      library_note_server_text: "old server note",
+      root_preview: {
+        selected_server_path: "/old",
+        instance_id: namespaceId,
+        epoch: "99999999-9999-4999-8999-999999999999",
+        preview_identity: { canonical_server_path: "/old", device: "device", inode: "inode" },
+        outcome: "selected",
+        children: [],
+        sample_limit: 10
+      } satisfies RootPreviewResult,
+      root_preview_request: { path: "/old" },
+      root_preview_status: "ready"
+    })
+
+    const pending = run(loadLibrary(), client)
+    viewStore.resetConnectionTarget({
+      mode: "remote",
+      base_url: "https://new.example.test",
+      instance_id: otherProfileId
+    })
+    resolveSearch({
+      ok: true,
+      data: { entries: [entry(entryBId, "old-response")], has_more: false, next_cursor: null, library_change_revision: "2" }
+    })
+    await pending
+
+    expect(viewStore.getState().library_entries).toEqual([])
+    expect(viewStore.getState().library_selected_entry_id).toBeNull()
+    expect(viewStore.getState().library_open_states).toEqual([])
+    expect(viewStore.getState().library_entry).toBeNull()
+    expect(viewStore.getState().library_note_text).toBe("")
+    expect(viewStore.getState().library_note_status).toBe("idle")
+    expect(viewStore.getState().library_note_error).toBeNull()
+    expect(viewStore.getState().library_note_server_text).toBeNull()
+    expect(viewStore.getState().root_preview).toBeNull()
+    expect(viewStore.getState().root_preview_request).toBeNull()
+    expect(viewStore.getState().connection_target.base_url).toBe("https://new.example.test")
   })
 
   it("keeps the latest terminal action through reselection and follows a newer active action", async () => {
