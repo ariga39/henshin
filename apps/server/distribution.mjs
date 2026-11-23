@@ -261,7 +261,7 @@ const build = async () => {
       "@henshin/server",
       "deploy",
       "--prod",
-      "--offline",
+      "--prefer-offline",
       "--frozen-lockfile",
       "--trust-lockfile",
       "--config.inject-workspace-packages=true",
