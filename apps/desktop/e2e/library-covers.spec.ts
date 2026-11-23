@@ -221,6 +221,78 @@ test("edits, rejects stale title saves, removes, and searches the personal title
   }
 })
 
+test("asks before discarding unsaved title and note drafts when navigating Library", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-draft-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-draft-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+
+  try {
+    for (const name of ["book-a", "book-b"]) {
+      const book = path.join(fixtureDirectory, name)
+      await mkdir(book)
+      await writeFile(path.join(book, "001.jpg"), "page")
+    }
+
+    const { window } = await launch(dbPath)
+    await expect(window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await window.getByTestId("root-preview-submit").click()
+    await window.getByTestId("root-label").fill("Unsaved drafts")
+    await window.getByTestId("root-save").click()
+    await window.getByTestId("root-saved-preview").click()
+    await window.getByTestId("scan-hold-new-discoveries").uncheck()
+    await window.getByTestId("start-held-scan").click()
+    await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(2, { timeout: 30_000 })
+
+    const bookA = window.getByTestId("library-entry").filter({ hasText: "book-a" })
+    const bookB = window.getByTestId("library-entry").filter({ hasText: "book-b" })
+    await bookA.getByRole("button", { name: /Open details/ }).click()
+    const details = window.getByTestId("library-details")
+    await details.getByTestId("entry-personal-title").fill("Unsaved title")
+    await details.getByTestId("entry-note").fill("Unsaved note")
+
+    let switchMessage = ""
+    window.once("dialog", (dialog) => {
+      switchMessage = dialog.message()
+      void dialog.dismiss()
+    })
+    await bookB.getByRole("button", { name: /Open details/ }).click()
+    expect(switchMessage).toContain("unsaved title and note changes")
+    await expect(details.getByTestId("entry-personal-title")).toHaveValue("Unsaved title")
+    await expect(details.getByTestId("entry-note")).toHaveValue("Unsaved note")
+
+    window.once("dialog", (dialog) => void dialog.accept())
+    await bookB.getByRole("button", { name: /Open details/ }).click()
+    await expect(window.getByTestId("library-details").getByTestId("entry-personal-title")).toHaveValue("book-b")
+    await expect(window.getByTestId("library-details").getByTestId("entry-note")).toHaveValue("")
+
+    await bookA.getByRole("button", { name: /Open details/ }).click()
+    const searchDetails = window.getByTestId("library-details")
+    await searchDetails.getByTestId("entry-personal-title").fill("Search draft")
+    await searchDetails.getByTestId("entry-note").fill("Search note")
+    await window.getByTestId("library-search").fill("book-b")
+    let searchMessage = ""
+    window.once("dialog", (dialog) => {
+      searchMessage = dialog.message()
+      void dialog.dismiss()
+    })
+    await window.getByTestId("library-search-submit").click()
+    expect(searchMessage).toContain("unsaved title and note changes")
+    await expect(window.getByTestId("library-details").getByTestId("entry-personal-title")).toHaveValue("Search draft")
+    await expect(window.getByTestId("library-details").getByTestId("entry-note")).toHaveValue("Search note")
+
+    await window.getByTestId("library-search").fill("book-b")
+    window.once("dialog", (dialog) => void dialog.accept())
+    await window.getByTestId("library-search-submit").click()
+    await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(1)
+    await expect(window.getByTestId("library-entry")).toContainText("book-b")
+    await expect(window.getByTestId("library-details")).toHaveCount(0)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+  }
+})
+
 test("loads covers in the viewport and releases them after scrolling away", async () => {
   const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-viewport-db-"))
   const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-viewport-fixture-"))

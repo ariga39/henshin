@@ -32,6 +32,18 @@ const availabilityText = (entry: LibraryEntry): string => {
     : `Server availability: ${label}; observed ${new Date(entry.availability.observed_at_ms).toISOString()}`
 }
 
+const confirmLibraryDraftNavigation = (action: string): boolean => {
+  const state = viewStore.getState()
+  const entry = state.library_entry
+  if (entry === null || entry.entry_id !== state.library_selected_entry_id) return true
+  const titleChanged = state.library_title_draft !== entry.title
+  const noteChanged = state.library_note_text !== (entry.note?.text ?? "")
+  if (!titleChanged && !noteChanged) return true
+  return window.confirm(
+    `You have unsaved ${titleChanged && noteChanged ? "title and note" : titleChanged ? "title" : "note"} changes. ${action} will discard them. Choose Cancel to keep editing.`
+  )
+}
+
 const coverPlaceholder = (entry: LibraryEntry, loading: boolean) => (
   <div
     className="library-cover-placeholder"
@@ -240,6 +252,10 @@ export const LibraryScreen = () => {
           role="search"
           onSubmit={(event) => {
             event.preventDefault()
+            if (searchText !== viewStore.getState().library_query && !confirmLibraryDraftNavigation("Changing the search")) {
+              setSearchText(viewStore.getState().library_query)
+              return
+            }
             void runtime.runPromise(searchLibrary(searchText))
           }}
         >
@@ -266,6 +282,10 @@ export const LibraryScreen = () => {
               type="button"
               data-testid="library-clear-search"
               onClick={() => {
+                if (!confirmLibraryDraftNavigation("Clearing the search")) {
+                  setSearchText(viewStore.getState().library_query)
+                  return
+                }
                 setSearchText("")
                 void runtime.runPromise(searchLibrary(""))
               }}
@@ -286,7 +306,10 @@ export const LibraryScreen = () => {
                 className="library-entry-details"
                 data-testid={`library-entry-details-${entry.entry_id}`}
                 aria-label={`Open details for ${entry.title === "" ? "Untitled" : entry.title}`}
-                onClick={() => void runtime.runPromise(selectLibraryEntry(entry.entry_id))}
+                onClick={() => {
+                  if (!confirmLibraryDraftNavigation("Switching entries")) return
+                  void runtime.runPromise(selectLibraryEntry(entry.entry_id))
+                }}
               >
                 <strong>{entry.title === "" ? "Untitled" : entry.title}</strong>
                 <span>{entry.source_path}</span>

@@ -138,6 +138,7 @@ export interface ViewState {
   readonly library_title_draft: string
   readonly library_title_status: "idle" | "loading" | "error"
   readonly library_title_error: string | null
+  readonly library_title_request_generation: number
   readonly library_entry_request_generation: number
   readonly library_cursor: string | null
   readonly library_has_more: boolean
@@ -255,6 +256,7 @@ const initialState: ViewState = {
   library_title_draft: "",
   library_title_status: "idle",
   library_title_error: null,
+  library_title_request_generation: 0,
   library_entry_request_generation: 0,
   library_cursor: null,
   library_has_more: false,

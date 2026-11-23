@@ -1399,8 +1399,13 @@ export const saveLibraryPersonalTitle = (title: string) =>
     const entry = state.library_entry
     const entryId = state.library_selected_entry_id
     const requestGeneration = state.library_entry_request_generation
+    const titleRequestGeneration = state.library_title_request_generation + 1
     if (entry === null || entry.entry_id !== entryId || entryId === null) return
-    yield* Effect.sync(() => viewStore.set({ library_title_status: "loading", library_title_error: null }))
+    yield* Effect.sync(() => viewStore.set({
+      library_title_request_generation: titleRequestGeneration,
+      library_title_status: "loading",
+      library_title_error: null
+    }))
     const result = yield* client.updatePersonalTitle({
       entry_id: entryId,
       expected_decision_version: entry.decision_version,
@@ -1409,14 +1414,22 @@ export const saveLibraryPersonalTitle = (title: string) =>
     if (!result.ok) {
       yield* Effect.sync(() => {
         const current = viewStore.getState()
-        if (current.library_selected_entry_id !== entryId || current.library_entry_request_generation !== requestGeneration) return
+        if (
+          current.library_selected_entry_id !== entryId ||
+          current.library_entry_request_generation !== requestGeneration ||
+          current.library_title_request_generation !== titleRequestGeneration
+        ) return
         viewStore.set({ library_title_status: "error", library_title_error: result.error.message })
       })
       return
     }
     yield* Effect.sync(() => {
       const current = viewStore.getState()
-      if (current.library_selected_entry_id !== entryId || current.library_entry_request_generation !== requestGeneration) return
+      if (
+        current.library_selected_entry_id !== entryId ||
+        current.library_entry_request_generation !== requestGeneration ||
+        current.library_title_request_generation !== titleRequestGeneration
+      ) return
       replaceLibraryListEntry(result.data.entry)
       replaceLibraryDetails(result.data.entry)
       viewStore.set({ library_title_status: "idle", library_title_error: null })
@@ -1429,8 +1442,13 @@ export const removeLibraryPersonalTitle = Effect.gen(function*() {
   const entry = state.library_entry
   const entryId = state.library_selected_entry_id
   const requestGeneration = state.library_entry_request_generation
+  const titleRequestGeneration = state.library_title_request_generation + 1
   if (entry === null || entry.entry_id !== entryId || entryId === null) return
-  yield* Effect.sync(() => viewStore.set({ library_title_status: "loading", library_title_error: null }))
+  yield* Effect.sync(() => viewStore.set({
+    library_title_request_generation: titleRequestGeneration,
+    library_title_status: "loading",
+    library_title_error: null
+  }))
   const result = yield* client.updatePersonalTitle({
     entry_id: entryId,
     expected_decision_version: entry.decision_version,
@@ -1439,14 +1457,22 @@ export const removeLibraryPersonalTitle = Effect.gen(function*() {
   if (!result.ok) {
     yield* Effect.sync(() => {
       const current = viewStore.getState()
-      if (current.library_selected_entry_id !== entryId || current.library_entry_request_generation !== requestGeneration) return
+      if (
+        current.library_selected_entry_id !== entryId ||
+        current.library_entry_request_generation !== requestGeneration ||
+        current.library_title_request_generation !== titleRequestGeneration
+      ) return
       viewStore.set({ library_title_status: "error", library_title_error: result.error.message })
     })
     return
   }
   yield* Effect.sync(() => {
     const current = viewStore.getState()
-    if (current.library_selected_entry_id !== entryId || current.library_entry_request_generation !== requestGeneration) return
+    if (
+      current.library_selected_entry_id !== entryId ||
+      current.library_entry_request_generation !== requestGeneration ||
+      current.library_title_request_generation !== titleRequestGeneration
+    ) return
     replaceLibraryListEntry(result.data.entry)
     replaceLibraryDetails(result.data.entry)
     viewStore.set({ library_title_status: "idle", library_title_error: null })

@@ -95,6 +95,7 @@ const resetView = () => {
     library_entries: [],
     library_selected_entry_id: null,
     library_entry_request_generation: 0,
+    library_title_request_generation: 0,
     library_open_profile_id: null,
     library_open_states: []
   })
@@ -173,6 +174,41 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_title_draft).toBe("Draft title")
     expect(viewStore.getState().library_note_text).toBe("Draft note")
     expect(viewStore.getState().library_entry?.title).toBe("Draft title")
+  })
+
+  it("does not let an older title command regress the visible list after a newer save", async () => {
+    let resolveFirst!: (value: Result<ReturnType<typeof commandResult>>) => void
+    let resolveSecond!: (value: Result<ReturnType<typeof commandResult>>) => void
+    let updateCount = 0
+    const client = makeLibraryClient({
+      updatePersonalTitle: () => Effect.promise(() => new Promise<Result<ReturnType<typeof commandResult>>>((resolve) => {
+        updateCount += 1
+        if (updateCount === 1) resolveFirst = resolve
+        else resolveSecond = resolve
+      }))
+    })
+    viewStore.set({
+      library_entries: [entry(entryAId, "Original title")],
+      library_selected_entry_id: entryAId,
+      library_entry: details(entryAId, "Original title", "1"),
+      library_entry_status: "ready",
+      library_title_draft: "First title",
+      library_entry_request_generation: 1
+    })
+
+    const firstSave = run(saveLibraryPersonalTitle("First title"), client)
+    await Promise.resolve()
+    const secondSave = run(saveLibraryPersonalTitle("Second title"), client)
+    await Promise.resolve()
+
+    resolveSecond({ ok: true, data: commandResult(details(entryAId, "Second title", "3")) })
+    await secondSave
+    resolveFirst({ ok: true, data: commandResult(details(entryAId, "First title", "2")) })
+    await firstSave
+
+    expect(viewStore.getState().library_entries[0]?.title).toBe("Second title")
+    expect(viewStore.getState().library_entry?.title).toBe("Second title")
+    expect(viewStore.getState().library_title_draft).toBe("Second title")
   })
 
   it("preserves a conflicted title draft and reapplies it after refreshing the revision", async () => {
