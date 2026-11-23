@@ -26,7 +26,6 @@ export interface StartScanInput {
   readonly rootId: string
   readonly expectedMappingRevision: string
   readonly expectedPolicyRevision: string
-  readonly mode?: "manual" | "scheduled"
   readonly holdNewDiscoveries: boolean
 }
 
@@ -69,7 +68,6 @@ export interface FinishScanInput {
   readonly readinessError: { readonly code: string; readonly message: string } | null
 }
 
-const decodeStart = Schema.decodeUnknownOption(ScanStartOutcome)
 const decodeTaskRow = Schema.decodeUnknownOption(ScanTaskRow)
 const decodeTask = Schema.decodeUnknownOption(ScanTask)
 const decodeTasks = Schema.decodeUnknownOption(Schema.Array(ScanTaskRow))
@@ -152,6 +150,7 @@ export class ScanStore extends Context.Service<
   ScanStore,
   {
     readonly start: (input: StartScanInput) => Effect.Effect<ScanStartResult, DatabaseWorkerError>
+    readonly startScheduled: (input: StartScanInput) => Effect.Effect<ScanStartResult, DatabaseWorkerError>
     readonly listTasks: () => Effect.Effect<ReadonlyArray<ScanTask>, DatabaseWorkerError>
     readonly readTask: (taskId: string) => Effect.Effect<ScanTask | null, DatabaseWorkerError>
     readonly listStaged: () => Effect.Effect<ReadonlyArray<StagedDiscovery>, DatabaseWorkerError>
@@ -184,23 +183,31 @@ export class ScanStore extends Context.Service<
     Effect.gen(function*() {
       const worker = yield* DatabaseWorker
 
+      const decodeStartResult = (value: unknown): Effect.Effect<ScanStartResult, DatabaseWorkerError> => {
+        const decoded = Schema.decodeUnknownOption(ScanStartOutcome)(value)
+        if (Option.isNone(decoded)) return Effect.fail(new DatabaseWorkerError({ message: "invalid scan start result" }))
+        const outcome = decoded.value
+        if (outcome.kind === "created" || outcome.kind === "replayed" || outcome.kind === "active") {
+          return Effect.try({
+            try: () => ({ kind: outcome.kind, task: taskView(outcome.task) } as ScanStartResult),
+            catch: () => new DatabaseWorkerError({ message: "invalid persisted scan task" })
+          })
+        }
+        return Effect.succeed(outcome as ScanStartResult)
+      }
+
       const start = (input: StartScanInput) => worker.call({
         op: "startManualScan",
-        ...input,
-        mode: input.mode ?? "manual"
+        ...input
       }).pipe(
-        Effect.flatMap((value) => {
-          const decoded = decodeStart(value)
-          if (Option.isNone(decoded)) return Effect.fail(new DatabaseWorkerError({ message: "invalid scan start result" }))
-          const outcome = decoded.value
-          if (outcome.kind === "created" || outcome.kind === "replayed" || outcome.kind === "active") {
-            return Effect.try({
-              try: () => ({ kind: outcome.kind, task: taskView(outcome.task) } as ScanStartResult),
-              catch: () => new DatabaseWorkerError({ message: "invalid persisted scan task" })
-            })
-          }
-          return Effect.succeed(outcome as ScanStartResult)
-        })
+        Effect.flatMap(decodeStartResult)
+      )
+
+      const startScheduled = (input: StartScanInput) => worker.call({
+        op: "startScheduledScan",
+        ...input
+      }).pipe(
+        Effect.flatMap(decodeStartResult)
       )
 
       const listTasks = () => worker.call({ op: "listScanTasks" }).pipe(
@@ -314,7 +321,7 @@ export class ScanStore extends Context.Service<
 
       const recoverInterrupted = () => worker.call({ op: "recoverScans" }).pipe(Effect.asVoid)
 
-      return ScanStore.of({ start, listTasks, readTask, listStaged, recordDiscovery, markRunning, stage, publishNormal, releaseHeld, finish, recoverInterrupted })
+      return ScanStore.of({ start, startScheduled, listTasks, readTask, listStaged, recordDiscovery, markRunning, stage, publishNormal, releaseHeld, finish, recoverInterrupted })
     })
   )
 }

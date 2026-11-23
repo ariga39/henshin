@@ -32,6 +32,7 @@ it("finishes a scan with an actionable failure while preserving progress", async
       policyRevision: "0",
       exclusions: [],
       scheduleEnabled: false,
+      scheduleIntervalMs: 86_400_000,
       state: "active"
     }
     const task: ScanTask = {
@@ -58,6 +59,7 @@ it("finishes a scan with an actionable failure while preserving progress", async
     const unused = () => Effect.die("unused test store operation")
     const store: ScanStore["Service"] = {
       start: unused,
+      startScheduled: unused,
       listTasks: unused,
       readTask: unused,
       listStaged: unused,
@@ -110,7 +112,7 @@ it("requires matching observations across the quiet interval before normal publi
     const root: ServerRootRow = {
       libraryId: randomUUID(), rootId, label: "Books", selectedPath: fixture, canonicalPath,
       device: String(identity.dev), inode: String(identity.ino), mappingRevision: "1", policyRevision: "0",
-      exclusions: [], scheduleEnabled: false, state: "active"
+      exclusions: [], scheduleEnabled: false, scheduleIntervalMs: 86_400_000, state: "active"
     }
     const task: ScanTask = {
       task_id: taskId, root_id: rootId, kind: "manual-scan", mode: "manual", hold_new_discoveries: false,
@@ -126,6 +128,7 @@ it("requires matching observations across the quiet interval before normal publi
     const unused = () => Effect.die("unused test store operation")
     const store: ScanStore["Service"] = {
       start: unused,
+      startScheduled: unused,
       listTasks: unused,
       readTask: unused,
       listStaged: () => Effect.succeed([...staged.values()]),

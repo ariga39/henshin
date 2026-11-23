@@ -46,6 +46,7 @@ const rootView = (root: {
   policyRevision: string
   exclusions: ReadonlyArray<{ readonly path: string; readonly scope: "exact" | "subtree" }>
   scheduleEnabled: boolean
+  scheduleIntervalMs: number
   libraryId: string
   state: "active"
 }) => ({
@@ -58,6 +59,7 @@ const rootView = (root: {
   policy_revision: root.policyRevision,
   exclusions: root.exclusions,
   schedule_enabled: root.scheduleEnabled,
+  schedule_interval_ms: root.scheduleIntervalMs,
   state: root.state
 })
 
@@ -542,7 +544,6 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
             rootId: root.rootId,
             expectedMappingRevision: scanPayload.expected_mapping_revision,
             expectedPolicyRevision: scanPayload.expected_policy_revision,
-            mode: scanPayload.command.mode,
             holdNewDiscoveries: scanPayload.command.hold_new_discoveries
           }).pipe(
             Effect.mapError(() => new InternalError({

@@ -163,9 +163,9 @@ it("coalesces manual and scheduled normal scans into one active generation", asy
         expectedPolicyRevision: registered.root.policyRevision,
         holdNewDiscoveries: false
       }
-      const scheduled = yield* scans.start({ ...common, operationId: randomUUID(), mode: "scheduled" })
+      const scheduled = yield* scans.startScheduled({ ...common, operationId: randomUUID() })
       if (scheduled.kind !== "created") throw new Error("expected a scheduled scan")
-      const manual = yield* scans.start({ ...common, operationId: randomUUID(), mode: "manual" })
+      const manual = yield* scans.start({ ...common, operationId: randomUUID() })
       expect(manual).toMatchObject({ kind: "active", task: { task_id: scheduled.task.task_id, mode: "scheduled" } })
     }).pipe(Effect.provide(storage)))
   } finally {

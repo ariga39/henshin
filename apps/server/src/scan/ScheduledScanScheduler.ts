@@ -5,18 +5,12 @@ import { ScanStore } from "../persistence/ScanStore"
 import { ServerState } from "../identity"
 import { runManualHeldScan } from "./ManualScanCoordinator"
 
-const DEFAULT_SCHEDULE_INTERVAL_MS = 24 * 60 * 60 * 1000
 const DEFAULT_POLL_INTERVAL_MS = 1000
 
 const configuredMilliseconds = (name: string, fallback: number): number => {
   const value = Number(process.env[name])
   return Number.isSafeInteger(value) && value > 0 ? value : fallback
 }
-
-const scheduleIntervalMs = (): number => configuredMilliseconds(
-  "HENSHIN_SCHEDULE_INTERVAL_MS",
-  DEFAULT_SCHEDULE_INTERVAL_MS
-)
 
 const pollIntervalMs = (): number => configuredMilliseconds(
   "HENSHIN_SCHEDULE_POLL_INTERVAL_MS",
@@ -26,40 +20,43 @@ const pollIntervalMs = (): number => configuredMilliseconds(
 /**
  * Polls persisted owner settings and submits the ordinary normal scan for each
  * due root. The due map is intentionally process-local: an enabled root is due
- * after a restart, while the durable setting remains the source of truth.
+ * after a restart, while the durable setting remains the source of truth. The
+ * worker's active-generation gate makes the start attempt safe without
+ * reading the durable task history on every poll.
  */
 export const runScheduledScanLoop = Effect.fn("runScheduledScanLoop")(function*() {
   const roots = yield* RootStore
   const scans = yield* ScanStore
   const server = yield* ServerState
   const dueAt = new Map<string, number>()
+  const cadenceAt = new Map<string, number>()
 
   const poll = Effect.gen(function*() {
     const listedRoots = yield* roots.list()
-    const tasks = yield* scans.listTasks()
     const now = Date.now()
     const activeRoots = new Set<string>()
 
     for (const root of listedRoots) {
       if (!root.scheduleEnabled) {
         dueAt.delete(root.rootId)
+        cadenceAt.delete(root.rootId)
         continue
       }
 
       activeRoots.add(root.rootId)
-      const due = dueAt.get(root.rootId) ?? now
-      if (due > now || tasks.some((task) =>
-        task.root_id === root.rootId && (task.status === "queued" || task.status === "running")
-      )) continue
+      const priorCadence = cadenceAt.get(root.rootId)
+      const due = priorCadence === undefined || priorCadence !== root.scheduleIntervalMs
+        ? now
+        : dueAt.get(root.rootId) ?? now
+      if (due > now) continue
 
-      const started = yield* scans.start({
+      const started = yield* scans.startScheduled({
         taskId: randomUUID(),
         operationId: randomUUID(),
         epoch: server.epoch,
         rootId: root.rootId,
         expectedMappingRevision: root.mappingRevision,
         expectedPolicyRevision: root.policyRevision,
-        mode: "scheduled",
         holdNewDiscoveries: false
       })
 
@@ -77,11 +74,15 @@ export const runScheduledScanLoop = Effect.fn("runScheduledScanLoop")(function*(
         case "root_not_found":
           break
       }
-      dueAt.set(root.rootId, now + scheduleIntervalMs())
+      dueAt.set(root.rootId, now + root.scheduleIntervalMs)
+      cadenceAt.set(root.rootId, root.scheduleIntervalMs)
     }
 
     for (const rootId of dueAt.keys()) {
-      if (!activeRoots.has(rootId)) dueAt.delete(rootId)
+      if (!activeRoots.has(rootId)) {
+        dueAt.delete(rootId)
+        cadenceAt.delete(rootId)
+      }
     }
   })
 

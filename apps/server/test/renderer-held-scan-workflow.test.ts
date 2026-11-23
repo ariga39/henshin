@@ -36,6 +36,7 @@ const root: ServerRoot = {
   policy_revision: "7",
   exclusions: [],
   schedule_enabled: false,
+  schedule_interval_ms: 86_400_000,
   state: "active"
 }
 

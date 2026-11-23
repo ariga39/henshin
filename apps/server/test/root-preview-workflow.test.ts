@@ -30,6 +30,7 @@ const savedRoot: ServerRoot = {
   policy_revision: "0",
   exclusions: [],
   schedule_enabled: false,
+  schedule_interval_ms: 86_400_000,
   state: "active"
 }
 

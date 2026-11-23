@@ -30,6 +30,14 @@ export const MAX_ROOT_EXCLUSIONS = 256
 export const RootExclusions = Schema.Array(RootExclusion).check(Schema.isMaxLength(MAX_ROOT_EXCLUSIONS))
 export type RootExclusions = typeof RootExclusions.Type
 
+/** The cadence used when an older client enables scheduling without a value. */
+export const DEFAULT_ROOT_SCHEDULE_INTERVAL_MS = 24 * 60 * 60 * 1000
+export const RootScheduleIntervalMs = Schema.Int.check(
+  Schema.isGreaterThanOrEqualTo(100),
+  Schema.isLessThanOrEqualTo(365 * 24 * 60 * 60 * 1000)
+)
+export type RootScheduleIntervalMs = typeof RootScheduleIntervalMs.Type
+
 /** Root-policy commands for suppressing or restoring one exact path or subtree. */
 export const RootPolicyCommand = Schema.Union([
   Schema.Struct({
@@ -42,7 +50,8 @@ export const RootPolicyCommand = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("set-schedule"),
-    enabled: Schema.Boolean
+    enabled: Schema.Boolean,
+    interval_ms: Schema.optional(RootScheduleIntervalMs)
   })
 ])
 export type RootPolicyCommand = typeof RootPolicyCommand.Type
@@ -248,6 +257,7 @@ export const ServerRoot = Schema.Struct({
   policy_revision: Revision,
   exclusions: RootExclusions,
   schedule_enabled: Schema.Boolean,
+  schedule_interval_ms: RootScheduleIntervalMs,
   state: Schema.Literal("active")
 })
 export type ServerRoot = typeof ServerRoot.Type
@@ -257,7 +267,7 @@ export type ServerRootList = typeof ServerRootList.Type
 
 export const RootScanCommand = Schema.Struct({
   type: Schema.Literal("start-scan"),
-  mode: Schema.Literals(["manual", "scheduled"]),
+  mode: Schema.Literal("manual"),
   hold_new_discoveries: Schema.Boolean
 })
 export type RootScanCommand = typeof RootScanCommand.Type

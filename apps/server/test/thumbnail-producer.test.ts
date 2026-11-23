@@ -138,6 +138,7 @@ const makeServices = async (
     policyRevision: "1",
     exclusions: [],
     scheduleEnabled: false,
+    scheduleIntervalMs: 86_400_000,
     state: "active"
   }
   const accepted = {

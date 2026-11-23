@@ -13,7 +13,12 @@ import {
   ScanManifest,
   Uuid
 } from "@henshin/contracts"
-import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanAnalysisError } from "@henshin/contracts/root"
+import {
+  DEFAULT_ROOT_SCHEDULE_INTERVAL_MS,
+  MAX_ROOT_EXCLUSIONS,
+  RootExclusions,
+  ScanAnalysisError
+} from "@henshin/contracts/root"
 import { caseFold } from "unicode-case-folding"
 import { normalizeSearchText, SEARCH_NORMALIZATION_PROFILE, searchBasename } from "../search"
 import {
@@ -354,6 +359,7 @@ db.exec(`
     policy_revision INTEGER NOT NULL DEFAULT 0,
     exclusions TEXT NOT NULL DEFAULT '[]',
     schedule_enabled INTEGER NOT NULL DEFAULT 0 CHECK (schedule_enabled IN (0, 1)),
+    schedule_interval_ms INTEGER NOT NULL DEFAULT ${DEFAULT_ROOT_SCHEDULE_INTERVAL_MS},
     state TEXT NOT NULL CHECK (state = 'active')
   );
   CREATE TABLE IF NOT EXISTS backup_destinations (
@@ -558,6 +564,9 @@ if (!rootColumns.has("exclusions")) {
 }
 if (!rootColumns.has("schedule_enabled")) {
   db.exec("ALTER TABLE server_roots ADD COLUMN schedule_enabled INTEGER NOT NULL DEFAULT 0 CHECK (schedule_enabled IN (0, 1))")
+}
+if (!rootColumns.has("schedule_interval_ms")) {
+  db.exec(`ALTER TABLE server_roots ADD COLUMN schedule_interval_ms INTEGER NOT NULL DEFAULT ${DEFAULT_ROOT_SCHEDULE_INTERVAL_MS}`)
 }
 
 const serverLibraryColumns = db.prepare("PRAGMA table_info(server_library)").all() as unknown as ReadonlyArray<{ name: string }>
@@ -887,11 +896,11 @@ const compactOperations = db.prepare(`
   )
 `)
 const selectRoots = db.prepare(
-  "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, schedule_enabled, state FROM server_roots ORDER BY rowid ASC"
+  "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, schedule_enabled, schedule_interval_ms, state FROM server_roots ORDER BY rowid ASC"
 )
 selectRoots.setReadBigInts(true)
 const selectRoot = db.prepare(
-  "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, schedule_enabled, state FROM server_roots WHERE root_id = ?"
+  "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, schedule_enabled, schedule_interval_ms, state FROM server_roots WHERE root_id = ?"
 )
 selectRoot.setReadBigInts(true)
 const selectBackupDestinations = db.prepare(
@@ -971,7 +980,7 @@ const selectLibrary = db.prepare("SELECT library_id FROM server_library WHERE id
 const selectLibraryState = db.prepare("SELECT library_id, change_revision FROM server_library WHERE id = 1")
 const selectRootOperation = db.prepare("SELECT payload, result FROM root_operations WHERE operation_id = ?")
 const insertRoot = db.prepare(
-  "INSERT INTO server_roots(library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, schedule_enabled, state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')"
+  "INSERT INTO server_roots(library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, schedule_enabled, schedule_interval_ms, state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')"
 )
 const insertRootOperation = db.prepare(
   "INSERT INTO root_operations(operation_id, payload, result) VALUES(?, ?, ?)"
@@ -1214,7 +1223,7 @@ const updateStagedHold = db.prepare(
   "UPDATE staged_discoveries SET candidate_version = ?, hold_state = 'eligible', updated_at_ms = ? WHERE candidate_id = ? AND root_id = ? AND candidate_version = ? AND hold_state = 'held'"
 )
 const updateRootPolicy = db.prepare(
-  "UPDATE server_roots SET policy_revision = ?, exclusions = ?, schedule_enabled = ? WHERE root_id = ?"
+  "UPDATE server_roots SET policy_revision = ?, exclusions = ?, schedule_enabled = ?, schedule_interval_ms = ? WHERE root_id = ?"
 )
 
 let closed = false
@@ -1239,6 +1248,7 @@ const rootRow = (row: {
   policy_revision: bigint
   exclusions: string
   schedule_enabled: bigint
+  schedule_interval_ms: bigint
   state: "active"
 }): ServerRootRow => {
   const exclusions = Schema.decodeUnknownOption(RootExclusions)(JSON.parse(row.exclusions))
@@ -1255,6 +1265,7 @@ const rootRow = (row: {
     policyRevision: row.policy_revision.toString(),
     exclusions: exclusions.value,
     scheduleEnabled: row.schedule_enabled === 1n,
+    scheduleIntervalMs: Number(row.schedule_interval_ms),
     state: row.state
   }
 }
@@ -1272,6 +1283,7 @@ const rootRows = (): ReadonlyArray<ServerRootRow> =>
     policy_revision: bigint
     exclusions: string
     schedule_enabled: bigint
+    schedule_interval_ms: bigint
     state: "active"
   }>).map(rootRow)
 
@@ -1289,6 +1301,7 @@ const rootById = (rootId: string): ServerRootRow | undefined => {
         policy_revision: bigint
         exclusions: string
         schedule_enabled: bigint
+        schedule_interval_ms: bigint
         state: "active"
       }
     | undefined
@@ -1726,6 +1739,7 @@ const registerRoot = (
       policyRevision: "0",
       exclusions: [],
       scheduleEnabled: false,
+      scheduleIntervalMs: DEFAULT_ROOT_SCHEDULE_INTERVAL_MS,
       state: "active"
     }
     insertRoot.run(
@@ -1739,7 +1753,8 @@ const registerRoot = (
       BigInt(root.mappingRevision),
       BigInt(root.policyRevision),
       JSON.stringify(root.exclusions),
-      root.scheduleEnabled ? 1 : 0
+      root.scheduleEnabled ? 1 : 0,
+      root.scheduleIntervalMs
     )
     insertRootOperation.run(request.operationId, payload, JSON.stringify(root))
     db.exec("COMMIT")
@@ -1860,14 +1875,15 @@ const stagedDiscoveryRow = (row: {
   updated_at_ms: Number(row.updated_at_ms)
 })
 
-const startManualScan = (
-  request: Extract<WorkerRequest, { op: "startManualScan" }>
+const startScan = (
+  request: Extract<WorkerRequest, { op: "startManualScan" | "startScheduledScan" }>
 ): import("./worker-protocol").ScanStartOutcome => {
+  const mode = request.op === "startScheduledScan" ? "scheduled" : "manual"
   const commandPayload = JSON.stringify({
     root_id: request.rootId,
     expected_mapping_revision: request.expectedMappingRevision,
     expected_policy_revision: request.expectedPolicyRevision,
-    mode: request.mode,
+    mode,
     hold_new_discoveries: request.holdNewDiscoveries
   })
   db.exec("BEGIN IMMEDIATE")
@@ -1935,7 +1951,7 @@ const startManualScan = (
       request.epoch,
       request.rootId,
       BigInt(request.expectedMappingRevision),
-      request.mode,
+      mode,
       request.holdNewDiscoveries ? 1 : 0,
       commandPayload,
       now,
@@ -2024,7 +2040,12 @@ const commitRootPolicy = (
     const scheduleEnabled = command.type === "set-schedule"
       ? command.enabled
       : current.scheduleEnabled
-    const changed = exclusions.length !== current.exclusions.length || scheduleEnabled !== current.scheduleEnabled
+    const scheduleIntervalMs = command.type === "set-schedule"
+      ? command.interval_ms ?? current.scheduleIntervalMs
+      : current.scheduleIntervalMs
+    const changed = exclusions.length !== current.exclusions.length ||
+      scheduleEnabled !== current.scheduleEnabled ||
+      scheduleIntervalMs !== current.scheduleIntervalMs
     if (exclusions.length > MAX_ROOT_EXCLUSIONS) {
       db.exec("ROLLBACK")
       return { kind: "exclusion_limit" }
@@ -2038,8 +2059,14 @@ const commitRootPolicy = (
       !changed
         ? current.policyRevision
         : (BigInt(current.policyRevision) + 1n).toString()
-    const root: ServerRootRow = { ...current, policyRevision: nextRevision, exclusions, scheduleEnabled }
-    updateRootPolicy.run(BigInt(root.policyRevision), JSON.stringify(root.exclusions), root.scheduleEnabled ? 1 : 0, root.rootId)
+    const root: ServerRootRow = { ...current, policyRevision: nextRevision, exclusions, scheduleEnabled, scheduleIntervalMs }
+    updateRootPolicy.run(
+      BigInt(root.policyRevision),
+      JSON.stringify(root.exclusions),
+      root.scheduleEnabled ? 1 : 0,
+      root.scheduleIntervalMs,
+      root.rootId
+    )
     insertRootPolicyOperation.run(
       request.epoch,
       request.operationId,
@@ -3495,7 +3522,8 @@ const handle = (request: WorkerRequest): unknown => {
     case "registerRoot":
       return registerRoot(request)
     case "startManualScan":
-      return startManualScan(request)
+    case "startScheduledScan":
+      return startScan(request)
     case "listScanTasks":
       return scanTaskRows()
     case "readScanTask":
