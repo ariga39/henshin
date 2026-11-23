@@ -162,6 +162,7 @@ export class ScanStore extends Context.Service<
       readonly rootId: string
       readonly mappingRevision: string
       readonly expectedPolicyRevision: string
+      readonly observedPaths: ReadonlyArray<string>
       readonly observedCandidatePaths: ReadonlyArray<string>
     }) => Effect.Effect<typeof NormalPublishOutcome.Type, DatabaseWorkerError>
     readonly releaseHeld: (input: {
@@ -255,6 +256,7 @@ export class ScanStore extends Context.Service<
         readonly rootId: string
         readonly mappingRevision: string
         readonly expectedPolicyRevision: string
+        readonly observedPaths: ReadonlyArray<string>
         readonly observedCandidatePaths: ReadonlyArray<string>
       }) => worker.call({ op: "publishNormalScan", ...input }).pipe(
         Effect.flatMap((value) => {

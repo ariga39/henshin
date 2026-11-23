@@ -11,6 +11,13 @@ type CoverState =
   | { readonly key: string | null; readonly request: number; readonly status: "loading" | "unavailable"; readonly src: null }
   | { readonly key: string; readonly request: number; readonly status: "ready"; readonly src: string }
 
+const availabilityText = (entry: LibraryEntry): string => {
+  const label = entry.availability.status
+  return entry.availability.observed_at_ms === null
+    ? `Server availability: ${label}`
+    : `Server availability: ${label}; observed ${new Date(entry.availability.observed_at_ms).toISOString()}`
+}
+
 const coverPlaceholder = (entry: LibraryEntry, loading: boolean) => (
   <div
     className="library-cover-placeholder"
@@ -237,7 +244,8 @@ export const LibraryScreen = () => {
                     Matched in {entry.match_fields.map((field) => field === "title" ? "book name" : "filename").join(" and ")}.
                   </small>
                 )}
-                <small>{entry.entry_id}</small>
+                <small data-testid="library-availability">{availabilityText(entry)}</small>
+                <small data-testid="library-entry-id">{entry.entry_id}</small>
               </div>
             </li>
           ))}

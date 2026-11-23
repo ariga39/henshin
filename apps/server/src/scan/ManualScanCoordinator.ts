@@ -393,6 +393,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
           rootId: task.root_id,
           mappingRevision: task.mapping_revision,
           expectedPolicyRevision: root.policyRevision,
+          observedPaths: discovered.value.candidates.map((candidate) => candidate.relativePath),
           observedCandidatePaths: verifiedCandidatePaths
         })
         switch (published.kind) {
@@ -406,6 +407,7 @@ export const runManualHeldScan = Effect.fn("runManualHeldScan")(function*(task: 
               message: [
                 "automatic allocation was deferred",
                 deferredPathsMessage("missing occupied paths", published.missingPaths, published.missingPathCount),
+                deferredPathsMessage("unidentified occupied paths", published.unidentifiedPaths, published.unidentifiedPathCount),
                 deferredPathsMessage("changed occupied paths", published.changedPaths, published.changedPathCount),
                 `${published.excludedPathCount} occupied path(s) excluded by policy`
               ].join("; ")

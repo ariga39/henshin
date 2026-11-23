@@ -123,6 +123,7 @@ const pendingEntry = (candidateVersion: number): LibraryEntry => ({
   content_version: "1",
   location_revision: "1",
   match_fields: [],
+  availability: { status: "present", observed_at_ms: 1 },
   cover: null,
   replacement: {
     candidate_id: candidate.candidate_id,
@@ -775,6 +776,7 @@ describe("held scan renderer workflows", () => {
       content_version: "1",
       location_revision: "1",
       match_fields: [],
+      availability: { status: "present" as const, observed_at_ms: 1 },
       replacement: null
     }
     const appended = {
@@ -1090,6 +1092,7 @@ describe("held scan renderer workflows", () => {
       content_version: "1",
       location_revision: "1",
       match_fields: [],
+      availability: { status: "present" as const, observed_at_ms: 1 },
       replacement: null
     }
     const oldPending = {

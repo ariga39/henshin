@@ -31,6 +31,12 @@ export const ReplacementComparison = Schema.Struct({
 })
 export type ReplacementComparison = typeof ReplacementComparison.Type
 
+export const ServerAvailability = Schema.Struct({
+  status: Schema.Literals(["present", "missing", "inaccessible", "unknown"]),
+  observed_at_ms: Schema.NullOr(Schema.Int)
+})
+export type ServerAvailability = typeof ServerAvailability.Type
+
 export const LibraryEntry = Schema.Struct({
   entry_id: Uuid,
   library_id: Uuid,
@@ -44,6 +50,7 @@ export const LibraryEntry = Schema.Struct({
   content_version: Revision,
   location_revision: Revision,
   match_fields: Schema.Array(Schema.Literals(["title", "basename"])),
+  availability: ServerAvailability,
   cover: Schema.NullOr(ThumbnailReference),
   replacement: Schema.NullOr(ReplacementComparison)
 })
