@@ -8,10 +8,12 @@ import {
   INDEXED_ROOT_SAMPLE_LIMIT,
   ReplacementCandidateObservation,
   ReplacementObservation,
-  ScanManifest
+  ScanManifest,
+  Uuid
 } from "@henshin/contracts"
 import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanAnalysisError } from "@henshin/contracts/root"
 import { caseFold } from "unicode-case-folding"
+import { normalizeSearchText, SEARCH_NORMALIZATION_PROFILE, searchBasename } from "../search"
 import {
   WorkerMessage,
   WorkerResponse,
@@ -43,7 +45,7 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
-const CURRENT_SCHEMA_VERSION = 8
+const CURRENT_SCHEMA_VERSION = 9
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
@@ -246,6 +248,29 @@ const ResolutionCursor = Schema.Struct({
   entry_id: Schema.String
 })
 
+const LibrarySearchCursor = Schema.Struct({
+  version: Schema.Literal(1),
+  normalization_profile: Schema.Literal(SEARCH_NORMALIZATION_PROFILE),
+  query: Schema.String,
+  page_size: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(200)),
+  library_id: Uuid,
+  epoch: Uuid,
+  state: Schema.NullOr(Schema.Literal("replacement-pending")),
+  last_entry_id: Uuid
+})
+
+const encodeLibrarySearchCursor = (value: typeof LibrarySearchCursor.Type): string =>
+  Buffer.from(JSON.stringify(value), "utf8").toString("base64url")
+
+const decodeLibrarySearchCursor = (value: string): typeof LibrarySearchCursor.Type | undefined => {
+  try {
+    const decoded = Schema.decodeUnknownOption(LibrarySearchCursor)(JSON.parse(Buffer.from(value, "base64url").toString("utf8")))
+    return Option.isNone(decoded) ? undefined : decoded.value
+  } catch {
+    return undefined
+  }
+}
+
 const encodeResolutionCursor = (value: typeof ResolutionCursor.Type): string =>
   Buffer.from(JSON.stringify(value), "utf8").toString("base64url")
 
@@ -388,6 +413,8 @@ db.exec(`
     source_path TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
     title TEXT NOT NULL,
+    title_search TEXT NOT NULL DEFAULT '',
+    basename_search TEXT NOT NULL DEFAULT '',
     page_count INTEGER NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending', 'detached')),
     content_version INTEGER NOT NULL,
@@ -444,6 +471,14 @@ if (!serverLibraryColumns.some((column) => column.name === "change_revision")) {
 const libraryEntryColumns = db.prepare("PRAGMA table_info(library_entries)").all() as unknown as ReadonlyArray<{ name: string }>
 if (!libraryEntryColumns.some((column) => column.name === "decision_version")) {
   db.exec("ALTER TABLE library_entries ADD COLUMN decision_version INTEGER NOT NULL DEFAULT 1")
+}
+const addedSearchColumns = !libraryEntryColumns.some((column) => column.name === "title_search") ||
+  !libraryEntryColumns.some((column) => column.name === "basename_search")
+if (!libraryEntryColumns.some((column) => column.name === "title_search")) {
+  db.exec("ALTER TABLE library_entries ADD COLUMN title_search TEXT NOT NULL DEFAULT ''")
+}
+if (!libraryEntryColumns.some((column) => column.name === "basename_search")) {
+  db.exec("ALTER TABLE library_entries ADD COLUMN basename_search TEXT NOT NULL DEFAULT ''")
 }
 const addedAcceptedObservationSummary = !libraryEntryColumns.some((column) => column.name === "accepted_observation_json")
 if (addedAcceptedObservationSummary) {
@@ -546,6 +581,8 @@ if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("deta
         source_path TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
         title TEXT NOT NULL,
+        title_search TEXT NOT NULL DEFAULT '',
+        basename_search TEXT NOT NULL DEFAULT '',
         page_count INTEGER NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending', 'detached')),
         content_version INTEGER NOT NULL,
@@ -557,11 +594,11 @@ if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("deta
         accepted_observation_json TEXT
       );
       INSERT INTO library_entries_v7(
-        entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count,
+        entry_id, library_id, root_id, relative_path, source_path, kind, title, title_search, basename_search, page_count,
         state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms,
         accepted_observation_json
       )
-      SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count,
+      SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, title_search, basename_search, page_count,
         state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms,
         accepted_observation_json
       FROM library_entries;
@@ -604,10 +641,31 @@ if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("deta
 
 const needsSummaryBackfill = addedAcceptedObservationSummary || addedCandidateObservationSummary ||
   (existingServerState !== undefined && existingServerState.schema_version < CURRENT_SCHEMA_VERSION)
+const needsSearchBackfill = addedSearchColumns ||
+  (existingServerState !== undefined && existingServerState.schema_version < CURRENT_SCHEMA_VERSION)
 
-if (needsSummaryBackfill) {
+if (needsSummaryBackfill || needsSearchBackfill) {
   db.exec("BEGIN IMMEDIATE")
   try {
+    if (needsSearchBackfill) {
+      const entriesWithoutSearchCopies = db.prepare(
+        "SELECT entry_id, relative_path, title FROM library_entries"
+      ).iterate() as unknown as Iterable<{
+        entry_id: string
+        relative_path: string
+        title: string
+      }>
+      const updateSearchCopies = db.prepare(
+        "UPDATE library_entries SET title_search = ?, basename_search = ? WHERE entry_id = ?"
+      )
+      for (const row of entriesWithoutSearchCopies) {
+        updateSearchCopies.run(
+          normalizeSearchText(row.title),
+          normalizeSearchText(searchBasename(row.relative_path)),
+          row.entry_id
+        )
+      }
+    }
     const acceptedWithoutSummary = db.prepare(
       "SELECT entry_id, kind, manifest_json FROM library_entries WHERE accepted_observation_json IS NULL"
     ).iterate() as unknown as Iterable<{
@@ -753,13 +811,13 @@ const updateEntryStatistics = db.prepare(
   "UPDATE entry_statistics SET open_count = open_count + 1, last_opened_at_ms = CASE WHEN last_opened_at_ms IS NULL OR last_opened_at_ms < ? THEN ? ELSE last_opened_at_ms END WHERE entry_id = ?"
 )
 const insertEntry = db.prepare(
-  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms, accepted_observation_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?, ?)"
+  "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, title_search, basename_search, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms, accepted_observation_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 1, 1, 1, ?, ?, ?, ?)"
 )
 const markEntryPending = db.prepare(
   "UPDATE library_entries SET state = 'replacement-pending', updated_at_ms = ? WHERE entry_id = ? AND state = 'accepted'"
 )
 const acceptReplacement = db.prepare(
-  "UPDATE library_entries SET kind = ?, title = ?, page_count = ?, state = 'accepted', decision_version = decision_version + 1, content_version = content_version + 1, manifest_json = ?, accepted_observation_json = ?, updated_at_ms = ? WHERE entry_id = ? AND state = 'replacement-pending'"
+  "UPDATE library_entries SET kind = ?, title = ?, title_search = ?, basename_search = ?, page_count = ?, state = 'accepted', decision_version = decision_version + 1, content_version = content_version + 1, manifest_json = ?, accepted_observation_json = ?, updated_at_ms = ? WHERE entry_id = ? AND state = 'replacement-pending'"
 )
 const detachEntry = db.prepare(
   "UPDATE library_entries SET state = 'detached', decision_version = decision_version + 1, location_revision = location_revision + 1, updated_at_ms = ? WHERE entry_id = ? AND state = 'replacement-pending'"
@@ -768,32 +826,41 @@ const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_
 const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
 const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
 const selectLibraryEntries = (
-  cursor: string | null,
-  limit: number,
-  state: "replacement-pending" | null
+  query: string,
+  lastEntryId: string | null,
+  state: "replacement-pending" | null,
+  limit: number
 ) => {
+  const queryClause = query.length === 0
+    ? ""
+    : " AND (instr(e.title_search, ?) > 0 OR instr(e.basename_search, ?) > 0)"
   const stateClause = state === null ? "e.state IN ('accepted', 'replacement-pending')" : "e.state = 'replacement-pending'"
-  const statement = db.prepare(cursor === null
+  const statement = db.prepare(lastEntryId === null
     ? `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
+         e.title_search, e.basename_search,
          e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
          CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
          s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
          s.candidate_observation_json
        FROM library_entries e
        LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
-       WHERE ${stateClause}
+       WHERE ${stateClause}${queryClause}
        ORDER BY e.entry_id ASC LIMIT ?`
     : `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
+         e.title_search, e.basename_search,
          e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
          CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
          s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
          s.candidate_observation_json
        FROM library_entries e
        LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
-       WHERE e.entry_id > ? AND ${stateClause}
+       WHERE e.entry_id > ? AND ${stateClause}${queryClause}
        ORDER BY e.entry_id ASC LIMIT ?`)
   statement.setReadBigInts(true)
-  return cursor === null ? statement.all(limit) : statement.all(cursor, limit)
+  const queryParameters = query.length === 0 ? [] : [query, query]
+  return lastEntryId === null
+    ? statement.all(...queryParameters, limit)
+    : statement.all(lastEntryId, ...queryParameters, limit)
 }
 const selectIndexedRootSamples = db.prepare(
   "SELECT relative_path, kind, manifest_json FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC LIMIT ?"
@@ -1643,6 +1710,8 @@ const resolveReplacement = (
       const updated = acceptReplacement.run(
         candidate.kind,
         titleForCandidate(candidate.relative_path, candidate.kind),
+        normalizeSearchText(titleForCandidate(candidate.relative_path, candidate.kind)),
+        normalizeSearchText(searchBasename(candidate.relative_path)),
         BigInt(pageCount),
         candidate.manifest_json,
         JSON.stringify(replacementObservation(persistedManifest(candidate.manifest_json, "candidate manifest"), candidate.kind)),
@@ -1663,6 +1732,8 @@ const resolveReplacement = (
         join(root.selectedPath, ...candidate.relative_path.split("/")),
         candidate.kind,
         titleForCandidate(candidate.relative_path, candidate.kind),
+        normalizeSearchText(titleForCandidate(candidate.relative_path, candidate.kind)),
+        normalizeSearchText(searchBasename(candidate.relative_path)),
         BigInt(pageCount),
         candidate.manifest_json,
         now,
@@ -1705,6 +1776,8 @@ const entryRow = (row: {
   source_path: string
   kind: "archive" | "image-directory"
   title: string
+  title_search: string
+  basename_search: string
   page_count: bigint
   state: "accepted" | "replacement-pending"
   decision_version: bigint
@@ -1716,7 +1789,7 @@ const entryRow = (row: {
   candidate_kind: "archive" | "image-directory" | null
   candidate_analysis_status: "ready" | "error" | null
   candidate_observation_json: string | null
-}): import("./worker-protocol").LibraryEntryRow => ({
+}, query = ""): import("./worker-protocol").LibraryEntryRow => ({
   entry_id: row.entry_id,
   library_id: row.library_id,
   root_id: row.root_id,
@@ -1728,6 +1801,12 @@ const entryRow = (row: {
   state: row.state,
   content_version: row.content_version.toString(),
   location_revision: row.location_revision.toString(),
+  match_fields: query.length === 0
+    ? []
+    : [
+        ...(row.title_search.includes(query) ? ["title" as const] : []),
+        ...(row.basename_search.includes(query) ? ["basename" as const] : [])
+      ],
   replacement: row.candidate_id === null || row.candidate_version === null || row.candidate_kind === null || row.candidate_analysis_status === null || row.accepted_observation_json === null || row.candidate_observation_json === null
     ? null
     : {
@@ -1880,6 +1959,8 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
         sourcePathFor(candidate.relative_path),
         candidate.kind,
         title,
+        normalizeSearchText(title),
+        normalizeSearchText(searchBasename(candidate.relative_path)),
         BigInt(pageCount),
         candidate.manifest_json,
         Date.now(),
@@ -1920,8 +2001,31 @@ const librarySummary = (): import("./worker-protocol").LibrarySummaryRow => {
   return { library_id: row.library_id, change_revision: row.change_revision.toString() }
 }
 
-const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntries" }>): import("./worker-protocol").LibraryEntryPageRow => {
-  const rows = selectLibraryEntries(request.cursor, request.pageSize + 1, request.state) as unknown as ReadonlyArray<{
+const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntries" }>): import("./worker-protocol").LibraryEntryPageResult => {
+  const normalizedQuery = normalizeSearchText(request.query.trim())
+  const state = request.state
+  db.exec("BEGIN")
+  try {
+  const library = librarySummary()
+  let lastEntryId: string | null = null
+  if (request.cursor !== null) {
+    const cursor = decodeLibrarySearchCursor(request.cursor)
+    if (
+      cursor === undefined ||
+      cursor.normalization_profile !== SEARCH_NORMALIZATION_PROFILE ||
+      cursor.query !== normalizedQuery ||
+      cursor.page_size !== request.pageSize ||
+      cursor.library_id !== library.library_id ||
+      cursor.epoch !== request.epoch ||
+      cursor.state !== (state ?? null)
+    ) {
+      db.exec("ROLLBACK")
+      return { kind: "invalid_cursor" }
+    }
+    lastEntryId = cursor.last_entry_id
+  }
+
+  const pageRows = selectLibraryEntries(normalizedQuery, lastEntryId, state ?? null, request.pageSize + 1) as unknown as ReadonlyArray<{
     entry_id: string
     library_id: string
     root_id: string
@@ -1929,6 +2033,8 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
     source_path: string
     kind: "archive" | "image-directory"
     title: string
+    title_search: string
+    basename_search: string
     page_count: bigint
     state: "accepted" | "replacement-pending"
     decision_version: bigint
@@ -1941,13 +2047,35 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
     candidate_analysis_status: "ready" | "error" | null
     candidate_observation_json: string | null
   }>
-  const page = rows.slice(0, request.pageSize)
-  const hasMore = rows.length > request.pageSize
-  return {
-    entries: page.map(entryRow),
-    has_more: hasMore,
-    next_cursor: hasMore ? page[page.length - 1]?.entry_id ?? null : null,
-    library_change_revision: librarySummary().change_revision
+  const page = pageRows.slice(0, request.pageSize)
+  const hasMore = pageRows.length > request.pageSize
+  const last = page[page.length - 1]
+  const nextCursor = hasMore && last !== undefined
+    ? encodeLibrarySearchCursor({
+        version: 1,
+        normalization_profile: SEARCH_NORMALIZATION_PROFILE,
+        query: normalizedQuery,
+        page_size: request.pageSize,
+        library_id: library.library_id,
+        epoch: request.epoch,
+        state: state ?? null,
+        last_entry_id: last.entry_id
+      })
+    : null
+  const result = {
+    kind: "page" as const,
+    page: {
+      entries: page.map((row) => entryRow(row, normalizedQuery)),
+      has_more: hasMore,
+      next_cursor: nextCursor,
+      library_change_revision: librarySummary().change_revision
+    }
+  }
+  db.exec("COMMIT")
+  return result
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
   }
 }
 

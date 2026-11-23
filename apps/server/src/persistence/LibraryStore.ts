@@ -4,7 +4,7 @@ import { DatabaseWorker, DatabaseWorkerError } from "./DatabaseWorker"
 import {
   AcceptedThumbnailEntryRow,
   IndexedRootSamplePageRow,
-  LibraryEntryPageRow,
+  LibraryEntryPageResult,
   LibraryEntryResolutionResult,
   LibrarySummaryRow,
   EntryResolutionLookupOutcome,
@@ -36,7 +36,7 @@ export type EntryResolutionLookupResult =
   | { readonly kind: "operation_conflict" | "operation_expired" | "not_found" }
 
 const decodeSummary = Schema.decodeUnknownOption(LibrarySummaryRow)
-const decodePage = Schema.decodeUnknownOption(LibraryEntryPageRow)
+const decodePage = Schema.decodeUnknownOption(LibraryEntryPageResult)
 const decodeResolution = Schema.decodeUnknownOption(LibraryEntryResolutionResult)
 const decodeAcceptedThumbnailEntry = Schema.decodeUnknownOption(Schema.NullOr(AcceptedThumbnailEntryRow))
 const decodeIndexedRootSamples = Schema.decodeUnknownOption(IndexedRootSamplePageRow)
@@ -54,6 +54,7 @@ const jsonValue = (value: string | null): unknown => {
 }
 
 export class InvalidLibraryEntryResolutionCursor extends Data.TaggedError("InvalidLibraryEntryResolutionCursor")<{}> {}
+export class InvalidLibrarySearchCursor extends Data.TaggedError("InvalidLibrarySearchCursor")<{}> {}
 
 const decodeOrFail = <A>(decoder: (value: unknown) => Option.Option<A>, value: unknown, message: string): Effect.Effect<A, DatabaseWorkerError> => {
   const decoded = decoder(value)
@@ -68,9 +69,11 @@ export class LibraryStore extends Context.Service<
     readonly summary: () => Effect.Effect<typeof LibrarySummaryRow.Type, DatabaseWorkerError>
     readonly page: (input: {
       readonly pageSize: number
+      readonly query: string
       readonly cursor: string | null
       readonly state?: "replacement-pending"
-    }) => Effect.Effect<LibraryEntryPage, DatabaseWorkerError>
+      readonly epoch: string
+    }) => Effect.Effect<LibraryEntryPage, DatabaseWorkerError | InvalidLibrarySearchCursor>
     readonly indexedRootSamples: (rootId: string) => Effect.Effect<IndexedRootSamplePage, DatabaseWorkerError>
     readonly resolution: (input: {
       readonly entryId: string
@@ -96,15 +99,24 @@ export class LibraryStore extends Context.Service<
       )
       const page = (input: {
         readonly pageSize: number
+        readonly query: string
         readonly cursor: string | null
         readonly state?: "replacement-pending"
+        readonly epoch: string
       }) => worker.call({
         op: "listLibraryEntries",
         pageSize: input.pageSize,
+        query: input.query,
+        epoch: input.epoch,
         cursor: input.cursor,
         state: input.state ?? null
       }).pipe(
-        Effect.flatMap((value) => decodeOrFail(decodePage, value, "invalid library entry page"))
+        Effect.flatMap((value) => decodeOrFail(decodePage, value, "invalid library entry page")),
+        Effect.flatMap((result): Effect.Effect<LibraryEntryPage, DatabaseWorkerError | InvalidLibrarySearchCursor> =>
+          result.kind === "invalid_cursor"
+            ? Effect.fail(new InvalidLibrarySearchCursor())
+            : Effect.succeed(result.page)
+        )
       )
       const resolution = (input: {
         readonly entryId: string

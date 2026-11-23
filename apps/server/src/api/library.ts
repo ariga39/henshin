@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import { EntryNotFound, InternalError, InvalidRequest, LibraryApi, RequestContext, RootNotFound } from "@henshin/contracts"
 import { HttpApiBuilder } from "effect/http-api"
 import { ServerState } from "../identity"
-import { InvalidLibraryEntryResolutionCursor, LibraryStore } from "../persistence/LibraryStore"
+import { InvalidLibraryEntryResolutionCursor, InvalidLibrarySearchCursor, LibraryStore } from "../persistence/LibraryStore"
 import { RootStore } from "../persistence/RootStore"
 
 const errorBase = (server: ServerState["Service"], requestId: string) => ({
@@ -71,10 +71,21 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
           const context = yield* RequestContext
           const page = yield* library.page({
             pageSize: payload.page_size ?? 50,
+            query: payload.query ?? "",
             cursor: payload.cursor ?? null,
-            state: payload.state
+            state: payload.state,
+            epoch: server.epoch
           }).pipe(
-            Effect.mapError(() => {
+            Effect.mapError((error) => {
+              if (error instanceof InvalidLibrarySearchCursor) {
+                return new InvalidRequest({
+                  code: "invalid_request",
+                  message: "search cursor is invalid or fenced to a different query; restart search",
+                  retryable: false,
+                  details: { field: "cursor" },
+                  ...errorBase(server, context.request_id)
+                })
+              }
               return new InternalError({
                 code: "internal_error",
                 message: "internal error",

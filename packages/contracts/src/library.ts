@@ -43,6 +43,7 @@ export const LibraryEntry = Schema.Struct({
   state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending")]),
   content_version: Revision,
   location_revision: Revision,
+  match_fields: Schema.Array(Schema.Literals(["title", "basename"])),
   cover: Schema.NullOr(ThumbnailReference),
   replacement: Schema.NullOr(ReplacementComparison)
 })
@@ -51,7 +52,7 @@ export type LibraryEntry = typeof LibraryEntry.Type
 export const LibraryEntryPage = Schema.Struct({
   entries: Schema.Array(LibraryEntry),
   has_more: Schema.Boolean,
-  next_cursor: Schema.NullOr(Uuid),
+  next_cursor: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8192))),
   library_change_revision: Revision
 })
 export type LibraryEntryPage = typeof LibraryEntryPage.Type
@@ -64,10 +65,13 @@ export const LibraryView = Schema.Struct({
 export type LibraryView = typeof LibraryView.Type
 
 const pageSize = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(200))
+const searchQuery = Schema.String.check(Schema.isMaxLength(1024))
+const searchCursor = Schema.String.check(Schema.isMaxLength(8192))
 
 export const LibrarySearchRequest = Schema.Struct({
+  query: Schema.optional(searchQuery),
   page_size: Schema.optional(pageSize),
-  cursor: Schema.optional(Uuid),
+  cursor: Schema.optional(searchCursor),
   state: Schema.optional(Schema.Literal("replacement-pending"))
 })
 export type LibrarySearchRequest = typeof LibrarySearchRequest.Type
