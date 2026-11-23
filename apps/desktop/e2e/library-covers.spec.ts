@@ -183,7 +183,18 @@ test("edits, rejects stale title saves, removes, and searches the personal title
     await title.fill("Stale title")
     await details.getByTestId("entry-personal-title-save").click()
     await expect(details.getByTestId("entry-personal-title-error")).toBeVisible()
+    const note = details.getByTestId("entry-note")
+    await note.fill("Unsaved note")
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].webContents.mainFrame.ipc.handleOnce("henshin:library-entry", () => ({
+        ok: false, error: { code: "unavailable", message: "Temporary interruption", retryable: true }
+      }))
+    })
     await details.getByTestId("entry-personal-title-error").getByRole("button", { name: "Reload current value" }).click()
+    await expect(details.getByRole("alert")).toContainText("Temporary interruption")
+    await details.getByRole("button", { name: "Retry loading entry details" }).click()
+    await expect(note).toHaveValue("Unsaved note")
+    await note.fill("")
     await expect(title).toHaveValue("Stale title")
     await details.getByTestId("entry-personal-title-save").click()
     await expect(details.getByTestId("entry-effective-title")).toContainText("Display title: Stale title")

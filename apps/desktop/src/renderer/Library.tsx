@@ -336,7 +336,12 @@ export const LibraryScreen = () => {
               <p role="status" data-testid="entry-metadata-pending">Loading saved entry details…</p>
             )}
             {state.library_entry_status === "error" && (
-              <p role="alert">Could not load entry details: {state.library_entry_error}</p>
+              <p role="alert">
+                Could not load entry details: {state.library_entry_error}{" "}
+                <button type="button" onClick={() => void runtime.runPromise(loadLibraryEntry(selectedEntry.entry_id))}>
+                  Retry loading entry details
+                </button>
+              </p>
             )}
             {state.library_entry_status === "ready" && state.library_entry?.entry_id === selectedEntry.entry_id && (
               <>
@@ -372,7 +377,7 @@ export const LibraryScreen = () => {
                 {state.library_title_error !== null && (
                   <p role="alert" data-testid="entry-personal-title-error">
                     {state.library_title_error}{" "}
-                    <button type="button" onClick={() => void runtime.runPromise(loadLibraryEntry(selectedEntry.entry_id, { preserveTitleDraft: true, preserveNoteDraft: true }))}>
+                    <button type="button" onClick={() => void runtime.runPromise(loadLibraryEntry(selectedEntry.entry_id))}>
                       Reload current value
                     </button>
                   </p>

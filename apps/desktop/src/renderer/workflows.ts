@@ -1253,23 +1253,19 @@ const replaceLibraryOpenState = (
   next
 ]
 
-type LoadLibraryEntryOptions = {
-  readonly preserveTitleDraft?: boolean
-  readonly preserveNoteDraft?: boolean
-}
-
-export const loadLibraryEntry = (entryId: string, options: LoadLibraryEntryOptions = {}) =>
+export const loadLibraryEntry = (entryId: string) =>
   Effect.gen(function*() {
     const client = yield* LibraryClient
     const current = viewStore.getState()
+    const preserveDrafts = current.library_entry?.entry_id === entryId
     const requestGeneration = current.library_entry_request_generation + 1
     yield* Effect.sync(() => viewStore.set({
       library_entry_request_generation: requestGeneration,
       library_entry_status: "loading",
       library_entry_error: null,
-      library_note_status: options.preserveNoteDraft ? current.library_note_status : "loading",
-      library_note_error: options.preserveNoteDraft ? current.library_note_error : null,
-      library_note_server_text: options.preserveNoteDraft ? current.library_note_server_text : null,
+      library_note_status: preserveDrafts ? current.library_note_status : "loading",
+      library_note_error: preserveDrafts ? current.library_note_error : null,
+      library_note_server_text: preserveDrafts ? current.library_note_server_text : null,
       library_title_status: "idle",
       library_title_error: null
     }))
@@ -1282,11 +1278,7 @@ export const loadLibraryEntry = (entryId: string, options: LoadLibraryEntryOptio
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({
         library_entry_status: "error",
-        library_entry_error: result.error.message,
-        library_note_status: "error",
-        library_note_error: result.error.message,
-        library_title_status: "error",
-        library_title_error: result.error.message
+        library_entry_error: result.error.message
       }))
       return
     }
@@ -1294,11 +1286,11 @@ export const loadLibraryEntry = (entryId: string, options: LoadLibraryEntryOptio
       library_entry: result.data,
       library_entry_status: "ready",
       library_entry_error: null,
-      library_note_text: options.preserveNoteDraft ? viewStore.getState().library_note_text : result.data.note?.text ?? "",
-      library_note_status: options.preserveNoteDraft ? viewStore.getState().library_note_status : "idle",
-      library_note_error: options.preserveNoteDraft ? viewStore.getState().library_note_error : null,
-      library_note_server_text: options.preserveNoteDraft ? viewStore.getState().library_note_server_text : null,
-      library_title_draft: options.preserveTitleDraft
+      library_note_text: preserveDrafts ? viewStore.getState().library_note_text : result.data.note?.text ?? "",
+      library_note_status: preserveDrafts ? viewStore.getState().library_note_status : "idle",
+      library_note_error: preserveDrafts ? viewStore.getState().library_note_error : null,
+      library_note_server_text: preserveDrafts ? viewStore.getState().library_note_server_text : null,
+      library_title_draft: preserveDrafts
         ? viewStore.getState().library_title_draft
         : result.data.title,
       library_title_status: "idle",
