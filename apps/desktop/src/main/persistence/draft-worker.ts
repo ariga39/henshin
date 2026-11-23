@@ -246,7 +246,7 @@ if (installationId !== undefined) {
     ).run(installationId, DESKTOP_STORE_SCHEMA_VERSION, applicationVersion ?? null)
   } else if (storedIdentity.installation_id !== installationId || storedIdentity.schema_version !== DESKTOP_STORE_SCHEMA_VERSION) {
     throw new Error("desktop client store identity or schema version is incompatible")
-  } else if (storedIdentity.application_version === null && applicationVersion !== undefined) {
+  } else if (applicationVersion !== undefined && storedIdentity.application_version !== applicationVersion) {
     db.prepare("UPDATE desktop_store_metadata SET application_version = ? WHERE id = 1").run(applicationVersion)
   }
 }
