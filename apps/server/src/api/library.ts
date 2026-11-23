@@ -1,9 +1,23 @@
 import { Effect } from "effect"
-import { EntryNotFound, InternalError, InvalidRequest, LibraryApi, RequestContext, RootNotFound } from "@henshin/contracts"
+import {
+  EntryNotFound,
+  EpochChanged,
+  InstanceMismatch,
+  InternalError,
+  InvalidRequest,
+  LibraryApi,
+  OperationConflict,
+  OperationExpired,
+  RequestContext,
+  RevisionConflict,
+  RootNotFound,
+  StorageFull
+} from "@henshin/contracts"
 import { HttpApiBuilder } from "effect/http-api"
 import { ServerState } from "../identity"
 import { InvalidLibraryEntryResolutionCursor, InvalidLibrarySearchCursor, LibraryStore } from "../persistence/LibraryStore"
 import { RootStore } from "../persistence/RootStore"
+import { parseCanonicalEhGalleryUrl } from "../eh-url"
 
 const errorBase = (server: ServerState["Service"], requestId: string) => ({
   request_id: requestId,
@@ -98,6 +112,134 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
             ...errorBase(server, context.request_id),
             server_time: Date.now(),
             data: page
+          }
+        })
+      )
+      .handle("entry", ({ params }) =>
+        Effect.gen(function*() {
+          const context = yield* RequestContext
+          const entry = yield* library.entry(params.id).pipe(
+            Effect.mapError(() => new InternalError({
+              code: "internal_error",
+              message: "internal error",
+              retryable: false,
+              ...errorBase(server, context.request_id)
+            }))
+          )
+          if (entry === null) {
+            return yield* new EntryNotFound({
+              code: "not_found",
+              message: "library entry not found",
+              retryable: false,
+              ...errorBase(server, context.request_id)
+            })
+          }
+          return {
+            ...errorBase(server, context.request_id),
+            server_time: Date.now(),
+            data: entry
+          }
+        })
+      )
+      .handle("entryCommand", ({ params, payload }) =>
+        Effect.gen(function*() {
+          const context = yield* RequestContext
+          if (payload.instance_id !== server.instanceId) {
+            return yield* new InstanceMismatch({
+              code: "instance_mismatch",
+              message: "instance mismatch",
+              retryable: false,
+              ...errorBase(server, context.request_id)
+            })
+          }
+          if (payload.epoch !== server.epoch) {
+            return yield* new EpochChanged({
+              code: "epoch_changed",
+              message: "epoch changed",
+              retryable: true,
+              ...errorBase(server, context.request_id)
+            })
+          }
+          const parsed = parseCanonicalEhGalleryUrl(payload.command.url)
+          if (parsed === null) {
+            return yield* new InvalidRequest({
+              code: "invalid_request",
+              message: "gallery URL must use https://e-hentai.org or https://exhentai.org with /g/{gid}/{token}/",
+              retryable: false,
+              details: { field: "command.url" },
+              ...errorBase(server, context.request_id)
+            })
+          }
+          const outcome = yield* library.bindEntry({
+            entryId: params.id,
+            operationId: payload.operation_id,
+            epoch: server.epoch,
+            expectedDecisionVersion: payload.expected_decision_version,
+            source: parsed.source,
+            gid: parsed.gid,
+            token: parsed.token,
+            preferredDomain: parsed.preferredDomain,
+            canonicalUrl: parsed.canonicalUrl
+          }).pipe(
+            Effect.mapError(() => new InternalError({
+              code: "internal_error",
+              message: "internal error",
+              retryable: false,
+              ...errorBase(server, context.request_id)
+            }))
+          )
+          switch (outcome.kind) {
+            case "committed":
+            case "replayed":
+              return {
+                ...errorBase(server, context.request_id),
+                server_time: Date.now(),
+                data: outcome.result
+              }
+            case "operation_conflict":
+              return yield* new OperationConflict({
+                code: "operation_conflict",
+                message: "operation id reused with a different payload",
+                retryable: false,
+                ...errorBase(server, context.request_id)
+              })
+            case "operation_expired":
+              return yield* new OperationExpired({
+                code: "operation_expired",
+                message: "the binding operation result expired; inspect the current entry before retrying",
+                retryable: false,
+                ...errorBase(server, context.request_id)
+              })
+            case "storage_full":
+              return yield* new StorageFull({
+                code: "storage_full503",
+                message: "binding operation recovery storage is full",
+                retryable: true,
+                ...errorBase(server, context.request_id)
+              })
+            case "entry_not_found":
+              return yield* new EntryNotFound({
+                code: "not_found",
+                message: "library entry not found",
+                retryable: false,
+                ...errorBase(server, context.request_id)
+              })
+            case "revision_conflict":
+              return yield* new RevisionConflict({
+                code: "revision_conflict",
+                message: "stale entry decision revision",
+                retryable: false,
+                details: { current_revision: outcome.currentDecisionVersion },
+                ...errorBase(server, context.request_id)
+              })
+            case "locator_conflict":
+              return yield* new InvalidRequest({
+                code: "invalid_request",
+                message: "this gallery identity already has a different token; verify the locator before replacing it",
+                retryable: false,
+                details: { field: "command.url" },
+                ...errorBase(server, context.request_id)
+              })
           }
         })
       )
