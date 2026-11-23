@@ -51,7 +51,7 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
-const CURRENT_SCHEMA_VERSION = 10
+const CURRENT_SCHEMA_VERSION = 9
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
@@ -506,10 +506,6 @@ db.exec(`
   );
 `)
 
-const existingServerState = db.prepare(
-  "SELECT schema_version FROM server_state WHERE id = 1"
-).get() as { schema_version: number } | undefined
-
 const rootColumns = new Set(
   (db.prepare("PRAGMA table_info(server_roots)").all() as unknown as ReadonlyArray<{ name: string }>).map(
     (column) => column.name
@@ -720,10 +716,8 @@ if (!currentLibraryEntryColumns.has("availability_observed_at_ms")) {
   db.exec("ALTER TABLE library_entries ADD COLUMN availability_observed_at_ms INTEGER")
 }
 
-const needsSummaryBackfill = addedAcceptedObservationSummary || addedCandidateObservationSummary ||
-  (existingServerState !== undefined && existingServerState.schema_version < CURRENT_SCHEMA_VERSION)
-const needsSearchBackfill = addedSearchColumns ||
-  (existingServerState !== undefined && existingServerState.schema_version < CURRENT_SCHEMA_VERSION)
+const needsSummaryBackfill = addedAcceptedObservationSummary || addedCandidateObservationSummary
+const needsSearchBackfill = addedSearchColumns
 
 if (needsSummaryBackfill || needsSearchBackfill) {
   db.exec("BEGIN IMMEDIATE")

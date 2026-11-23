@@ -1,26 +1,131 @@
 import { execFile as execFileCallback } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { DatabaseSync } from "node:sqlite"
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js"
 import { afterEach, describe, expect, it } from "vitest"
+import { createBackupArchive, type BackupArchiveContext } from "../src/maintenance/BackupArchive"
 
 const execFile = promisify(execFileCallback)
 const SERVER_PATH = path.resolve("apps/server/dist/server.mjs")
 const workspaces: Array<string> = []
 
-const run = async (args: ReadonlyArray<string>, options?: { readonly env?: NodeJS.ProcessEnv }) => {
+const run = async (args: ReadonlyArray<string>) => {
   const result = await execFile(process.execPath, [SERVER_PATH, ...args], {
-    cwd: path.resolve("."),
-    env: options?.env
+    cwd: path.resolve(".")
   }).catch((error: unknown) => {
     const failure = error as { stderr?: string; code?: number }
     throw new Error(`${failure.code ?? "unknown"}: ${failure.stderr ?? ""}`, { cause: error })
   })
   return JSON.parse(result.stdout) as Record<string, unknown>
+}
+
+const directArchiveContext = async (options: {
+  readonly dataDir: string
+  readonly destination: string
+  readonly destinationId: string
+  readonly beforePublish?: () => Promise<void>
+}): Promise<{ readonly context: BackupArchiveContext; readonly close: () => void }> => {
+  const database = new DatabaseSync(path.join(options.dataDir, "server.sqlite"))
+  const destinationStats = await stat(options.destination)
+  const destinationRow = {
+    destinationId: options.destinationId,
+    name: "primary",
+    selectedPath: options.destination,
+    canonicalPath: await realpath(options.destination),
+    device: String(destinationStats.dev),
+    inode: String(destinationStats.ino),
+    state: "active" as const
+  }
+  const context: BackupArchiveContext = {
+    dbPath: path.join(options.dataDir, "server.sqlite"),
+    destination: destinationRow,
+    roots: [],
+    label: null,
+    beforePublish: options.beforePublish,
+    reserve: async (request) => {
+      const nextOrder = (database.prepare(
+        "SELECT COALESCE(MAX(publication_order), 0) + 1 AS next_order FROM backup_artifacts WHERE destination_id = ?"
+      ).get(request.destinationId) as { next_order: number }).next_order
+      database.prepare(`
+        INSERT INTO backup_artifacts(
+          artifact_id, destination_id, operation_id, relative_path, publication_order,
+          retention_class, label, status, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?, 'archive', ?, 'reserved', ?)
+      `).run(
+        request.artifactId,
+        request.destinationId,
+        request.operationId,
+        request.relativePath,
+        nextOrder,
+        request.label,
+        request.createdAtMs
+      )
+      return {
+        kind: "reserved" as const,
+        artifact: {
+          artifactId: request.artifactId,
+          destinationId: request.destinationId,
+          operationId: request.operationId,
+          relativePath: request.relativePath,
+          publicationOrder: nextOrder,
+          retentionClass: "archive" as const,
+          label: request.label,
+          status: "reserved" as const,
+          manifestDigest: null,
+          sizeBytes: null,
+          createdAtMs: request.createdAtMs,
+          completedAtMs: null
+        }
+      }
+    },
+    complete: async (request) => {
+      database.prepare(`
+        UPDATE backup_artifacts
+        SET status = 'completed', manifest_digest = ?, size_bytes = ?, completed_at_ms = ?
+        WHERE artifact_id = ?
+      `).run(request.manifestDigest, request.sizeBytes, request.completedAtMs, request.artifactId)
+      const row = database.prepare(`
+        SELECT artifact_id, destination_id, operation_id, relative_path, publication_order,
+               retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
+        FROM backup_artifacts WHERE artifact_id = ?
+      `).get(request.artifactId) as {
+        artifact_id: string
+        destination_id: string
+        operation_id: string
+        relative_path: string
+        publication_order: number
+        retention_class: "archive"
+        label: string | null
+        status: "completed"
+        manifest_digest: string
+        size_bytes: number
+        created_at_ms: number
+        completed_at_ms: number
+      }
+      return {
+        kind: "completed" as const,
+        artifact: {
+          artifactId: row.artifact_id,
+          destinationId: row.destination_id,
+          operationId: row.operation_id,
+          relativePath: row.relative_path,
+          publicationOrder: row.publication_order,
+          retentionClass: row.retention_class,
+          label: row.label,
+          status: row.status,
+          manifestDigest: row.manifest_digest,
+          sizeBytes: row.size_bytes,
+          createdAtMs: row.created_at_ms,
+          completedAtMs: row.completed_at_ms
+        }
+      }
+    }
+  }
+  return { context, close: () => database.close() }
 }
 
 afterEach(async () => {
@@ -86,6 +191,8 @@ describe("server backup archive", () => {
       "--label", "test archive"
     ])
     const archivePath = created.archive_path as string
+    expect((await stat(path.join(destination, "archives"))).mode & 0o777).toBe(0o700)
+    expect((await stat(archivePath)).mode & 0o777).toBe(0o600)
     const archiveBytes = new Uint8Array(await readFile(archivePath))
     const reader = new ZipReader(new Uint8ArrayReader(archiveBytes))
     const entries = await reader.getEntries()
@@ -121,17 +228,41 @@ describe("server backup archive", () => {
     snapshot.close()
     expect(await readFile(sourceFile)).toEqual(sourceBytes)
 
-    const restarted = await run([
-      "backup", "create", "--data-dir", dataDir, "--destination-id", saved.destination_id
-    ])
-    expect(restarted.publication_order).toBe(2)
-    expect((await readdir(path.join(destination, "archives"))).filter((name) => name.endsWith(".henshin.zip"))).toHaveLength(2)
+    const interrupted = await directArchiveContext({
+      dataDir,
+      destination,
+      destinationId: saved.destination_id,
+      beforePublish: async () => {
+        throw new Error("test publication interruption")
+      }
+    })
+    await expect(createBackupArchive(interrupted.context)).rejects.toThrow("test publication interruption")
+    interrupted.close()
+    expect((await readdir(path.join(destination, "archives"))).filter((name) => name.endsWith(".henshin.zip"))).toHaveLength(1)
 
-    const interrupted = await execFile(process.execPath, [SERVER_PATH, "backup", "create", "--data-dir", dataDir, "--destination-id", saved.destination_id], {
-      cwd: path.resolve("."),
-      env: { ...process.env, HENSHIN_TEST_INTERRUPT_PUBLICATION: "1" }
-    }).then(() => false).catch(() => true)
-    expect(interrupted).toBe(true)
-    expect((await readdir(path.join(destination, "archives"))).filter((name) => name.endsWith(".henshin.zip"))).toHaveLength(2)
+    const replacedPath = path.join(workspace, "destination-before-replacement")
+    const replacement = await directArchiveContext({
+      dataDir,
+      destination,
+      destinationId: saved.destination_id,
+      beforePublish: async () => {
+        await rename(destination, replacedPath)
+        await mkdir(destination)
+      }
+    })
+    await expect(createBackupArchive(replacement.context)).rejects.toThrow("backup destination changed and publication was blocked")
+    replacement.close()
+    expect((await readdir(path.join(replacedPath, "archives"))).filter((name) => name.endsWith(".henshin.zip"))).toHaveLength(1)
+    await expect(stat(path.join(destination, "archives"))).rejects.toMatchObject({ code: "ENOENT" })
+
+    const catalog = new DatabaseSync(path.join(dataDir, "server.sqlite"))
+    try {
+      const artifacts = catalog.prepare(
+        "SELECT status FROM backup_artifacts ORDER BY publication_order"
+      ).all() as Array<{ status: string }>
+      expect(artifacts.map((artifact) => artifact.status)).toEqual(["completed", "reserved", "reserved"])
+    } finally {
+      catalog.close()
+    }
   })
 })

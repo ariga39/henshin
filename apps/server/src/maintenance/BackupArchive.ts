@@ -1,11 +1,10 @@
 import { backup, DatabaseSync } from "node:sqlite"
 import { createHash, randomUUID } from "node:crypto"
-import { lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat } from "node:fs/promises"
+import { chmod, lstat, mkdir, mkdtemp, open, realpath, rename, rm, stat } from "node:fs/promises"
 import { join, dirname } from "node:path"
 import {
-  BlobWriter,
+  Reader,
   Uint8ArrayReader,
-  Uint8ArrayWriter,
   ZipReader,
   ZipWriter
 } from "@zip.js/zip.js"
@@ -26,6 +25,8 @@ import type {
 const MAX_STATE_BYTES = 512 * 1024 * 1024
 const MAX_CONFIGURATION_BYTES = 4 * 1024 * 1024
 const MAX_MANIFEST_BYTES = 256 * 1024
+const MAX_ARCHIVE_BYTES = MAX_STATE_BYTES + MAX_CONFIGURATION_BYTES + MAX_MANIFEST_BYTES + 16 * 1024 * 1024
+const IO_CHUNK_BYTES = 1024 * 1024
 const ARCHIVE_DIRECTORY = "archives"
 const ARCHIVE_SUFFIX = ".henshin.zip"
 
@@ -48,6 +49,8 @@ export interface BackupArchiveContext {
     readonly sizeBytes: number
     readonly completedAtMs: number
   }) => Promise<BackupArtifactCompletionOutcome>
+  /** Test-only failure seam; production callers leave this unset. */
+  readonly beforePublish?: () => Promise<void>
 }
 
 export interface BackupArchiveResult {
@@ -84,8 +87,9 @@ const ensureArchiveDirectory = async (destination: string): Promise<string> => {
     if (!existing.isDirectory() || existing.isSymbolicLink()) throw new Error("backup destination archive directory is unsafe")
   } catch (error) {
     if (!isMissing(error)) throw error
-    await mkdir(expected)
+    await mkdir(expected, { mode: 0o700 })
   }
+  await chmod(expected, 0o700)
   const canonical = await realpath(expected)
   if (canonical !== expected) throw new Error("backup destination archive directory is unsafe")
   return canonical
@@ -167,60 +171,129 @@ const validateSnapshot = (snapshot: DatabaseSync): void => {
   }
 }
 
+class FileHandleReader extends Reader<Awaited<ReturnType<typeof open>>> {
+  readonly size: number
+
+  constructor(
+    private readonly file: Awaited<ReturnType<typeof open>>,
+    size: number
+  ) {
+    super(file)
+    this.size = size
+  }
+
+  override async init(): Promise<void> {
+    return
+  }
+
+  override async readUint8Array(index: number, length: number): Promise<Uint8Array> {
+    if (!Number.isSafeInteger(index) || !Number.isSafeInteger(length) || index < 0 || length < 0) {
+      throw new Error("invalid backup archive read range")
+    }
+    const available = Math.max(0, Math.min(length, this.size - index))
+    const output = new Uint8Array(available)
+    let offset = 0
+    while (offset < available) {
+      const result = await this.file.read(output, offset, available - offset, index + offset)
+      if (result.bytesRead === 0) throw new Error("backup archive ended before its declared range")
+      offset += result.bytesRead
+    }
+    return output
+  }
+}
+
+const digestFile = async (filePath: string, expectedSize: number): Promise<string> => {
+  const file = await open(filePath, "r")
+  try {
+    const hash = createHash("sha256")
+    const buffer = new Uint8Array(IO_CHUNK_BYTES)
+    let offset = 0
+    while (offset < expectedSize) {
+      const result = await file.read(buffer, 0, Math.min(buffer.length, expectedSize - offset), offset)
+      if (result.bytesRead === 0) throw new Error("backup payload ended before its declared size")
+      hash.update(buffer.subarray(0, result.bytesRead))
+      offset += result.bytesRead
+    }
+    if ((await file.stat()).size !== expectedSize) throw new Error("backup payload changed during verification")
+    return hash.digest("hex")
+  } finally {
+    await file.close()
+  }
+}
+
+const fileWritable = (file: Awaited<ReturnType<typeof open>>): WritableStream<Uint8Array> => {
+  let position = 0
+  return new WritableStream({
+    async write(chunk: Uint8Array) {
+      let offset = 0
+      while (offset < chunk.length) {
+        const result = await file.write(chunk, offset, chunk.length - offset, position)
+        if (result.bytesWritten === 0) throw new Error("backup archive output made no progress")
+        offset += result.bytesWritten
+        position += result.bytesWritten
+      }
+    },
+    close: () => file.sync()
+  })
+}
+
 const verifyArchive = async (
-  archiveBytes: Uint8Array,
-  manifestBytes: Uint8Array,
-  stateBytes: Uint8Array,
-  configurationBytes: Uint8Array
+  archivePath: string,
+  expected: ReadonlyMap<string, { readonly size: number; readonly sha256: string }>
 ): Promise<void> => {
-  const reader = new ZipReader(new Uint8ArrayReader(archiveBytes))
+  const archiveSize = (await stat(archivePath)).size
+  if (archiveSize > MAX_ARCHIVE_BYTES) throw new Error("backup archive exceeds the size limit")
+  const file = await open(archivePath, "r")
+  const reader = new ZipReader(new FileHandleReader(file, archiveSize))
   try {
     const entries = await reader.getEntries()
-    const expected = new Map([
-      ["manifest.json", manifestBytes],
-      ["state.sqlite", stateBytes],
-      ["configuration.json", configurationBytes]
-    ])
     if (entries.length !== expected.size) throw new Error("backup archive has an unexpected member count")
     const seen = new Set<string>()
     for (const entry of entries) {
-      if (entry.directory || entry.filename.includes("/") || entry.filename.startsWith("/") || seen.has(entry.filename)) {
+      if (entry.directory || entry.symlink || entry.filename.includes("/") || entry.filename.startsWith("/") || seen.has(entry.filename)) {
         throw new Error("backup archive contains an unsafe member")
       }
       const wanted = expected.get(entry.filename)
       if (wanted === undefined) throw new Error("backup archive contains an unexpected member")
       seen.add(entry.filename)
-      const actual = await entry.getData(new Uint8ArrayWriter())
-      if (actual.byteLength !== wanted.byteLength || digest(actual) !== digest(wanted)) {
+      const hash = createHash("sha256")
+      let size = 0
+      await entry.getData(new WritableStream<Uint8Array>({
+        write(chunk) {
+          size += chunk.byteLength
+          if (size > wanted.size) throw new Error(`backup archive member exceeds its manifest size: ${entry.filename}`)
+          hash.update(chunk)
+        }
+      }))
+      if (size !== wanted.size || hash.digest("hex") !== wanted.sha256) {
         throw new Error(`backup archive member failed verification: ${entry.filename}`)
       }
     }
   } finally {
     await reader.close()
+    await file.close()
   }
 }
 
-const writeFlushed = async (filePath: string, bytes: Uint8Array): Promise<void> => {
-  const handle = await open(filePath, "wx")
+const writeArchive = async (
+  filePath: string,
+  statePath: string,
+  stateSize: number,
+  manifestBytes: Uint8Array,
+  configurationBytes: Uint8Array
+): Promise<void> => {
+  const handle = await open(filePath, "wx", 0o600)
+  const state = await open(statePath, "r")
   try {
-    await handle.write(bytes)
-    await handle.sync()
+    const writer = new ZipWriter(fileWritable(handle))
+    await writer.add("manifest.json", new Uint8ArrayReader(manifestBytes))
+    await writer.add("state.sqlite", new FileHandleReader(state, stateSize))
+    await writer.add("configuration.json", new Uint8ArrayReader(configurationBytes))
+    await writer.close()
   } finally {
+    await state.close()
     await handle.close()
   }
-}
-
-const archiveBytes = async (
-  manifestBytes: Uint8Array,
-  stateBytes: Uint8Array,
-  configurationBytes: Uint8Array
-): Promise<Uint8Array> => {
-  const writer = new ZipWriter(new BlobWriter("application/zip"))
-  await writer.add("manifest.json", new Uint8ArrayReader(manifestBytes))
-  await writer.add("state.sqlite", new Uint8ArrayReader(stateBytes))
-  await writer.add("configuration.json", new Uint8ArrayReader(configurationBytes))
-  const blob = await writer.close()
-  return new Uint8Array(await blob.arrayBuffer())
 }
 
 export const createBackupArchive = async (context: BackupArchiveContext): Promise<BackupArchiveResult> => {
@@ -250,6 +323,7 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
   const archiveDirectory = await ensureArchiveDirectory(selected.value.canonicalPath)
   const finalPath = join(archiveDirectory, `${artifact.artifactId}${ARCHIVE_SUFFIX}`)
   const stagingDirectory = await mkdtemp(join(dirname(context.dbPath), ".backup-staging-"))
+  await chmod(stagingDirectory, 0o700)
   let temporaryArchivePath: string | undefined
   try {
     const snapshotPath = join(stagingDirectory, "state.sqlite")
@@ -260,8 +334,9 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
     } finally {
       source.close()
     }
-    const stateBytes = new Uint8Array(await readFile(snapshotPath))
-    if (stateBytes.byteLength > MAX_STATE_BYTES) throw new Error("backup snapshot exceeds the size limit")
+    const stateSize = (await stat(snapshotPath)).size
+    if (stateSize > MAX_STATE_BYTES) throw new Error("backup snapshot exceeds the size limit")
+    const stateDigest = await digestFile(snapshotPath, stateSize)
 
     const snapshot = new DatabaseSync(snapshotPath, { readOnly: true })
     let configuration: ReturnType<typeof snapshotConfiguration>
@@ -292,7 +367,7 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
       retention_class: "archive",
       label: artifact.label,
       payloads: {
-        "state.sqlite": { size_bytes: stateBytes.byteLength, sha256: digest(stateBytes) },
+        "state.sqlite": { size_bytes: stateSize, sha256: stateDigest },
         "configuration.json": { size_bytes: configurationBytes.byteLength, sha256: digest(configurationBytes) }
       },
       included_data_classes: ["authoritative server state", "nonsecret application configuration"],
@@ -308,14 +383,16 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
     }
     const manifestBytes = jsonBytes(manifest)
     if (manifestBytes.byteLength > MAX_MANIFEST_BYTES) throw new Error("backup manifest exceeds the size limit")
-    const bytes = await archiveBytes(manifestBytes, stateBytes, configurationBytes)
     temporaryArchivePath = join(archiveDirectory, `.${artifact.artifactId}.tmp`)
-    await writeFlushed(temporaryArchivePath, bytes)
-    await verifyArchive(new Uint8Array(await readFile(temporaryArchivePath)), manifestBytes, stateBytes, configurationBytes)
+    await writeArchive(temporaryArchivePath, snapshotPath, stateSize, manifestBytes, configurationBytes)
+    const expectedPayloads = new Map([
+      ["manifest.json", { size: manifestBytes.byteLength, sha256: digest(manifestBytes) }],
+      ["state.sqlite", { size: stateSize, sha256: stateDigest }],
+      ["configuration.json", { size: configurationBytes.byteLength, sha256: digest(configurationBytes) }]
+    ])
+    await verifyArchive(temporaryArchivePath, expectedPayloads)
 
-    if (process.env.HENSHIN_TEST_INTERRUPT_PUBLICATION === "1") {
-      throw new Error("backup publication interrupted")
-    }
+    if (context.beforePublish !== undefined) await context.beforePublish()
     const revalidated = await revalidateWritableLocation(selected.value)
     if (!revalidated.ok) throw new Error("backup destination changed and publication was blocked")
     const beforePublishSeparation = await validateWritableLocationSeparation({
@@ -339,8 +416,7 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
     } finally {
       await directoryHandle.close()
     }
-    const finalBytes = new Uint8Array(await readFile(finalPath))
-    await verifyArchive(finalBytes, manifestBytes, stateBytes, configurationBytes)
+    await verifyArchive(finalPath, expectedPayloads)
     const finalSize = (await stat(finalPath)).size
     const completed = await context.complete({
       artifactId: artifact.artifactId,
