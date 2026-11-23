@@ -13,6 +13,7 @@ import {
   loadReaderProfiles,
   openSelectedLibraryEntry,
   searchLibrary,
+  updateLibraryNote,
   selectLibraryEntry,
   showSetup
 } from "./workflows"
@@ -301,6 +302,54 @@ export const LibraryScreen = () => {
         {selectedEntry !== null && (
           <section aria-labelledby="library-entry-details-heading" data-testid="library-details">
             <h3 id="library-entry-details-heading">{selectedEntry.title}</h3>
+            {state.library_entry_status === "loading" && (
+              <p role="status" data-testid="entry-metadata-pending">Loading saved entry details…</p>
+            )}
+            {state.library_entry_status === "error" && (
+              <p role="alert">Could not load entry details: {state.library_entry_error}</p>
+            )}
+            {state.library_entry_status === "ready" && state.library_entry?.entry_id === selectedEntry.entry_id && (
+              <form
+                data-testid="entry-note-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void runtime.runPromise(updateLibraryNote(state.library_note_text))
+                }}
+              >
+                <label htmlFor={`entry-note-${selectedEntry.entry_id}`}>Private note</label>
+                <textarea
+                  id={`entry-note-${selectedEntry.entry_id}`}
+                  data-testid="entry-note"
+                  value={state.library_note_text}
+                  onChange={(event) => viewStore.set({ library_note_text: event.target.value })}
+                  disabled={state.library_note_status === "loading"}
+                  rows={5}
+                />
+                <button
+                  type="submit"
+                  data-testid="entry-note-save"
+                  disabled={state.library_note_status === "loading"}
+                >
+                  {state.library_note_status === "loading" ? "Saving…" : "Save note"}
+                </button>
+                <button
+                  type="button"
+                  data-testid="entry-note-clear"
+                  disabled={state.library_note_status === "loading" || state.library_note_text.length === 0}
+                  onClick={() => void runtime.runPromise(updateLibraryNote(""))}
+                >
+                  Clear note
+                </button>
+                {state.library_note_error !== null && (
+                  <p role="alert" data-testid="entry-note-error">{state.library_note_error}</p>
+                )}
+                {state.library_note_server_text !== null && (
+                  <p data-testid="entry-note-current-server">
+                    Current server note: {state.library_note_server_text || "(empty)"}
+                  </p>
+                )}
+              </form>
+            )}
             {selectedEntryCanOpen ? (
               <>
                 <p>Accepted {selectedEntry.kind}; target resolution is checked by the desktop main process.</p>

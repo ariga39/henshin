@@ -194,6 +194,16 @@ export type RootCommandIpcRequest = typeof RootCommandIpcRequest.Type
 export const LibrarySearchIpcRequest = LibrarySearchRequest
 export type LibrarySearchIpcRequest = typeof LibrarySearchIpcRequest.Type
 
+export const LibraryEntryIpcRequest = Schema.Struct({ entry_id: Uuid })
+export type LibraryEntryIpcRequest = typeof LibraryEntryIpcRequest.Type
+
+export const LibraryNoteIpcRequest = Schema.Struct({
+  entry_id: Uuid,
+  text: Text,
+  expected_decision_version: Revision
+})
+export type LibraryNoteIpcRequest = typeof LibraryNoteIpcRequest.Type
+
 export const ThumbnailGetIpcRequest = Schema.Struct({ key: ThumbnailKey })
 export type ThumbnailGetIpcRequest = typeof ThumbnailGetIpcRequest.Type
 

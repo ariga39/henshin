@@ -7,6 +7,9 @@ import type {
   DiscardedDraft,
   HandshakeView,
   LibraryEntryPage,
+  LibraryEntryDetails,
+  LibraryNoteIpcRequest,
+  EntryCommandResult,
   OpenBookIpcRequest,
   OpenBookIpcResult,
   OpenBookStatusIpcRequest,
@@ -159,6 +162,8 @@ export interface LibraryBridge {
     readonly cursor?: string
     readonly state?: "replacement-pending"
   }): Promise<Result<LibraryEntryPage>>
+  entry(input: { readonly entry_id: string }): Promise<Result<LibraryEntryDetails>>
+  note(input: LibraryNoteIpcRequest): Promise<Result<EntryCommandResult>>
   open(input: OpenBookIpcRequest): Promise<Result<OpenBookIpcResult>>
   status(input: OpenBookStatusIpcRequest): Promise<Result<OpenBookIpcResult | null>>
   onOpenStateChanged(listener: () => void): () => void
@@ -328,6 +333,8 @@ export class LibraryClient extends Context.Service<
       readonly cursor?: string
       readonly state?: "replacement-pending"
     }) => Effect.Effect<Result<LibraryEntryPage>>
+    readonly entry: (input: { readonly entry_id: string }) => Effect.Effect<Result<LibraryEntryDetails>>
+    readonly note: (input: LibraryNoteIpcRequest) => Effect.Effect<Result<EntryCommandResult>>
     readonly open: (input: OpenBookIpcRequest) => Effect.Effect<Result<OpenBookIpcResult>>
     readonly status: (input: OpenBookStatusIpcRequest) => Effect.Effect<Result<OpenBookIpcResult | null>>
     readonly getThumbnail: (key: ThumbnailKey) => Effect.Effect<Result<Uint8Array>>
@@ -337,6 +344,8 @@ export class LibraryClient extends Context.Service<
     LibraryClient,
     LibraryClient.of({
       search: (input) => callIpc(() => window.henshinLibrary.search(input)),
+      entry: (input) => callIpc(() => window.henshinLibrary.entry(input)),
+      note: (input) => callIpc(() => window.henshinLibrary.note(input)),
       open: (input) => callIpc(() => window.henshinLibrary.open(input)),
       status: (input) => callIpc(() => window.henshinLibrary.status(input)),
       getThumbnail: (key) => callIpc(() => window.henshinLibrary.getThumbnail(key))
