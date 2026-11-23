@@ -106,6 +106,64 @@ const listLibrary = (server: RunningServer): Promise<LibraryEntryPage> =>
     return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
   })).then((result) => result.data)
 
+const readReplacementState = (dbPath: string, rootId: string) => {
+  const db = new DatabaseSync(dbPath)
+  const entries = db.prepare(
+    "SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, decision_version, content_version, location_revision, manifest_json FROM library_entries WHERE root_id = ? ORDER BY entry_id"
+  ).all(rootId)
+  const staged = db.prepare(
+    "SELECT candidate_id, candidate_version, relative_path, kind, hold_state, analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? ORDER BY candidate_id"
+  ).all(rootId)
+  const entryIds = db.prepare(
+    "SELECT entry_id FROM library_entries WHERE root_id = ? ORDER BY entry_id"
+  ).all(rootId) as Array<{ entry_id: string }>
+  const openEvents = entryIds.length === 0
+    ? []
+    : db.prepare(
+        `SELECT event_id, instance_id, entry_id, device_id, observed_location_revision, observed_content_version, occurred_at_ms
+         FROM open_events WHERE entry_id IN (${entryIds.map(() => "?").join(", ")}) ORDER BY event_id`
+      ).all(...entryIds.map((entry) => entry.entry_id))
+  const statistics = entryIds.length === 0
+    ? []
+    : db.prepare(
+        `SELECT entry_id, open_count, last_opened_at_ms
+         FROM entry_statistics WHERE entry_id IN (${entryIds.map(() => "?").join(", ")}) ORDER BY entry_id`
+      ).all(...entryIds.map((entry) => entry.entry_id))
+  const library = db.prepare("SELECT change_revision FROM server_library WHERE id = 1").all()
+  db.close()
+  return { entries, staged, openEvents, statistics, library }
+}
+
+const setCandidateObservationTokens = (
+  dbPath: string,
+  candidateId: string,
+  beforeToken: string | undefined,
+  afterToken: string | undefined
+): void => {
+  const db = new DatabaseSync(dbPath)
+  const row = db.prepare("SELECT manifest_json FROM staged_discoveries WHERE candidate_id = ?").get(candidateId) as
+    | { manifest_json: string | null }
+    | undefined
+  if (row?.manifest_json === null || row?.manifest_json === undefined) throw new Error("expected candidate manifest")
+  const manifest = JSON.parse(row.manifest_json) as {
+    before: { observation_token?: string }
+    after: { observation_token?: string }
+  }
+  if (beforeToken === undefined) delete manifest.before.observation_token
+  else manifest.before.observation_token = beforeToken
+  if (afterToken === undefined) delete manifest.after.observation_token
+  else manifest.after.observation_token = afterToken
+  db.prepare("UPDATE staged_discoveries SET manifest_json = ? WHERE candidate_id = ?").run(
+    JSON.stringify(manifest),
+    candidateId
+  )
+  db.close()
+}
+
+const removeCandidateObservationTokens = (dbPath: string, candidateId: string): void => {
+  setCandidateObservationTokens(dbPath, candidateId, undefined, undefined)
+}
+
 const downgradeLibraryEntriesToPreReplacementSchema = (dbPath: string): void => {
   const db = new DatabaseSync(dbPath)
   db.exec("PRAGMA foreign_keys = OFF")
@@ -530,7 +588,7 @@ describe("replacement comparison read model", () => {
   })
 
   it("keeps the original entry after fresh validation and replays after the source changes", async () => {
-    const { server, fixture, root } = await makeScenario(
+    const { dbPath, server, fixture, root } = await makeScenario(
       "henshin-replacement-keep-",
       "Keep replacement",
       async (fixture) => {
@@ -605,6 +663,20 @@ describe("replacement comparison read model", () => {
       return yield* (yield* ReviewHttpClient).candidates()
     }))).data.find((item) => item.candidate_id === candidate.candidate_id)
     if (refreshedCandidate === undefined) throw new Error("expected refreshed replacement candidate")
+
+    setCandidateObservationTokens(dbPath, refreshedCandidate.candidate_id, "stale-before", "stale-after")
+    const beforeTokenMismatch = readReplacementState(dbPath, root.root_id)
+    const tokenMismatch = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).command({
+        params: { id: refreshedCandidate.candidate_id },
+        payload: { ...command, operation_id: randomUUID(), expected_candidate_version: refreshedCandidate.candidate_version }
+      }).pipe(Effect.flip)
+    }))
+    expect(tokenMismatch._tag).toBe("RevisionConflict")
+    expect(tokenMismatch.message).toContain("source changed since Review")
+    expect(readReplacementState(dbPath, root.root_id)).toEqual(beforeTokenMismatch)
+
+    removeCandidateObservationTokens(dbPath, refreshedCandidate.candidate_id)
     const operationId = randomUUID()
     const resolved = await withReviewClient(server, Effect.gen(function*() {
       return yield* (yield* ReviewHttpClient).command({
@@ -710,6 +782,7 @@ describe("replacement comparison read model", () => {
       command: { type: "resolve-replacement" as const, entry_id: initial.entry_id, decision: "replace" as const }
     }
 
+    const beforeStale = readReplacementState(dbPath, root.root_id)
     await writeFile(page, "Book C")
     const stale = await withReviewClient(server, Effect.gen(function*() {
       return yield* (yield* ReviewHttpClient).command({
@@ -719,6 +792,7 @@ describe("replacement comparison read model", () => {
     }))
     expect(stale._tag).toBe("RevisionConflict")
     expect(stale.message).toContain("source changed since Review")
+    expect(readReplacementState(dbPath, root.root_id)).toEqual(beforeStale)
 
     await writeFile(page, "Book B")
     expect((await scan(server, root)).readiness_error?.code).toBe("allocation_deferred")
@@ -726,6 +800,8 @@ describe("replacement comparison read model", () => {
       return yield* (yield* ReviewHttpClient).candidates()
     }))).data.find((item) => item.candidate_id === candidate.candidate_id)
     if (refreshedCandidate === undefined) throw new Error("expected refreshed replacement candidate")
+
+    removeCandidateObservationTokens(dbPath, refreshedCandidate.candidate_id)
 
     const operationId = randomUUID()
     const resolved = await withReviewClient(server, Effect.gen(function*() {
@@ -741,6 +817,24 @@ describe("replacement comparison read model", () => {
       entry: { entry_id: newEntryId, state: "accepted", content_version: "1" },
       detached_entry_id: initial.entry_id
     })
+
+    const delayedEvent = await withOpenEventClient(server, Effect.gen(function*() {
+      return yield* (yield* OpenEventHttpClient).batch({
+        payload: {
+          epoch: server.epoch,
+          events: [{
+            event_id: randomUUID(),
+            instance_id: server.instanceId,
+            entry_id: initial.entry_id,
+            device_id: randomUUID(),
+            observed_location_revision: initial.location_revision,
+            observed_content_version: initial.content_version,
+            occurred_at_ms: Date.now()
+          }]
+        }
+      })
+    }))
+    expect(delayedEvent.data.results[0]?.outcome).toBe("accepted")
 
     await writeFile(page, "Book D")
     const replay = await withReviewClient(server, Effect.gen(function*() {
@@ -758,8 +852,10 @@ describe("replacement comparison read model", () => {
     const db = new DatabaseSync(dbPath)
     const oldRow = db.prepare("SELECT state FROM library_entries WHERE entry_id = ?").get(initial.entry_id) as { state: string } | undefined
     const history = db.prepare("SELECT COUNT(*) AS count FROM open_events WHERE entry_id = ?").get(initial.entry_id) as { count: number } | undefined
+    const newHistory = db.prepare("SELECT COUNT(*) AS count FROM open_events WHERE entry_id = ?").get(newEntryId) as { count: number } | undefined
     db.close()
     expect(oldRow?.state).toBe("detached")
-    expect(history?.count).toBe(1)
+    expect(history?.count).toBe(2)
+    expect(newHistory?.count).toBe(0)
   })
 })

@@ -1614,9 +1614,7 @@ const resolveReplacement = (
     }
     if (
       request.freshManifestJson === null ||
-      (request.decision === "replace"
-        ? candidate.manifest_json !== request.freshManifestJson
-        : !manifestsEquivalent(candidate.manifest_json, request.freshManifestJson))
+      !manifestsEquivalent(candidate.manifest_json, request.freshManifestJson)
     ) {
       db.exec("ROLLBACK")
       return { kind: "fresh_observation_conflict" }
