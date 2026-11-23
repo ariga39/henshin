@@ -2,7 +2,15 @@ import type { LibraryEntry, RootPreviewResult, ScanTask, StagedDiscovery } from 
 import { useSyncExternalStore } from "react"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { loadPendingReplacements, releaseHeldDiscovery, resolveReplacement, retryScanResults, startManualScan } from "./workflows"
+import {
+  loadPendingReplacements,
+  refreshReplacementReview,
+  releaseHeldDiscovery,
+  replacementEvidenceMatches,
+  resolveReplacement,
+  retryScanResults,
+  startManualScan
+} from "./workflows"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -142,6 +150,7 @@ export const HeldScanReview = () => {
                 ? state.scan_resolution_error
                 : null
             const pageCount = candidate === undefined ? null : replacementPageCount(candidate)
+            const evidenceMatches = replacementEvidenceMatches(entry, candidate)
             return (
               <article key={entry.entry_id} data-testid={`replacement-${entry.entry_id}`}>
                 <h3>Previous entry</h3>
@@ -155,9 +164,17 @@ export const HeldScanReview = () => {
                 </dl>
                 <h3>Candidate at the same path</h3>
                 {candidate === undefined ? (
-                  <p data-testid="replacement-candidate-unavailable">
-                    Candidate details are unavailable. Keep this replacement pending and refresh Review before deciding.
-                  </p>
+                  <>
+                    <p data-testid="replacement-candidate-unavailable">
+                      Candidate details are unavailable. Keep this replacement pending and refresh Review before deciding.
+                    </p>
+                    <button
+                      data-testid={`replacement-refresh-${entry.entry_id}`}
+                      onClick={() => void runtime.runPromise(refreshReplacementReview)}
+                    >
+                      Refresh Review
+                    </button>
+                  </>
                 ) : (
                   <>
                     <dl>
@@ -172,7 +189,17 @@ export const HeldScanReview = () => {
                       <dt>Analysis</dt>
                       <dd>{candidate.analysis_status === "ready" ? "complete" : candidate.analysis_error?.message ?? "not ready"}</dd>
                     </dl>
-                    {candidate.analysis_status === "ready" && candidate.manifest !== null && pageCount !== null && pageCount > 0 ? (
+                    {!evidenceMatches ? (
+                      <p role="alert" data-testid="replacement-evidence-mismatch">
+                        This comparison is out of date. Refresh Review before deciding.{" "}
+                        <button
+                          data-testid={`replacement-refresh-${entry.entry_id}`}
+                          onClick={() => void runtime.runPromise(refreshReplacementReview)}
+                        >
+                          Refresh Review
+                        </button>
+                      </p>
+                    ) : candidate.analysis_status === "ready" && candidate.manifest !== null && pageCount !== null && pageCount > 0 ? (
                       <div>
                         <button
                           data-testid={`replacement-keep-${entry.entry_id}`}
