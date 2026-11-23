@@ -68,6 +68,12 @@ contextBridge.exposeInMainWorld("henshinLibrary", {
   getThumbnail: (key: string) => ipcRenderer.invoke(IpcChannels.thumbnailGet, { key })
 })
 
+contextBridge.exposeInMainWorld("henshinConnection", {
+  connect: () => ipcRenderer.invoke(IpcChannels.connect, {}),
+  disconnect: () => ipcRenderer.invoke(IpcChannels.disconnect, {}),
+  connectionStatus: () => ipcRenderer.invoke(IpcChannels.connectionStatus, {})
+})
+
 contextBridge.exposeInMainWorld("henshinOpenJournal", {
   onChanged: (listener: () => void) => {
     const handler = () => listener()

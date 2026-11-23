@@ -6,6 +6,7 @@ import type {
   LocalMappingPreview,
   LibraryEntry,
   LibraryEntryDetails,
+  LibraryFreshness,
   NoteView,
   RootPreviewRequest,
   RootPreviewResult,
@@ -139,6 +140,7 @@ export interface ViewState {
   readonly library_has_more: boolean
   readonly library_status: "idle" | "loading" | "ready" | "error"
   readonly library_error: string | null
+  readonly library_freshness: LibraryFreshness | null
   readonly library_request_generation: number
   readonly library_cover_generation: number
   readonly pending_replacement_entries: ReadonlyArray<LibraryEntry>
@@ -252,6 +254,7 @@ const initialState: ViewState = {
   library_has_more: false,
   library_status: "idle",
   library_error: null,
+  library_freshness: null,
   library_request_generation: 0,
   library_cover_generation: 0,
   pending_replacement_entries: [],

@@ -10,6 +10,7 @@ import type {
   LibraryEntryDetails,
   LibraryNoteIpcRequest,
   EntryCommandResult,
+  LibrarySearchIpcResult,
   OpenBookIpcRequest,
   OpenBookIpcResult,
   OpenBookStatusIpcRequest,
@@ -161,7 +162,7 @@ export interface LibraryBridge {
     readonly page_size?: number
     readonly cursor?: string
     readonly state?: "replacement-pending"
-  }): Promise<Result<LibraryEntryPage>>
+  }): Promise<Result<LibraryEntryPage | LibrarySearchIpcResult>>
   entry(input: { readonly entry_id: string }): Promise<Result<LibraryEntryDetails>>
   note(input: LibraryNoteIpcRequest): Promise<Result<EntryCommandResult>>
   open(input: OpenBookIpcRequest): Promise<Result<OpenBookIpcResult>>
@@ -332,7 +333,7 @@ export class LibraryClient extends Context.Service<
       readonly page_size?: number
       readonly cursor?: string
       readonly state?: "replacement-pending"
-    }) => Effect.Effect<Result<LibraryEntryPage>>
+    }) => Effect.Effect<Result<LibraryEntryPage | LibrarySearchIpcResult>>
     readonly entry: (input: { readonly entry_id: string }) => Effect.Effect<Result<LibraryEntryDetails>>
     readonly note: (input: LibraryNoteIpcRequest) => Effect.Effect<Result<EntryCommandResult>>
     readonly open: (input: OpenBookIpcRequest) => Effect.Effect<Result<OpenBookIpcResult>>

@@ -12,6 +12,7 @@ import type {
 } from "@henshin/contracts"
 import {
   LibraryClient,
+  ConnectionClient,
   OpenJournalClient,
   LocalMappingClient,
   PrototypeClient,
@@ -1496,7 +1497,28 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
       : { query, page_size: 50, cursor })
     if (viewStore.getState().library_request_generation !== requestGeneration) return
     if (!result.ok) {
-      yield* Effect.sync(() => viewStore.set({ library_status: "error", library_error: result.error.message }))
+      yield* Effect.sync(() => {
+        const state = viewStore.getState()
+        const unfiltered = query.trim() === ""
+        viewStore.set(unfiltered && state.library_entries.length > 0
+          ? {
+              library_status: "ready",
+              library_error: result.error.message,
+              library_freshness: state.library_freshness === null
+                ? null
+                : { ...state.library_freshness, source: "cached", stale: true, partial: true }
+            }
+          : {
+              library_status: "error",
+              library_error: result.error.message,
+              ...(unfiltered ? {} : {
+                library_entries: [],
+                library_cursor: null,
+                library_has_more: false,
+                library_freshness: null
+              })
+            })
+      })
       return
     }
     yield* Effect.sync(() => {
@@ -1504,16 +1526,19 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
       const existing = append ? state.library_entries : []
       const ids = new Set(existing.map((entry) => entry.entry_id))
       const entries = [...existing]
-      for (const entry of result.data.entries) {
+      const page = "page" in result.data ? result.data.page : result.data
+      const freshness = "freshness" in result.data ? result.data.freshness : null
+      for (const entry of page.entries) {
         if (!ids.has(entry.entry_id)) entries.push(entry)
       }
       viewStore.set({
         library_entries: entries,
         library_query: query,
-        library_cursor: result.data.next_cursor,
-        library_has_more: result.data.has_more,
+        library_cursor: page.next_cursor,
+        library_has_more: page.has_more,
         library_status: "ready",
         library_error: null,
+        library_freshness: freshness,
         library_cover_generation: append
           ? state.library_cover_generation
           : state.library_cover_generation + 1
@@ -1669,6 +1694,55 @@ const loadNoteWithOptions = (preserveFormText: boolean) => Effect.gen(function*(
 })
 
 export const loadNote = loadNoteWithOptions(false)
+
+export const loadLibraryConnectionStatus = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const connectionGeneration = viewStore.getState().connection_generation
+  const result = yield* client.connectionStatus()
+  if (result.ok) {
+    yield* Effect.sync(() => viewStore.publishConnection(result.data, connectionGeneration))
+  }
+})
+
+export const disconnectLibrary = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const connectionGeneration = viewStore.beginConnectionTransition("disconnected")
+  const result = yield* client.disconnect()
+  if (result.ok) {
+    yield* Effect.sync(() => {
+      viewStore.publishConnection(result.data, connectionGeneration)
+      const state = viewStore.getState()
+      if (state.library_query.trim() === "" && state.library_entries.length > 0) {
+        viewStore.set({
+          library_freshness: state.library_freshness === null
+            ? null
+            : { ...state.library_freshness, source: "cached", stale: true, partial: true }
+        })
+      }
+    })
+  } else if (isCurrent(connectionGeneration)) {
+    yield* Effect.sync(() => viewStore.set({ library_error: result.error.message }))
+  }
+})
+
+export const reconnectLibrary = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const connectionGeneration = viewStore.beginConnectionTransition("connecting")
+  const result = yield* client.connect()
+  if (!result.ok) {
+    const status = yield* client.connectionStatus()
+    if (isCurrent(connectionGeneration) && status.ok) {
+      yield* Effect.sync(() => viewStore.publishConnection(status.data, connectionGeneration))
+    }
+    if (isCurrent(connectionGeneration)) {
+      yield* Effect.sync(() => viewStore.set({ library_error: result.error.message }))
+    }
+    return
+  }
+  if (!isCurrent(connectionGeneration)) return
+  yield* Effect.sync(() => viewStore.publishConnection(result.data, connectionGeneration))
+  yield* loadLibrary()
+})
 
 export const loadConnectionStatus = Effect.gen(function*() {
   const client = yield* PrototypeClient

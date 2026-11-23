@@ -8,7 +8,7 @@ import {
   DeviceRootMapping,
   LocalMappingPreview
 } from "./root"
-import { LibrarySearchRequest, ReplacementResolutionCommand } from "./library"
+import { LibraryEntryPage, LibrarySearchRequest, ReplacementResolutionCommand } from "./library"
 import { ThumbnailKey } from "./thumbnail"
 import { ReleaseHoldCommand } from "./review"
 import type {
@@ -203,6 +203,20 @@ export const LibraryNoteIpcRequest = Schema.Struct({
   expected_decision_version: Revision
 })
 export type LibraryNoteIpcRequest = typeof LibraryNoteIpcRequest.Type
+export const LibraryFreshness = Schema.Struct({
+  source: Schema.Union([Schema.Literal("live"), Schema.Literal("cached")]),
+  stale: Schema.Boolean,
+  partial: Schema.Boolean,
+  observed_at_ms: Schema.Int,
+  instance_id: Uuid
+})
+export type LibraryFreshness = typeof LibraryFreshness.Type
+
+export const LibrarySearchIpcResult = Schema.Struct({
+  page: LibraryEntryPage,
+  freshness: LibraryFreshness
+})
+export type LibrarySearchIpcResult = typeof LibrarySearchIpcResult.Type
 
 export const ThumbnailGetIpcRequest = Schema.Struct({ key: ThumbnailKey })
 export type ThumbnailGetIpcRequest = typeof ThumbnailGetIpcRequest.Type

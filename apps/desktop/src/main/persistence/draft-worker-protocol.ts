@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path"
 import { OpenEvent } from "@henshin/contracts/event"
 import { DraftFormId, NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import {
+  LibraryEntryPage,
   EntryResolution,
   ReaderEntryFormat,
   ReaderLaunchMode,
@@ -195,6 +196,17 @@ export const OpenResolutionCacheReadResult = Schema.NullOr(OpenResolutionCacheRo
 /** Maximum UTF-8 bytes retained for persisted accepted-resolution evidence. */
 export const OPEN_RESOLUTION_CACHE_BUDGET_BYTES = 4 * 1024 * 1024
 
+export const LibraryPageCacheRow = Schema.Struct({
+  instanceId: Uuid,
+  epoch: Uuid,
+  pageSize: Schema.Natural,
+  cursorKey: Schema.String,
+  page: LibraryEntryPage,
+  observedAtMs: Schema.Int
+})
+export type LibraryPageCacheRow = typeof LibraryPageCacheRow.Type
+export const LibraryPageCacheReadResult = Schema.NullOr(LibraryPageCacheRow)
+
 export const OpenJournalReadResult = Schema.NullOr(OpenJournalRow)
 export type OpenJournalReadResult = typeof OpenJournalReadResult.Type
 
@@ -334,6 +346,21 @@ export const DraftWorkerRequest = Schema.Union([
     entryId: Uuid,
     epoch: Uuid,
     resolution: EntryResolution
+  }),
+  Schema.Struct({
+    op: Schema.Literal("getLibraryPage"),
+    instanceId: Uuid,
+    pageSize: Schema.Natural,
+    cursorKey: Schema.String
+  }),
+  Schema.Struct({
+    op: Schema.Literal("saveLibraryPage"),
+    instanceId: Uuid,
+    epoch: Uuid,
+    pageSize: Schema.Natural,
+    cursorKey: Schema.String,
+    page: LibraryEntryPage,
+    observedAtMs: Schema.Int
   }),
   Schema.Struct({ op: Schema.Literal("close") })
 ])

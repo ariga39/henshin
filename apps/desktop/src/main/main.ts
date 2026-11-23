@@ -73,6 +73,7 @@ import {
   reconcileNoteCommand
 } from "./CommandCoordinator"
 import { LocalDatabaseWorker } from "./persistence/LocalDatabaseWorker"
+import { LibraryPageCache } from "./persistence/LibraryPageCache"
 import { OpenResolutionCache } from "./persistence/OpenResolutionCache"
 import {
   OpenJournalConflictError,
@@ -133,7 +134,7 @@ let mainWindow: BrowserWindow | null = null
 const appWindows = new Set<BrowserWindow>()
 const trustedWindowUrls = new Map<BrowserWindow, string>()
 let serverChild: ServerChild | null = null
-type MainServices = DraftStore | CommandAttemptStore | OpenJournalStore | LocalMappingStore | ReaderProfileStore | OpenResolutionCache
+type MainServices = DraftStore | CommandAttemptStore | OpenJournalStore | LocalMappingStore | ReaderProfileStore | OpenResolutionCache | LibraryPageCache
 let runtime: ManagedRuntime.ManagedRuntime<MainServices, never> | null = null
 let connection: ConnectionLifecycle | null = null
 let openCoordinator: OpenCoordinator | null = null
@@ -154,6 +155,14 @@ class LocalMappingStaleError extends Error {
 
   constructor(message = "the local mapping preview is stale; inspect the directory again") {
     super(message)
+  }
+}
+
+class OfflineLibraryUnavailableError extends Error {
+  readonly code = "offline_library_unavailable"
+
+  constructor() {
+    super("this server's cached Library is not available on this device; reconnect before browsing it offline")
   }
 }
 const executableSelections = new Map<string, { readonly path: string; readonly createdAt: number }>()
@@ -244,6 +253,9 @@ const toPublicError = (error: unknown): PublicError => {
       message: error.message,
       retryable: true
     }
+  }
+  if (error instanceof OfflineLibraryUnavailableError) {
+    return { code: error.code, message: error.message, retryable: true }
   }
   if (error instanceof LocalMappingStaleError) {
     return { code: error.code, message: error.message, retryable: true }
@@ -1173,14 +1185,92 @@ const registerIpc = (): void => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(LibrarySearchIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    return runNetworkResult(
-      toResult(
+    const request = decoded.value
+    const pageSize = request.page_size ?? 50
+    const cursor = request.cursor ?? null
+    const cacheableLibrary = request.state === undefined && (request.query === undefined || request.query.trim() === "")
+    const activeSession = requireConnection().getSession()
+    if (activeSession !== null) {
+      return runNetworkResult(
+        toRawResult(
+          Effect.gen(function*() {
+            const client = yield* LibraryHttpClient
+            return yield* client.search({ payload: request })
+          })
+        )
+      ).then(async (result) => {
+        if (!result.ok) return result
+        if (result.data.instance_id !== activeSession.instanceId || result.data.epoch !== activeSession.epoch) {
+          return {
+            ok: false as const,
+            error: {
+              code: "instance_mismatch",
+              message: "the authenticated Library response belongs to another server namespace; reconnect before browsing",
+              retryable: true
+            }
+          }
+        }
+        const page = result.data.data
+        if (cacheableLibrary) {
+          await requireRuntime().runPromise(
+            Effect.gen(function*() {
+              const cache = yield* LibraryPageCache
+              yield* cache.save({
+                instanceId: activeSession.instanceId,
+                epoch: activeSession.epoch,
+                pageSize,
+                cursor,
+                page,
+                observedAtMs: Math.trunc(result.data.server_time)
+              })
+            }).pipe(Effect.catch(() => Effect.void))
+          )
+        }
+        return {
+          ok: true as const,
+          data: {
+            page,
+            freshness: {
+              source: "live" as const,
+              stale: false,
+              partial: false,
+              observed_at_ms: Math.trunc(result.data.server_time),
+              instance_id: activeSession.instanceId
+            }
+          }
+        }
+      })
+    }
+
+    try {
+      if (!cacheableLibrary) throw new OfflineLibraryUnavailableError()
+      const namespace = requireNamespace()
+      if (requireConnection().getStatus().state !== "disconnected") {
+        throw new ConnectionPausedError({ state: requireConnection().getStatus().state })
+      }
+      return requireRuntime().runPromise(
         Effect.gen(function*() {
-          const client = yield* LibraryHttpClient
-          return yield* client.search({ payload: decoded.value })
-        })
+          const cache = yield* LibraryPageCache
+          const cached = yield* cache.get({ instanceId: namespace, pageSize, cursor })
+          if (cached === undefined) return yield* Effect.fail(new OfflineLibraryUnavailableError())
+          return {
+            ok: true as const,
+            data: {
+              page: cached.page,
+              freshness: {
+                source: "cached" as const,
+                stale: true,
+                partial: true,
+                observed_at_ms: cached.observedAtMs,
+                instance_id: namespace
+              }
+            }
+          }
+        }).pipe(Effect.catch((error) => Effect.succeed({ ok: false as const, error: toPublicError(error) })))
       )
-    )
+    } catch (error) {
+      return Promise.resolve({ ok: false as const, error: toPublicError(error) })
+    }
   })
 
   ipcMain.handle(IpcChannels.libraryEntry, (event, raw: unknown) => {
@@ -1782,7 +1872,8 @@ const bootstrap = async (): Promise<void> => {
       OpenJournalStore.layerFromWorker,
       LocalMappingStore.layerFromWorker,
       ReaderProfileStore.layerFromWorker,
-      OpenResolutionCache.layerFromWorker
+      OpenResolutionCache.layerFromWorker,
+      LibraryPageCache.layerFromWorker
     ).pipe(Layer.provide(localWorker))
   )
 

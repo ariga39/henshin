@@ -7,11 +7,13 @@ import { viewStore } from "./store"
 import { createThumbnailLoadRequest } from "./thumbnail-loading"
 import {
   chooseLibraryOpenProfile,
+  disconnectLibrary,
   libraryOpenStateFor,
   loadLibrary,
   loadActiveLibraryOpenState,
   loadReaderProfiles,
   openSelectedLibraryEntry,
+  reconnectLibrary,
   searchLibrary,
   updateLibraryNote,
   selectLibraryEntry,
@@ -40,6 +42,8 @@ const coverPlaceholder = (entry: LibraryEntry, loading: boolean) => (
     <strong>{entry.title}</strong>
   </div>
 )
+
+const observedAtText = (observedAtMs: number): string => new Date(observedAtMs).toISOString()
 
 const LibraryCover = ({
   entry,
@@ -210,6 +214,28 @@ export const LibraryScreen = () => {
         </button>
       </header>
 
+      <section aria-labelledby="library-connection-heading" data-testid="library-connection">
+        <h2 id="library-connection-heading">Server connection</h2>
+        <p data-testid="library-connection-status">{state.connection.state}</p>
+        {state.connection.state === "disconnected" && (
+          <p>Server network work is paused; cached Library data is available only for this verified server.</p>
+        )}
+        <button
+          data-testid="library-reconnect"
+          disabled={state.connection.state === "connecting"}
+          onClick={() => void runtime.runPromise(reconnectLibrary)}
+        >
+          Reconnect
+        </button>
+        <button
+          data-testid="library-disconnect"
+          disabled={state.connection.state !== "connected"}
+          onClick={() => void runtime.runPromise(disconnectLibrary)}
+        >
+          Disconnect
+        </button>
+      </section>
+
       {state.library_scan_task !== null && (
         <p role="status" data-testid="library-scan-status">
           Scan task {state.library_scan_task.status}.
@@ -252,6 +278,11 @@ export const LibraryScreen = () => {
         </button>
         {state.library_status === "loading" && <p role="status">Loading library…</p>}
         {state.library_status === "error" && <p role="alert">Could not load library: {state.library_error}</p>}
+        {state.library_freshness?.source === "cached" && (
+          <p role="status" data-testid="library-cache-status">
+            Cached Library — partial and stale. Last observed {observedAtText(state.library_freshness.observed_at_ms)}. Only previously loaded books are shown.
+          </p>
+        )}
         {state.library_status === "ready" && state.library_entries.length === 0 && hasLibraryQuery && (
           <>
             <p data-testid="library-no-matches">No books match “{state.library_query}”.</p>

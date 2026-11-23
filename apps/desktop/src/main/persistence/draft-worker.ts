@@ -5,7 +5,7 @@ import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalOpenEventPayload } from "@henshin/contracts/canonical"
 import { OpenEvent } from "@henshin/contracts/event"
-import { EntryResolution } from "@henshin/contracts"
+import { EntryResolution, LibraryEntryPage } from "@henshin/contracts"
 import {
   CommandAttemptAdmission,
   CommandAttemptMutation,
@@ -18,6 +18,7 @@ import {
   type DraftRow,
   type OpenJournalRow,
   type OpenResolutionCacheRow,
+  type LibraryPageCacheRow,
   type DraftWorkerRequest,
   OPEN_RESOLUTION_CACHE_BUDGET_BYTES
 } from "./draft-worker-protocol"
@@ -35,6 +36,7 @@ const COMMAND_ATTEMPT_COMPACTION_BATCH = 64
 const OPEN_JOURNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const OPEN_JOURNAL_COMPACTION_BATCH = 64
 const MAX_OPEN_RESOLUTION_CACHE_ROWS = 256
+const MAX_LIBRARY_PAGE_CACHE_ROWS = 256
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const db = new DatabaseSync(dbPath)
 
@@ -134,6 +136,15 @@ db.exec(`
     resolution_json TEXT NOT NULL,
     cached_at_ms INTEGER NOT NULL,
     PRIMARY KEY (instance_id, entry_id)
+  );
+  CREATE TABLE IF NOT EXISTS library_page_cache (
+    instance_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    page_size INTEGER NOT NULL,
+    cursor_key TEXT NOT NULL,
+    page_json TEXT NOT NULL,
+    observed_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (instance_id, page_size, cursor_key)
   );
 `)
 
@@ -369,6 +380,30 @@ const compactOpenResolutionCache = (): void => {
     deleteOldestOpenResolution.run()
   }
 }
+const selectLibraryPage = db.prepare(`
+  SELECT instance_id, epoch, page_size, cursor_key, page_json, observed_at_ms
+  FROM library_page_cache
+  WHERE instance_id = ? AND page_size = ? AND cursor_key = ?
+`)
+selectLibraryPage.setReadBigInts(true)
+const compactLibraryPages = db.prepare(`
+  DELETE FROM library_page_cache
+  WHERE rowid IN (
+    SELECT rowid
+    FROM library_page_cache
+    ORDER BY observed_at_ms DESC, rowid DESC
+    LIMIT -1 OFFSET ${MAX_LIBRARY_PAGE_CACHE_ROWS}
+  )
+`)
+const upsertLibraryPage = db.prepare(`
+  INSERT INTO library_page_cache(
+    instance_id, epoch, page_size, cursor_key, page_json, observed_at_ms
+  ) VALUES(?, ?, ?, ?, ?, ?)
+  ON CONFLICT(instance_id, page_size, cursor_key) DO UPDATE SET
+    epoch = excluded.epoch,
+    page_json = excluded.page_json,
+    observed_at_ms = excluded.observed_at_ms
+`)
 const selectReaderProfileCount = db.prepare("SELECT COUNT(*) AS count FROM reader_profiles")
 selectReaderProfileCount.setReadBigInts(true)
 const insertReaderProfile = db.prepare(`
@@ -623,6 +658,28 @@ const readOpenResolution = (instanceId: string, entryId: string): OpenResolution
     epoch: row.epoch,
     resolution: Schema.decodeUnknownSync(EntryResolution)(JSON.parse(row.resolution_json)),
     cachedAtMs: Number(row.cached_at_ms)
+  }
+}
+
+type LibraryPageCacheDbRow = {
+  readonly instance_id: string
+  readonly epoch: string
+  readonly page_size: bigint
+  readonly cursor_key: string
+  readonly page_json: string
+  readonly observed_at_ms: bigint
+}
+
+const readLibraryPage = (instanceId: string, pageSize: number, cursorKey: string): LibraryPageCacheRow | undefined => {
+  const row = selectLibraryPage.get(instanceId, pageSize, cursorKey) as LibraryPageCacheDbRow | undefined
+  if (row === undefined) return undefined
+  return {
+    instanceId: row.instance_id,
+    epoch: row.epoch,
+    pageSize: Number(row.page_size),
+    cursorKey: row.cursor_key,
+    page: Schema.decodeUnknownSync(LibraryEntryPage)(JSON.parse(row.page_json)),
+    observedAtMs: Number(row.observed_at_ms)
   }
 }
 
@@ -1656,6 +1713,29 @@ const handle = (request: DraftWorkerRequest): unknown => {
         db.exec("COMMIT")
         const row = readOpenResolution(request.instanceId, request.entryId)
         if (row === undefined) throw new Error("saved open resolution was not readable")
+        return row
+      } catch (error) {
+        rollbackIfActive()
+        throw error
+      }
+    }
+    case "getLibraryPage":
+      return readLibraryPage(request.instanceId, request.pageSize, request.cursorKey) ?? null
+    case "saveLibraryPage": {
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        upsertLibraryPage.run(
+          request.instanceId,
+          request.epoch,
+          request.pageSize,
+          request.cursorKey,
+          JSON.stringify(request.page),
+          request.observedAtMs
+        )
+        compactLibraryPages.run()
+        db.exec("COMMIT")
+        const row = readLibraryPage(request.instanceId, request.pageSize, request.cursorKey)
+        if (row === undefined) throw new Error("saved library page was not readable")
         return row
       } catch (error) {
         rollbackIfActive()
