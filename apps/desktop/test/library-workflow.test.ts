@@ -1,8 +1,9 @@
 import { Effect, Layer } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
-import type { LibraryEntry, LibraryEntryDetails, OpenBookIpcResult, ReaderProfile } from "@henshin/contracts"
+import type { EntryCommandResult, LibraryEntry, LibraryEntryDetails, OpenBookIpcResult, ReaderProfile } from "@henshin/contracts"
 import { LibraryClient, type Result } from "../src/renderer/client"
 import {
+  bindLibraryEntry,
   chooseLibraryOpenProfile,
   libraryOpenStateFor,
   loadActiveLibraryOpenState,
@@ -59,6 +60,28 @@ const accepted = (entryId: string, actionId = firstActionId): OpenBookIpcResult 
   event_durable: true
 })
 
+const entryDetails = (
+  entryId: string,
+  decisionVersion = "1",
+  binding: LibraryEntryDetails["binding"] = null
+): LibraryEntryDetails => ({
+  entry_id: entryId,
+  library_id: libraryId,
+  root_id: "77777777-7777-4777-8777-777777777777",
+  relative_path: `${entryId}/001.png`,
+  source_path: `/books/${entryId}`,
+  kind: "image-directory",
+  title: entryId === entryAId ? "book-a" : "book-b",
+  page_count: 1,
+  state: "accepted",
+  decision_version: decisionVersion,
+  content_version: "1",
+  location_revision: "1",
+  cover: null,
+  replacement: null,
+  binding
+})
+
 const run = <A>(effect: Effect.Effect<A, unknown, LibraryClient>, client: LibraryClient["Service"]) =>
   Effect.runPromise(Effect.provide(effect, Layer.succeed(LibraryClient, client)))
 
@@ -80,7 +103,8 @@ const resetView = () => {
     library_entries: [],
     library_selected_entry_id: null,
     library_open_profile_id: null,
-    library_open_states: []
+    library_open_states: [],
+    library_entry_request_generation: 0
   })
 }
 
@@ -122,6 +146,159 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_note_server_text).toBe("server text")
     expect(viewStore.getState().library_note_error).toContain("retained")
     expect(viewStore.getState().library_entry?.decision_version).toBe("2")
+  })
+  it("binds the selected entry with its revision and stores the canonical binding", async () => {
+    const bindRequests: Array<{ readonly entry_id: string; readonly url: string; readonly expected_decision_version: string }> = []
+    const bound = entryDetails(entryAId, "1", {
+      source: "EH",
+      gid: "12345",
+      canonical_url: "https://e-hentai.org/g/12345/token/",
+      preferred_domain: "e-hentai.org"
+    })
+    const client = LibraryClient.of({
+      entry: () => Effect.succeed({ ok: true as const, data: entryDetails(entryAId) }),
+      bind: (input) => {
+        bindRequests.push(input)
+        return Effect.succeed({ ok: true as const, data: {
+          operation_id: firstActionId,
+          entry: bound
+        } satisfies EntryCommandResult })
+      },
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({ library_entries: [entry(entryAId, "book-a")] })
+
+    await run(selectLibraryEntry(entryAId), client)
+    await run(bindLibraryEntry("https://e-hentai.org/g/12345/typed-token/?ignored=true"), client)
+
+    expect(bindRequests).toEqual([{
+      entry_id: entryAId,
+      url: "https://e-hentai.org/g/12345/typed-token/?ignored=true",
+      expected_decision_version: "1"
+    }])
+    expect(viewStore.getState().library_entry?.binding).toEqual(bound.binding)
+    expect(viewStore.getState().library_bind_url).toBe(bound.binding?.canonical_url)
+    expect(viewStore.getState().library_bind_error).toBeNull()
+  })
+
+  it("discards stale detail replies across A-to-B-to-A reselection", async () => {
+    const pending: Array<{
+      readonly entryId: string
+      readonly resolve: (result: Result<LibraryEntryDetails>) => void
+    }> = []
+    const client = LibraryClient.of({
+      entry: (input) => Effect.promise(() => new Promise<Result<LibraryEntryDetails>>((resolve) => {
+        pending.push({ entryId: input.entry_id, resolve })
+      })),
+      bind: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({ library_entries: [entry(entryAId, "book-a"), entry(entryBId, "book-b")] })
+
+    const firstA = run(selectLibraryEntry(entryAId), client)
+    await Promise.resolve()
+    const b = run(selectLibraryEntry(entryBId), client)
+    await Promise.resolve()
+    const secondA = run(selectLibraryEntry(entryAId), client)
+    await Promise.resolve()
+    expect(pending.map((request) => request.entryId)).toEqual([entryAId, entryBId, entryAId])
+
+    pending[2]!.resolve({ ok: true, data: entryDetails(entryAId, "3") })
+    await secondA
+    pending[0]!.resolve({ ok: true, data: entryDetails(entryAId, "1") })
+    pending[1]!.resolve({ ok: true, data: entryDetails(entryBId, "2") })
+    await Promise.all([firstA, b])
+
+    expect(viewStore.getState().library_selected_entry_id).toBe(entryAId)
+    expect(viewStore.getState().library_entry).toMatchObject({ entry_id: entryAId, decision_version: "3" })
+  })
+
+  it("discards late bind success and failure after changing the selected entry", async () => {
+    const bindResolvers: Array<(result: Result<EntryCommandResult>) => void> = []
+    const client = LibraryClient.of({
+      entry: (input) => Effect.succeed({ ok: true as const, data: entryDetails(input.entry_id) }),
+      bind: () => Effect.promise(() => new Promise<Result<EntryCommandResult>>((resolve) => {
+        bindResolvers.push(resolve)
+      })),
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({ library_entries: [entry(entryAId, "book-a"), entry(entryBId, "book-b")] })
+
+    await run(selectLibraryEntry(entryAId), client)
+    const lateSuccess = run(bindLibraryEntry("https://e-hentai.org/g/1/a/"), client)
+    await Promise.resolve()
+    await run(selectLibraryEntry(entryBId), client)
+    bindResolvers[0]!({ ok: true, data: { operation_id: firstActionId, entry: entryDetails(entryAId, "2", {
+      source: "EH", gid: "1", canonical_url: "https://e-hentai.org/g/1/a/", preferred_domain: "e-hentai.org"
+    }) } })
+    await lateSuccess
+    expect(viewStore.getState().library_selected_entry_id).toBe(entryBId)
+    expect(viewStore.getState().library_entry?.entry_id).toBe(entryBId)
+    expect(viewStore.getState().library_bind_error).toBeNull()
+
+    await run(selectLibraryEntry(entryAId), client)
+    const lateFailure = run(bindLibraryEntry("https://e-hentai.org/g/2/b/"), client)
+    await Promise.resolve()
+    await run(selectLibraryEntry(entryBId), client)
+    bindResolvers[1]!({ ok: false, error: { code: "transport", message: "late failure", retryable: true } })
+    await lateFailure
+    expect(viewStore.getState().library_selected_entry_id).toBe(entryBId)
+    expect(viewStore.getState().library_entry?.entry_id).toBe(entryBId)
+    expect(viewStore.getState().library_bind_error).toBeNull()
+  })
+
+  it("reloads a conflict revision while retaining the typed URL for retry", async () => {
+    const bindRequests: Array<{ readonly expected_decision_version: string; readonly url: string }> = []
+    let entryCalls = 0
+    const bound = entryDetails(entryAId, "2", {
+      source: "EH",
+      gid: "98765",
+      canonical_url: "https://e-hentai.org/g/98765/fresh-token/",
+      preferred_domain: "e-hentai.org"
+    })
+    const client = LibraryClient.of({
+      entry: () => {
+        entryCalls += 1
+        return Effect.succeed({ ok: true as const, data: entryDetails(entryAId, entryCalls === 1 ? "1" : "2") })
+      },
+      bind: (input) => {
+        bindRequests.push(input)
+        return bindRequests.length === 1
+          ? Effect.succeed({ ok: false as const, error: {
+            code: "revision_conflict",
+            message: "stale entry decision revision",
+            retryable: false,
+            current_revision: "2"
+          } })
+          : Effect.succeed({ ok: true as const, data: { operation_id: firstActionId, entry: bound } })
+      },
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({ library_entries: [entry(entryAId, "book-a")] })
+
+    await run(selectLibraryEntry(entryAId), client)
+    const typedUrl = "https://e-hentai.org/g/98765/typed-token/?ignored=true"
+    await run(bindLibraryEntry(typedUrl), client)
+    expect(viewStore.getState().library_entry?.decision_version).toBe("2")
+    expect(viewStore.getState().library_bind_url).toBe(typedUrl)
+    expect(viewStore.getState().library_bind_error).toBe("stale entry decision revision")
+
+    await run(bindLibraryEntry(viewStore.getState().library_bind_url), client)
+    expect(bindRequests.map((request) => request.expected_decision_version)).toEqual(["1", "2"])
+    expect(viewStore.getState().library_entry?.binding).toEqual(bound.binding)
+    expect(viewStore.getState().library_bind_error).toBeNull()
   })
 
   it("does not open a replacement-pending entry", async () => {

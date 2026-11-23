@@ -301,7 +301,7 @@ export const LibraryScreen = () => {
           </button>
         )}
         {selectedEntry !== null && (
-          <section aria-labelledby="library-entry-details-heading" data-testid="library-details">
+          <section className="library-details" aria-labelledby="library-entry-details-heading" data-testid="library-details">
             <h3 id="library-entry-details-heading">{selectedEntry.title}</h3>
             {state.library_entry_status === "loading" && (
               <p role="status" data-testid="entry-metadata-pending">Loading saved entry details…</p>

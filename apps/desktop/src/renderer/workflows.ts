@@ -1252,9 +1252,24 @@ const replaceLibraryOpenState = (
   next
 ]
 
-export const loadLibraryEntry = (entryId: string) =>
+interface LibraryEntryLoadOptions {
+  readonly requestGeneration: number
+  readonly preserveBindingUrl?: string
+}
+
+export const loadLibraryEntry = (entryId: string, options?: LibraryEntryLoadOptions) =>
   Effect.gen(function*() {
     const client = yield* LibraryClient
+    const requestGeneration = options?.requestGeneration ?? viewStore.getState().library_entry_request_generation + 1
+    if (options === undefined) {
+      yield* Effect.sync(() => viewStore.set({ library_entry_request_generation: requestGeneration }))
+    }
+    const isCurrent = () => {
+      const state = viewStore.getState()
+      return state.library_selected_entry_id === entryId &&
+        state.library_entry_request_generation === requestGeneration
+    }
+    if (!isCurrent()) return
     yield* Effect.sync(() => viewStore.set({
       library_entry_status: "loading",
       library_entry_error: null,
@@ -1262,11 +1277,11 @@ export const loadLibraryEntry = (entryId: string) =>
       library_note_error: null,
       library_note_server_text: null,
       library_bind_status: "idle",
-      library_bind_error: null
+      library_bind_error: null,
+      ...(options?.preserveBindingUrl === undefined ? {} : { library_bind_url: options.preserveBindingUrl })
     }))
     const result = yield* client.entry({ entry_id: entryId })
-    const current = viewStore.getState()
-    if (current.library_selected_entry_id !== entryId) return
+    if (!isCurrent()) return
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({
         library_entry_status: "error",
@@ -1293,6 +1308,7 @@ export const loadLibraryEntry = (entryId: string) =>
 export const selectLibraryEntry = (entryId: string) =>
   Effect.gen(function*() {
     const state = viewStore.getState()
+    const requestGeneration = state.library_entry_request_generation + 1
     const openState = libraryOpenStateFor(state, entryId)
     const preserveManualProfile = state.library_selected_entry_id === entryId
       ? state.library_open_profile_id
@@ -1308,9 +1324,11 @@ export const selectLibraryEntry = (entryId: string) =>
       library_note_error: null,
       library_note_server_text: null,
       library_bind_status: "idle",
-      library_bind_error: null
+      library_bind_error: null,
+      library_bind_url: "",
+      library_entry_request_generation: requestGeneration
     }))
-    yield* loadLibraryEntry(entryId)
+    yield* loadLibraryEntry(entryId, { requestGeneration })
   })
 
 export const updateLibraryNote = (text: string) =>
@@ -1366,14 +1384,48 @@ export const bindLibraryEntry = (url: string) =>
     const state = viewStore.getState()
     const entry = state.library_entry
     const entryId = state.library_selected_entry_id
-    if (entry === null || entryId === null) return
-    yield* Effect.sync(() => viewStore.set({ library_bind_status: "loading", library_bind_error: null }))
+    if (entry === null || entryId === null || entry.entry_id !== entryId) return
+    const requestGeneration = state.library_entry_request_generation + 1
+    const isCurrent = () => {
+      const current = viewStore.getState()
+      return current.library_selected_entry_id === entryId &&
+        current.library_entry_request_generation === requestGeneration &&
+        current.library_entry?.entry_id === entryId
+    }
+    yield* Effect.sync(() => viewStore.set({
+      library_bind_status: "loading",
+      library_bind_error: null,
+      library_entry_request_generation: requestGeneration
+    }))
     const result = yield* client.bind({
       entry_id: entryId,
       url,
       expected_decision_version: entry.decision_version
     })
+    if (!isCurrent()) return
     if (!result.ok) {
+      if (result.error.code === "revision_conflict") {
+        const refreshGeneration = requestGeneration + 1
+        yield* Effect.sync(() => viewStore.set({
+          library_entry_request_generation: refreshGeneration,
+          library_bind_status: "loading",
+          library_bind_error: null
+        }))
+        yield* loadLibraryEntry(entryId, {
+          requestGeneration: refreshGeneration,
+          preserveBindingUrl: url
+        })
+        if (viewStore.getState().library_entry_request_generation !== refreshGeneration ||
+          viewStore.getState().library_selected_entry_id !== entryId) return
+        if (viewStore.getState().library_entry_status === "ready") {
+          yield* Effect.sync(() => viewStore.set({
+            library_bind_status: "error",
+            library_bind_error: result.error.message,
+            library_bind_url: url
+          }))
+        }
+        return
+      }
       yield* Effect.sync(() => viewStore.set({ library_bind_status: "error", library_bind_error: result.error.message }))
       return
     }
