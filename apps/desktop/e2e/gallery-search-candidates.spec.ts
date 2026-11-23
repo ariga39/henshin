@@ -124,7 +124,20 @@ test("reviews synthetic gallery candidates before binding and distinguishes canc
     await expect(window.getByTestId("gallery-candidate")).toHaveCount(2, { timeout: 15_000 })
     await expect(window.getByTestId("gallery-binding-status")).toContainText("Unbound")
     await window.getByTestId("gallery-candidate").nth(1).locator("input").check()
-    await window.getByTestId("gallery-confirm").click()
+    const confirm = window.getByTestId("gallery-confirm")
+    const controlsDuringBind = confirm.evaluate((element) => new Promise<boolean>((resolve) => {
+      const button = element as HTMLButtonElement
+      const panel = button.closest("section")!
+      const changes = new MutationObserver(() => {
+        if (button.textContent !== "Binding…") return
+        changes.disconnect()
+        const controls = panel.querySelectorAll("form input, form button, input[type=radio]")
+        resolve(controls.length > 0 && Array.from(controls).every((control) => control.matches(":disabled")))
+      })
+      changes.observe(panel, { childList: true, characterData: true, attributes: true, subtree: true })
+      button.click()
+    }))
+    await expect(controlsDuringBind).resolves.toBe(true)
     await expect(window.getByTestId("gallery-bind-confirmed")).toBeVisible()
     await expect(window.getByTestId("gallery-binding-status")).toContainText("https://exhentai.org/g/67890/Beta-7/")
     expect(requests.some((request) => request.includes("synthetic-local-book"))).toBe(false)

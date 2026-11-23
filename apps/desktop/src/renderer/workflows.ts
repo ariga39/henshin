@@ -1560,7 +1560,7 @@ export const searchGalleryCandidates = () =>
   Effect.gen(function*() {
     const client = yield* EhClient
     const state = viewStore.getState()
-    if (state.library_selected_entry_id === null || state.gallery_search_title.trim().length === 0) return
+    if (state.gallery_bind_status === "loading" || state.library_selected_entry_id === null || state.gallery_search_title.trim().length === 0) return
     const generation = state.gallery_search_generation + 1
     yield* Effect.sync(() => viewStore.set({
       gallery_search_generation: generation,

@@ -199,6 +199,8 @@ export const LibraryScreen = () => {
   const openProfile = openResult?.profile_id === null || openResult === null
     ? null
     : state.reader_profiles.find((profile) => profile.profile_id === openResult.profile_id) ?? null
+  const bindingGallery = state.gallery_bind_status === "loading"
+  const gallerySearchDisabled = bindingGallery || state.gallery_search_status === "loading"
   const selectedEntryCanOpen = selectedEntry?.state === "accepted"
 
   return (
@@ -371,7 +373,7 @@ export const LibraryScreen = () => {
                       data-testid="gallery-search-title"
                       value={state.gallery_search_title}
                       onChange={(event) => viewStore.set({ gallery_search_title: event.target.value })}
-                      disabled={state.gallery_search_status === "loading"}
+                      disabled={gallerySearchDisabled}
                     />
                     <label htmlFor="gallery-search-author">Author</label>
                     <input
@@ -379,7 +381,7 @@ export const LibraryScreen = () => {
                       data-testid="gallery-search-author"
                       value={state.gallery_search_author}
                       onChange={(event) => viewStore.set({ gallery_search_author: event.target.value })}
-                      disabled={state.gallery_search_status === "loading"}
+                      disabled={gallerySearchDisabled}
                     />
                     <label htmlFor="gallery-search-language">Language</label>
                     <input
@@ -387,9 +389,9 @@ export const LibraryScreen = () => {
                       data-testid="gallery-search-language"
                       value={state.gallery_search_language}
                       onChange={(event) => viewStore.set({ gallery_search_language: event.target.value })}
-                      disabled={state.gallery_search_status === "loading"}
+                      disabled={gallerySearchDisabled}
                     />
-                    <button type="submit" data-testid="gallery-search-submit" disabled={state.gallery_search_status === "loading" || state.gallery_search_title.trim().length === 0}>
+                    <button type="submit" data-testid="gallery-search-submit" disabled={gallerySearchDisabled || state.gallery_search_title.trim().length === 0}>
                       Search galleries
                     </button>
                     {state.gallery_search_status === "loading" && (
@@ -410,7 +412,7 @@ export const LibraryScreen = () => {
                   {state.gallery_search_status === "cancelled" && <p data-testid="gallery-search-cancelled">Stopped waiting for search results.</p>}
                   {state.gallery_search_status === "error" && <p role="alert">Gallery search failed: {state.gallery_search_error}</p>}
                   {state.gallery_candidates.length > 0 && (
-                    <fieldset data-testid="gallery-candidates">
+                    <fieldset data-testid="gallery-candidates" disabled={bindingGallery}>
                       <legend>Review candidates before binding</legend>
                       {state.gallery_candidates.map((candidate) => (
                         <label key={candidate.canonical_url} data-testid="gallery-candidate">
@@ -430,7 +432,7 @@ export const LibraryScreen = () => {
                       <button
                         type="button"
                         data-testid="gallery-confirm"
-                        disabled={state.gallery_selected_candidate_url === null || state.gallery_bind_status === "loading" || state.library_entry.binding !== null}
+                        disabled={state.gallery_selected_candidate_url === null || state.library_entry.binding !== null}
                         onClick={() => void runtime.runPromise(bindSelectedGalleryCandidate())}
                       >
                         {state.gallery_bind_status === "loading" ? "Binding…" : "Confirm selected gallery"}

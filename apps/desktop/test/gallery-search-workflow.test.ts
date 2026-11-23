@@ -199,7 +199,7 @@ describe("gallery candidate review workflow", () => {
     expect(viewStore.getState().gallery_bind_error).toBe("entry changed")
   })
 
-  it("keeps a committed bind visible when a search overlaps it", async () => {
+  it("keeps the selected candidate and ignores new searches until its bind settles", async () => {
     const selected = candidate("97531", "Overlapping fixture")
     let resolveBind!: (value: {
       readonly ok: true
@@ -209,14 +209,6 @@ describe("gallery candidate review workflow", () => {
       readonly ok: true
       readonly data: { readonly operation_id: string; readonly entry: LibraryEntryDetails }
     }>((resolve) => { resolveBind = resolve })
-    let resolveSearch!: (value: {
-      readonly ok: true
-      readonly data: { readonly status: "results"; readonly candidates: ReadonlyArray<EhGalleryCandidate> }
-    }) => void
-    const pendingSearch = new Promise<{
-      readonly ok: true
-      readonly data: { readonly status: "results"; readonly candidates: ReadonlyArray<EhGalleryCandidate> }
-    }>((resolve) => { resolveSearch = resolve })
     const library = LibraryClient.of({
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
       getThumbnail: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
@@ -226,14 +218,15 @@ describe("gallery candidate review workflow", () => {
         return Effect.promise(() => pendingBind)
       }
     })
-    const eh = EhClient.of({ candidates: () => Effect.promise(() => pendingSearch) })
+    const eh = EhClient.of({ candidates: () => { throw new Error("unexpected search during binding") } })
 
     await run(selectLibraryEntry(entryId), eh, library)
     viewStore.set({ gallery_selected_candidate_url: selected.canonical_url })
     const binding = run(bindSelectedGalleryCandidate(), eh, library)
     await Promise.resolve()
-    const search = run(searchGalleryCandidates(), eh, library)
-    await Promise.resolve()
+    expect(viewStore.getState().gallery_bind_status).toBe("loading")
+    await run(searchGalleryCandidates(), eh, library)
+    expect(viewStore.getState().gallery_selected_candidate_url).toBe(selected.canonical_url)
     resolveBind({
       ok: true,
       data: {
@@ -244,11 +237,6 @@ describe("gallery candidate review workflow", () => {
       }
     })
     await binding
-    expect(viewStore.getState().gallery_bind_status).toBe("confirmed")
-    expect(viewStore.getState().library_entry?.binding?.canonical_url).toBe(selected.canonical_url)
-
-    resolveSearch({ ok: true, data: { status: "results", candidates: [selected] } })
-    await search
     expect(viewStore.getState().gallery_bind_status).toBe("confirmed")
     expect(viewStore.getState().library_entry?.binding?.canonical_url).toBe(selected.canonical_url)
   })
