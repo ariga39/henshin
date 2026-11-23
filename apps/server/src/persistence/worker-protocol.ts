@@ -62,13 +62,19 @@ export const BackupDestinationRegistrationOutcome = Schema.Union([
 ])
 export type BackupDestinationRegistrationOutcome = typeof BackupDestinationRegistrationOutcome.Type
 
+export const BackupRetentionClass = Schema.Union([
+  Schema.Literal("archive"),
+  Schema.Literal("rotating")
+])
+export type BackupRetentionClass = typeof BackupRetentionClass.Type
+
 export const BackupArtifactRow = Schema.Struct({
   artifactId: Uuid,
   destinationId: Uuid,
   operationId: Uuid,
   relativePath: Schema.String,
   publicationOrder: Schema.Natural,
-  retentionClass: Schema.Literal("archive"),
+  retentionClass: BackupRetentionClass,
   label: Schema.NullOr(Schema.String),
   status: Schema.Union([Schema.Literal("reserved"), Schema.Literal("completed")]),
   manifestDigest: Schema.NullOr(Schema.String),
@@ -484,6 +490,7 @@ export const WorkerRequest = Schema.Union([
     operationId: Uuid,
     destinationId: Uuid,
     relativePath: Schema.String,
+    retentionClass: BackupRetentionClass,
     label: Schema.NullOr(Schema.String),
     createdAtMs: Schema.Int
   }),

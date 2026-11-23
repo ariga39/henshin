@@ -27,22 +27,26 @@ import type {
   BackupArtifactReservationOutcome,
   BackupArtifactRow,
   BackupDestinationRow,
+  BackupRetentionClass,
   ServerRootRow
 } from "../persistence/worker-protocol"
 
-const ARCHIVE_DIRECTORY = "archives"
+const retentionDirectory = (retentionClass: BackupRetentionClass): string =>
+  retentionClass === "archive" ? "archives" : "rotating"
 const ARCHIVE_SUFFIX = ".henshin.zip"
 
 export interface BackupArchiveContext {
   readonly dbPath: string
   readonly destination: BackupDestinationRow
   readonly roots: ReadonlyArray<ServerRootRow>
+  readonly retentionClass: BackupRetentionClass
   readonly label: string | null
   readonly reserve: (request: {
     readonly artifactId: string
     readonly operationId: string
     readonly destinationId: string
     readonly relativePath: string
+    readonly retentionClass: BackupRetentionClass
     readonly label: string | null
     readonly createdAtMs: number
   }) => Promise<BackupArtifactReservationOutcome>
@@ -83,8 +87,8 @@ const destinationObservation = (destination: BackupDestinationRow): WritableLoca
 const isMissing = (error: unknown): boolean =>
   typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
 
-const ensureArchiveDirectory = async (destination: string): Promise<string> => {
-  const expected = join(destination, ARCHIVE_DIRECTORY)
+const ensureArchiveDirectory = async (destination: string, retentionClass: BackupRetentionClass): Promise<string> => {
+  const expected = join(destination, retentionDirectory(retentionClass))
   try {
     const existing = await lstat(expected)
     if (!existing.isDirectory() || existing.isSymbolicLink()) throw new Error("backup destination archive directory is unsafe")
@@ -247,12 +251,13 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
 
   const artifactId = randomUUID()
   const operationId = randomUUID()
-  const relativePath = `${ARCHIVE_DIRECTORY}/${artifactId}${ARCHIVE_SUFFIX}`
+  const relativePath = `${retentionDirectory(context.retentionClass)}/${artifactId}${ARCHIVE_SUFFIX}`
   const reservation = await context.reserve({
     artifactId,
     operationId,
     destinationId: context.destination.destinationId,
     relativePath,
+    retentionClass: context.retentionClass,
     label: context.label,
     createdAtMs: Date.now()
   })
@@ -260,7 +265,7 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
     throw new Error(`backup artifact reservation failed: ${reservation.kind}`)
   }
   const artifact = reservation.artifact
-  const archiveDirectory = await ensureArchiveDirectory(selected.value.canonicalPath)
+  const archiveDirectory = await ensureArchiveDirectory(selected.value.canonicalPath, context.retentionClass)
   const finalPath = join(archiveDirectory, `${artifact.artifactId}${ARCHIVE_SUFFIX}`)
   const stagingDirectory = await mkdtemp(join(dirname(context.dbPath), ".backup-staging-"))
   await chmod(stagingDirectory, 0o700)
@@ -304,7 +309,7 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
       snapshot_started_at: snapshotStartedAt,
       snapshot_completed_at: new Date().toISOString(),
       library_change_revision: configuration.library_change_revision,
-      retention_class: "archive",
+      retention_class: context.retentionClass,
       label: artifact.label,
       payloads: {
         "state.sqlite": { size_bytes: stateSize, sha256: stateDigest },

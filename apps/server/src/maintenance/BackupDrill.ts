@@ -30,9 +30,10 @@ import type {
   ServerRootRow
 } from "../persistence/worker-protocol"
 
-const ARCHIVE_DIRECTORY = "archives"
+const retentionDirectory = (retentionClass: BackupArtifactRow["retentionClass"]): string =>
+  retentionClass === "archive" ? "archives" : "rotating"
 const ARCHIVE_SUFFIX = ".henshin.zip"
-const CURRENT_SCHEMA_VERSION = 10
+const CURRENT_SCHEMA_VERSION = 12
 const textDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
 
 const Digest = Schema.String.check(Schema.isMinLength(64), Schema.isMaxLength(64))
@@ -52,7 +53,7 @@ const ArchiveManifest = Schema.Struct({
   snapshot_started_at: Schema.String,
   snapshot_completed_at: Schema.String,
   library_change_revision: Schema.Int,
-  retention_class: Schema.Literal("archive"),
+  retention_class: Schema.Union([Schema.Literal("archive"), Schema.Literal("rotating")]),
   label: Schema.NullOr(Schema.String),
   payloads: Schema.Struct({
     "state.sqlite": ArchivePayload,
@@ -156,14 +157,16 @@ const destinationObservation = (destination: BackupDestinationRow): WritableLoca
 
 const ensureArchivePath = async (
   destination: BackupDestinationRow,
-  relativePath: string
+  relativePath: string,
+  retentionClass: BackupArtifactRow["retentionClass"]
 ): Promise<string> => {
+  const directory = retentionDirectory(retentionClass)
   if (
-    !relativePath.startsWith(`${ARCHIVE_DIRECTORY}/`) ||
+    !relativePath.startsWith(`${directory}/`) ||
     relativePath.includes("\\") ||
     relativePath.includes("\u0000")
   ) throw new BackupDrillFailure("unsafe-artifact-path", "backup artifact path is invalid")
-  const archiveDirectory = join(destination.canonicalPath, ARCHIVE_DIRECTORY)
+  const archiveDirectory = join(destination.canonicalPath, directory)
   try {
     if (await realpath(archiveDirectory) !== archiveDirectory) {
       throw new BackupDrillFailure("unsafe-artifact-path", "backup archive directory is unsafe")
@@ -365,7 +368,7 @@ export const runBackupDrill = async (context: BackupDrillContext): Promise<Backu
       writableLocations: [dirname(context.dbPath), currentDestination.value]
     })
     if (!separation.ok) throw new BackupDrillFailure("location-overlap", "backup destination overlaps a collection root or server data directory")
-    const archivePath = await ensureArchivePath(context.destination, context.artifact.relativePath)
+    const archivePath = await ensureArchivePath(context.destination, context.artifact.relativePath, context.artifact.retentionClass)
     stagingDirectory = await mkdtemp(join(dirname(context.dbPath), ".backup-drill-"))
     if (context.beforeVerification !== undefined && await context.beforeVerification() === "interrupt") {
       throw new BackupDrillInterrupted()
@@ -376,7 +379,7 @@ export const runBackupDrill = async (context: BackupDrillContext): Promise<Backu
     const manifest = decodeJson(ArchiveManifest, manifestBytes, "manifest") as ArchiveManifest
     const configuration = decodeJson(SnapshotConfiguration, configurationBytes, "configuration") as SnapshotConfiguration
     if (manifest.artifact_id !== context.artifact.artifactId || manifest.destination_id !== context.artifact.destinationId ||
-      manifest.relative_path !== context.artifact.relativePath || manifest.retention_class !== "archive") {
+      manifest.relative_path !== context.artifact.relativePath || manifest.retention_class !== context.artifact.retentionClass) {
       throw new BackupDrillFailure("artifact-mismatch", "backup manifest is not bound to the catalog artifact")
     }
     const stateDigest = await digestFile(statePath, stateSize)

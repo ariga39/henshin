@@ -26,6 +26,7 @@ import {
   BackupDrillCompletionOutcome,
   BackupDrillRunRow,
   BackupDrillStartOutcome,
+  BackupRetentionClass,
   ServerRootRow,
 } from "./persistence/worker-protocol"
 import {
@@ -62,7 +63,8 @@ interface IndependentOptions {
 const usage = (): string =>
   "usage: server.mjs (--data-dir <directory> | --database <path>) [--port <1-65535>] [--initialize-owner | --rotate-owner]\n" +
   "       server.mjs backup-destination <list|register|replace> (--data-dir <directory> | --database <path>) [--name <name>] [--path <directory>] [--id <destination-id>] [--confirm]\n" +
-  "       server.mjs backup create (--data-dir <directory> | --database <path>) --destination-id <destination-id> [--label <label>]\n" +
+  "       server.mjs backup create (--data-dir <directory> | --database <path>) --destination-id <destination-id> [--retention-class <archive|rotating>] [--label <label>]\n" +
+  "       server.mjs backup list (--data-dir <directory> | --database <path>)\n" +
   "       server.mjs backup drill [list] (--data-dir <directory> | --database <path>) [--artifact-id <artifact-id>]"
 
 interface BackupDestinationOptions {
@@ -76,13 +78,22 @@ interface BackupDestinationOptions {
 }
 
 interface BackupCreateOptions {
+  readonly kind: "create"
   readonly dataDir?: string
   readonly database?: string
   readonly destinationId: string
+  readonly retentionClass: typeof BackupRetentionClass.Type
   readonly label: string | null
 }
 
+interface BackupListOptions {
+  readonly kind: "list"
+  readonly dataDir?: string
+  readonly database?: string
+}
+
 interface BackupDrillOptions {
+  readonly kind: "drill"
   readonly command: "run" | "list"
   readonly dataDir?: string
   readonly database?: string
@@ -94,6 +105,7 @@ const parseBackupCreateOptions = (args: ReadonlyArray<string>): BackupCreateOpti
   let dataDir: string | undefined
   let database: string | undefined
   let destinationId: string | undefined
+  let retentionClass: typeof BackupRetentionClass.Type = "archive"
   let label: string | null = null
   for (let index = 2; index < args.length; index += 1) {
     switch (args[index]) {
@@ -109,6 +121,12 @@ const parseBackupCreateOptions = (args: ReadonlyArray<string>): BackupCreateOpti
         destinationId = args[++index]
         if (destinationId === undefined || destinationId.startsWith("--")) throw new Error(usage())
         break
+      case "--retention-class": {
+        const value = args[++index]
+        if (value !== "archive" && value !== "rotating") throw new Error(usage())
+        retentionClass = value
+        break
+      }
       case "--label":
         label = args[++index] ?? null
         if (label === null || label.startsWith("--") || label.length > 200) throw new Error(usage())
@@ -120,7 +138,31 @@ const parseBackupCreateOptions = (args: ReadonlyArray<string>): BackupCreateOpti
     }
   }
   if ((dataDir === undefined) === (database === undefined) || destinationId === undefined) throw new Error(usage())
-  return { dataDir, database, destinationId, label }
+  return { kind: "create", dataDir, database, destinationId, retentionClass, label }
+}
+
+const parseBackupListOptions = (args: ReadonlyArray<string>): BackupListOptions => {
+  if (args[1] !== "list") throw new Error(usage())
+  let dataDir: string | undefined
+  let database: string | undefined
+  for (let index = 2; index < args.length; index += 1) {
+    switch (args[index]) {
+      case "--data-dir":
+        dataDir = args[++index]
+        if (dataDir === undefined || dataDir.startsWith("--")) throw new Error(usage())
+        break
+      case "--database":
+        database = args[++index]
+        if (database === undefined || database.startsWith("--")) throw new Error(usage())
+        break
+      case "--help":
+        throw new Error(usage())
+      default:
+        throw new Error(usage())
+    }
+  }
+  if ((dataDir === undefined) === (database === undefined)) throw new Error(usage())
+  return { kind: "list", dataDir, database }
 }
 
 const parseBackupDrillOptions = (args: ReadonlyArray<string>): BackupDrillOptions => {
@@ -153,7 +195,7 @@ const parseBackupDrillOptions = (args: ReadonlyArray<string>): BackupDrillOption
   if ((dataDir === undefined) === (database === undefined)) throw new Error(usage())
   if (command === "run" && artifactId === undefined) throw new Error(usage())
   if (command === "list" && artifactId !== undefined) throw new Error(usage())
-  return { command, dataDir, database, artifactId }
+  return { kind: "drill", command, dataDir, database, artifactId }
 }
 
 const parseBackupDestinationOptions = (args: ReadonlyArray<string>): BackupDestinationOptions => {
@@ -643,6 +685,7 @@ const runBackupCreateCommand = async (options: BackupCreateOptions): Promise<voi
         dbPath,
         destination,
         roots,
+        retentionClass: options.retentionClass,
         label: options.label,
         reserve: async (request) => decodeBackupArtifactReservationOutcome(await Effect.runPromise(worker.call({
           op: "reserveBackupArtifact",
@@ -664,6 +707,32 @@ const runBackupCreateCommand = async (options: BackupCreateOptions): Promise<voi
         retention_class: archive.artifact.retentionClass,
         manifest_digest: archive.manifestDigest,
         archive_size_bytes: archive.archiveSizeBytes
+      }
+    })
+  )
+  process.stdout.write(JSON.stringify(result) + "\n")
+}
+
+const runBackupListCommand = async (options: BackupListOptions): Promise<void> => {
+  const dbPath = await resolveIndependentDatabasePath(options)
+  const result = await runDestinationWorker(dbPath, (worker) =>
+    Effect.gen(function*() {
+      const artifacts = decodeBackupArtifacts(yield* worker.call({ op: "listBackupArtifacts" }))
+      return {
+        artifacts: artifacts.map((artifact) => ({
+          artifact_id: artifact.artifactId,
+          destination_id: artifact.destinationId,
+          operation_id: artifact.operationId,
+          relative_path: artifact.relativePath,
+          publication_order: artifact.publicationOrder,
+          retention_class: artifact.retentionClass,
+          label: artifact.label,
+          status: artifact.status,
+          manifest_digest: artifact.manifestDigest,
+          size_bytes: artifact.sizeBytes,
+          created_at_ms: artifact.createdAtMs,
+          completed_at_ms: artifact.completedAtMs
+        }))
       }
     })
   )
@@ -739,17 +808,22 @@ const main = async () => {
   }
 
   if (args[0] === "backup") {
-    let options: BackupCreateOptions | BackupDrillOptions
+    let options: BackupCreateOptions | BackupListOptions | BackupDrillOptions
     try {
-      options = args[1] === "create" ? parseBackupCreateOptions(args) : parseBackupDrillOptions(args)
+      options = args[1] === "create"
+        ? parseBackupCreateOptions(args)
+        : args[1] === "list"
+          ? parseBackupListOptions(args)
+          : parseBackupDrillOptions(args)
     } catch (error) {
       console.error(error instanceof Error ? error.message : usage())
       process.exitCode = 2
       return
     }
     try {
-      if ("label" in options) await runBackupCreateCommand(options)
-      else await runBackupDrillCommand(options)
+      if (options.kind === "create") await runBackupCreateCommand(options)
+      else if (options.kind === "drill") await runBackupDrillCommand(options)
+      else await runBackupListCommand(options)
     } catch (error) {
       console.error(error instanceof Error ? error.message : "backup creation failed")
       process.exitCode = 1

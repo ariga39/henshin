@@ -34,6 +34,7 @@ import {
   BackupDrillCompletionOutcome,
   BackupDrillRunRow,
   BackupDrillStartOutcome,
+  BackupRetentionClass,
   RootRegistrationOutcome,
   RootReplayLookup,
   type WorkerRequest
@@ -57,7 +58,7 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
-const CURRENT_SCHEMA_VERSION = 10
+const CURRENT_SCHEMA_VERSION = 12
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
@@ -407,7 +408,7 @@ db.exec(`
     operation_id TEXT NOT NULL UNIQUE,
     relative_path TEXT NOT NULL,
     publication_order INTEGER NOT NULL,
-    retention_class TEXT NOT NULL CHECK (retention_class = 'archive'),
+    retention_class TEXT NOT NULL CHECK (retention_class IN ('archive', 'rotating')),
     label TEXT,
     status TEXT NOT NULL CHECK (status IN ('reserved', 'completed')),
     manifest_digest TEXT,
@@ -575,6 +576,46 @@ db.exec(`
     last_opened_at_ms INTEGER
   );
 `)
+
+const backupArtifactsTable = db.prepare(
+  "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'backup_artifacts'"
+).get() as { sql: string } | undefined
+if (backupArtifactsTable !== undefined && !backupArtifactsTable.sql.includes("'rotating'")) {
+  db.exec("PRAGMA foreign_keys = OFF")
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    db.exec(`
+      CREATE TABLE backup_artifacts_v12 (
+        artifact_id TEXT PRIMARY KEY,
+        destination_id TEXT NOT NULL REFERENCES backup_destinations(destination_id),
+        operation_id TEXT NOT NULL UNIQUE,
+        relative_path TEXT NOT NULL,
+        publication_order INTEGER NOT NULL,
+        retention_class TEXT NOT NULL CHECK (retention_class IN ('archive', 'rotating')),
+        label TEXT,
+        status TEXT NOT NULL CHECK (status IN ('reserved', 'completed')),
+        manifest_digest TEXT,
+        size_bytes INTEGER,
+        created_at_ms INTEGER NOT NULL,
+        completed_at_ms INTEGER,
+        UNIQUE (destination_id, relative_path),
+        UNIQUE (destination_id, publication_order)
+      );
+      INSERT INTO backup_artifacts_v12
+        SELECT artifact_id, destination_id, operation_id, relative_path, publication_order,
+               retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
+        FROM backup_artifacts;
+      DROP TABLE backup_artifacts;
+      ALTER TABLE backup_artifacts_v12 RENAME TO backup_artifacts;
+    `)
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON")
+  }
+}
 
 const rootColumns = new Set(
   (db.prepare("PRAGMA table_info(server_roots)").all() as unknown as ReadonlyArray<{ name: string }>).map(
@@ -814,9 +855,9 @@ if (!entryOverrideColumns.has("notes_revision")) db.exec("ALTER TABLE entry_over
 if (!entryOverrideColumns.has("notes_updated_at_ms")) db.exec("ALTER TABLE entry_overrides ADD COLUMN notes_updated_at_ms INTEGER")
 
 const needsSummaryBackfill = addedAcceptedObservationSummary || addedCandidateObservationSummary ||
-  (existingVersion !== undefined && existingVersion < CURRENT_SCHEMA_VERSION)
+  (existingVersion !== undefined && existingVersion < 10)
 const needsSearchBackfill = addedSearchColumns ||
-  (existingVersion !== undefined && existingVersion < CURRENT_SCHEMA_VERSION)
+  (existingVersion !== undefined && existingVersion < 10)
 
 if (needsSummaryBackfill || needsSearchBackfill) {
   db.exec("BEGIN IMMEDIATE")
@@ -947,7 +988,7 @@ const insertBackupArtifact = db.prepare(
   `INSERT INTO backup_artifacts(
     artifact_id, destination_id, operation_id, relative_path, publication_order,
     retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
-  ) VALUES (?, ?, ?, ?, ?, 'archive', ?, 'reserved', NULL, NULL, ?, NULL)`
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', NULL, NULL, ?, NULL)`
 )
 const updateBackupArtifactCompleted = db.prepare(
   `UPDATE backup_artifacts
@@ -1336,7 +1377,7 @@ const backupArtifactRow = (row: {
   operation_id: string
   relative_path: string
   publication_order: number
-  retention_class: "archive"
+  retention_class: BackupRetentionClass
   label: string | null
   status: "reserved" | "completed"
   manifest_digest: string | null
@@ -1522,6 +1563,7 @@ const reserveBackupArtifact = (
       const same = artifact.artifactId === request.artifactId &&
         artifact.destinationId === request.destinationId &&
         artifact.relativePath === request.relativePath &&
+        artifact.retentionClass === request.retentionClass &&
         artifact.label === request.label &&
         artifact.createdAtMs === request.createdAtMs
       db.exec(same ? "COMMIT" : "ROLLBACK")
@@ -1543,6 +1585,7 @@ const reserveBackupArtifact = (
       request.operationId,
       request.relativePath,
       publicationOrder,
+      request.retentionClass,
       request.label,
       request.createdAtMs
     )

@@ -29,6 +29,7 @@ const directArchiveContext = async (options: {
   readonly dataDir: string
   readonly destination: string
   readonly destinationId: string
+  readonly retentionClass?: "archive" | "rotating"
   readonly beforePublish?: () => Promise<void>
 }): Promise<{ readonly context: BackupArchiveContext; readonly close: () => void }> => {
   const database = new DatabaseSync(path.join(options.dataDir, "server.sqlite"))
@@ -46,6 +47,7 @@ const directArchiveContext = async (options: {
     dbPath: path.join(options.dataDir, "server.sqlite"),
     destination: destinationRow,
     roots: [],
+    retentionClass: options.retentionClass ?? "archive",
     label: null,
     beforePublish: options.beforePublish,
     reserve: async (request) => {
@@ -56,13 +58,14 @@ const directArchiveContext = async (options: {
         INSERT INTO backup_artifacts(
           artifact_id, destination_id, operation_id, relative_path, publication_order,
           retention_class, label, status, created_at_ms
-        ) VALUES (?, ?, ?, ?, ?, 'archive', ?, 'reserved', ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?)
       `).run(
         request.artifactId,
         request.destinationId,
         request.operationId,
         request.relativePath,
         nextOrder,
+        request.retentionClass,
         request.label,
         request.createdAtMs
       )
@@ -74,7 +77,7 @@ const directArchiveContext = async (options: {
           operationId: request.operationId,
           relativePath: request.relativePath,
           publicationOrder: nextOrder,
-          retentionClass: "archive" as const,
+          retentionClass: request.retentionClass,
           label: request.label,
           status: "reserved" as const,
           manifestDigest: null,
@@ -100,7 +103,7 @@ const directArchiveContext = async (options: {
         operation_id: string
         relative_path: string
         publication_order: number
-        retention_class: "archive"
+        retention_class: "archive" | "rotating"
         label: string | null
         status: "completed"
         manifest_digest: string
@@ -128,6 +131,44 @@ const directArchiveContext = async (options: {
     }
   }
   return { context, close: () => database.close() }
+}
+
+const downgradeToV10ArchiveOnlyCatalog = (database: DatabaseSync): void => {
+  database.exec("PRAGMA foreign_keys = OFF")
+  database.exec("BEGIN IMMEDIATE")
+  try {
+    database.exec(`
+      CREATE TABLE backup_artifacts_v10 (
+        artifact_id TEXT PRIMARY KEY,
+        destination_id TEXT NOT NULL REFERENCES backup_destinations(destination_id),
+        operation_id TEXT NOT NULL UNIQUE,
+        relative_path TEXT NOT NULL,
+        publication_order INTEGER NOT NULL,
+        retention_class TEXT NOT NULL CHECK (retention_class = 'archive'),
+        label TEXT,
+        status TEXT NOT NULL CHECK (status IN ('reserved', 'completed')),
+        manifest_digest TEXT,
+        size_bytes INTEGER,
+        created_at_ms INTEGER NOT NULL,
+        completed_at_ms INTEGER,
+        UNIQUE (destination_id, relative_path),
+        UNIQUE (destination_id, publication_order)
+      );
+      INSERT INTO backup_artifacts_v10
+        SELECT artifact_id, destination_id, operation_id, relative_path, publication_order,
+               retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
+        FROM backup_artifacts;
+      DROP TABLE backup_artifacts;
+      ALTER TABLE backup_artifacts_v10 RENAME TO backup_artifacts;
+      UPDATE server_state SET schema_version = 10 WHERE id = 1;
+    `)
+    database.exec("COMMIT")
+  } catch (error) {
+    database.exec("ROLLBACK")
+    throw error
+  } finally {
+    database.exec("PRAGMA foreign_keys = ON")
+  }
 }
 
 afterEach(async () => {
@@ -194,7 +235,7 @@ describe("server backup archive", () => {
     const recoveredDatabase = new DatabaseSync(path.join(dataDir, "server.sqlite"), { readOnly: true })
     try {
       expect((recoveredDatabase.prepare("SELECT schema_version FROM server_state WHERE id = 1").get() as { schema_version: number }).schema_version)
-        .toBe(10)
+        .toBe(12)
       expect((recoveredDatabase.prepare("SELECT title_search, basename_search FROM library_entries WHERE entry_id = ?").get(entryId) as {
         title_search: string
         basename_search: string
@@ -231,7 +272,7 @@ describe("server backup archive", () => {
       schema_version: number
     }
     expect(manifest.application_version).toBe(serverPackage.version)
-    expect(manifest.schema_version).toBe(10)
+    expect(manifest.schema_version).toBe(12)
     for (const name of ["state.sqlite", "configuration.json"]) {
       const payload = payloads.get(name)
       if (payload === undefined) throw new Error(`missing ${name}`)
@@ -288,5 +329,189 @@ describe("server backup archive", () => {
     } finally {
       catalog.close()
     }
+  })
+
+  it("publishes two rotating recovery points and preserves them when publication fails", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-backup-rotating-"))
+    workspaces.push(workspace)
+    const dataDir = path.join(workspace, "data")
+    const destination = path.join(workspace, "destination")
+    await Promise.all([mkdir(dataDir), mkdir(destination)])
+
+    const registered = await run([
+      "backup-destination", "register", "--data-dir", dataDir,
+      "--name", "primary", "--path", destination
+    ])
+    const destinationId = (registered.destination as { destination_id: string }).destination_id
+    await execFile(process.execPath, [SERVER_PATH, "--data-dir", dataDir, "--initialize-owner"], {
+      cwd: path.resolve(".")
+    })
+
+    const archive = await run([
+      "backup", "create", "--data-dir", dataDir,
+      "--destination-id", destinationId, "--retention-class", "archive"
+    ])
+    const first = await run([
+      "backup", "create", "--data-dir", dataDir,
+      "--destination-id", destinationId, "--retention-class", "rotating", "--label", "first"
+    ])
+    const second = await run([
+      "backup", "create", "--data-dir", dataDir,
+      "--destination-id", destinationId, "--retention-class", "rotating", "--label", "second"
+    ])
+    const firstId = first.artifact_id as string
+    const secondId = second.artifact_id as string
+    expect(firstId).not.toBe(secondId)
+    expect(first.destination_id).toBe(destinationId)
+    expect(second.destination_id).toBe(destinationId)
+    expect(first.retention_class).toBe("rotating")
+    expect(second.retention_class).toBe("rotating")
+
+    const listed = await run(["backup", "list", "--data-dir", dataDir])
+    const artifacts = listed.artifacts as Array<{
+      artifact_id: string
+      destination_id: string
+      retention_class: string
+      status: string
+      manifest_digest: string | null
+      relative_path: string
+    }>
+    expect(artifacts).toHaveLength(3)
+    expect(artifacts.map((artifact) => artifact.retention_class)).toEqual(["archive", "rotating", "rotating"])
+    expect(artifacts.every((artifact) => artifact.destination_id === destinationId)).toBe(true)
+    expect(artifacts.every((artifact) => artifact.status === "completed")).toBe(true)
+
+    const rotatingArtifacts = artifacts.filter((artifact) => artifact.retention_class === "rotating")
+    for (const artifact of rotatingArtifacts) {
+      const bytes = new Uint8Array(await readFile(path.join(destination, artifact.relative_path)))
+      const reader = new ZipReader(new Uint8ArrayReader(bytes))
+      const manifestEntry = (await reader.getEntries()).find((entry) => entry.filename === "manifest.json")
+      if (manifestEntry === undefined || manifestEntry.directory) throw new Error("missing rotating backup manifest")
+      const manifest = JSON.parse(new TextDecoder().decode(await manifestEntry.getData(new Uint8ArrayWriter()))) as {
+        artifact_id: string
+        retention_class: string
+      }
+      await reader.close()
+      expect(manifest).toMatchObject({ artifact_id: artifact.artifact_id, retention_class: "rotating" })
+    }
+    for (const artifact of rotatingArtifacts) {
+      const drill = await run([
+        "backup", "drill", "--data-dir", dataDir, "--artifact-id", artifact.artifact_id
+      ])
+      expect((drill.run as { status: string }).status).toBe("passed")
+    }
+
+    const previous = new Map(rotatingArtifacts.map((artifact) => [artifact.artifact_id, artifact.manifest_digest]))
+    const interrupted = await directArchiveContext({
+      dataDir,
+      destination,
+      destinationId,
+      retentionClass: "rotating",
+      beforePublish: async () => {
+        throw new Error("test rotating publication interruption")
+      }
+    })
+    await expect(createBackupArchive(interrupted.context)).rejects.toThrow("test rotating publication interruption")
+    interrupted.close()
+
+    const after = await run(["backup", "list", "--data-dir", dataDir])
+    const completedAfter = (after.artifacts as typeof artifacts).filter((artifact) => artifact.status === "completed")
+    expect(completedAfter.map((artifact) => artifact.artifact_id)).toEqual(artifacts.map((artifact) => artifact.artifact_id))
+    expect(new Map(completedAfter.filter((artifact) => artifact.retention_class === "rotating").map((artifact) => [artifact.artifact_id, artifact.manifest_digest])))
+      .toEqual(previous)
+    expect(await readdir(path.join(destination, "rotating"))).toHaveLength(2)
+    await expect(stat(archive.archive_path as string)).resolves.toBeDefined()
+  })
+
+  it("migrates a v10 archive-only catalog before accepting rotating backups", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-backup-v10-migration-"))
+    workspaces.push(workspace)
+    const dataDir = path.join(workspace, "data")
+    const destination = path.join(workspace, "destination")
+    await Promise.all([mkdir(dataDir), mkdir(destination)])
+
+    const registered = await run([
+      "backup-destination", "register", "--data-dir", dataDir,
+      "--name", "primary", "--path", destination
+    ])
+    const destinationId = (registered.destination as { destination_id: string }).destination_id
+    await execFile(process.execPath, [SERVER_PATH, "--data-dir", dataDir, "--initialize-owner"], {
+      cwd: path.resolve(".")
+    })
+
+    const prepared = new DatabaseSync(path.join(dataDir, "server.sqlite"))
+    try {
+      downgradeToV10ArchiveOnlyCatalog(prepared)
+    } finally {
+      prepared.close()
+    }
+
+    const legacyArchive = await directArchiveContext({
+      dataDir,
+      destination,
+      destinationId,
+      retentionClass: "archive"
+    })
+    const createdLegacyArchive = await createBackupArchive(legacyArchive.context)
+    legacyArchive.close()
+
+    const legacyState = new DatabaseSync(path.join(dataDir, "server.sqlite"), { readOnly: true })
+    try {
+      expect((legacyState.prepare("SELECT schema_version FROM server_state WHERE id = 1").get() as { schema_version: number }).schema_version)
+        .toBe(10)
+      expect((legacyState.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'backup_artifacts'").get() as { sql: string }).sql)
+        .not.toContain("'rotating'")
+    } finally {
+      legacyState.close()
+    }
+
+    const migratedList = await run(["backup", "list", "--data-dir", dataDir])
+    const migratedArtifacts = migratedList.artifacts as Array<{
+      artifact_id: string
+      retention_class: string
+      status: string
+    }>
+    expect(migratedArtifacts).toHaveLength(1)
+    expect(migratedArtifacts[0]).toMatchObject({
+      artifact_id: createdLegacyArchive.artifact.artifactId,
+      retention_class: "archive",
+      status: "completed"
+    })
+    const migratedState = new DatabaseSync(path.join(dataDir, "server.sqlite"), { readOnly: true })
+    try {
+      expect((migratedState.prepare("SELECT schema_version FROM server_state WHERE id = 1").get() as { schema_version: number }).schema_version)
+        .toBe(12)
+      expect((migratedState.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'backup_artifacts'").get() as { sql: string }).sql)
+        .toContain("'rotating'")
+    } finally {
+      migratedState.close()
+    }
+
+    const archiveDrill = await run([
+      "backup", "drill", "--data-dir", dataDir,
+      "--artifact-id", createdLegacyArchive.artifact.artifactId
+    ])
+    expect((archiveDrill.run as { status: string }).status).toBe("passed")
+
+    const rotating = await run([
+      "backup", "create", "--data-dir", dataDir,
+      "--destination-id", destinationId, "--retention-class", "rotating", "--label", "post-migration"
+    ])
+    expect(rotating.retention_class).toBe("rotating")
+
+    const finalList = await run(["backup", "list", "--data-dir", dataDir])
+    const finalArtifacts = finalList.artifacts as Array<{
+      artifact_id: string
+      retention_class: string
+      status: string
+    }>
+    expect(finalArtifacts.map((artifact) => artifact.retention_class)).toEqual(["archive", "rotating"])
+    expect(finalArtifacts.every((artifact) => artifact.status === "completed")).toBe(true)
+    await expect(stat(createdLegacyArchive.archivePath)).resolves.toBeDefined()
+    const rotatingDrill = await run([
+      "backup", "drill", "--data-dir", dataDir,
+      "--artifact-id", rotating.artifact_id as string
+    ])
+    expect((rotatingDrill.run as { status: string }).status).toBe("passed")
   })
 })
