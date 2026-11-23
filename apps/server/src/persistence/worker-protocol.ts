@@ -1,5 +1,5 @@
 import { Schema } from "effect"
-import { INDEXED_ROOT_SAMPLE_LIMIT, ServerAvailability } from "@henshin/contracts"
+import { INDEXED_ROOT_SAMPLE_LIMIT, LibraryTagOption, ServerAvailability } from "@henshin/contracts"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import { OpenEvent, OpenEventOutcome } from "@henshin/contracts/event"
 import { RootExclusions, RootPolicyCommand, RootRelativePath, ScanManifestObservation, ScanManifestPage } from "@henshin/contracts/root"
@@ -312,13 +312,16 @@ export const LibraryEntryPageRow = Schema.Struct({
   entries: Schema.Array(LibraryEntryRow),
   has_more: Schema.Boolean,
   next_cursor: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8192))),
-  library_change_revision: Revision
+  library_change_revision: Revision,
+  tag_options: Schema.optional(Schema.Array(LibraryTagOption))
 })
 export type LibraryEntryPageRow = typeof LibraryEntryPageRow.Type
 
 export const LibraryEntryPageResult = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("page"), page: LibraryEntryPageRow }),
-  Schema.Struct({ kind: Schema.Literal("invalid_cursor") })
+  Schema.Struct({ kind: Schema.Literal("invalid_cursor") }),
+  Schema.Struct({ kind: Schema.Literal("invalid_filter"), field: Schema.Literals(["include_tags", "exclude_tags"]) }),
+  Schema.Struct({ kind: Schema.Literal("conflicting_filter"), tag: Schema.String })
 ])
 export type LibraryEntryPageResult = typeof LibraryEntryPageResult.Type
 export const LibraryEntryDetailsRow = LibraryEntryDetails
@@ -566,7 +569,9 @@ export const WorkerRequest = Schema.Union([
     query: Schema.String.check(Schema.isMaxLength(1024)),
     epoch: Uuid,
     cursor: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8192))),
-    state: Schema.NullOr(Schema.Literal("replacement-pending"))
+    state: Schema.NullOr(Schema.Literal("replacement-pending")),
+    includeTags: Schema.Array(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512))).check(Schema.isMaxLength(64)),
+    excludeTags: Schema.Array(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512))).check(Schema.isMaxLength(64))
   }),
   Schema.Struct({
     op: Schema.Literal("listIndexedRootSamples"),

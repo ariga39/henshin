@@ -51,7 +51,7 @@ import {
 
 const SEED_NOTE_ID = "note-1"
 const SEED_NOTE_TEXT = "hello"
-const CURRENT_SCHEMA_VERSION = 10
+const CURRENT_SCHEMA_VERSION = 11
 /** Shipped prototype policy: seven days and 64 retained rows per database. */
 const RESULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_OPERATION_RESULTS = 64
@@ -262,6 +262,8 @@ const LibrarySearchCursor = Schema.Struct({
   library_id: Uuid,
   epoch: Uuid,
   state: Schema.NullOr(Schema.Literal("replacement-pending")),
+  include_tags: Schema.Array(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512))).check(Schema.isMaxLength(64)),
+  exclude_tags: Schema.Array(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512))).check(Schema.isMaxLength(64)),
   last_entry_id: Uuid
 })
 
@@ -474,6 +476,7 @@ db.exec(`
     gid TEXT NOT NULL,
     token TEXT NOT NULL,
     preferred_domain TEXT NOT NULL CHECK (preferred_domain IN ('e-hentai.org', 'exhentai.org')),
+    metadata_tags_json TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     UNIQUE (source, gid)
@@ -485,6 +488,13 @@ db.exec(`
     bound_at_ms INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS bindings_gallery_id ON bindings(gallery_id);
+  CREATE TABLE IF NOT EXISTS entry_tag_overrides (
+    entry_id TEXT NOT NULL REFERENCES library_entries(entry_id) ON DELETE CASCADE,
+    tag TEXT NOT NULL CHECK (length(tag) BETWEEN 1 AND 512),
+    action TEXT NOT NULL CHECK (action IN ('add', 'suppress')),
+    PRIMARY KEY (entry_id, tag)
+  );
+  CREATE INDEX IF NOT EXISTS entry_tag_overrides_tag ON entry_tag_overrides(tag, action);
   CREATE TABLE IF NOT EXISTS entry_operations (
     epoch TEXT NOT NULL,
     operation_id TEXT NOT NULL,
@@ -556,6 +566,12 @@ const bindingColumns = new Set(
     (column) => column.name
   )
 )
+const galleryColumns = new Set(
+  (db.prepare("PRAGMA table_info(galleries)").all() as unknown as ReadonlyArray<{ name: string }>).map(
+    (column) => column.name
+  )
+)
+if (!galleryColumns.has("metadata_tags_json")) db.exec("ALTER TABLE galleries ADD COLUMN metadata_tags_json TEXT")
 if (!bindingColumns.has("preferred_domain")) {
   db.exec("ALTER TABLE bindings ADD COLUMN preferred_domain TEXT NOT NULL DEFAULT 'e-hentai.org' CHECK (preferred_domain IN ('e-hentai.org', 'exhentai.org'))")
   db.exec("UPDATE bindings SET preferred_domain = (SELECT preferred_domain FROM galleries WHERE galleries.gallery_id = bindings.gallery_id)")
@@ -1032,16 +1048,82 @@ const detachEntry = db.prepare(
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
 const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
 const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
+const tagMembershipSql = (tag: string): { readonly sql: string; readonly parameters: ReadonlyArray<string> } => ({
+  sql: `(
+    EXISTS (
+      SELECT 1
+      FROM bindings b
+      JOIN galleries g ON g.gallery_id = b.gallery_id
+      JOIN json_each(CASE WHEN g.metadata_tags_json IS NULL THEN '[]' ELSE g.metadata_tags_json END) source_tag
+        ON source_tag.value = ?
+      WHERE b.entry_id = e.entry_id
+        AND NOT EXISTS (
+          SELECT 1 FROM entry_tag_overrides suppressed
+          WHERE suppressed.entry_id = e.entry_id AND suppressed.tag = ? AND suppressed.action = 'suppress'
+        )
+    )
+    OR EXISTS (
+      SELECT 1 FROM entry_tag_overrides added
+      WHERE added.entry_id = e.entry_id AND added.tag = ? AND added.action = 'add'
+    )
+  )`,
+  parameters: [tag, tag, tag]
+})
+const tagOption = (id: string): import("@henshin/contracts").LibraryTagOption => {
+  const separator = id.indexOf(":")
+  return separator > 0
+    ? { id, namespace: id.slice(0, separator), name: id.slice(separator + 1), alias: null }
+    : { id, namespace: "local", name: id, alias: null }
+}
+const selectLibraryTagOptions = (
+  state: "replacement-pending" | null
+): ReadonlyArray<import("@henshin/contracts").LibraryTagOption> => {
+  const stateClause = state === null ? "e.state IN ('accepted', 'replacement-pending')" : "e.state = 'replacement-pending'"
+  const rows = db.prepare(`
+    SELECT tag FROM (
+      SELECT DISTINCT source_tag.value AS tag
+      FROM library_entries e
+      JOIN bindings b ON b.entry_id = e.entry_id
+      JOIN galleries g ON g.gallery_id = b.gallery_id
+      JOIN json_each(CASE WHEN g.metadata_tags_json IS NULL THEN '[]' ELSE g.metadata_tags_json END) source_tag
+      WHERE ${stateClause}
+        AND NOT EXISTS (
+          SELECT 1 FROM entry_tag_overrides suppressed
+          WHERE suppressed.entry_id = e.entry_id
+            AND suppressed.tag = source_tag.value
+            AND suppressed.action = 'suppress'
+        )
+      UNION
+      SELECT DISTINCT added.tag
+      FROM entry_tag_overrides added
+      JOIN library_entries e ON e.entry_id = added.entry_id
+      WHERE ${stateClause}
+        AND added.action = 'add'
+    )
+    ORDER BY tag ASC
+  `).all() as unknown as ReadonlyArray<{ tag: string }>
+  return rows.map((row) => tagOption(row.tag))
+}
 const selectLibraryEntries = (
   query: string,
   lastEntryId: string | null,
   state: "replacement-pending" | null,
+  includeTags: ReadonlyArray<string>,
+  excludeTags: ReadonlyArray<string>,
   limit: number
 ) => {
   const queryClause = query.length === 0
     ? ""
     : " AND (instr(CASE WHEN o.title_present = 1 THEN o.title_search ELSE e.title_search END, ?) > 0 OR instr(e.basename_search, ?) > 0)"
   const stateClause = state === null ? "e.state IN ('accepted', 'replacement-pending')" : "e.state = 'replacement-pending'"
+  const filterClauses = [
+    ...includeTags.map((tag) => tagMembershipSql(tag)),
+    ...excludeTags.map((tag) => {
+      const membership = tagMembershipSql(tag)
+      return { sql: `NOT ${membership.sql}`, parameters: membership.parameters }
+    })
+  ]
+  const filtersSql = filterClauses.map(({ sql }) => ` AND ${sql}`).join("")
   const statement = db.prepare(lastEntryId === null
     ? `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title AS fallback_title,
          CASE WHEN o.title_present = 1 THEN o.title ELSE NULL END AS title_override,
@@ -1055,7 +1137,7 @@ const selectLibraryEntries = (
        FROM library_entries e
        LEFT JOIN entry_overrides o ON o.entry_id = e.entry_id
        LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
-       WHERE ${stateClause}${queryClause}
+       WHERE ${stateClause}${queryClause}${filtersSql}
        ORDER BY e.entry_id ASC LIMIT ?`
     : `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title AS fallback_title,
          CASE WHEN o.title_present = 1 THEN o.title ELSE NULL END AS title_override,
@@ -1069,13 +1151,14 @@ const selectLibraryEntries = (
        FROM library_entries e
        LEFT JOIN entry_overrides o ON o.entry_id = e.entry_id
        LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
-       WHERE e.entry_id > ? AND ${stateClause}${queryClause}
+       WHERE e.entry_id > ? AND ${stateClause}${queryClause}${filtersSql}
        ORDER BY e.entry_id ASC LIMIT ?`)
   statement.setReadBigInts(true)
   const queryParameters = query.length === 0 ? [] : [query, query]
+  const filterParameters = filterClauses.flatMap(({ parameters }) => parameters)
   return lastEntryId === null
-    ? statement.all(...queryParameters, limit)
-    : statement.all(lastEntryId, ...queryParameters, limit)
+    ? statement.all(...queryParameters, ...filterParameters, limit)
+    : statement.all(lastEntryId, ...queryParameters, ...filterParameters, limit)
 }
 const selectIndexedRootSamples = db.prepare(
   "SELECT relative_path, kind, manifest_json FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC LIMIT ?"
@@ -2728,9 +2811,28 @@ const librarySummary = (): import("./worker-protocol").LibrarySummaryRow => {
 const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntries" }>): import("./worker-protocol").LibraryEntryPageResult => {
   const normalizedQuery = normalizeSearchText(request.query.trim())
   const state = request.state
+  const includeTags = Array.from(new Set(request.includeTags)).sort()
+  const excludeTags = Array.from(new Set(request.excludeTags)).sort()
   db.exec("BEGIN")
   try {
   const library = librarySummary()
+  const tagOptions = selectLibraryTagOptions(state)
+  const knownTags = new Set(tagOptions.map((tag) => tag.id))
+  const conflictingTag = includeTags.find((tag) => excludeTags.includes(tag))
+  if (conflictingTag !== undefined) {
+    db.exec("ROLLBACK")
+    return { kind: "conflicting_filter", tag: conflictingTag }
+  }
+  const unknownInclude = includeTags.find((tag) => !knownTags.has(tag))
+  if (unknownInclude !== undefined) {
+    db.exec("ROLLBACK")
+    return { kind: "invalid_filter", field: "include_tags" }
+  }
+  const unknownExclude = excludeTags.find((tag) => !knownTags.has(tag))
+  if (unknownExclude !== undefined) {
+    db.exec("ROLLBACK")
+    return { kind: "invalid_filter", field: "exclude_tags" }
+  }
   let lastEntryId: string | null = null
   if (request.cursor !== null) {
     const cursor = decodeLibrarySearchCursor(request.cursor)
@@ -2741,7 +2843,9 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
       cursor.page_size !== request.pageSize ||
       cursor.library_id !== library.library_id ||
       cursor.epoch !== request.epoch ||
-      cursor.state !== (state ?? null)
+      cursor.state !== (state ?? null) ||
+      JSON.stringify(cursor.include_tags) !== JSON.stringify(includeTags) ||
+      JSON.stringify(cursor.exclude_tags) !== JSON.stringify(excludeTags)
     ) {
       db.exec("ROLLBACK")
       return { kind: "invalid_cursor" }
@@ -2749,7 +2853,7 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
     lastEntryId = cursor.last_entry_id
   }
 
-  const pageRows = selectLibraryEntries(normalizedQuery, lastEntryId, state ?? null, request.pageSize + 1) as unknown as ReadonlyArray<{
+  const pageRows = selectLibraryEntries(normalizedQuery, lastEntryId, state ?? null, includeTags, excludeTags, request.pageSize + 1) as unknown as ReadonlyArray<{
     entry_id: string
     library_id: string
     root_id: string
@@ -2786,6 +2890,8 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
         library_id: library.library_id,
         epoch: request.epoch,
         state: state ?? null,
+        include_tags: includeTags,
+        exclude_tags: excludeTags,
         last_entry_id: last.entry_id
       })
     : null
@@ -2795,7 +2901,8 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
       entries: page.map((row) => entryRow(row, normalizedQuery)),
       has_more: hasMore,
       next_cursor: nextCursor,
-      library_change_revision: librarySummary().change_revision
+      library_change_revision: librarySummary().change_revision,
+      tag_options: tagOptions
     }
   }
   db.exec("COMMIT")

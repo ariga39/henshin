@@ -61,6 +61,10 @@ const jsonValue = (value: string | null): unknown => {
 
 export class InvalidLibraryEntryResolutionCursor extends Data.TaggedError("InvalidLibraryEntryResolutionCursor")<{}> {}
 export class InvalidLibrarySearchCursor extends Data.TaggedError("InvalidLibrarySearchCursor")<{}> {}
+export class InvalidLibrarySearchFilter extends Data.TaggedError("InvalidLibrarySearchFilter")<{
+  readonly field: "include_tags" | "exclude_tags"
+  readonly message: string
+}> {}
 
 const decodeOrFail = <A>(decoder: (value: unknown) => Option.Option<A>, value: unknown, message: string): Effect.Effect<A, DatabaseWorkerError> => {
   const decoded = decoder(value)
@@ -78,8 +82,10 @@ export class LibraryStore extends Context.Service<
       readonly query: string
       readonly cursor: string | null
       readonly state?: "replacement-pending"
+      readonly includeTags: ReadonlyArray<string>
+      readonly excludeTags: ReadonlyArray<string>
       readonly epoch: string
-    }) => Effect.Effect<LibraryEntryPage, DatabaseWorkerError | InvalidLibrarySearchCursor>
+    }) => Effect.Effect<LibraryEntryPage, DatabaseWorkerError | InvalidLibrarySearchCursor | InvalidLibrarySearchFilter>
     readonly entry: (entryId: string) => Effect.Effect<import("@henshin/contracts").LibraryEntryDetails | null, DatabaseWorkerError>
     readonly bindEntry: (input: {
       readonly entryId: string
@@ -129,6 +135,8 @@ export class LibraryStore extends Context.Service<
         readonly query: string
         readonly cursor: string | null
         readonly state?: "replacement-pending"
+        readonly includeTags: ReadonlyArray<string>
+        readonly excludeTags: ReadonlyArray<string>
         readonly epoch: string
       }) => worker.call({
         op: "listLibraryEntries",
@@ -136,12 +144,24 @@ export class LibraryStore extends Context.Service<
         query: input.query,
         epoch: input.epoch,
         cursor: input.cursor,
-        state: input.state ?? null
+        state: input.state ?? null,
+        includeTags: input.includeTags,
+        excludeTags: input.excludeTags
       }).pipe(
         Effect.flatMap((value) => decodeOrFail(decodePage, value, "invalid library entry page")),
-        Effect.flatMap((result): Effect.Effect<LibraryEntryPage, DatabaseWorkerError | InvalidLibrarySearchCursor> =>
+        Effect.flatMap((result): Effect.Effect<LibraryEntryPage, DatabaseWorkerError | InvalidLibrarySearchCursor | InvalidLibrarySearchFilter> =>
           result.kind === "invalid_cursor"
             ? Effect.fail(new InvalidLibrarySearchCursor())
+            : result.kind === "invalid_filter"
+              ? Effect.fail(new InvalidLibrarySearchFilter({
+                  field: result.field,
+                  message: `${result.field} contains an unknown tag`
+                }))
+              : result.kind === "conflicting_filter"
+                ? Effect.fail(new InvalidLibrarySearchFilter({
+                    field: "include_tags",
+                    message: `tag ${result.tag} cannot be both included and excluded`
+                  }))
             : Effect.succeed(result.page)
         )
       )

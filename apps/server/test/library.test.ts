@@ -1842,3 +1842,133 @@ describe("literal library search", () => {
     expect(whitespaceSearch.data.entries).toHaveLength(0)
   })
 })
+
+describe("effective tag library search", () => {
+  it("filters current source tags and local additions across stable pages", async () => {
+    const server = await start()
+    await server.stop()
+
+    const db = new DatabaseSync(server.dbPath)
+    const library = db.prepare("SELECT library_id FROM server_library WHERE id = 1").get() as { library_id: string }
+    const rootId = randomUUID()
+    db.prepare(
+      "INSERT INTO server_roots(library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, state) VALUES(?, ?, ?, ?, ?, ?, ?, 1, 0, '[]', 'active')"
+    ).run(library.library_id, rootId, "Tag search fixture", "/tags", "/tags", "device", "inode")
+
+    const fixtureEntries = [
+      { relativePath: "alpha-one", tags: ["artist:alpha", "genre:comic"] },
+      { relativePath: "alpha-two", tags: ["artist:alpha", "genre:comic"] },
+      { relativePath: "alpha-three", tags: ["artist:alpha", "genre:other", "group:alpha"] },
+      { relativePath: "beta", tags: ["artist:beta"] },
+      { relativePath: "suppressed", tags: ["artist:alpha"], overrides: [{ tag: "artist:alpha", action: "suppress" as const }, { tag: "local:favourite", action: "add" as const }] },
+      { relativePath: "local-only", tags: [], overrides: [{ tag: "local:favourite", action: "add" as const }] }
+    ]
+    const insertEntry = db.prepare(
+      "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, title_search, basename_search, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'accepted', 1, 1, 1, '{}', 0, 0)"
+    )
+    const insertGallery = db.prepare(
+      "INSERT INTO galleries(gallery_id, source, gid, token, preferred_domain, metadata_tags_json, created_at_ms, updated_at_ms) VALUES(?, 'EH', ?, 'token', 'e-hentai.org', ?, 0, 0)"
+    )
+    const insertBinding = db.prepare(
+      "INSERT INTO bindings(entry_id, gallery_id, preferred_domain, bound_at_ms) VALUES(?, ?, 'e-hentai.org', 0)"
+    )
+    const insertOverride = db.prepare(
+      "INSERT INTO entry_tag_overrides(entry_id, tag, action) VALUES(?, ?, ?)"
+    )
+    for (const [index, fixture] of fixtureEntries.entries()) {
+      const entryId = randomUUID()
+      const normalized = fixture.relativePath.normalize("NFKC").toLowerCase().normalize("NFC")
+      insertEntry.run(
+        entryId,
+        library.library_id,
+        rootId,
+        fixture.relativePath,
+        `/tags/${fixture.relativePath}`,
+        "image-directory",
+        fixture.relativePath,
+        normalized,
+        normalized
+      )
+      if (fixture.tags.length > 0) {
+        const galleryId = randomUUID()
+        insertGallery.run(galleryId, String(index + 1), JSON.stringify(fixture.tags))
+        insertBinding.run(entryId, galleryId)
+      }
+      for (const override of fixture.overrides ?? []) insertOverride.run(entryId, override.tag, override.action)
+    }
+    db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1").run()
+    db.close()
+
+    const restarted = await startServer(server.dbPath)
+    servers.push(restarted)
+    const client = <A, E>(program: Effect.Effect<A, E, LibraryHttpClient>) => withLibraryClient(restarted, program)
+    const collect = async (payload: Parameters<LibraryHttpClient["Service"]["search"]>[0]["payload"]) => {
+      const pages = []
+      let cursor: string | undefined
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const page = await client(Effect.gen(function*() {
+          return yield* (yield* LibraryHttpClient).search({
+            payload: { ...payload, page_size: 2, ...(cursor === undefined ? {} : { cursor }) }
+          })
+        }))
+        pages.push(page.data)
+        if (!page.data.has_more) return pages
+        cursor = page.data.next_cursor ?? undefined
+      }
+      throw new Error("tag search did not finish within the page bound")
+    }
+
+    const allPages = await collect({})
+    expect(new Set(allPages.flatMap((page) => page.entries.map((entry) => entry.relative_path)))).toEqual(
+      new Set(fixtureEntries.map((entry) => entry.relativePath))
+    )
+    expect(allPages[0]?.tag_options).toEqual(expect.arrayContaining([
+      { id: "artist:alpha", namespace: "artist", name: "alpha", alias: null },
+      { id: "group:alpha", namespace: "group", name: "alpha", alias: null },
+      { id: "local:favourite", namespace: "local", name: "favourite", alias: null }
+    ]))
+    expect(allPages[0]?.tag_options?.some((tag) => tag.id === "artist:alpha")).toBe(true)
+
+    const included = await collect({ include_tags: ["artist:alpha"] })
+    expect(included).toHaveLength(2)
+    expect(new Set(included.flatMap((page) => page.entries.map((entry) => entry.relative_path)))).toEqual(
+      new Set(["alpha-one", "alpha-two", "alpha-three"])
+    )
+    expect(included.every((page) => page.entries.length <= 2)).toBe(true)
+
+    const includedAnd = await collect({ include_tags: ["artist:alpha", "genre:comic"] })
+    expect(new Set(includedAnd.flatMap((page) => page.entries.map((entry) => entry.relative_path)))).toEqual(
+      new Set(["alpha-one", "alpha-two"])
+    )
+
+    const excluded = await collect({ include_tags: ["artist:alpha"], exclude_tags: ["genre:comic"] })
+    expect(excluded.flatMap((page) => page.entries.map((entry) => entry.relative_path))).toEqual(["alpha-three"])
+
+    const local = await collect({ include_tags: ["local:favourite"] })
+    expect(new Set(local.flatMap((page) => page.entries.map((entry) => entry.relative_path)))).toEqual(
+      new Set(["local-only", "suppressed"])
+    )
+
+    const first = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { include_tags: ["artist:alpha"], page_size: 1 } })
+    }))
+    if (first.data.next_cursor === null) throw new Error("expected a filter cursor")
+    const fenced = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({
+        payload: { include_tags: ["group:alpha"], page_size: 1, cursor: first.data.next_cursor ?? undefined }
+      }).pipe(Effect.flip)
+    }))
+    expect(fenced._tag).toBe("InvalidRequest")
+
+    const unknown = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { include_tags: ["unknown:tag"] } }).pipe(Effect.flip)
+    }))
+    expect(unknown._tag).toBe("InvalidRequest")
+    const conflict = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({
+        payload: { include_tags: ["artist:alpha"], exclude_tags: ["artist:alpha"] }
+      }).pipe(Effect.flip)
+    }))
+    expect(conflict._tag).toBe("InvalidRequest")
+  })
+})

@@ -15,7 +15,7 @@ import {
 } from "@henshin/contracts"
 import { HttpApiBuilder } from "effect/http-api"
 import { ServerState } from "../identity"
-import { InvalidLibraryEntryResolutionCursor, InvalidLibrarySearchCursor, LibraryStore } from "../persistence/LibraryStore"
+import { InvalidLibraryEntryResolutionCursor, InvalidLibrarySearchCursor, InvalidLibrarySearchFilter, LibraryStore } from "../persistence/LibraryStore"
 import { RootStore } from "../persistence/RootStore"
 import { parseCanonicalEhGalleryUrl } from "../eh-url"
 
@@ -88,6 +88,8 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
             query: payload.query ?? "",
             cursor: payload.cursor ?? null,
             state: payload.state,
+            includeTags: payload.include_tags ?? [],
+            excludeTags: payload.exclude_tags ?? [],
             epoch: server.epoch
           }).pipe(
             Effect.mapError((error) => {
@@ -97,6 +99,15 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
                   message: "search cursor is invalid or fenced to a different query; restart search",
                   retryable: false,
                   details: { field: "cursor" },
+                  ...errorBase(server, context.request_id)
+                })
+              }
+              if (error instanceof InvalidLibrarySearchFilter) {
+                return new InvalidRequest({
+                  code: "invalid_request",
+                  message: error.message,
+                  retryable: false,
+                  details: { field: error.field },
                   ...errorBase(server, context.request_id)
                 })
               }

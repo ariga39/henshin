@@ -57,11 +57,20 @@ export const LibraryEntry = Schema.Struct({
 })
 export type LibraryEntry = typeof LibraryEntry.Type
 
+export const LibraryTagOption = Schema.Struct({
+  id: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512)),
+  namespace: Schema.String,
+  name: Schema.String,
+  alias: Schema.NullOr(Schema.String)
+})
+export type LibraryTagOption = typeof LibraryTagOption.Type
+
 export const LibraryEntryPage = Schema.Struct({
   entries: Schema.Array(LibraryEntry),
   has_more: Schema.Boolean,
   next_cursor: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8192))),
-  library_change_revision: Revision
+  library_change_revision: Revision,
+  tag_options: Schema.optional(Schema.Array(LibraryTagOption))
 })
 export type LibraryEntryPage = typeof LibraryEntryPage.Type
 
@@ -75,12 +84,16 @@ export type LibraryView = typeof LibraryView.Type
 const pageSize = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(200))
 const searchQuery = Schema.String.check(Schema.isMaxLength(1024))
 const searchCursor = Schema.String.check(Schema.isMaxLength(8192))
+const filterTag = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512))
+const filterTags = Schema.Array(filterTag).check(Schema.isMaxLength(64))
 
 export const LibrarySearchRequest = Schema.Struct({
   query: Schema.optional(searchQuery),
   page_size: Schema.optional(pageSize),
   cursor: Schema.optional(searchCursor),
-  state: Schema.optional(Schema.Literal("replacement-pending"))
+  state: Schema.optional(Schema.Literal("replacement-pending")),
+  include_tags: Schema.optional(filterTags),
+  exclude_tags: Schema.optional(filterTags)
 })
 export type LibrarySearchRequest = typeof LibrarySearchRequest.Type
 
