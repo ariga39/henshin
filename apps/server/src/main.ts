@@ -4,7 +4,7 @@ import { NodeRuntime } from "@effect/platform-node"
 import { Effect, Layer } from "effect"
 import { makeAppLayer } from "./app"
 import {
-  initializeOwnerCredential,
+  writeOwnerCredential,
   OwnerCredentialError,
   readOwnerCredential
 } from "./owner-credential"
@@ -36,17 +36,17 @@ interface IndependentOptions {
   readonly dataDir?: string
   readonly database?: string
   readonly port: number
-  readonly initializeOwner: boolean
+  readonly ownerCommand?: "initialize" | "rotate"
 }
 
 const usage = (): string =>
-  "usage: server.mjs (--data-dir <directory> | --database <path>) [--port <1-65535>] [--initialize-owner]"
+  "usage: server.mjs (--data-dir <directory> | --database <path>) [--port <1-65535>] [--initialize-owner | --rotate-owner]"
 
 const parseIndependentOptions = (args: ReadonlyArray<string>): IndependentOptions => {
   let dataDir: string | undefined
   let database: string | undefined
   let port = 4317
-  let initializeOwner = false
+  let ownerCommand: IndependentOptions["ownerCommand"]
 
   for (let index = 0; index < args.length; index += 1) {
     switch (args[index]) {
@@ -70,7 +70,9 @@ const parseIndependentOptions = (args: ReadonlyArray<string>): IndependentOption
         break
       }
       case "--initialize-owner":
-        initializeOwner = true
+      case "--rotate-owner":
+        if (ownerCommand !== undefined) throw new Error(usage())
+        ownerCommand = args[index] === "--rotate-owner" ? "rotate" : "initialize"
         break
       case "--help":
         throw new Error(usage())
@@ -80,7 +82,7 @@ const parseIndependentOptions = (args: ReadonlyArray<string>): IndependentOption
   }
 
   if ((dataDir === undefined) === (database === undefined)) throw new Error(usage())
-  return { dataDir, database, port, initializeOwner }
+  return { dataDir, database, port, ownerCommand }
 }
 
 const isMissingPath = (error: unknown): boolean =>
@@ -205,11 +207,11 @@ const runIndependent = async (options: IndependentOptions): Promise<void> => {
     return
   }
 
-  if (options.initializeOwner) {
+  if (options.ownerCommand !== undefined) {
     let guard
     try {
       guard = await acquireServerOwnership(dbPath)
-      const token = await initializeOwnerCredential(dbPath)
+      const token = await writeOwnerCredential(dbPath, options.ownerCommand)
       process.stdout.write(`owner_token=${token}\n`)
     } catch (error) {
       console.error(startupDiagnostic(error) ?? "server initialization failed")

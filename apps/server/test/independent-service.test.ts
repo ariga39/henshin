@@ -224,6 +224,36 @@ describe("independent foreground service", () => {
     }
   })
 
+  it("rotates only a stopped library's owner token and rejects the old credential", async () => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "henshin-rotate-owner-"))
+    dataDirectories.add(dataDir)
+    const selection = ["--data-dir", dataDir]
+    const port = await freeLoopbackPort()
+    const { token } = await initializeOwner(selection)
+    const first = await startServer(selection, port)
+    const handshake = (server: RunningServer, secret: string) => fetch(server.baseUrl + "/prototype/v1/handshake", {
+      headers: { authorization: "Bearer " + secret }
+    })
+
+    const busy = launch([...selection, "--rotate-owner"])
+    expect((await waitForExit(busy.child, EXIT_TIMEOUT_MS)).code).toBe(1)
+    expect(busy.stdout()).not.toContain("owner_token=")
+    expect((await handshake(first, token)).status).toBe(200)
+    await stopServer(first)
+
+    const rotated = launch([...selection, "--rotate-owner"])
+    expect((await waitForExit(rotated.child, EXIT_TIMEOUT_MS)).code).toBe(0)
+    const replacement = /^owner_token=([A-Za-z0-9_-]{43})$/mu.exec(rotated.stdout())?.[1]
+    if (!replacement) throw new Error("rotation did not return an owner token")
+
+    const second = await startServer(selection, port)
+    expect(second.instanceId).toBe(first.instanceId)
+    expect(second.epoch).not.toBe(first.epoch)
+    expect((await handshake(second, token)).status).toBe(401)
+    expect((await handshake(second, replacement)).status).toBe(200)
+    await stopServer(second)
+  })
+
   it("requires explicit database selection when a managed database is not server.sqlite", async () => {
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "henshin-managed-reuse-"))
     dataDirectories.add(dataDir)

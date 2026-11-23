@@ -126,3 +126,8 @@ library.
 Each data directory has one independent owner credential bound to the selected
 database. Reuse that explicit database path on subsequent starts. To operate
 a second independent library, initialize it in a separate data directory.
+
+To rotate a lost or compromised owner token, stop the service and run the same
+initialization command with `--rotate-owner` in place of `--initialize-owner`.
+Save the replacement token and restart the service. Each independent client
+needs the new token to reconnect.
