@@ -118,26 +118,6 @@ const verifySnapshot = (snapshotPath: string, inputs: RestoreInputs): unknown =>
     const entries = (snapshot.prepare("SELECT COUNT(*) AS count FROM library_entries").get() as { count: number }).count
     const events = (snapshot.prepare("SELECT COUNT(*) AS count FROM open_events").get() as { count: number }).count
     const aggregates = (snapshot.prepare("SELECT COUNT(*) AS count FROM entry_statistics").get() as { count: number }).count
-    const missingAggregates = (snapshot.prepare(`
-      SELECT COUNT(*) AS count
-      FROM library_entries e
-      LEFT JOIN entry_statistics s ON s.entry_id = e.entry_id
-      WHERE s.entry_id IS NULL
-    `).get() as { count: number }).count
-    const inconsistentAggregates = (snapshot.prepare(`
-      SELECT COUNT(*) AS count
-      FROM entry_statistics s
-      LEFT JOIN (
-        SELECT entry_id, COUNT(*) AS open_count, MAX(occurred_at_ms) AS last_opened_at_ms
-        FROM open_events
-        GROUP BY entry_id
-      ) e ON e.entry_id = s.entry_id
-      WHERE s.open_count != COALESCE(e.open_count, 0)
-         OR s.last_opened_at_ms IS NOT e.last_opened_at_ms
-    `).get() as { count: number }).count
-    if (missingAggregates !== 0 || inconsistentAggregates !== 0) {
-      throw new BackupDrillFailure("aggregate-mismatch", "backup snapshot aggregates do not match open events")
-    }
     const overrideTables = (snapshot.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%override%' ORDER BY name"
     ).all() as unknown as ReadonlyArray<{ name: string }>).map((row) => row.name)
@@ -181,9 +161,9 @@ export const runBackupDrill = async (context: BackupDrillContext): Promise<Backu
     if (context.beforeVerification !== undefined && await context.beforeVerification() === "interrupt") {
       throw new BackupDrillInterrupted()
     }
-    const target = currentIdentity(context.dbPath)
     let inputs: RestoreInputs
     try {
+      const target = currentIdentity(context.dbPath)
       inputs = await loadArchive(archivePath, stagingDirectory, {
         artifactId: context.artifact.artifactId,
         destinationId: context.artifact.destinationId,

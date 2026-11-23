@@ -1,7 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process"
 import { DatabaseSync } from "node:sqlite"
 import { createHash, randomUUID } from "node:crypto"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
@@ -70,13 +70,25 @@ describe("ordinary server restore archive validation", () => {
 
     const preview = await runJson(["backup", "restore", "preview", "--data-dir", dataDir, "--artifact-id", artifact.artifactId])
     expect(preview.requiresConfirmation).toBe(true)
+    expect(preview.destinationId).toBe(destinationId)
     expect(preview.identity).toMatchObject({ instanceId: identity.instance_id })
+    expect(preview.recoveryPoint.snapshotStartedAt).toEqual(expect.any(String))
+    expect(preview.recoveryPoint.snapshotCompletedAt).toEqual(expect.any(String))
+    expect(preview.recoveryPoint.libraryChangeRevision).toBe(0)
+    expect(preview.affectedInterval.from).toBe(preview.recoveryPoint.snapshotCompletedAt)
+    expect(preview.affectedInterval.libraryChangeRevisions).toMatchObject({ from: 0, to: 0, estimatedLost: 0 })
     expect(await readRestorePoint(artifact, path.join(dataDir, "server.sqlite"))).toMatchObject({ artifactId: artifact.artifactId })
+    const unavailableStagingRoot = path.join(workspace, "staging-file")
+    await writeFile(unavailableStagingRoot, "not a directory")
+    await expect(readRestorePoint(artifact, path.join(dataDir, "server.sqlite"), unavailableStagingRoot)).rejects.toMatchObject({ code: "staging-unavailable" })
 
     const defaultPreview = await runJson(["backup", "restore", "--data-dir", dataDir, "--artifact-id", artifact.artifactId])
     expect(defaultPreview).toMatchObject({ artifactId: artifact.artifactId, requiresConfirmation: true })
+    const stalePreview = await mkdtemp(path.join(dataDir, ".backup-restore-preview-stale-"))
+    await writeFile(path.join(stalePreview, "private.sqlite"), "stale")
     const listed = await runJson(["backup", "restore", "list", "--data-dir", dataDir])
     expect(listed.recovery_points).toHaveLength(1)
+    await expect(stat(stalePreview)).rejects.toMatchObject({ code: "ENOENT" })
     const unknownSubcommand = await runFailure(["backup", "restore", "inspect", "--data-dir", dataDir, "--artifact-id", artifact.artifactId])
     expect(unknownSubcommand.code).toBe(2)
     expect(unknownSubcommand.stderr).toContain("usage: server.mjs")
@@ -106,6 +118,8 @@ describe("ordinary server restore archive validation", () => {
     const damagedResult = await runFailure(["backup", "restore", "preview", "--data-dir", dataDir, "--artifact-id", artifact.artifactId])
     expect(damagedResult.code).toBe(1)
     expect(damagedResult.stderr).toContain("backup artifact")
+    const damagedList = await runJson(["backup", "restore", "list", "--data-dir", dataDir])
+    expect(damagedList.recovery_points).toMatchObject([{ artifactId: artifact.artifactId, status: "unavailable", code: expect.any(String) }])
 
     const unreadableTarget = path.join(workspace, "unreadable.sqlite")
     await writeFile(unreadableTarget, "not a sqlite database")

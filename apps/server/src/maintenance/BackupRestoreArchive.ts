@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite"
 import { createHash } from "node:crypto"
-import { chmod, lstat, mkdtemp, open, realpath, rm, stat } from "node:fs/promises"
+import { chmod, lstat, mkdtemp, open, readdir, realpath, rm, stat } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import { dirname, join, relative, resolve } from "node:path"
 import { Option, Schema } from "effect"
@@ -95,7 +95,7 @@ export const listRestoreArtifacts = (dbPath: string): ReadonlyArray<RestoreArtif
       FROM backup_artifacts a
       JOIN backup_destinations d ON d.destination_id = a.destination_id
       WHERE a.status = 'completed' AND a.manifest_digest IS NOT NULL AND a.size_bytes IS NOT NULL
-      ORDER BY a.publication_order DESC
+      ORDER BY a.completed_at_ms DESC, a.artifact_id ASC
     `).all() as Array<{
       artifact_id: string
       destination_id: string
@@ -154,6 +154,7 @@ export type RestoreTargetIdentity = {
 
 export interface RestorePreview {
   readonly artifactId: string
+  readonly destinationId: string
   readonly recoveryPoint: {
     readonly snapshotStartedAt: string
     readonly snapshotCompletedAt: string
@@ -213,6 +214,43 @@ const writeChunk = async (file: FileHandle, chunk: Uint8Array): Promise<void> =>
   }
 }
 
+const filesystemErrorCodes = new Set(["EACCES", "EIO", "EISDIR", "EMFILE", "ENFILE", "ENOSPC", "ENOTDIR", "EPERM", "EROFS"])
+
+const filesystemErrorCode = (error: unknown): string | undefined => {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined
+  const code = error.code
+  return typeof code === "string" && filesystemErrorCodes.has(code) ? code : undefined
+}
+
+const stagingFailure = (error: unknown): BackupRestoreFailure | undefined => {
+  const code = filesystemErrorCode(error)
+  return code === undefined
+    ? undefined
+    : new BackupRestoreFailure("staging-unavailable", `backup restore staging is unavailable (${code})`)
+}
+
+export const cleanupRestorePreviewStaging = async (dataDirectory: string): Promise<void> => {
+  let entries
+  try {
+    entries = await readdir(dataDirectory, { withFileTypes: true })
+  } catch (error) {
+    const failure = stagingFailure(error)
+    if (failure !== undefined) throw failure
+    throw error
+  }
+  await Promise.all(entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith(".backup-restore-preview-"))
+    .map(async (entry) => {
+      try {
+        await rm(join(dataDirectory, entry.name), { recursive: true, force: true })
+      } catch (error) {
+        const failure = stagingFailure(error)
+        if (failure !== undefined) throw failure
+        throw error
+      }
+    }))
+}
+
 export const archivePath = async (artifact: RestoreArtifact): Promise<string> => {
   if (
     !artifact.relativePath.startsWith(`${ARCHIVE_DIRECTORY}/`) ||
@@ -254,6 +292,8 @@ const readManifest = async (archive: string): Promise<{ readonly manifest: Resto
     })
   } catch (error) {
     if (error instanceof BackupRestoreFailure) throw error
+    const failure = stagingFailure(error)
+    if (failure !== undefined) throw failure
     if (error instanceof BackupArchiveSizeError) throw new BackupRestoreFailure("archive-too-large", "backup artifact exceeds the size limit")
     if (error instanceof BackupArchiveMemberSizeError) throw new BackupRestoreFailure("member-too-large", "backup artifact member exceeds the size limit")
     throw new BackupRestoreFailure("archive-invalid", "backup artifact cannot be read")
@@ -324,6 +364,8 @@ export const loadArchive = async (
     return loaded
   } catch (error) {
     if (error instanceof BackupRestoreFailure) throw error
+    const failure = stagingFailure(error)
+    if (failure !== undefined) throw failure
     if (error instanceof BackupArchiveSizeError) throw new BackupRestoreFailure("archive-too-large", "backup artifact exceeds the size limit")
     if (error instanceof BackupArchiveMemberSizeError) throw new BackupRestoreFailure("member-too-large", "backup artifact member exceeds the size limit")
     throw new BackupRestoreFailure("archive-invalid", "backup artifact cannot be read")
@@ -379,6 +421,26 @@ export const validateSnapshot = (inputs: RestoreInputs, target: { readonly insta
       throw new BackupRestoreFailure("authority-mismatch", "backup belongs to another server instance or library")
     }
     if (state.schema_version > CURRENT_SCHEMA_VERSION) throw new BackupRestoreFailure("schema-unsupported", "backup snapshot schema is newer than this server")
+    const missingAggregates = (snapshot.prepare(`
+      SELECT COUNT(*) AS count
+      FROM library_entries e
+      LEFT JOIN entry_statistics s ON s.entry_id = e.entry_id
+      WHERE s.entry_id IS NULL
+    `).get() as { count: number }).count
+    const inconsistentAggregates = (snapshot.prepare(`
+      SELECT COUNT(*) AS count
+      FROM entry_statistics s
+      LEFT JOIN (
+        SELECT entry_id, COUNT(*) AS open_count, MAX(occurred_at_ms) AS last_opened_at_ms
+        FROM open_events
+        GROUP BY entry_id
+      ) e ON e.entry_id = s.entry_id
+      WHERE s.open_count != COALESCE(e.open_count, 0)
+         OR s.last_opened_at_ms IS NOT e.last_opened_at_ms
+    `).get() as { count: number }).count
+    if (missingAggregates !== 0 || inconsistentAggregates !== 0) {
+      throw new BackupRestoreFailure("aggregate-mismatch", "backup snapshot aggregates do not match open events")
+    }
   } finally {
     snapshot.close()
   }
@@ -402,8 +464,13 @@ export const readRestorePoint = async (
   if (manifest.artifact_id !== artifact.artifactId || manifest.destination_id !== artifact.destinationId || manifest.relative_path !== artifact.relativePath || sha256(bytes) !== artifact.manifestDigest) {
     throw new BackupRestoreFailure("artifact-mismatch", "backup manifest is not bound to the catalog artifact")
   }
-  const stagingDirectory = await mkdtemp(join(stagingRoot, ".backup-restore-preview-"))
-  await chmod(stagingDirectory, 0o700)
+  let stagingDirectory: string
+  try {
+    stagingDirectory = await mkdtemp(join(stagingRoot, ".backup-restore-preview-"))
+    await chmod(stagingDirectory, 0o700)
+  } catch (error) {
+    throw stagingFailure(error) ?? error
+  }
   try {
     const inputs = await loadArchive(archive, stagingDirectory, artifact, target.changeRevision)
     validateSnapshot(inputs, target)
@@ -412,6 +479,7 @@ export const readRestorePoint = async (
   }
   return {
     artifactId: artifact.artifactId,
+    destinationId: artifact.destinationId,
     recoveryPoint: {
       snapshotStartedAt: manifest.snapshot_started_at,
       snapshotCompletedAt: manifest.snapshot_completed_at,
