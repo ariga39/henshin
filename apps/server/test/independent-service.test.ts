@@ -161,7 +161,31 @@ const stopServer = async (server: RunningServer): Promise<void> => {
   )
 }
 
-const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")
+interface WindowsAclRule {
+  readonly sid: string
+  readonly type: string
+  readonly rightsValue: number
+}
+
+interface WindowsAclSnapshot {
+  readonly ownerSid: string
+  readonly currentSid: string
+  readonly rules: ReadonlyArray<WindowsAclRule>
+}
+
+const WINDOWS_ACL_SCRIPT = `$ErrorActionPreference = 'Stop'
+$acl = Get-Acl -LiteralPath $env:HENSHIN_AUTH_PATH
+$ownerSid = ([System.Security.Principal.NTAccount]::new($acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$rules = @($acl.Access | ForEach-Object {
+  [pscustomobject]@{
+    Sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    Type = $_.AccessControlType.ToString()
+    RightsValue = [int64]$_.FileSystemRights
+  }
+})
+[pscustomobject]@{ OwnerSid = $ownerSid; CurrentSid = $currentSid; Rules = $rules } |
+  ConvertTo-Json -Compress -Depth 5`
 
 const expectProtectedOwnerState = async (authPath: string): Promise<void> => {
   if (process.platform !== "win32") {
@@ -169,17 +193,34 @@ const expectProtectedOwnerState = async (authPath: string): Promise<void> => {
     return
   }
 
-  const [{ stdout: acl }, { stdout: identity }] = await Promise.all([
-    execFileAsync("icacls", [authPath], { windowsHide: true }),
-    execFileAsync("whoami", [], { windowsHide: true })
-  ])
-  const account = identity.trim().split(/\\/u).at(-1)
-  if (account === undefined || account.length === 0) throw new Error("Windows identity was unavailable")
-  const currentUser = new RegExp(`(?:^|\\r?\\n)\\s*${escapeRegExp(account)}:\\s+.*\\((?:F|M)\\)`, "iu")
-  expect(acl).toMatch(currentUser)
-  expect(acl).not.toMatch(
-    /(?:^|\r?\n)\s*(?:Everyone|BUILTIN\\Users|NT AUTHORITY\\Authenticated Users):\s+.*\((?:F|M|W)\)/iu
+  const { stdout } = await execFileAsync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_ACL_SCRIPT],
+    { windowsHide: true, env: { ...process.env, HENSHIN_AUTH_PATH: authPath } }
   )
+  const snapshot = JSON.parse(stdout) as WindowsAclSnapshot
+  const readData = 1
+  const writeData = 2
+  const hasReadWriteAllow = (sid: string): boolean =>
+    snapshot.rules.some(
+      (rule) =>
+        rule.sid === sid &&
+        rule.type === "Allow" &&
+        (rule.rightsValue & readData) !== 0 &&
+        (rule.rightsValue & writeData) !== 0
+    )
+
+  expect(hasReadWriteAllow(snapshot.ownerSid)).toBe(true)
+  expect(hasReadWriteAllow(snapshot.currentSid)).toBe(true)
+
+  const broadGroupSids = new Set([
+    "S-1-1-0", // Everyone
+    "S-1-5-11", // Authenticated Users
+    "S-1-5-32-545" // BUILTIN\\Users
+  ])
+  expect(
+    snapshot.rules.filter((rule) => rule.type === "Allow" && broadGroupSids.has(rule.sid))
+  ).toEqual([])
 }
 
 const expectUsageFailure = async (args: ReadonlyArray<string>): Promise<void> => {
