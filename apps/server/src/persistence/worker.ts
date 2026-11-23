@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { DatabaseSync } from "node:sqlite"
-import { readdirSync, rmSync } from "node:fs"
+import { constants, copyFileSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs"
+import { pathToFileURL } from "node:url"
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
@@ -17,6 +18,7 @@ import { MAX_ROOT_EXCLUSIONS, RootExclusions, ScanAnalysisError } from "@henshin
 import { caseFold } from "unicode-case-folding"
 import { normalizeSearchText, SEARCH_NORMALIZATION_PROFILE, searchBasename } from "../search"
 import {
+  NEWER_DATABASE_SCHEMA,
   WorkerMessage,
   WorkerResponse,
   type CommitOutcome,
@@ -294,7 +296,42 @@ const decodeResolutionCursor = (value: string): typeof ResolutionCursor.Type | u
 }
 
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
+const readVersion = (file: string, readOnly: boolean): number | undefined => {
+  const existing = new DatabaseSync(file, { readOnly })
+  try {
+    const state = existing.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'server_state'").get()
+    if (!state) return undefined
+    const row = existing.prepare("SELECT schema_version FROM server_state WHERE id = 1").get()
+    return row?.schema_version as number | undefined
+  } finally {
+    existing.close()
+  }
+}
+
+const readExistingVersion = (): number | undefined => {
+  if (statSync(dbPath, { throwIfNoEntry: false }) === undefined) return undefined
+  const journals = ["-wal", "-journal"].filter((suffix) =>
+    (statSync(dbPath + suffix, { throwIfNoEntry: false })?.size ?? 0) > 0
+  )
+  // The server owns the data directory. A clean immutable read creates no SQLite sidecars.
+  if (journals.length === 0) return readVersion(pathToFileURL(dbPath).href + "?immutable=1", true)
+  // Even a read-only WAL connection can change the shared-memory index. Recover a
+  // private copy so the version includes committed frames without touching the source.
+  const directory = mkdtempSync(join(dirname(dbPath), ".schema-probe-"))
+  try {
+    const probe = join(directory, "probe.sqlite")
+    for (const suffix of ["", ...journals]) {
+      copyFileSync(dbPath + suffix, probe + suffix, constants.COPYFILE_FICLONE)
+    }
+    return readVersion(probe, false)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+}
+const existingVersion = readExistingVersion()
+if (existingVersion !== undefined && existingVersion > CURRENT_SCHEMA_VERSION) throw new Error(NEWER_DATABASE_SCHEMA)
 const db = new DatabaseSync(dbPath)
+
 const cleanupBackupDrillStaging = (): void => {
   const dataDirectory = dirname(dbPath)
   for (const entry of readdirSync(dataDirectory, { withFileTypes: true })) {
@@ -539,10 +576,6 @@ db.exec(`
   );
 `)
 
-const existingServerState = db.prepare(
-  "SELECT schema_version FROM server_state WHERE id = 1"
-).get() as { schema_version: number } | undefined
-
 const rootColumns = new Set(
   (db.prepare("PRAGMA table_info(server_roots)").all() as unknown as ReadonlyArray<{ name: string }>).map(
     (column) => column.name
@@ -781,9 +814,9 @@ if (!entryOverrideColumns.has("notes_revision")) db.exec("ALTER TABLE entry_over
 if (!entryOverrideColumns.has("notes_updated_at_ms")) db.exec("ALTER TABLE entry_overrides ADD COLUMN notes_updated_at_ms INTEGER")
 
 const needsSummaryBackfill = addedAcceptedObservationSummary || addedCandidateObservationSummary ||
-  (existingServerState !== undefined && existingServerState.schema_version < CURRENT_SCHEMA_VERSION)
+  (existingVersion !== undefined && existingVersion < CURRENT_SCHEMA_VERSION)
 const needsSearchBackfill = addedSearchColumns ||
-  (existingServerState !== undefined && existingServerState.schema_version < CURRENT_SCHEMA_VERSION)
+  (existingVersion !== undefined && existingVersion < CURRENT_SCHEMA_VERSION)
 
 if (needsSummaryBackfill || needsSearchBackfill) {
   db.exec("BEGIN IMMEDIATE")
@@ -3389,9 +3422,6 @@ const handle = (request: WorkerRequest): unknown => {
         | { instance_id: string; schema_version: number }
         | undefined
       const schemaVersion = existing?.schema_version
-      if (schemaVersion !== undefined && schemaVersion > CURRENT_SCHEMA_VERSION) {
-        throw new Error("unsupported server database schema version")
-      }
       const instanceId = existing?.instance_id ?? randomUUID()
       if (existing === undefined) {
         db.prepare("INSERT INTO server_state(id, instance_id, schema_version) VALUES(1, ?, ?)").run(

@@ -1,5 +1,6 @@
 import { createServer } from "node:http"
 import { access, readFile, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises"
+import { DatabaseSync } from "node:sqlite"
 import os from "node:os"
 import path from "node:path"
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
@@ -274,6 +275,55 @@ afterEach(async () => {
 })
 
 describe("independent foreground service", () => {
+  it("refuses a newer schema before modifying the library database", async () => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "henshin-future-library-"))
+    dataDirectories.add(dataDir)
+    const dbPath = path.join(dataDir, "server.sqlite")
+    await initializeOwner(["--data-dir", dataDir])
+    const future = new DatabaseSync(dbPath)
+    try {
+      future.exec(`
+        CREATE TABLE server_state (id INTEGER PRIMARY KEY, instance_id TEXT, schema_version INTEGER);
+        INSERT INTO server_state VALUES (1, 'future-instance', 9999);
+        CREATE TABLE future_books (title TEXT);
+        INSERT INTO future_books VALUES ('preserved');
+      `)
+    } finally {
+      future.close()
+    }
+    const before = await readFile(dbPath)
+    const refused = launch(["--data-dir", dataDir, "--port", String(await freeLoopbackPort())])
+    expect((await waitForExit(refused.child, EXIT_TIMEOUT_MS)).code).toBe(1)
+    expect((await readFile(dbPath)).equals(before)).toBe(true)
+    expect(refused.stdout()).not.toContain('"event":"ready"')
+    expect(refused.stderr()).toContain("newer database schema")
+  })
+
+  it("leaves a newer library and its uncheckpointed WAL intact", async () => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "henshin-future-wal-"))
+    dataDirectories.add(dataDir)
+    const dbPath = path.join(dataDir, "server.sqlite")
+    await initializeOwner(["--data-dir", dataDir])
+    // Abrupt exit leaves committed pages in the WAL, as after a crashed newer server.
+    await execFileAsync(process.execPath, ["-e", `
+      const { DatabaseSync } = require("node:sqlite")
+      const db = new DatabaseSync(process.argv[1])
+      db.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0")
+      db.exec("CREATE TABLE server_state(id INTEGER PRIMARY KEY, instance_id TEXT, schema_version INTEGER)")
+      db.exec("INSERT INTO server_state VALUES(1, 'future-instance', 9999)")
+      process.exit(0)
+    `, dbPath])
+    const files = [dbPath, dbPath + "-wal", dbPath + "-shm"]
+    const before = await Promise.all(files.map((file) => readFile(file)))
+    expect(before[1].length).toBeGreaterThan(32)
+    const refused = launch(["--data-dir", dataDir, "--port", String(await freeLoopbackPort())])
+    expect((await waitForExit(refused.child, EXIT_TIMEOUT_MS)).code).toBe(1)
+    expect(refused.stderr()).toContain("newer database schema")
+    for (const [index, file] of files.entries()) {
+      expect((await readFile(file)).equals(before[index]), path.basename(file)).toBe(true)
+    }
+  })
+
   it("initializes an owner, serves authenticated HTTP on a stable port, and restarts with a new epoch", async () => {
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "henshin-independent-service-"))
     dataDirectories.add(dataDir)

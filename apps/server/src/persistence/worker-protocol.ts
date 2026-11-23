@@ -14,6 +14,8 @@ import {
   SetPersonalTitleCommand
 } from "@henshin/contracts"
 
+export const NEWER_DATABASE_SCHEMA = "This library uses a newer database schema. Start it with a compatible server version."
+
 /** A persisted prototype note row, always with a canonical decimal revision. */
 export const NoteRow = Schema.Struct({
   note_id: NoteId,
