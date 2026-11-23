@@ -20,15 +20,15 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 11.22.0
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24.19.0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
 
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
@@ -45,6 +45,14 @@ jobs:
           Write-Host "pnpm: $(pnpm --version)"
           pnpm build:server:distribution
           if ($LASTEXITCODE -ne 0) { throw "standalone distribution build failed" }
+
+      - name: Upload Windows x64 standalone archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: henshin-server-windows-x64
+          path: ${{ runner.temp }}\henshin-artifact\*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Restore workspace test dependencies
         run: pnpm install --frozen-lockfile

@@ -168,22 +168,28 @@ const build = async () => {
       stdio: "inherit"
     })
 
-    const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm"
+    const pnpmArguments = [
+      "--filter",
+      "@henshin/server",
+      "deploy",
+      "--prod",
+      "--legacy",
+      "--config.confirmModulesPurge=false",
+      deployDirectory
+    ]
+    const packageManagerEntrypoint = process.env.npm_execpath
+    if (packageManagerEntrypoint === undefined && process.platform === "win32") {
+      throw new Error("Windows distribution builds must be invoked through pnpm")
+    }
     execFileSync(
-      pnpm,
-      [
-        "--filter",
-        "@henshin/server",
-        "deploy",
-        "--prod",
-        "--legacy",
-        "--config.confirmModulesPurge=false",
-        deployDirectory
-      ], {
-      cwd: repositoryDir,
-      env: { ...process.env, CI: "true" },
-      stdio: "inherit"
-    })
+      packageManagerEntrypoint === undefined ? "pnpm" : process.execPath,
+      packageManagerEntrypoint === undefined ? pnpmArguments : [packageManagerEntrypoint, ...pnpmArguments],
+      {
+        cwd: repositoryDir,
+        env: { ...process.env, CI: "true" },
+        stdio: "inherit"
+      }
+    )
 
     await rename(path.join(deployDirectory, "node_modules"), path.join(bundleDirectory, "node_modules"))
     const nodeModulesDirectory = path.join(bundleDirectory, "node_modules")
