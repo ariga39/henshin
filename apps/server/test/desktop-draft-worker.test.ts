@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process"
 import { Worker } from "node:worker_threads"
 import { DatabaseSync } from "node:sqlite"
 import { mkdtemp, rm } from "node:fs/promises"
@@ -159,15 +160,13 @@ describe("desktop draft SQLite worker", () => {
       INSERT INTO desktop_store_metadata VALUES(1, '11111111-1111-4111-8111-111111111111', 2, 'future');
     `)
     const sidecars = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]
-    const preflightEntriesBefore = readdirSync(os.tmpdir()).filter((name) => name.startsWith("henshin-desktop-store-preflight-"))
     const before = new Map(sidecars.map((filePath) => [
       filePath,
       { bytes: readFileSync(filePath), stat: statSync(filePath) }
     ]))
 
     await expect(expectWorkerStartupFailure(dbPath)).resolves.toContain("newer")
-    expect(readdirSync(os.tmpdir()).filter((name) => name.startsWith("henshin-desktop-store-preflight-")))
-      .toEqual(preflightEntriesBefore)
+    expect(readdirSync(directory).sort()).toEqual(sidecars.map((file) => path.basename(file)).sort())
     for (const [filePath, snapshot] of before) {
       expect(readFileSync(filePath)).toEqual(snapshot.bytes)
       const after = statSync(filePath)
@@ -176,6 +175,30 @@ describe("desktop draft SQLite worker", () => {
       expect(after.mode).toBe(snapshot.stat.mode)
     }
     writer.close()
+  })
+
+  it("inspects the last committed desktop schema after a rollback-journal interruption", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-rollback-"))
+    tempDirectories.add(directory)
+    const dbPath = path.join(directory, "desktop.db")
+    const child = spawnSync(process.execPath, ["-e", `
+      const { DatabaseSync } = require("node:sqlite")
+      const db = new DatabaseSync(process.argv[1])
+      db.exec("PRAGMA journal_mode=DELETE; PRAGMA cache_size=2; PRAGMA user_version=2; CREATE TABLE unsent_drafts(data BLOB)")
+      db.exec("BEGIN IMMEDIATE; PRAGMA user_version=1")
+      const insert = db.prepare("INSERT INTO unsent_drafts VALUES(zeroblob(8192))")
+      for (let i = 0; i < 32; i++) insert.run()
+      process.kill(process.pid, "SIGKILL")
+    `, dbPath])
+    if (child.error) throw child.error
+    const journalPath = dbPath + "-journal"
+    const journal = readFileSync(journalPath)
+    expect(journal.readUInt32BE(0)).not.toBe(0)
+    const before = readFileSync(dbPath)
+    await expect(expectWorkerStartupFailure(dbPath)).resolves.toContain("newer")
+    expect(readFileSync(dbPath)).toEqual(before)
+    expect(readFileSync(journalPath)).toEqual(journal)
+    expect(readdirSync(directory).sort()).toEqual(["desktop.db", "desktop.db-journal"])
   })
 
   it("upgrades a legacy store with the desktop origin version", async () => {

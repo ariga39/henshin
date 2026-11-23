@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite"
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs"
+import { constants, copyFileSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path"
-import { tmpdir } from "node:os"
+import { pathToFileURL } from "node:url"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalOpenEventPayload } from "@henshin/contracts/canonical"
@@ -50,30 +50,9 @@ const DESKTOP_STORE_TABLES = new Set([
   "desktop_store_metadata"
 ])
 
-const preflightExistingStore = (): void => {
+const inspectStoreSchema = (filename: string, readOnly: boolean): void => {
+  const inspection = new DatabaseSync(filename, { readOnly })
   try {
-    if (!statSync(dbPath).isFile()) throw new Error("desktop client store path is not a file")
-  } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return
-    throw error
-  }
-
-  const preflightDirectory = mkdtempSync(join(tmpdir(), "henshin-desktop-store-preflight-"))
-  let inspection: DatabaseSync | undefined
-  try {
-    chmodSync(preflightDirectory, 0o700)
-    const inspectionPath = join(preflightDirectory, basename(dbPath))
-    copyFileSync(dbPath, inspectionPath)
-    chmodSync(inspectionPath, 0o600)
-    for (const suffix of ["-wal", "-shm"]) {
-      const sidecarPath = `${dbPath}${suffix}`
-      if (!existsSync(sidecarPath)) continue
-      const copiedSidecarPath = `${inspectionPath}${suffix}`
-      copyFileSync(sidecarPath, copiedSidecarPath)
-      chmodSync(copiedSidecarPath, 0o600)
-    }
-
-    inspection = new DatabaseSync(inspectionPath, { readOnly: true })
     const userVersion = Number((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version)
     if (userVersion > DESKTOP_STORE_SCHEMA_VERSION) {
       throw new Error("desktop client store schema is newer than this desktop")
@@ -111,8 +90,32 @@ const preflightExistingStore = (): void => {
       throw new Error("desktop client store schema is unsupported")
     }
   } finally {
-    inspection?.close()
-    rmSync(preflightDirectory, { recursive: true, force: true })
+    inspection.close()
+  }
+}
+
+const preflightExistingStore = (): void => {
+  const entry = statSync(dbPath, { throwIfNoEntry: false })
+  if (entry === undefined) return
+  if (!entry.isFile()) throw new Error("desktop client store path is not a file")
+  const journals = ["-wal", "-journal"].filter((suffix) =>
+    (statSync(dbPath + suffix, { throwIfNoEntry: false })?.size ?? 0) > 0
+  )
+  if (journals.length === 0) {
+    inspectStoreSchema(pathToFileURL(dbPath).href + "?immutable=1", true)
+    return
+  }
+
+  // SQLite can replay the journal and rebuild its shared-memory index on the private copy.
+  const directory = mkdtempSync(join(dirname(dbPath), ".desktop-schema-probe-"))
+  try {
+    const copy = join(directory, "client.sqlite")
+    for (const suffix of ["", ...journals]) {
+      copyFileSync(dbPath + suffix, copy + suffix, constants.COPYFILE_FICLONE)
+    }
+    inspectStoreSchema(copy, false)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
   }
 }
 
