@@ -394,7 +394,7 @@ export const LibraryScreen = () => {
                     </button>
                     {state.gallery_search_status === "loading" && (
                       <button type="button" data-testid="gallery-search-cancel" onClick={() => void runtime.runPromise(cancelGallerySearch)}>
-                        Cancel search
+                        Stop waiting
                       </button>
                     )}
                   </form>
@@ -407,7 +407,7 @@ export const LibraryScreen = () => {
                   )}
                   {state.gallery_search_status === "restricted" && <p role="alert" data-testid="gallery-search-restricted">Gallery search access is restricted by the upstream service.</p>}
                   {state.gallery_search_status === "unrecognized_layout" && <p role="alert" data-testid="gallery-search-unrecognized">Gallery search returned an unrecognized upstream layout.</p>}
-                  {state.gallery_search_status === "cancelled" && <p data-testid="gallery-search-cancelled">Gallery search cancelled; this book remains unchanged.</p>}
+                  {state.gallery_search_status === "cancelled" && <p data-testid="gallery-search-cancelled">Stopped waiting for search results.</p>}
                   {state.gallery_search_status === "error" && <p role="alert">Gallery search failed: {state.gallery_search_error}</p>}
                   {state.gallery_candidates.length > 0 && (
                     <fieldset data-testid="gallery-candidates">

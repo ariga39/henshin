@@ -117,7 +117,8 @@ const LOCAL_MAPPING_REQUEST_TIMEOUT = Duration.seconds(12)
 // The server gives one thumbnail request a 30-second aggregate producer
 // budget; keep a small allowance for HTTP and IPC teardown.
 const THUMBNAIL_NETWORK_DEADLINE = Duration.seconds(32)
-const EH_CANDIDATE_SEARCH_DEADLINE = Duration.seconds(20)
+// Allow the server its bounded queue wait and fetch timeout before the IPC deadline.
+const EH_CANDIDATE_SEARCH_DEADLINE = Duration.seconds(25)
 
 interface Session {
   readonly instanceId: string

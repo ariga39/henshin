@@ -137,6 +137,9 @@ const readBoundedText = async (response: Response): Promise<string> => {
       if (total > MAX_RESPONSE_BYTES) throw new Error("upstream response exceeded the bounded size")
       chunks.push(next.value)
     }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined)
+    throw error
   } finally {
     reader.releaseLock()
   }
