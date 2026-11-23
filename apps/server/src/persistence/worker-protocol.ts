@@ -82,7 +82,8 @@ export const BackupArtifactReservationOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("reserved"), artifact: BackupArtifactRow }),
   Schema.Struct({ kind: Schema.Literal("replayed"), artifact: BackupArtifactRow }),
   Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
-  Schema.Struct({ kind: Schema.Literal("destination_not_found") })
+  Schema.Struct({ kind: Schema.Literal("destination_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("restore_pending") })
 ])
 export type BackupArtifactReservationOutcome = typeof BackupArtifactReservationOutcome.Type
 

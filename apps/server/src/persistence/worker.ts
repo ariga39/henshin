@@ -366,6 +366,18 @@ db.exec(`
   );
   CREATE UNIQUE INDEX IF NOT EXISTS server_library_library_id_unique
     ON server_library(library_id);
+  CREATE TABLE IF NOT EXISTS server_restore_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    status TEXT NOT NULL CHECK (status IN ('normal', 'needs-reconciliation')),
+    artifact_id TEXT,
+    restored_at_ms INTEGER,
+    recovery_point TEXT
+  );
+  CREATE TABLE IF NOT EXISTS server_root_verification (
+    root_id TEXT PRIMARY KEY REFERENCES server_roots(root_id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('verified', 'needs-verification')),
+    updated_at_ms INTEGER NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS prototype_note (
     note_id TEXT PRIMARY KEY,
     text TEXT NOT NULL,
@@ -575,6 +587,8 @@ db.exec(`
     last_opened_at_ms INTEGER
   );
 `)
+
+db.prepare("INSERT OR IGNORE INTO server_restore_state(id, status) VALUES(1, 'normal')").run()
 
 const rootColumns = new Set(
   (db.prepare("PRAGMA table_info(server_roots)").all() as unknown as ReadonlyArray<{ name: string }>).map(
@@ -985,6 +999,7 @@ const interruptRunningBackupDrills = db.prepare(
 )
 const selectLibrary = db.prepare("SELECT library_id FROM server_library WHERE id = 1")
 const selectLibraryState = db.prepare("SELECT library_id, change_revision FROM server_library WHERE id = 1")
+const selectRestoreState = db.prepare("SELECT status FROM server_restore_state WHERE id = 1")
 const selectRootOperation = db.prepare("SELECT payload, result FROM root_operations WHERE operation_id = ?")
 const insertRoot = db.prepare(
   "INSERT INTO server_roots(library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')"
@@ -1514,6 +1529,11 @@ const reserveBackupArtifact = (
 ): BackupArtifactReservationOutcome => {
   db.exec("BEGIN IMMEDIATE")
   try {
+    const restoreState = selectRestoreState.get() as { status: "normal" | "needs-reconciliation" } | undefined
+    if (restoreState?.status === "needs-reconciliation") {
+      db.exec("ROLLBACK")
+      return { kind: "restore_pending" }
+    }
     const existing = selectBackupArtifactByOperation.get(request.operationId) as
       | Parameters<typeof backupArtifactRow>[0]
       | undefined
@@ -1879,6 +1899,10 @@ const startManualScan = (
   })
   db.exec("BEGIN IMMEDIATE")
   try {
+    const restoreState = selectRestoreState.get() as { status: "normal" | "needs-reconciliation" } | undefined
+    if (restoreState?.status === "needs-reconciliation") {
+      throw new Error("server restore requires root and destination reconciliation before scanning")
+    }
     const existing = selectScanOperation.get(request.epoch, request.operationId, request.epoch, request.operationId) as
       | { task_id: string; command_payload: string }
       | undefined
@@ -2599,6 +2623,10 @@ const bindEntry = (
 
   db.exec("BEGIN IMMEDIATE")
   try {
+    const restoreState = selectRestoreState.get() as { status: "normal" | "needs-reconciliation" } | undefined
+    if (restoreState?.status === "needs-reconciliation") {
+      throw new Error("server restore requires root and destination reconciliation before EH work")
+    }
     const previous = selectEntryOperation.get(request.epoch, request.operationId) as {
       entry_id: string
       payload: string

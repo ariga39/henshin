@@ -25,6 +25,12 @@ import {
   type RestoreArtifact
 } from "./maintenance/BackupRestoreArchive"
 import {
+  reconcileRestoredAuthority,
+  recoverInterruptedRestore,
+  completeRestoreCredentialDelivery,
+  restoreExistingAuthority
+} from "./maintenance/BackupRestore"
+import {
   NEWER_DATABASE_SCHEMA,
   BackupArtifactRow,
   BackupArtifactCompletionOutcome,
@@ -49,7 +55,7 @@ interface Bootstrap {
 
 const startupDiagnostic = (error: unknown): string | undefined => {
   if (error instanceof ServerOwnershipError) return error.message
-  if (error instanceof OwnerCredentialError) return error.message
+  if (error instanceof OwnerCredentialError || error instanceof BackupRestoreFailure) return error.message
   if (error instanceof DatabaseWorkerError) {
     if (error.message === NEWER_DATABASE_SCHEMA) return NEWER_DATABASE_SCHEMA
     return "server startup failed at database: database initialization failed"
@@ -58,6 +64,25 @@ const startupDiagnostic = (error: unknown): string | undefined => {
     return "server startup failed at readiness: server is unavailable"
   }
   return undefined
+}
+
+const writeStdout = async (value: string): Promise<void> => {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => {
+      reject(error)
+    }
+    process.stdout.once("error", onError)
+    try {
+      process.stdout.write(value, (error?: Error | null) => {
+        process.stdout.off("error", onError)
+        if (error === undefined || error === null) resolve()
+        else reject(error)
+      })
+    } catch (error) {
+      process.stdout.off("error", onError)
+      reject(error)
+    }
+  })
 }
 
 interface IndependentOptions {
@@ -72,7 +97,7 @@ const usage = (): string =>
   "       server.mjs backup-destination <list|register|replace> (--data-dir <directory> | --database <path>) [--name <name>] [--path <directory>] [--id <destination-id>] [--confirm]\n" +
   "       server.mjs backup create (--data-dir <directory> | --database <path>) --destination-id <destination-id> [--label <label>]\n" +
   "       server.mjs backup drill [list] (--data-dir <directory> | --database <path>) [--artifact-id <artifact-id>]\n" +
-  "       server.mjs backup restore [list|preview] (--data-dir <directory> | --database <path>) [--artifact-id <artifact-id>]"
+  "       server.mjs backup restore [list|preview|apply|reconcile] (--data-dir <directory> | --database <path>) [--artifact-id <artifact-id>] [--confirm]"
 
 interface BackupDestinationOptions {
   readonly command: "list" | "register" | "replace"
@@ -99,7 +124,7 @@ interface BackupDrillOptions {
 }
 
 interface BackupRestoreOptions {
-  readonly command: "list" | "preview"
+  readonly command: "list" | "preview" | "apply" | "reconcile"
   readonly dataDir?: string
   readonly database?: string
   readonly artifactId?: string
@@ -109,14 +134,14 @@ interface BackupRestoreOptions {
 const parseBackupRestoreOptions = (args: ReadonlyArray<string>): BackupRestoreOptions => {
   if (args[1] !== "restore") throw new Error(usage())
   const subcommand = args[2]
-  const command = subcommand === "list" || subcommand === "preview"
+  const command = subcommand === "list" || subcommand === "preview" || subcommand === "apply" || subcommand === "reconcile"
     ? subcommand
     : "preview"
   let dataDir: string | undefined
   let database: string | undefined
   let artifactId: string | undefined
   let confirmed = false
-  const firstOption = subcommand === "list" || subcommand === "preview" ? 3 : 2
+  const firstOption = subcommand === command ? 3 : 2
   for (let index = firstOption; index < args.length; index += 1) {
     switch (args[index]) {
       case "--data-dir":
@@ -141,9 +166,10 @@ const parseBackupRestoreOptions = (args: ReadonlyArray<string>): BackupRestoreOp
     }
   }
   if ((dataDir === undefined) === (database === undefined)) throw new Error(usage())
-  if (command === "preview" && artifactId === undefined) throw new Error(usage())
-  if (command === "list" && artifactId !== undefined) throw new Error(usage())
-  if (confirmed) throw new Error(usage())
+  if ((command === "preview" || command === "apply") && artifactId === undefined) throw new Error(usage())
+  if ((command === "list" || command === "reconcile") && artifactId !== undefined) throw new Error(usage())
+  if (command === "apply" && !confirmed) throw new Error("restore apply requires --confirm")
+  if ((command === "list" || command === "reconcile") && confirmed) throw new Error(usage())
   return { command, dataDir, database, artifactId, confirmed }
 }
 const parseBackupCreateOptions = (args: ReadonlyArray<string>): BackupCreateOptions => {
@@ -329,6 +355,7 @@ const resolveIndependentDatabasePath = async (options: Pick<IndependentOptions, 
           entry.name !== "server.sqlite" &&
           entry.name !== ".henshin-server-auth.sqlite" &&
           entry.name !== ".henshin-server-owner.sqlite" &&
+          !entry.name.startsWith(".henshin-rollback-") &&
           (entry.isFile() || entry.isSymbolicLink()) &&
           /\.(?:db|sqlite|sqlite3)$/iu.test(entry.name)
       )
@@ -390,11 +417,10 @@ const runManaged = async () => {
   let dbPath: string
   try {
     dbPath = await canonicalizeDatabasePath(bootstrap.dbPath)
+    await recoverInterruptedRestore(dbPath)
   } catch (error) {
     failStartup(
-      error instanceof ServerOwnershipError
-        ? error.message
-        : "server startup failed at data-directory: data directory is unavailable"
+      startupDiagnostic(error) ?? "server startup failed at data-directory: data directory is unavailable"
     )
     return
   }
@@ -435,8 +461,10 @@ const runIndependent = async (options: IndependentOptions): Promise<void> => {
     let guard
     try {
       guard = await acquireServerOwnership(dbPath)
-      const token = await writeOwnerCredential(dbPath, options.ownerCommand)
-      process.stdout.write(`owner_token=${token}\n`)
+      const recoveredToken = await recoverInterruptedRestore(dbPath, guard, options.ownerCommand)
+      const token = recoveredToken ?? await writeOwnerCredential(dbPath, options.ownerCommand)
+      await writeStdout(`owner_token=${token}\n`)
+      if (recoveredToken !== undefined) await completeRestoreCredentialDelivery(dbPath)
     } catch (error) {
       console.error(startupDiagnostic(error) ?? "server initialization failed")
       process.exitCode = 1
@@ -453,6 +481,7 @@ const runIndependent = async (options: IndependentOptions): Promise<void> => {
     // stopped rotation command cannot replace the credential between these
     // two operations.
     guard = await acquireServerOwnership(dbPath)
+    await recoverInterruptedRestore(dbPath, guard)
     const credential = await readOwnerCredential(dbPath)
     if (credential.databaseName !== path.basename(dbPath)) {
       throw new OwnerCredentialError(
@@ -563,6 +592,7 @@ const runDestinationWorker = async <A>(
   let guard: Awaited<ReturnType<typeof acquireServerOwnership>> | undefined
   try {
     guard = await acquireServerOwnership(dbPath)
+    await recoverInterruptedRestore(dbPath, guard)
     return await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function*() {
@@ -697,6 +727,7 @@ const runBackupRestoreCommand = async (options: BackupRestoreOptions): Promise<v
   const guard = await acquireServerOwnership(dbPath)
   try {
     await cleanupRestorePreviewStaging(path.dirname(dbPath))
+    await recoverInterruptedRestore(dbPath, guard)
     const target = currentIdentity(dbPath)
     const artifacts = listRestoreArtifacts(dbPath)
     if (options.command === "list") {
@@ -717,8 +748,30 @@ const runBackupRestoreCommand = async (options: BackupRestoreOptions): Promise<v
       process.stdout.write(JSON.stringify({ recovery_points: points }) + "\n")
       return
     }
+    if (options.command === "reconcile") {
+      process.stdout.write(JSON.stringify(await reconcileRestoredAuthority(dbPath)) + "\n")
+      return
+    }
     const artifact = restoreArtifact(artifacts, options.artifactId as string)
-    process.stdout.write(JSON.stringify(await readRestorePoint(artifact, target, path.dirname(dbPath))) + "\n")
+    if (options.command === "preview") {
+      process.stdout.write(JSON.stringify(await readRestorePoint(artifact, target, path.dirname(dbPath))) + "\n")
+      return
+    }
+    const restored = await restoreExistingAuthority({ dbPath, artifact, confirm: options.confirmed })
+    await writeStdout(JSON.stringify({
+      ...restored,
+      owner_token: restored.ownerToken,
+      ownerToken: undefined,
+      post_restore: {
+        status: "needs-reconciliation",
+        scans: "suspended",
+        backup_publication: "suspended",
+        mappings: "needs-verification",
+        eh_work: "suspended",
+        next_command: "backup restore reconcile"
+      }
+    }) + "\n")
+    await completeRestoreCredentialDelivery(dbPath)
   } finally {
     guard.close()
   }

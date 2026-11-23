@@ -145,6 +145,32 @@ export const writeOwnerCredential = async (dbPath: string, command: "initialize"
   }
 }
 
+/** Verify that a stopped restore can rotate the selected database credential. */
+export const assertOwnerCredentialWritable = async (dbPath: string): Promise<void> => {
+  const database = await openAuthDatabase(dbPath, false)
+  try {
+    const name = path.basename(dbPath)
+    const row = database.prepare("SELECT verifier, database_name FROM owner_credential WHERE id = 1").get() as
+      | { verifier: string; database_name: string }
+      | undefined
+    if (row === undefined || !/^[0-9a-f]{64}$/u.test(row.verifier) || row.database_name !== name) {
+      throw new OwnerCredentialError("server restore cannot rotate the selected database owner credential")
+    }
+    database.exec("BEGIN IMMEDIATE")
+    try {
+      database.prepare("UPDATE owner_credential SET verifier = verifier WHERE id = 1 AND database_name = ?").run(name)
+      database.exec("ROLLBACK")
+    } catch (error) {
+      try { database.exec("ROLLBACK") } catch { /* Preserve the write failure. */ }
+      throw new OwnerCredentialError(
+        `server restore cannot rotate the selected database owner credential: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+  } finally {
+    database.close()
+  }
+}
+
 export const readOwnerCredential = async (
   dbPath: string
 ): Promise<{ readonly verifier: string; readonly databaseName: string }> => {

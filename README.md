@@ -40,25 +40,6 @@ Choose a collection directory, confirm the preview, and start a scan to
 populate Library. The development build uses an ad hoc signature. Public
 distribution requires Developer ID signing and notarization.
 
-## Build and install the Windows x64 desktop package
-
-On a Windows x64 host with Node.js 24.19.0 and the repository's pinned pnpm,
-run these commands from the checkout.
-
-```powershell
-pnpm install --frozen-lockfile
-pnpm --filter @henshin/desktop package:windows
-```
-
-Extract `henshin-desktop-0.0.0-win32-x64.zip` from `dist/desktop/` to any
-directory, including one whose path contains spaces, and launch `Henshin.exe`.
-The portable directory includes the managed server and keeps its managed
-library under the normal Electron user-data directory, so saved roots and
-accepted books are available after closing and reopening the application.
-The adjacent `.sha256` file is the archive checksum. The development archive
-is explicitly unsigned because no Authenticode certificate is configured;
-public distribution requires release signing.
-
 ## Build the standalone server archive
 
 The repository build produces a platform-specific archive under
@@ -228,3 +209,65 @@ node apps/server/dist/server.mjs backup drill \
 node apps/server/dist/server.mjs backup drill list \
   --data-dir "$PWD/.henshin-server-data"
 ```
+
+### Restore an existing server authority
+
+Stop the service and all other writers before restoring. List the completed
+recovery points, then preview the selected artifact; the preview shows its
+snapshot time, instance/library identity, and estimated lost revision interval:
+
+```sh
+node apps/server/dist/server.mjs backup restore list \
+  --data-dir "$PWD/.henshin-server-data"
+node apps/server/dist/server.mjs backup restore preview \
+  --data-dir "$PWD/.henshin-server-data" \
+  --artifact-id <artifact-id>
+```
+
+Apply only after reviewing that output. The command requires `--confirm`,
+checks the existing target's instance and library identity, preserves a
+rollback copy, and prints a new `owner_token` on success. Save that token in a
+protected location; the pre-restore token is no longer valid:
+
+```sh
+node apps/server/dist/server.mjs backup restore apply \
+  --data-dir "$PWD/.henshin-server-data" \
+  --artifact-id <artifact-id> --confirm
+```
+
+If replacement is interrupted, do not delete the restore marker, its private
+recovery companion, rollback copy, or selected archive. Restart the service, or
+rerun a stopped restore command; startup and maintenance recovery inspect the
+atomically written marker (and its recovery companion if needed), then recover
+the previous target when installation did not finish. If both marker copies
+are unreadable, keep the target, rollback copy, staging directory, and archive
+intact and stop for the explicit restore recovery procedure; the server never
+guesses which database to replace. Inspect the result with
+`backup restore list` or `backup restore preview`. After a successful replacement,
+restart the service with the newly printed token and verify the recovered
+instance/history before resuming work. If the process stopped after installing
+the replacement but before printing a new token, startup keeps the restored
+service offline. Run `--rotate-owner` and save the printed token, then restart
+the service and reconnect clients. Restore preflight checks
+credential writability before the database replacement.
+
+Restored roots and destinations remain unverified, and scans, EH work, backup
+publication, and rotation remain suspended until their current paths and
+policy are checked. Run reconciliation only while the service is stopped:
+
+```sh
+node apps/server/dist/server.mjs backup restore reconcile \
+  --data-dir "$PWD/.henshin-server-data"
+```
+
+Resume normal work only after it reports `"status":"normal"`. A running
+service, a mismatched readable authority, a damaged archive, or a changed
+destination blocks replacement without overwriting the selected archive or
+collection files. Empty-target disaster recovery and independent cloning use
+separate operator workflows.
+
+The rollback copy is intentionally retained through verification and
+reconciliation. After the recovered service and its mappings are verified, an
+operator may remove only the matching `.henshin-rollback-*.sqlite` file and its
+`-wal`/`-shm` sidecars from the data directory; never remove an archive or a
+collection file as rollback cleanup.

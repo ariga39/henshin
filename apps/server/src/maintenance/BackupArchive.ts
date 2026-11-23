@@ -257,6 +257,9 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
     createdAtMs: Date.now()
   })
   if (reservation.kind !== "reserved" && reservation.kind !== "replayed") {
+    if (reservation.kind === "restore_pending") {
+      throw new Error("backup publication is suspended until restore reconciliation")
+    }
     throw new Error(`backup artifact reservation failed: ${reservation.kind}`)
   }
   const artifact = reservation.artifact
