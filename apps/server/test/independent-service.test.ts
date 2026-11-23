@@ -2,14 +2,16 @@ import { createServer } from "node:http"
 import { access, readFile, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { promisify } from "node:util"
 import { afterEach, describe, expect, it } from "vitest"
 
 const SERVER_PATH = process.env.HENSHIN_SERVER_ENTRYPOINT ?? fileURLToPath(new URL("../dist/server.mjs", import.meta.url))
 const SERVER_CWD = process.env.HENSHIN_SERVER_CWD ?? process.cwd()
 const READY_TIMEOUT_MS = 5_000
 const EXIT_TIMEOUT_MS = 5_000
+const execFileAsync = promisify(execFile)
 
 interface Attempt {
   readonly child: ChildProcessWithoutNullStreams
@@ -150,8 +152,34 @@ const startServer = async (
 
 const stopServer = async (server: RunningServer): Promise<void> => {
   server.child.kill("SIGTERM")
-  // Effect's default teardown maps a signal interruption to exit code 130.
-  await expect(waitForExit(server.child, EXIT_TIMEOUT_MS)).resolves.toEqual({ code: 130, signal: null })
+  // POSIX runtimes report Effect's signal interruption as 130. Windows
+  // reports the supported child termination as SIGTERM.
+  await expect(waitForExit(server.child, EXIT_TIMEOUT_MS)).resolves.toEqual(
+    process.platform === "win32"
+      ? { code: null, signal: "SIGTERM" }
+      : { code: 130, signal: null }
+  )
+}
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")
+
+const expectProtectedOwnerState = async (authPath: string): Promise<void> => {
+  if (process.platform !== "win32") {
+    expect((await stat(authPath)).mode & 0o777).toBe(0o600)
+    return
+  }
+
+  const [{ stdout: acl }, { stdout: identity }] = await Promise.all([
+    execFileAsync("icacls", [authPath], { windowsHide: true }),
+    execFileAsync("whoami", [], { windowsHide: true })
+  ])
+  const account = identity.trim().split(/\\/u).at(-1)
+  if (account === undefined || account.length === 0) throw new Error("Windows identity was unavailable")
+  const currentUser = new RegExp(`(?:^|\\r?\\n)\\s*${escapeRegExp(account)}:\\s+.*\\((?:F|M)\\)`, "iu")
+  expect(acl).toMatch(currentUser)
+  expect(acl).not.toMatch(
+    /(?:^|\r?\n)\s*(?:Everyone|BUILTIN\\Users|NT AUTHORITY\\Authenticated Users):\s+.*\((?:F|M|W)\)/iu
+  )
 }
 
 const expectUsageFailure = async (args: ReadonlyArray<string>): Promise<void> => {
@@ -183,7 +211,7 @@ describe("independent foreground service", () => {
     const authPath = path.join(dataDir, ".henshin-server-auth.sqlite")
     const authState = await readFile(authPath)
     expect(authState.includes(Buffer.from(initialized.token))).toBe(false)
-    expect((await stat(authPath)).mode & 0o777).toBe(0o600)
+    await expectProtectedOwnerState(authPath)
 
     const first = await startServer(["--data-dir", dataDir], port)
     expect(first.stdout()).not.toContain(initialized.token)
