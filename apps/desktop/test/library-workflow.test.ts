@@ -80,6 +80,7 @@ describe("library renderer workflow", () => {
         calls += 1
         return Effect.succeed({ ok: true as const, data: accepted(entryAId) })
       },
+      status: () => Effect.succeed({ ok: true as const, data: null }),
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     viewStore.set({
@@ -149,31 +150,35 @@ describe("library renderer workflow", () => {
     })
   })
 
-  it("follows main's active action and shows its eventual result under the launched profile", async () => {
+  it("follows main's active action through status without resubmitting Open", async () => {
     let resolveFirst!: (value: Result<OpenBookIpcResult>) => void
     const first = new Promise<Result<OpenBookIpcResult>>((resolve) => { resolveFirst = resolve })
+    let resolveStatus!: (value: Result<OpenBookIpcResult | null>) => void
+    const statusResult = new Promise<Result<OpenBookIpcResult | null>>((resolve) => { resolveStatus = resolve })
     const calls: Array<{ readonly entry_id: string; readonly profile_id: string; readonly action_id: string }> = []
+    const statusCalls: Array<{ readonly entry_id?: string; readonly action_id?: string }> = []
     const client = LibraryClient.of({
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
       open: (input) => {
         calls.push(input)
         return calls.length === 1
           ? Effect.promise(() => first)
-          : calls.length === 2
-            ? Effect.succeed({
-              ok: true as const,
-              data: {
-                action_id: calls[0]!.action_id,
-                entry_id: input.entry_id,
-                profile_id: profileId,
-                status: "in-flight" as const,
-                message: "another reader handoff is already opening this entry; follow the active action",
-                event_durable: false
-              }
-            })
-            : Effect.promise(() => first)
+          : Effect.succeed({
+            ok: true as const,
+            data: {
+              action_id: calls[0]!.action_id,
+              entry_id: input.entry_id,
+              profile_id: profileId,
+              status: "in-flight" as const,
+              message: "another reader handoff is already opening this entry; follow the active action",
+              event_durable: false
+            }
+          })
       },
-      status: () => Effect.succeed({ ok: true as const, data: null }),
+      status: (input) => {
+        statusCalls.push(input)
+        return Effect.promise(() => statusResult)
+      },
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     viewStore.set({
@@ -194,12 +199,12 @@ describe("library renderer workflow", () => {
 
     const firstRequest = calls[0]
     const secondRequest = calls[1]
-    const followRequest = calls[2]
     expect(firstRequest).toMatchObject({ entry_id: entryAId, profile_id: profileId })
     expect(secondRequest).toMatchObject({ entry_id: entryAId, profile_id: otherProfileId })
     if (firstRequest === undefined || secondRequest === undefined) throw new Error("expected both renderer requests")
     expect(secondRequest.action_id).not.toBe(firstRequest.action_id)
-    expect(followRequest).toMatchObject({ entry_id: entryAId, profile_id: profileId, action_id: firstRequest.action_id })
+    expect(calls).toHaveLength(2)
+    expect(statusCalls).toEqual([{ action_id: firstRequest.action_id }])
     expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
       profile_id: profileId,
       status: "loading",
@@ -211,12 +216,66 @@ describe("library renderer workflow", () => {
       }
     })
 
+    resolveStatus({ ok: true, data: accepted(entryAId, firstRequest.action_id) })
     resolveFirst({ ok: true, data: accepted(entryAId, firstRequest.action_id) })
     await Promise.all([firstWindow, secondWindow])
     expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
       profile_id: profileId,
       status: "accepted",
       result: { action_id: firstRequest.action_id, profile_id: profileId, status: "accepted" }
+    })
+  })
+
+  it("reports unknown when active-action status lookup fails without resubmitting Open", async () => {
+    const openCalls: Array<{ readonly entry_id: string; readonly profile_id: string; readonly action_id: string }> = []
+    const statusCalls: Array<{ readonly action_id?: string; readonly entry_id?: string }> = []
+    const client = LibraryClient.of({
+      search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
+      open: (input) => {
+        openCalls.push(input)
+        return Effect.succeed({
+          ok: true as const,
+          data: {
+            action_id: input.action_id,
+            entry_id: input.entry_id,
+            profile_id: input.profile_id,
+            status: "in-flight" as const,
+            message: "another reader handoff is already opening this entry; follow the active action",
+            event_durable: false
+          }
+        })
+      },
+      status: (input) => {
+        statusCalls.push(input)
+        return Effect.succeed({
+          ok: false as const,
+          error: { code: "transport", message: "status lookup interrupted", retryable: true }
+        })
+      },
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      connection: { state: "connected", instance_id: namespaceId, epoch: "99999999-9999-4999-8999-999999999999", reason: null },
+      connection_generation: 7,
+      library_entries: [entry(entryAId, "book-a")],
+      library_selected_entry_id: entryAId,
+      library_open_profile_id: profileId
+    })
+
+    await run(openSelectedLibraryEntry, client)
+
+    expect(openCalls).toHaveLength(1)
+    expect(statusCalls).toEqual([{ action_id: openCalls[0]!.action_id }])
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
+      status: "unknown",
+      result: {
+        action_id: openCalls[0]!.action_id,
+        entry_id: entryAId,
+        profile_id: profileId,
+        status: "unknown",
+        message: "The reader handoff outcome is temporarily unavailable. Retry status before opening again.",
+        event_durable: false
+      }
     })
   })
 

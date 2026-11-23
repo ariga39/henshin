@@ -42,6 +42,8 @@ afterEach(() => {
     library_entries: [],
     library_status: "idle",
     library_selected_entry_id: null,
+    library_open_profile_id: null,
+    library_open_states: [],
     reader_profiles: [],
     reader_profiles_status: "idle",
     reader_profiles_error: null
