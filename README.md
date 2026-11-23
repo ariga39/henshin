@@ -93,3 +93,31 @@ and passes the bearer token over a private stdin channel. Starting the server
 standalone requires writing one JSON bootstrap line
 (`{"bearerToken":"...","dbPath":"..."}`) to its stdin; it reports readiness on
 stdout.
+
+### Run the independent foreground service
+
+Independent mode is a foreground Node process and does not depend on Electron.
+Create its data directory, initialize its owner credential once, then start it
+on a configured loopback port:
+
+```sh
+mkdir -p .henshin-server-data
+CI=true fnm exec --using=24 pnpm --filter @henshin/server build
+CI=true fnm exec --using=24 pnpm --filter @henshin/server start -- \
+  --data-dir "$PWD/.henshin-server-data" --initialize-owner
+# Save the owner_token printed by the initialization command locally.
+CI=true fnm exec --using=24 pnpm --filter @henshin/server start -- \
+  --data-dir "$PWD/.henshin-server-data" --port 4317
+```
+
+The service binds `127.0.0.1:4317` and requires the saved token as a bearer
+credential on every API request. Only a verifier is persisted in the restricted
+server authentication state; the token is not accepted through process
+arguments, environment variables, or logs. Restarting the foreground process
+keeps the database instance ID and creates a new authority epoch.
+
+To reuse a database created by managed desktop mode, select its existing file
+explicitly on both commands, for example
+`--database "$PWD/.henshin-server-data/managed-library.db"`. A data directory
+containing a non-default database is not silently paired with a new empty
+`server.sqlite` library.

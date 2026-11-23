@@ -3,10 +3,11 @@ import { randomUUID } from "node:crypto"
 import { Effect, Layer, Redacted } from "effect"
 import { Authentication, AuthenticationRequired, RequestContext } from "@henshin/contracts"
 import { AuthConfig, ServerState } from "../identity"
+import { hashBearerToken } from "../owner-credential"
 
 const constantTimeEqual = (left: string, right: string): boolean => {
-  const a = Buffer.from(left, "utf8")
-  const b = Buffer.from(right, "utf8")
+  const a = Buffer.from(left, "hex")
+  const b = Buffer.from(right, "hex")
   if (a.length !== b.length) return false
   return timingSafeEqual(a, b)
 }
@@ -25,7 +26,7 @@ export const AuthenticationLayer = Layer.effect(
     return Authentication.of({
       bearer: Effect.fn("Authentication.bearer")(function*(httpEffect, { credential }) {
         const presented = Redacted.value(credential)
-        if (!constantTimeEqual(presented, Redacted.value(config.token))) {
+        if (!constantTimeEqual(hashBearerToken(presented), Redacted.value(config.token))) {
           return yield* new AuthenticationRequired({
             code: "authentication_required",
             message: "Missing or invalid bearer token",
