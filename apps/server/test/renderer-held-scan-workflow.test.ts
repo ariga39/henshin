@@ -238,6 +238,8 @@ const scanClientWith = (overrides: Partial<ScanReviewClient["Service"]> = {}): S
 function libraryClientWith(overrides: Partial<LibraryClient["Service"]> = {}): LibraryClient["Service"] {
   return LibraryClient.of({
     search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "0" } }),
+    open: () => Effect.succeed({ ok: false as const, error: { code: "open_not_used", message: "not used", retryable: false } }),
+    status: () => Effect.succeed({ ok: true as const, data: null }),
     getThumbnail: () => Effect.succeed({ ok: false as const, error: { code: "thumbnail_missing", message: "not used", retryable: false } }),
     ...overrides
   })
