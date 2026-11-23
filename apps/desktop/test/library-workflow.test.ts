@@ -6,7 +6,10 @@ import {
   chooseLibraryOpenProfile,
   libraryOpenStateFor,
   loadActiveLibraryOpenState,
+  loadLibraryEntry,
+  removeLibraryPersonalTitle,
   openSelectedLibraryEntry,
+  saveLibraryPersonalTitle,
   searchLibrary,
   selectLibraryEntry,
   updateLibraryNote
@@ -65,6 +68,7 @@ const run = <A>(effect: Effect.Effect<A, unknown, LibraryClient>, client: Librar
 const makeLibraryClient = (overrides: Partial<LibraryClient["Service"]>): LibraryClient["Service"] => LibraryClient.of({
   entry: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
   note: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
+  updatePersonalTitle: () => Effect.succeed({ ok: false as const, error: { code: "not_used", message: "not used", retryable: false } }),
   search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
   open: () => Effect.succeed({ ok: true as const, data: accepted(entryAId) }),
   status: () => Effect.succeed({ ok: true as const, data: null }),

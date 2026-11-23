@@ -51,6 +51,8 @@
   text-align: left;
 }
 .library-entry-details:focus-visible { outline: 2px solid #17554d; outline-offset: .2rem; }
+.library-details { border-top: 1px solid #dce2df; margin-top: 1rem; padding-top: .75rem; }
+.library-details h3 { margin: 0; }
 .library-cover-frame, .library-cover-image, .library-cover-placeholder {
   width: 4.5rem;
   height: 6.75rem;

@@ -2,6 +2,7 @@ import { Deferred, Effect, Fiber, Option } from "effect"
 import { localMappingPreviewCanActivate } from "@henshin/contracts"
 import type {
   ConnectionStatusView,
+  LibraryEntryDetails,
   RootPreviewRequest,
   RootPreviewResult,
   ScanTask,
@@ -1260,16 +1261,21 @@ export const loadLibraryEntry = (entryId: string) =>
       library_entry_error: null,
       library_note_status: "loading",
       library_note_error: null,
-      library_note_server_text: null
+      library_note_server_text: null,
+      library_title_status: "idle",
+      library_title_error: null
     }))
     const result = yield* client.entry({ entry_id: entryId })
-    if (viewStore.getState().library_selected_entry_id !== entryId) return
+    const current = viewStore.getState()
+    if (current.library_selected_entry_id !== entryId) return
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({
         library_entry_status: "error",
         library_entry_error: result.error.message,
         library_note_status: "error",
-        library_note_error: result.error.message
+        library_note_error: result.error.message,
+        library_title_status: "error",
+        library_title_error: result.error.message
       }))
       return
     }
@@ -1280,7 +1286,10 @@ export const loadLibraryEntry = (entryId: string) =>
       library_note_text: result.data.note?.text ?? "",
       library_note_status: "idle",
       library_note_error: null,
-      library_note_server_text: null
+      library_note_server_text: null,
+      library_title_draft: result.data.title,
+      library_title_status: "idle",
+      library_title_error: null
     }))
   })
 
@@ -1300,7 +1309,10 @@ export const selectLibraryEntry = (entryId: string) =>
       library_note_text: "",
       library_note_status: "idle",
       library_note_error: null,
-      library_note_server_text: null
+      library_note_server_text: null,
+      library_title_draft: "",
+      library_title_status: "idle",
+      library_title_error: null
     }))
     yield* loadLibraryEntry(entryId)
   })
@@ -1311,7 +1323,7 @@ export const updateLibraryNote = (text: string) =>
     const state = viewStore.getState()
     const entry = state.library_entry
     const entryId = state.library_selected_entry_id
-    if (entry === null || entryId === null) return
+    if (entry === null || entryId === null || entry.entry_id !== entryId) return
     const expectedDecisionVersion = entry.decision_version
     yield* Effect.sync(() => viewStore.set({ library_note_status: "loading", library_note_error: null }))
     const result = yield* client.note({
@@ -1348,6 +1360,62 @@ export const updateLibraryNote = (text: string) =>
       library_note_server_text: null
     }))
   })
+
+const replaceLibraryTitle = (entry: LibraryEntryDetails): void => {
+  const state = viewStore.getState()
+  viewStore.set({
+    library_entry: entry,
+    library_entries: state.library_entries.map((item) => item.entry_id === entry.entry_id
+      ? { ...item, title: entry.title, title_override: entry.title_override }
+      : item),
+    library_title_draft: entry.title
+  })
+}
+
+export const saveLibraryPersonalTitle = (title: string) =>
+  Effect.gen(function*() {
+    const client = yield* LibraryClient
+    const state = viewStore.getState()
+    const entry = state.library_entry
+    const entryId = state.library_selected_entry_id
+    if (entry === null || entryId === null || entry.entry_id !== entryId) return
+    yield* Effect.sync(() => viewStore.set({ library_title_status: "loading", library_title_error: null }))
+    const result = yield* client.updatePersonalTitle({
+      entry_id: entryId,
+      expected_decision_version: entry.decision_version,
+      command: { type: "set-personal-title", title }
+    })
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({ library_title_status: "error", library_title_error: result.error.message }))
+      return
+    }
+    yield* Effect.sync(() => {
+      replaceLibraryTitle(result.data.entry)
+      viewStore.set({ library_title_status: "idle", library_title_error: null })
+    })
+  })
+
+export const removeLibraryPersonalTitle = Effect.gen(function*() {
+  const client = yield* LibraryClient
+  const state = viewStore.getState()
+  const entry = state.library_entry
+  const entryId = state.library_selected_entry_id
+  if (entry === null || entryId === null || entry.entry_id !== entryId) return
+  yield* Effect.sync(() => viewStore.set({ library_title_status: "loading", library_title_error: null }))
+  const result = yield* client.updatePersonalTitle({
+    entry_id: entryId,
+    expected_decision_version: entry.decision_version,
+    command: { type: "remove-personal-title" }
+  })
+  if (!result.ok) {
+    yield* Effect.sync(() => viewStore.set({ library_title_status: "error", library_title_error: result.error.message }))
+    return
+  }
+  yield* Effect.sync(() => {
+    replaceLibraryTitle(result.data.entry)
+    viewStore.set({ library_title_status: "idle", library_title_error: null })
+  })
+})
 
 export const chooseLibraryOpenProfile = (profileId: string) => Effect.sync(() => {
   const state = viewStore.getState()

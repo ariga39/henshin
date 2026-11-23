@@ -95,19 +95,103 @@ test("renders a decoded server cover and keeps an unavailable neighbor usable", 
     await expect(unavailableEntry.getByTestId("library-cover-placeholder")).toHaveAttribute("aria-hidden", "true")
     await expect(unavailableEntry).toContainText("unavailable-book")
 
-    await window.getByTestId("library-refresh").click()
-    await expect(decodedEntry.getByTestId("library-cover-image")).toBeVisible({ timeout: 30_000 })
-    await expect(unavailableEntry.getByTestId("library-cover-placeholder")).toContainText("Cover unavailable")
+    await decodedEntry.getByRole("button", { name: /Open details/ }).click()
 
-    const displayedSrc = await stableImageSrc(decodedEntry.getByTestId("library-cover-image"))
-    const serverPid = await bundledServerPid(app)
+    await app.close()
+    const reopened = await launch(dbPath)
+    await expect(reopened.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await reopened.window.getByTestId("open-library").click()
+    const reopenedEntry = reopened.window.getByTestId("library-entry").filter({ hasText: "decoded-book" })
+    await expect(reopenedEntry).toBeVisible()
+
+    await reopened.window.getByTestId("library-refresh").click()
+    await expect(reopenedEntry.getByTestId("library-cover-image")).toBeVisible({ timeout: 30_000 })
+    await expect(reopened.window.getByTestId("library-entry").filter({ hasText: "unavailable-book" }).getByTestId("library-cover-placeholder")).toContainText("Cover unavailable")
+
+    const displayedSrc = await stableImageSrc(reopenedEntry.getByTestId("library-cover-image"))
+    const serverPid = await bundledServerPid(reopened.app)
     if (serverPid === null) throw new Error("bundled server process was not found")
     process.kill(serverPid, "SIGTERM")
-    await expect.poll(() => bundledServerPid(app), { timeout: 5_000 }).toBeNull()
-    await window.getByTestId("library-refresh").click()
-    await expect(window.getByRole("alert")).toContainText("Could not load library")
-    await expect(decodedEntry.getByTestId("library-cover-image")).toBeVisible()
-    await expect(decodedEntry.getByTestId("library-cover-image")).toHaveAttribute("src", displayedSrc ?? "")
+    await expect.poll(() => bundledServerPid(reopened.app), { timeout: 5_000 }).toBeNull()
+    await reopened.window.getByTestId("library-refresh").click()
+    await expect(reopened.window.getByRole("alert")).toContainText("Could not load library")
+    await expect(reopenedEntry.getByTestId("library-cover-image")).toBeVisible()
+    await expect(reopenedEntry.getByTestId("library-cover-image")).toHaveAttribute("src", displayedSrc ?? "")
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+  }
+})
+
+test("edits, rejects stale title saves, removes, and searches the personal title", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-title-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-title-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+
+  try {
+    const book = path.join(fixtureDirectory, "original-book")
+    await mkdir(book)
+    await writeFile(path.join(book, "001.jpg"), "page")
+
+    const { app, window } = await launch(dbPath)
+    await expect(window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await window.getByTestId("root-preview-submit").click()
+    await window.getByTestId("root-label").fill("Personal title")
+    await window.getByTestId("root-save").click()
+    await window.getByTestId("root-saved-preview").click()
+    await window.getByTestId("scan-hold-new-discoveries").uncheck()
+    await window.getByTestId("start-held-scan").click()
+    await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(1, { timeout: 30_000 })
+
+    const entry = window.getByTestId("library-entry").filter({ hasText: "original-book" })
+    await entry.getByRole("button", { name: /Open details/ }).click()
+    const details = window.getByTestId("library-details")
+    const title = details.getByTestId("entry-personal-title")
+    const entryId = await entry.getByTestId("library-entry-id").textContent()
+    if (entryId === null) throw new Error("expected rendered entry id")
+    await title.fill("Desktop title")
+    await details.getByTestId("entry-personal-title-save").click()
+    await expect(details.getByTestId("entry-effective-title")).toContainText("Display title: Desktop title")
+    await expect(entry).toContainText("Desktop title")
+
+    await title.fill("")
+    await details.getByTestId("entry-personal-title-save").click()
+    await expect(details.getByTestId("entry-effective-title")).toContainText("Display title: Untitled")
+
+    const concurrent = await window.evaluate(async ({ entryId }) => {
+      return await (globalThis as unknown as {
+        readonly henshinLibrary: {
+          readonly updatePersonalTitle: (input: unknown) => Promise<{ readonly ok: boolean }>
+        }
+      }).henshinLibrary.updatePersonalTitle({
+        entry_id: entryId,
+        expected_decision_version: "3",
+        command: { type: "set-personal-title", title: "Concurrent title" }
+      })
+    }, { entryId })
+    expect(concurrent.ok).toBe(true)
+
+    await title.fill("Stale title")
+    await details.getByTestId("entry-personal-title-save").click()
+    await expect(details.getByTestId("entry-personal-title-error")).toBeVisible()
+    await details.getByTestId("entry-personal-title-error").getByRole("button", { name: "Reload current value" }).click()
+    await expect(title).toHaveValue("Concurrent title")
+
+    await details.getByTestId("entry-personal-title-remove").click()
+    await expect(details.getByTestId("entry-effective-title")).toContainText("Display title: original-book")
+    await window.getByTestId("library-search").fill("original-book")
+    await window.getByTestId("library-search-submit").click()
+    await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(1)
+    await expect(window.getByTestId("library-entry")).toContainText("original-book")
+
+    await app.close()
+    const reopened = await launch(dbPath)
+    await expect(reopened.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await reopened.window.getByTestId("open-library").click()
+    const reopenedEntry = reopened.window.getByTestId("library-entry").filter({ hasText: "original-book" })
+    await reopenedEntry.getByRole("button", { name: /Open details/ }).click()
+    await expect(reopened.window.getByTestId("library-details").getByTestId("entry-effective-title")).toContainText("Display title: original-book")
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })

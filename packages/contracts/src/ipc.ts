@@ -9,6 +9,7 @@ import {
   LocalMappingPreview
 } from "./root"
 import { LibrarySearchRequest, ReplacementResolutionCommand } from "./library"
+import { RemovePersonalTitleCommand, SetPersonalTitleCommand } from "./eh"
 import { ThumbnailKey } from "./thumbnail"
 import { ReleaseHoldCommand } from "./review"
 import type {
@@ -203,6 +204,12 @@ export const LibraryNoteIpcRequest = Schema.Struct({
   expected_decision_version: Revision
 })
 export type LibraryNoteIpcRequest = typeof LibraryNoteIpcRequest.Type
+export const LibraryPersonalTitleIpcRequest = Schema.Struct({
+  entry_id: Uuid,
+  expected_decision_version: Revision,
+  command: Schema.Union([SetPersonalTitleCommand, RemovePersonalTitleCommand])
+})
+export type LibraryPersonalTitleIpcRequest = typeof LibraryPersonalTitleIpcRequest.Type
 
 export const ThumbnailGetIpcRequest = Schema.Struct({ key: ThumbnailKey })
 export type ThumbnailGetIpcRequest = typeof ThumbnailGetIpcRequest.Type

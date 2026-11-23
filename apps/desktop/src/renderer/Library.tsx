@@ -9,11 +9,14 @@ import {
   chooseLibraryOpenProfile,
   libraryOpenStateFor,
   loadLibrary,
+  loadLibraryEntry,
   loadActiveLibraryOpenState,
   loadReaderProfiles,
   openSelectedLibraryEntry,
   searchLibrary,
   updateLibraryNote,
+  removeLibraryPersonalTitle,
+  saveLibraryPersonalTitle,
   selectLibraryEntry,
   showSetup
 } from "./workflows"
@@ -197,6 +200,10 @@ export const LibraryScreen = () => {
     ? null
     : state.reader_profiles.find((profile) => profile.profile_id === openResult.profile_id) ?? null
   const selectedEntryCanOpen = selectedEntry?.state === "accepted"
+  const selectedDetails = selectedEntry !== null && state.library_entry?.entry_id === selectedEntry.entry_id
+    ? state.library_entry
+    : selectedEntry
+  const hasPersonalTitle = selectedDetails?.title_override !== null && selectedDetails?.title_override !== undefined
 
   return (
     <main className="collection" data-testid="library-screen">
@@ -281,7 +288,7 @@ export const LibraryScreen = () => {
                 aria-label={`Open details for ${entry.title}`}
                 onClick={() => void runtime.runPromise(selectLibraryEntry(entry.entry_id))}
               >
-                <strong>{entry.title}</strong>
+                <strong>{entry.title === "" ? "Untitled" : entry.title}</strong>
                 <span>{entry.source_path}</span>
                 {entry.match_fields.length > 0 && (
                   <small data-testid="library-match-evidence">
@@ -301,7 +308,7 @@ export const LibraryScreen = () => {
         )}
         {selectedEntry !== null && (
           <section aria-labelledby="library-entry-details-heading" data-testid="library-details">
-            <h3 id="library-entry-details-heading">{selectedEntry.title}</h3>
+            <h3 id="library-entry-details-heading">{selectedDetails?.title === "" ? "Untitled" : selectedDetails?.title}</h3>
             {state.library_entry_status === "loading" && (
               <p role="status" data-testid="entry-metadata-pending">Loading saved entry details…</p>
             )}
@@ -309,46 +316,77 @@ export const LibraryScreen = () => {
               <p role="alert">Could not load entry details: {state.library_entry_error}</p>
             )}
             {state.library_entry_status === "ready" && state.library_entry?.entry_id === selectedEntry.entry_id && (
-              <form
-                data-testid="entry-note-form"
-                onSubmit={(event) => {
+              <>
+                <p>Indexed {selectedEntry.kind}; gallery binding is independent of upstream metadata refresh.</p>
+                <p data-testid="entry-effective-title">
+                  Display title: {selectedDetails?.title === "" ? "Untitled" : selectedDetails?.title} ({hasPersonalTitle ? "personal override" : "current fallback"})
+                </p>
+                <form onSubmit={(event) => {
                   event.preventDefault()
-                  void runtime.runPromise(updateLibraryNote(state.library_note_text))
-                }}
-              >
-                <label htmlFor={`entry-note-${selectedEntry.entry_id}`}>Private note</label>
-                <textarea
-                  id={`entry-note-${selectedEntry.entry_id}`}
-                  data-testid="entry-note"
-                  value={state.library_note_text}
-                  onChange={(event) => viewStore.set({ library_note_text: event.target.value })}
-                  disabled={state.library_note_status === "loading"}
-                  rows={5}
-                />
-                <button
-                  type="submit"
-                  data-testid="entry-note-save"
-                  disabled={state.library_note_status === "loading"}
-                >
-                  {state.library_note_status === "loading" ? "Saving…" : "Save note"}
-                </button>
-                <button
-                  type="button"
-                  data-testid="entry-note-clear"
-                  disabled={state.library_note_status === "loading" || state.library_note_text.length === 0}
-                  onClick={() => void runtime.runPromise(updateLibraryNote(""))}
-                >
-                  Clear note
-                </button>
-                {state.library_note_error !== null && (
-                  <p role="alert" data-testid="entry-note-error">{state.library_note_error}</p>
-                )}
-                {state.library_note_server_text !== null && (
-                  <p data-testid="entry-note-current-server">
-                    Current server note: {state.library_note_server_text || "(empty)"}
+                  void runtime.runPromise(saveLibraryPersonalTitle(state.library_title_draft))
+                }}>
+                  <label htmlFor={`personal-title-${selectedEntry.entry_id}`}>Personal title</label>
+                  <input
+                    id={`personal-title-${selectedEntry.entry_id}`}
+                    data-testid="entry-personal-title"
+                    value={state.library_title_draft}
+                    onChange={(event) => viewStore.set({ library_title_draft: event.target.value })}
+                    placeholder="Leave empty for Untitled"
+                    disabled={state.library_title_status === "loading"}
+                  />
+                  <button type="submit" data-testid="entry-personal-title-save" disabled={state.library_title_status === "loading"}>
+                    {state.library_title_status === "loading" ? "Saving…" : "Save title"}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="entry-personal-title-remove"
+                    disabled={state.library_title_status === "loading" || !hasPersonalTitle}
+                    onClick={() => void runtime.runPromise(removeLibraryPersonalTitle)}
+                  >
+                    Remove override
+                  </button>
+                </form>
+                {state.library_title_error !== null && (
+                  <p role="alert" data-testid="entry-personal-title-error">
+                    {state.library_title_error}{" "}
+                    <button type="button" onClick={() => void runtime.runPromise(loadLibraryEntry(selectedEntry.entry_id))}>
+                      Reload current value
+                    </button>
                   </p>
                 )}
-              </form>
+                <form
+                  data-testid="entry-note-form"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    void runtime.runPromise(updateLibraryNote(state.library_note_text))
+                  }}
+                >
+                  <label htmlFor={`entry-note-${selectedEntry.entry_id}`}>Private note</label>
+                  <textarea
+                    id={`entry-note-${selectedEntry.entry_id}`}
+                    data-testid="entry-note"
+                    value={state.library_note_text}
+                    onChange={(event) => viewStore.set({ library_note_text: event.target.value })}
+                    disabled={state.library_note_status === "loading"}
+                    rows={5}
+                  />
+                  <button type="submit" data-testid="entry-note-save" disabled={state.library_note_status === "loading"}>
+                    {state.library_note_status === "loading" ? "Saving…" : "Save note"}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="entry-note-clear"
+                    disabled={state.library_note_status === "loading" || state.library_note_text.length === 0}
+                    onClick={() => void runtime.runPromise(updateLibraryNote(""))}
+                  >
+                    Clear note
+                  </button>
+                  {state.library_note_error !== null && <p role="alert" data-testid="entry-note-error">{state.library_note_error}</p>}
+                  {state.library_note_server_text !== null && (
+                    <p data-testid="entry-note-current-server">Current server note: {state.library_note_server_text || "(empty)"}</p>
+                  )}
+                </form>
+              </>
             )}
             {selectedEntryCanOpen ? (
               <>

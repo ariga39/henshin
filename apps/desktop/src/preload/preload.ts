@@ -16,6 +16,7 @@ import type {
   RecoverOpenJournalIpcRequest,
   LibrarySearchIpcRequest,
   LibraryNoteIpcRequest
+  LibraryPersonalTitleIpcRequest
 } from "@henshin/contracts"
 import { IpcChannels } from "@henshin/contracts/channels"
 
@@ -58,6 +59,8 @@ contextBridge.exposeInMainWorld("henshinLibrary", {
     ipcRenderer.invoke(IpcChannels.libraryEntry, input),
   note: (input: LibraryNoteIpcRequest) =>
     ipcRenderer.invoke(IpcChannels.libraryNote, input),
+  updatePersonalTitle: (input: LibraryPersonalTitleIpcRequest) =>
+    ipcRenderer.invoke(IpcChannels.libraryPersonalTitle, input),
   open: (input: OpenBookIpcRequest) => ipcRenderer.invoke(IpcChannels.openBook, input),
   status: (input: OpenBookStatusIpcRequest) => ipcRenderer.invoke(IpcChannels.openBookStatus, input),
   onOpenStateChanged: (listener: () => void) => {

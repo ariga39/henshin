@@ -10,6 +10,8 @@ import type {
   LibraryEntryDetails,
   LibraryNoteIpcRequest,
   EntryCommandResult,
+  EntryCommandResult,
+  LibraryPersonalTitleIpcRequest,
   OpenBookIpcRequest,
   OpenBookIpcResult,
   OpenBookStatusIpcRequest,
@@ -164,6 +166,7 @@ export interface LibraryBridge {
   }): Promise<Result<LibraryEntryPage>>
   entry(input: { readonly entry_id: string }): Promise<Result<LibraryEntryDetails>>
   note(input: LibraryNoteIpcRequest): Promise<Result<EntryCommandResult>>
+  updatePersonalTitle(input: LibraryPersonalTitleIpcRequest): Promise<Result<EntryCommandResult>>
   open(input: OpenBookIpcRequest): Promise<Result<OpenBookIpcResult>>
   status(input: OpenBookStatusIpcRequest): Promise<Result<OpenBookIpcResult | null>>
   onOpenStateChanged(listener: () => void): () => void
@@ -335,6 +338,7 @@ export class LibraryClient extends Context.Service<
     }) => Effect.Effect<Result<LibraryEntryPage>>
     readonly entry: (input: { readonly entry_id: string }) => Effect.Effect<Result<LibraryEntryDetails>>
     readonly note: (input: LibraryNoteIpcRequest) => Effect.Effect<Result<EntryCommandResult>>
+    readonly updatePersonalTitle: (input: LibraryPersonalTitleIpcRequest) => Effect.Effect<Result<EntryCommandResult>>
     readonly open: (input: OpenBookIpcRequest) => Effect.Effect<Result<OpenBookIpcResult>>
     readonly status: (input: OpenBookStatusIpcRequest) => Effect.Effect<Result<OpenBookIpcResult | null>>
     readonly getThumbnail: (key: ThumbnailKey) => Effect.Effect<Result<Uint8Array>>
@@ -346,6 +350,7 @@ export class LibraryClient extends Context.Service<
       search: (input) => callIpc(() => window.henshinLibrary.search(input)),
       entry: (input) => callIpc(() => window.henshinLibrary.entry(input)),
       note: (input) => callIpc(() => window.henshinLibrary.note(input)),
+      updatePersonalTitle: (input) => callIpc(() => window.henshinLibrary.updatePersonalTitle(input)),
       open: (input) => callIpc(() => window.henshinLibrary.open(input)),
       status: (input) => callIpc(() => window.henshinLibrary.status(input)),
       getThumbnail: (key) => callIpc(() => window.henshinLibrary.getThumbnail(key))
