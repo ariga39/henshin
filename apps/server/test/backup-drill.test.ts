@@ -178,7 +178,30 @@ describe("server backup restore drill", () => {
     expect(passed.run.artifactId).toBe(firstArtifactId)
     expect(passed.checks.records.open_events).toBe(1)
     expect(passed.checks.derived_covers.placeholders).toBe(true)
+    expect(passed.checks.overrides).toMatchObject({ verified: false, status: "unavailable" })
     expect(passed.last_successful.artifactId).toBe(firstArtifactId)
+
+    await rm(path.join(destination, "archives"), { recursive: true, force: true })
+    const unavailable = await runFailure(["backup", "drill", "--data-dir", dataDir, "--artifact-id", firstArtifactId])
+    expect(unavailable.code).toBe(1)
+    const unavailableResult = JSON.parse(unavailable.stdout) as Record<string, any>
+    expect(unavailableResult.run.status).toBe("failed")
+    expect(unavailableResult.run.diagnosticCode).toBe("artifact-unavailable")
+    await mkdir(path.join(destination, "archives"))
+    await writeFile(firstArchivePath, firstArchive)
+
+    const inconsistentDatabase = new DatabaseSync(path.join(dataDir, "server.sqlite"))
+    inconsistentDatabase.prepare("UPDATE entry_statistics SET open_count = 999").run()
+    inconsistentDatabase.close()
+    const inconsistent = await runJson(["backup", "create", "--data-dir", dataDir, "--destination-id", destinationId, "--label", "inconsistent archive"])
+    const inconsistentDrill = await runFailure(["backup", "drill", "--data-dir", dataDir, "--artifact-id", inconsistent.artifact_id as string])
+    expect(inconsistentDrill.code).toBe(1)
+    const inconsistentResult = JSON.parse(inconsistentDrill.stdout) as Record<string, any>
+    expect(inconsistentResult.run.status).toBe("failed")
+    expect(inconsistentResult.run.diagnosticCode).toBe("aggregate-mismatch")
+    const repairedDatabase = new DatabaseSync(path.join(dataDir, "server.sqlite"))
+    repairedDatabase.prepare("UPDATE entry_statistics SET open_count = (SELECT COUNT(*) FROM open_events)").run()
+    repairedDatabase.close()
 
     await runJson(["backup", "create", "--data-dir", dataDir, "--destination-id", destinationId, "--label", "newer archive"])
     const damaged = Buffer.from(firstArchive)
@@ -195,12 +218,30 @@ describe("server backup restore drill", () => {
     const interrupted = await directInterruptedDrillContext({ dataDir, destination, artifactId: firstArtifactId })
     await expect(runBackupDrill(interrupted.context)).rejects.toMatchObject({ name: "BackupDrillInterrupted" })
     interrupted.close()
+    const staleStaging = path.join(dataDir, ".backup-drill-stale")
+    await mkdir(staleStaging)
+    await writeFile(path.join(staleStaging, "state.sqlite"), "private staged state")
+    const futureRunId = randomUUID()
+    const futureRunDatabase = new DatabaseSync(path.join(dataDir, "server.sqlite"))
+    try {
+      futureRunDatabase.prepare(`
+        INSERT INTO backup_drill_runs(
+          run_id, artifact_id, manifest_digest, status, started_at_ms,
+          completed_at_ms, duration_ms, diagnostic_code, diagnostic_message, checks_json
+        ) VALUES (?, ?, ?, 'running', ?, NULL, NULL, NULL, NULL, NULL)
+      `).run(futureRunId, firstArtifactId, first.manifest_digest as string, Date.now() + 60_000)
+    } finally {
+      futureRunDatabase.close()
+    }
     const listed = await runJson(["backup", "drill", "list", "--data-dir", dataDir])
     expect(listed.latest_attempt.status).toBe("interrupted")
     expect(listed.latest_attempt.artifactId).toBe(firstArtifactId)
     expect(listed.last_successful.status).toBe("passed")
     expect(listed.last_successful.artifactId).toBe(firstArtifactId)
     expect(listed.runs.some((run: Record<string, any>) => run.status === "failed" && run.artifactId === firstArtifactId)).toBe(true)
+    const recoveredFutureRun = listed.runs.find((run: Record<string, any>) => run.runId === futureRunId)
+    expect(recoveredFutureRun).toMatchObject({ status: "interrupted", durationMs: 0 })
+    expect(await stat(staleStaging).then(() => true, () => false)).toBe(false)
     expect(await readFile(sourceFile)).toEqual(sourceBytes)
     expect(createHash("sha256").update(await readFile(firstArchivePath)).digest("hex")).toBe(firstArchiveDigest)
 
@@ -219,7 +260,7 @@ describe("server backup restore drill", () => {
         INSERT INTO backup_artifacts(
           artifact_id, destination_id, operation_id, relative_path, publication_order,
           retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
-        ) VALUES (?, ?, ?, ?, 3, 'archive', NULL, 'completed', ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, 4, 'archive', NULL, 'completed', ?, ?, ?, ?)
       `).run(
         oversizedArtifactId,
         destinationId,

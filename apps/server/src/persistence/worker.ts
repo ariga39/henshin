@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { DatabaseSync } from "node:sqlite"
-import { basename, isAbsolute, join, relative, sep } from "node:path"
+import { readdirSync, rmSync } from "node:fs"
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path"
 import { parentPort, workerData } from "node:worker_threads"
 import { Option, Schema } from "effect"
 import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contracts/canonical"
@@ -294,6 +295,13 @@ const decodeResolutionCursor = (value: string): typeof ResolutionCursor.Type | u
 
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
 const db = new DatabaseSync(dbPath)
+const cleanupBackupDrillStaging = (): void => {
+  const dataDirectory = dirname(dbPath)
+  for (const entry of readdirSync(dataDirectory, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith(".backup-drill-")) continue
+    rmSync(join(dataDirectory, entry.name), { recursive: true, force: true })
+  }
+}
 db.function(
   "henshin_resolution_parent_key",
   { deterministic: true },
@@ -900,7 +908,7 @@ const updateBackupDrillRun = db.prepare(
 )
 const interruptRunningBackupDrills = db.prepare(
   `UPDATE backup_drill_runs
-   SET status = 'interrupted', completed_at_ms = ?, duration_ms = ? - started_at_ms,
+   SET status = 'interrupted', completed_at_ms = ?, duration_ms = MAX(0, ? - started_at_ms),
        diagnostic_code = 'process-interrupted',
        diagnostic_message = 'drill process ended before completion'
    WHERE status = 'running'`
@@ -3251,6 +3259,7 @@ const handle = (request: WorkerRequest): unknown => {
       if (schemaVersion !== undefined && schemaVersion < CURRENT_SCHEMA_VERSION) {
         db.prepare("UPDATE server_state SET schema_version = ? WHERE id = 1").run(CURRENT_SCHEMA_VERSION)
       }
+      cleanupBackupDrillStaging()
       const interruptedAtMs = Date.now()
       interruptRunningBackupDrills.run(interruptedAtMs, interruptedAtMs)
       db.exec(`

@@ -164,8 +164,13 @@ const ensureArchivePath = async (
     relativePath.includes("\u0000")
   ) throw new BackupDrillFailure("unsafe-artifact-path", "backup artifact path is invalid")
   const archiveDirectory = join(destination.canonicalPath, ARCHIVE_DIRECTORY)
-  if (await realpath(archiveDirectory) !== archiveDirectory) {
-    throw new BackupDrillFailure("unsafe-artifact-path", "backup archive directory is unsafe")
+  try {
+    if (await realpath(archiveDirectory) !== archiveDirectory) {
+      throw new BackupDrillFailure("unsafe-artifact-path", "backup archive directory is unsafe")
+    }
+  } catch (error) {
+    if (error instanceof BackupDrillFailure) throw error
+    throw new BackupDrillFailure("artifact-unavailable", "backup archive directory is unavailable")
   }
   const archivePath = resolve(destination.canonicalPath, relativePath)
   const child = relative(archiveDirectory, archivePath)
@@ -178,7 +183,6 @@ const ensureArchivePath = async (
     if (!entry.isFile() || entry.isSymbolicLink()) throw new BackupDrillFailure("artifact-unavailable", "backup artifact is unavailable")
   } catch (error) {
     if (error instanceof BackupDrillFailure) throw error
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return archivePath
     throw new BackupDrillFailure("artifact-unavailable", "backup artifact is unavailable")
   }
   return archivePath
@@ -309,7 +313,20 @@ const verifySnapshot = (
       LEFT JOIN entry_statistics s ON s.entry_id = e.entry_id
       WHERE s.entry_id IS NULL
     `).get() as { count: number }).count
-    if (missingAggregates !== 0) throw new BackupDrillFailure("aggregate-mismatch", "backup snapshot aggregates are incomplete")
+    const inconsistentAggregates = (snapshot.prepare(`
+      SELECT COUNT(*) AS count
+      FROM entry_statistics s
+      LEFT JOIN (
+        SELECT entry_id, COUNT(*) AS open_count, MAX(occurred_at_ms) AS last_opened_at_ms
+        FROM open_events
+        GROUP BY entry_id
+      ) e ON e.entry_id = s.entry_id
+      WHERE s.open_count != COALESCE(e.open_count, 0)
+         OR s.last_opened_at_ms IS NOT e.last_opened_at_ms
+    `).get() as { count: number }).count
+    if (missingAggregates !== 0 || inconsistentAggregates !== 0) {
+      throw new BackupDrillFailure("aggregate-mismatch", "backup snapshot aggregates do not match open events")
+    }
     const overrideTables = (snapshot.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%override%' ORDER BY name"
     ).all() as unknown as ReadonlyArray<{ name: string }>).map((row) => row.name)
@@ -321,7 +338,7 @@ const verifySnapshot = (
       foreign_keys: "ok",
       records: { library_entries: entries, open_events: events },
       aggregates: { entry_statistics: aggregates, consistent: true },
-      overrides: { tables: overrideTables, verified: true },
+      overrides: { tables: overrideTables, verified: false, status: "unavailable" },
       derived_covers: { status: "not-in-archive", placeholders: true }
     }
   } finally {
@@ -330,14 +347,6 @@ const verifySnapshot = (
 }
 
 export const runBackupDrill = async (context: BackupDrillContext): Promise<BackupDrillResult> => {
-  const currentDestination = await revalidateWritableLocation(destinationObservation(context.destination))
-  if (!currentDestination.ok) throw new BackupDrillFailure("destination-changed", "backup destination changed and requires replacement")
-  const separation = await validateWritableLocationSeparation({
-    sourceRoots: context.roots.map(sourceRootObservation),
-    writableLocations: [dirname(context.dbPath), currentDestination.value]
-  })
-  if (!separation.ok) throw new BackupDrillFailure("location-overlap", "backup destination overlaps a collection root or server data directory")
-  const archivePath = await ensureArchivePath(context.destination, context.artifact.relativePath)
   const runId = randomUUID()
   const startedAtMs = Date.now()
   const started = await context.start({
@@ -347,8 +356,17 @@ export const runBackupDrill = async (context: BackupDrillContext): Promise<Backu
     startedAtMs
   })
   if (started.kind !== "started" && started.kind !== "replayed") throw new BackupDrillFailure("run-not-started", `backup drill could not start: ${started.kind}`)
-  const stagingDirectory = await mkdtemp(join(dirname(context.dbPath), ".backup-drill-"))
+  let stagingDirectory: string | undefined
   try {
+    const currentDestination = await revalidateWritableLocation(destinationObservation(context.destination))
+    if (!currentDestination.ok) throw new BackupDrillFailure("destination-changed", "backup destination changed and requires replacement")
+    const separation = await validateWritableLocationSeparation({
+      sourceRoots: context.roots.map(sourceRootObservation),
+      writableLocations: [dirname(context.dbPath), currentDestination.value]
+    })
+    if (!separation.ok) throw new BackupDrillFailure("location-overlap", "backup destination overlaps a collection root or server data directory")
+    const archivePath = await ensureArchivePath(context.destination, context.artifact.relativePath)
+    stagingDirectory = await mkdtemp(join(dirname(context.dbPath), ".backup-drill-"))
     if (context.beforeVerification !== undefined && await context.beforeVerification() === "interrupt") {
       throw new BackupDrillInterrupted()
     }
@@ -407,6 +425,6 @@ export const runBackupDrill = async (context: BackupDrillContext): Promise<Backu
     if (completed.kind !== "completed" && completed.kind !== "replayed") throw new Error("backup drill failure result was not recorded")
     return { run: completed.run, checks: null }
   } finally {
-    await rm(stagingDirectory, { recursive: true, force: true })
+    if (stagingDirectory !== undefined) await rm(stagingDirectory, { recursive: true, force: true })
   }
 }
