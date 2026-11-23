@@ -94,7 +94,7 @@ afterEach(async () => {
 })
 
 describe("private Library entry notes", () => {
-  it("keeps notes independent across a shared gallery, replays after restart, and fences stale writes", async () => {
+  it("keeps notes independent across a shared gallery, persists through restart, and fences stale writes", async () => {
     const server = await start()
     const entries = await scanTwoBooks(server)
     const first = entries[0]
@@ -116,11 +116,23 @@ describe("private Library entry notes", () => {
     await bind(first.entry_id, "1")
     await bind(second.entry_id, "1")
 
+    const titled = await withClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: first.entry_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_decision_version: "2",
+          command: { type: "set-personal-title", title: "Title survives note clearing" }
+        }
+      })
+    }))
+    expect(titled.data.entry.title_override).toBe("Title survives note clearing")
+
     const setFirstPayload = {
       operation_id: randomUUID(),
       instance_id: server.instanceId,
       epoch: server.epoch,
-      expected_decision_version: "2",
+      expected_decision_version: "3",
       command: { type: "set-note" as const, text: "first book note" }
     }
     const setFirst = await withClient(server, Effect.gen(function*() {
@@ -168,21 +180,39 @@ describe("private Library entry notes", () => {
     expect(stale._tag).toBe("RevisionConflict")
     expect(fresh.data.entry.note?.text).toBe("current server note")
 
+    const clearPayload = {
+      operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+      expected_decision_version: setFirst.data.entry.decision_version,
+      command: { type: "clear-note" as const }
+    }
     const clear = await withClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).entryCommand({
         params: { id: first.entry_id },
-        payload: {
-          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
-          expected_decision_version: setFirst.data.entry.decision_version,
-          command: { type: "clear-note" as const }
-        }
+        payload: clearPayload
       })
     }))
-    expect(clear.data.entry.note).toMatchObject({ text: "", revision: "2" })
+    const clearReplay = await withClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({ params: { id: first.entry_id }, payload: clearPayload })
+    }))
+    expect(clearReplay.data).toEqual(clear.data)
+    expect(clear.data.entry.note).toBeNull()
+    expect(clear.data.entry.decision_version).toBe("5")
+    expect(clear.data.entry.title_override).toBe("Title survives note clearing")
+
+    const clearedDb = new DatabaseSync(server.dbPath)
+    expect(clearedDb.prepare("SELECT notes, notes_revision FROM entry_overrides WHERE entry_id = ?").get(first.entry_id))
+      .toEqual({ notes: null, notes_revision: 2 })
+    expect(clearedDb.prepare("SELECT title_present, title FROM entry_overrides WHERE entry_id = ?").get(first.entry_id))
+      .toEqual({ title_present: 1, title: "Title survives note clearing" })
+    clearedDb.close()
 
     await server.stop()
     const restarted = await startServer(server.dbPath)
     servers.push(restarted)
+    const staleEpochRetry = await withClient(restarted, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({ params: { id: first.entry_id }, payload: clearPayload }).pipe(Effect.flip)
+    }))
+    expect(staleEpochRetry._tag).toBe("EpochChanged")
     const reopened = await withClient(restarted, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).entryCommand({
         params: { id: first.entry_id },
@@ -195,6 +225,7 @@ describe("private Library entry notes", () => {
     }))
     expect(reopened.data.entry.note?.text).toBe("first book note")
     expect(reopened.data.entry.note?.revision).toBe("3")
+    expect(reopened.data.entry.title_override).toBe("Title survives note clearing")
 
     const rebound = await withClient(restarted, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).entryCommand({
@@ -223,7 +254,7 @@ describe("private Library entry notes", () => {
     const db = new DatabaseSync(restarted.dbPath)
     expect((db.prepare("PRAGMA table_info(entry_overrides)").all() as Array<{ name: string }>).map((column) => column.name))
       .toEqual(expect.arrayContaining(["title_present", "notes"]))
-    expect(db.prepare("SELECT notes FROM entry_overrides WHERE entry_id = ?").get(first.entry_id)).toEqual({ notes: "first book note" })
+    expect(db.prepare("SELECT notes, title FROM entry_overrides WHERE entry_id = ?").get(first.entry_id)).toEqual({ notes: "first book note", title: "Title survives note clearing" })
     expect(db.prepare("SELECT notes FROM entry_overrides WHERE entry_id = ?").get(second.entry_id)).toEqual({ notes: "current server note" })
     db.close()
   })
