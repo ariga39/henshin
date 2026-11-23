@@ -767,7 +767,12 @@ const detachEntry = db.prepare(
 const deleteStaged = db.prepare("DELETE FROM staged_discoveries WHERE candidate_id = ?")
 const selectStagedPathsForRoot = db.prepare("SELECT relative_path FROM staged_discoveries WHERE root_id = ?")
 const bumpLibraryRevision = db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1")
-const selectLibraryEntries = (cursor: string | null, limit: number) => {
+const selectLibraryEntries = (
+  cursor: string | null,
+  limit: number,
+  state: "replacement-pending" | null
+) => {
+  const stateClause = state === null ? "e.state IN ('accepted', 'replacement-pending')" : "e.state = 'replacement-pending'"
   const statement = db.prepare(cursor === null
     ? `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
          e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
@@ -776,7 +781,7 @@ const selectLibraryEntries = (cursor: string | null, limit: number) => {
          s.candidate_observation_json
        FROM library_entries e
        LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
-       WHERE e.state IN ('accepted', 'replacement-pending')
+       WHERE ${stateClause}
        ORDER BY e.entry_id ASC LIMIT ?`
     : `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
          e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
@@ -785,7 +790,7 @@ const selectLibraryEntries = (cursor: string | null, limit: number) => {
          s.candidate_observation_json
        FROM library_entries e
        LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
-       WHERE e.entry_id > ? AND e.state IN ('accepted', 'replacement-pending')
+       WHERE e.entry_id > ? AND ${stateClause}
        ORDER BY e.entry_id ASC LIMIT ?`)
   statement.setReadBigInts(true)
   return cursor === null ? statement.all(limit) : statement.all(cursor, limit)
@@ -1728,6 +1733,7 @@ const entryRow = (row: {
     : {
         candidate_id: row.candidate_id,
         candidate_version: Number(row.candidate_version),
+        decision_version: row.decision_version.toString(),
         old_observation: persistedReplacementObservation(row.accepted_observation_json, "accepted observation summary"),
         candidate_observation: persistedReplacementCandidateObservation(row.candidate_observation_json, "candidate observation summary")
       },
@@ -1915,7 +1921,7 @@ const librarySummary = (): import("./worker-protocol").LibrarySummaryRow => {
 }
 
 const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntries" }>): import("./worker-protocol").LibraryEntryPageRow => {
-  const rows = selectLibraryEntries(request.cursor, request.pageSize + 1) as unknown as ReadonlyArray<{
+  const rows = selectLibraryEntries(request.cursor, request.pageSize + 1, request.state) as unknown as ReadonlyArray<{
     entry_id: string
     library_id: string
     root_id: string

@@ -341,6 +341,14 @@ describe("replacement comparison read model", () => {
     })
     expect(entry.replacement.candidate_observation.format_evidence).toEqual(["jpeg"])
     expect(entry.replacement.candidate_observation.size_bytes).toBe(24)
+
+    const pendingPage = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({
+        payload: { page_size: 1, state: "replacement-pending" }
+      })
+    }))
+    expect(pendingPage.data.entries).toHaveLength(1)
+    expect(pendingPage.data.entries[0]?.entry_id).toBe(entry.entry_id)
   })
 
   it("migrates occupied candidates from a pre-replacement database and preserves them on a later rescan", async () => {

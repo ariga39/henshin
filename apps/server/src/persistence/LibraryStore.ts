@@ -66,7 +66,11 @@ export class LibraryStore extends Context.Service<
   LibraryStore,
   {
     readonly summary: () => Effect.Effect<typeof LibrarySummaryRow.Type, DatabaseWorkerError>
-    readonly page: (input: { readonly pageSize: number; readonly cursor: string | null }) => Effect.Effect<LibraryEntryPage, DatabaseWorkerError>
+    readonly page: (input: {
+      readonly pageSize: number
+      readonly cursor: string | null
+      readonly state?: "replacement-pending"
+    }) => Effect.Effect<LibraryEntryPage, DatabaseWorkerError>
     readonly indexedRootSamples: (rootId: string) => Effect.Effect<IndexedRootSamplePage, DatabaseWorkerError>
     readonly resolution: (input: {
       readonly entryId: string
@@ -90,10 +94,15 @@ export class LibraryStore extends Context.Service<
       const summary = () => worker.call({ op: "readLibrary" }).pipe(
         Effect.flatMap((value) => decodeOrFail(decodeSummary, value, "invalid library summary"))
       )
-      const page = (input: { readonly pageSize: number; readonly cursor: string | null }) => worker.call({
+      const page = (input: {
+        readonly pageSize: number
+        readonly cursor: string | null
+        readonly state?: "replacement-pending"
+      }) => worker.call({
         op: "listLibraryEntries",
         pageSize: input.pageSize,
-        cursor: input.cursor
+        cursor: input.cursor,
+        state: input.state ?? null
       }).pipe(
         Effect.flatMap((value) => decodeOrFail(decodePage, value, "invalid library entry page"))
       )

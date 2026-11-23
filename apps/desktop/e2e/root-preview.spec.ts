@@ -412,7 +412,7 @@ test("preserves accepted entries across an interrupted normal scan and explicitl
   }
 })
 
-test("loads an additional Library page after a normal scan", async () => {
+test("pages the Library and reviews an off-page replacement after a held scan", async () => {
   const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-pages-db-"))
   const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-pages-fixture-"))
   const dbPath = path.join(dbDirectory, "prototype.db")
@@ -439,6 +439,24 @@ test("loads an additional Library page after a normal scan", async () => {
     await expect(first.window.getByTestId("library-load-more")).toBeVisible()
     await first.window.getByTestId("library-load-more").click()
     await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(51, { timeout: 30_000 })
+
+    const lastBook = first.window.getByTestId("library-entry").last()
+    const lastTitle = await lastBook.locator(".library-entry-details > strong").innerText()
+    const lastId = await lastBook.locator("small").innerText()
+    await first.window.getByTestId("library-refresh").click()
+    await expect(first.window.getByTestId("library-entry")).toHaveCount(50)
+    await expect(first.window.getByText(lastId, { exact: true })).toHaveCount(0)
+
+    await first.window.getByTestId("library-setup").click()
+    await writeFile(path.join(fixtureDirectory, lastTitle, "002.jpg"), "Replacement second page")
+    await first.window.getByTestId("root-saved-preview").click()
+    await first.window.getByTestId("scan-hold-new-discoveries").check()
+    await first.window.getByTestId("start-held-scan").click()
+    const pending = first.window.getByTestId(`replacement-${lastId}`)
+    await expect(pending.getByTestId("replacement-candidate-path")).toHaveText(lastTitle, { timeout: 30_000 })
+    await expect(pending.getByTestId("replacement-candidate-pages")).toHaveText("2")
+    await pending.getByTestId(`replacement-keep-${lastId}`).click()
+    await expect(pending).toHaveCount(0)
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })
@@ -531,5 +549,71 @@ test("inspects and recovers retained handoff outcomes from the ordinary desktop 
     await expect(third.window.getByTestId(`dismiss-unknown-${unknownActionId}`)).toHaveCount(0)
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
+  }
+})
+
+test("reviews a changed occupied path before keeping or replacing its entry", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-replacement-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-replacement-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+  const bookDirectory = path.join(fixtureDirectory, "book")
+
+  try {
+    await mkdir(bookDirectory)
+    await writeFile(path.join(bookDirectory, "001.jpg"), "Book A")
+
+    const first = await launch(dbPath)
+    await first.window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await first.window.getByTestId("root-preview-submit").click()
+    await first.window.getByTestId("root-label").fill("Replacement books")
+    await first.window.getByTestId("root-save").click()
+    await expect(first.window.getByTestId("root-saved")).toContainText("Replacement books")
+    await first.window.getByTestId("root-saved-preview").click()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("library-screen")).toBeVisible()
+    await expect(first.window.getByTestId("library-scan-status")).toHaveText("Scan task succeeded.", { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(1, { timeout: 30_000 })
+    const originalId = await first.window.getByTestId("library-entry").locator("small").textContent()
+
+    await first.window.getByTestId("library-setup").click()
+    await writeFile(path.join(bookDirectory, "001.jpg"), "Book B")
+    await writeFile(path.join(bookDirectory, "002.jpg"), "Book B second page")
+    await first.window.getByTestId("root-saved-preview").click()
+    await expect(first.window.getByTestId("root-preview-candidates").locator("li")).toHaveCount(1)
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("library-screen")).toBeVisible()
+    await expect(first.window.getByTestId("library-scan-status")).toContainText("completed_with_errors", { timeout: 30_000 })
+
+    await first.window.getByTestId("library-setup").click()
+    await expect(first.window.getByTestId("replacement-review")).toBeVisible()
+    const pending = first.window.getByTestId(`replacement-${originalId}`)
+    await expect(pending.getByTestId("replacement-previous-details")).toHaveText("book (image-directory, 1 page)")
+    await expect(pending.getByTestId("replacement-candidate-path")).toHaveText("book")
+    await expect(pending.getByTestId("replacement-candidate-pages")).toHaveText("2")
+    await expect(pending.getByTestId("replacement-pending-note")).toContainText("Decide later")
+    await pending.getByTestId(`replacement-keep-${originalId}`).click()
+    await expect(first.window.getByTestId("replacement-review")).toHaveCount(0, { timeout: 30_000 })
+    await first.window.getByTestId("open-library").click()
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(1)
+    await expect(first.window.getByTestId("library-entry").locator("small")).toHaveText(originalId ?? "")
+
+    await first.window.getByTestId("library-setup").click()
+    await writeFile(path.join(bookDirectory, "001.jpg"), "Book C")
+    await writeFile(path.join(bookDirectory, "003.jpg"), "Book C third page")
+    await first.window.getByTestId("root-saved-preview").click()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("library-screen")).toBeVisible()
+    await expect(first.window.getByTestId("library-scan-status")).toContainText("completed_with_errors", { timeout: 30_000 })
+    await first.window.getByTestId("library-setup").click()
+    await expect(first.window.getByTestId("replacement-review")).toBeVisible()
+    await first.window.getByTestId(`replacement-replace-${originalId}`).click()
+    await expect(first.window.getByTestId("replacement-review")).toHaveCount(0, { timeout: 30_000 })
+    await first.window.getByTestId("open-library").click()
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(1)
+    const replacementId = await first.window.getByTestId("library-entry").locator("small").textContent()
+    expect(replacementId).not.toBe(originalId)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
   }
 })

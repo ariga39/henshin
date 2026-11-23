@@ -87,6 +87,17 @@ export interface ViewState {
   readonly scan_release_mapping_revision: string | null
   readonly scan_release_policy_revision: string | null
   readonly scan_release_error: string | null
+  readonly scan_resolution_status: "idle" | "loading" | "error"
+  readonly scan_resolution_candidate_id: string | null
+  readonly scan_resolution_entry_id: string | null
+  readonly scan_resolution_operation_id: string | null
+  readonly scan_resolution_candidate_version: number | null
+  readonly scan_resolution_decision_version: string | null
+  readonly scan_resolution_location_revision: string | null
+  readonly scan_resolution_mapping_revision: string | null
+  readonly scan_resolution_policy_revision: string | null
+  readonly scan_resolution_decision: "keep" | "replace" | null
+  readonly scan_resolution_error: string | null
   readonly scan_hold_new_discoveries: boolean
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
@@ -108,6 +119,11 @@ export interface ViewState {
   readonly library_status: "idle" | "loading" | "ready" | "error"
   readonly library_error: string | null
   readonly library_cover_generation: number
+  readonly pending_replacement_entries: ReadonlyArray<LibraryEntry>
+  readonly pending_replacement_cursor: string | null
+  readonly pending_replacement_has_more: boolean
+  readonly pending_replacement_status: "idle" | "loading" | "ready" | "error"
+  readonly pending_replacement_error: string | null
   readonly library_scan_status: "idle" | "starting" | "started" | "error"
   readonly library_scan_error: string | null
   readonly library_scan_task: ScanTask | null
@@ -172,6 +188,17 @@ const initialState: ViewState = {
   scan_release_mapping_revision: null,
   scan_release_policy_revision: null,
   scan_release_error: null,
+  scan_resolution_status: "idle",
+  scan_resolution_candidate_id: null,
+  scan_resolution_entry_id: null,
+  scan_resolution_operation_id: null,
+  scan_resolution_candidate_version: null,
+  scan_resolution_decision_version: null,
+  scan_resolution_location_revision: null,
+  scan_resolution_mapping_revision: null,
+  scan_resolution_policy_revision: null,
+  scan_resolution_decision: null,
+  scan_resolution_error: null,
   scan_hold_new_discoveries: false,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
   connection_generation: 0,
@@ -193,6 +220,11 @@ const initialState: ViewState = {
   library_status: "idle",
   library_error: null,
   library_cover_generation: 0,
+  pending_replacement_entries: [],
+  pending_replacement_cursor: null,
+  pending_replacement_has_more: false,
+  pending_replacement_status: "idle",
+  pending_replacement_error: null,
   library_scan_status: "idle",
   library_scan_error: null,
   library_scan_task: null

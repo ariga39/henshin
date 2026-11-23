@@ -33,6 +33,7 @@ import {
   RootCommandIpcRequest,
   RootSaveIpcRequest,
   ReleaseHeldDiscoveryIpcRequest,
+  ReviewCandidateIpcRequest,
   ReviewCandidatesIpcRequest,
   ServerHttpClient,
   ReviewHttpClient,
@@ -1078,7 +1079,7 @@ const registerIpc = (): void => {
 
   ipcMain.handle(IpcChannels.reviewCommand, (event, raw: unknown) => {
     assertTrustedSender(event)
-    const decoded = Schema.decodeUnknownOption(ReleaseHeldDiscoveryIpcRequest)(raw)
+    const decoded = Schema.decodeUnknownOption(ReviewCandidateIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     let session: Session
     try {
@@ -1101,6 +1102,12 @@ const registerIpc = (): void => {
               expected_candidate_version: input.expected_candidate_version,
               expected_mapping_revision: input.expected_mapping_revision,
               expected_policy_revision: input.expected_policy_revision,
+              ...("expected_decision_version" in input
+                ? {
+                    expected_decision_version: input.expected_decision_version,
+                    expected_location_revision: input.expected_location_revision
+                  }
+                : {}),
               command: input.command
             }
           })

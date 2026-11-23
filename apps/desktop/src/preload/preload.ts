@@ -7,10 +7,12 @@ import type {
   ReaderProfileTestIpcRequest,
   ReaderProfileTestTargetSelectIpcRequest,
   ReleaseHeldDiscoveryIpcRequest,
+  ReviewCandidateIpcRequest,
   RootCommandIpcRequest,
   RootPreviewRequest,
   RootRegistrationRequest,
-  RecoverOpenJournalIpcRequest
+  RecoverOpenJournalIpcRequest,
+  LibrarySearchIpcRequest
 } from "@henshin/contracts"
 import { IpcChannels } from "@henshin/contracts/channels"
 
@@ -34,7 +36,7 @@ contextBridge.exposeInMainWorld("henshinLocalMapping", {
 contextBridge.exposeInMainWorld("henshinScanReview", {
   listTasks: () => ipcRenderer.invoke(IpcChannels.taskList, {}),
   candidates: () => ipcRenderer.invoke(IpcChannels.reviewCandidates, {}),
-  command: (input: ReleaseHeldDiscoveryIpcRequest) => ipcRenderer.invoke(IpcChannels.reviewCommand, input)
+  command: (input: ReviewCandidateIpcRequest) => ipcRenderer.invoke(IpcChannels.reviewCommand, input)
 })
 
 contextBridge.exposeInMainWorld("henshinReaderProfiles", {
@@ -47,7 +49,7 @@ contextBridge.exposeInMainWorld("henshinReaderProfiles", {
 })
 
 contextBridge.exposeInMainWorld("henshinLibrary", {
-  search: (input: { readonly page_size?: number; readonly cursor?: string }) =>
+  search: (input: LibrarySearchIpcRequest) =>
     ipcRenderer.invoke(IpcChannels.librarySearch, input),
   getThumbnail: (key: string) => ipcRenderer.invoke(IpcChannels.thumbnailGet, { key })
 })

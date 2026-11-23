@@ -25,6 +25,7 @@ export type ReplacementCandidateObservation = typeof ReplacementCandidateObserva
 export const ReplacementComparison = Schema.Struct({
   candidate_id: Uuid,
   candidate_version: Schema.Natural,
+  decision_version: Revision,
   old_observation: ReplacementObservation,
   candidate_observation: ReplacementCandidateObservation
 })
@@ -66,7 +67,8 @@ const pageSize = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLes
 
 export const LibrarySearchRequest = Schema.Struct({
   page_size: Schema.optional(pageSize),
-  cursor: Schema.optional(Uuid)
+  cursor: Schema.optional(Uuid),
+  state: Schema.optional(Schema.Literal("replacement-pending"))
 })
 export type LibrarySearchRequest = typeof LibrarySearchRequest.Type
 

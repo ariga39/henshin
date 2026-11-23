@@ -1,5 +1,7 @@
 import { Effect, Layer } from "effect"
 import type {
+  LibraryEntry,
+  LibraryEntryPage,
   RootCommandIpcRequest,
   RootPreviewResult,
   ScanTask,
@@ -11,8 +13,11 @@ import { LibraryClient, LocalMappingClient, RootPreviewClient, ScanReviewClient,
 import {
   loadRootWorkspace,
   loadLibrary,
+  loadPendingReplacements,
+  refreshReplacementReview,
   retryScanResults,
   releaseHeldDiscovery,
+  resolveReplacement,
   startManualScan,
   startHeldScan,
   watchHeldScans
@@ -97,6 +102,52 @@ const candidate: StagedDiscovery = {
   updated_at_ms: 1
 }
 
+const replacementManifest = {
+  source_kind: "directory" as const,
+  pages: [{ name: "001.jpg", format: "jpeg", declared_bytes: 1 }],
+  diagnostics: { supported_pages: 1, unsupported_pages: 0, ignored_entries: 0, directory_records: 1 },
+  before: { kind: "directory" as const, bytes: 1, mtime_ms: 1, entry_count: 1 },
+  after: { kind: "directory" as const, bytes: 1, mtime_ms: 1, entry_count: 1 }
+}
+
+const pendingEntry = (candidateVersion: number): LibraryEntry => ({
+  entry_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  library_id: root.library_id,
+  root_id: root.root_id,
+  relative_path: candidate.relative_path,
+  source_path: "/collections/books/book",
+  kind: "image-directory",
+  title: "book",
+  page_count: 1,
+  state: "replacement-pending",
+  content_version: "1",
+  location_revision: "1",
+  cover: null,
+  replacement: {
+    candidate_id: candidate.candidate_id,
+    candidate_version: candidateVersion,
+    decision_version: "1",
+    old_observation: {
+      kind: "image-directory",
+      page_count: 1,
+      format_evidence: ["jpeg"],
+      size_bytes: 1,
+      entry_count: 1,
+      diagnostics: replacementManifest.diagnostics
+    },
+    candidate_observation: {
+      kind: "image-directory",
+      page_count: 1,
+      format_evidence: ["jpeg"],
+      size_bytes: 1,
+      entry_count: 1,
+      diagnostics: replacementManifest.diagnostics,
+      analysis_status: "ready",
+      analysis_error: null
+    }
+  }
+})
+
 const scanError = { ok: false as const, error: { code: "transport", message: "candidate reply lost", retryable: true } }
 
 const resetView = () => {
@@ -132,6 +183,11 @@ const resetView = () => {
     library_status: "idle",
     library_error: null,
     library_cover_generation: 0,
+    pending_replacement_entries: [],
+    pending_replacement_cursor: null,
+    pending_replacement_has_more: false,
+    pending_replacement_status: "idle",
+    pending_replacement_error: null,
     library_scan_status: "idle",
     library_scan_error: null,
     library_scan_task: null
@@ -170,6 +226,9 @@ const scanClientWith = (overrides: Partial<ScanReviewClient["Service"]> = {}): S
   release: () => Effect.succeed({ ok: true, data: {
     operation_id: "77777777-7777-4777-8777-777777777777",
     candidate: { ...candidate, candidate_version: 2, hold_state: "eligible" }
+  } }),
+  resolve: () => Effect.succeed({ ok: false as const, error: {
+    code: "not_found", message: "replacement not found", retryable: false
   } }),
   ...overrides
 })
@@ -749,6 +808,335 @@ describe("held scan renderer workflows", () => {
       library_has_more: false,
       library_cursor: null,
       library_cover_generation: 1
+    })
+  })
+
+  it("refreshes stale replacement evidence without retrying the decision and clears the obsolete error", async () => {
+    const staleCandidate = { ...candidate, manifest: replacementManifest }
+    const freshCandidate = { ...staleCandidate, candidate_version: 2 }
+    const staleEntry = pendingEntry(0)
+    const freshEntry = pendingEntry(2)
+    let resolveCalls = 0
+    const scanClient = scanClientWith({
+      candidates: () => Effect.succeed({ ok: true, data: [freshCandidate] }),
+      resolve: () => {
+        resolveCalls += 1
+        return Effect.succeed({ ok: false as const, error: { code: "unexpected", message: "must not retry", retryable: false } })
+      }
+    })
+    const libraryClient = libraryClientWith({
+      search: (input) => {
+        expect(input.state).toBe("replacement-pending")
+        return Effect.succeed({ ok: true as const, data: {
+          entries: [freshEntry], has_more: false, next_cursor: null, library_change_revision: "2"
+        } })
+      }
+    })
+    viewStore.set({
+      root_saved_roots: [root],
+      staged_discoveries: [staleCandidate],
+      pending_replacement_entries: [staleEntry],
+      pending_replacement_status: "ready",
+      scan_status: "ready"
+    })
+
+    await run(resolveReplacement(candidate.candidate_id, staleEntry.entry_id, "keep"), rootClientWith(), scanClient, libraryClient)
+
+    expect(resolveCalls).toBe(0)
+    expect(viewStore.getState()).toMatchObject({
+      staged_discoveries: [freshCandidate],
+      pending_replacement_entries: [freshEntry],
+      scan_resolution_status: "idle",
+      scan_resolution_error: null,
+      scan_resolution_entry_id: null
+    })
+  })
+
+  it("keeps rescan guidance after an unchanged fresh-observation conflict", async () => {
+    const reviewCandidate = { ...candidate, manifest: replacementManifest }
+    const conflictMessage = "replacement source changed since Review; rescan and refresh Review before resolving it"
+    let resolveCalls = 0
+    const scanClient = scanClientWith({
+      candidates: () => Effect.succeed({ ok: true, data: [reviewCandidate] }),
+      resolve: () => {
+        resolveCalls += 1
+        return Effect.succeed({ ok: false as const, error: {
+          code: "revision_conflict", message: conflictMessage, retryable: false
+        } })
+      }
+    })
+    viewStore.set({
+      root_saved_roots: [root],
+      staged_discoveries: [reviewCandidate],
+      pending_replacement_entries: [pendingEntry(1)],
+      pending_replacement_status: "ready",
+      scan_status: "ready"
+    })
+
+    await run(resolveReplacement(candidate.candidate_id, pendingEntry(1).entry_id, "keep"), rootClientWith(), scanClient, libraryClientWith({
+      search: () => Effect.succeed({ ok: true as const, data: {
+        entries: [pendingEntry(1)], has_more: false, next_cursor: null, library_change_revision: "1"
+      } })
+    }))
+
+    expect(resolveCalls).toBe(1)
+    expect(viewStore.getState()).toMatchObject({
+      scan_resolution_status: "error",
+      scan_resolution_error: conflictMessage,
+      scan_resolution_entry_id: pendingEntry(1).entry_id
+    })
+  })
+
+  it("keeps refresh guidance after an unchanged policy conflict", async () => {
+    const reviewCandidate = { ...candidate, manifest: replacementManifest }
+    const currentRoot = { ...root, policy_revision: "8" }
+    const conflictMessage = "saved root policy changed; refresh the root and Review"
+    const scanClient = scanClientWith({
+      candidates: () => Effect.succeed({ ok: true, data: [reviewCandidate] }),
+      resolve: () => Effect.succeed({ ok: false as const, error: {
+        code: "revision_conflict", message: conflictMessage, retryable: false
+      } })
+    })
+    viewStore.set({
+      root_saved_roots: [root],
+      staged_discoveries: [reviewCandidate],
+      pending_replacement_entries: [pendingEntry(1)],
+      pending_replacement_status: "ready",
+      scan_status: "ready"
+    })
+
+    await run(resolveReplacement(candidate.candidate_id, pendingEntry(1).entry_id, "replace"), rootClientWith({
+      list: () => Effect.succeed({ ok: true, data: [currentRoot] })
+    }), scanClient, libraryClientWith({
+      search: () => Effect.succeed({ ok: true as const, data: {
+        entries: [pendingEntry(1)], has_more: false, next_cursor: null, library_change_revision: "1"
+      } })
+    }))
+
+    expect(viewStore.getState()).toMatchObject({
+      root_saved_roots: [currentRoot],
+      scan_resolution_status: "error",
+      scan_resolution_error: conflictMessage
+    })
+  })
+
+  it("clears conflict guidance for new evidence and allows the successful decision", async () => {
+    const staleCandidate = { ...candidate, manifest: replacementManifest }
+    const freshCandidate = { ...staleCandidate, candidate_version: 2 }
+    const staleEntry = pendingEntry(1)
+    const freshEntry = pendingEntry(2)
+    let phase = "stale"
+    let resolveCalls = 0
+    const scanClient = scanClientWith({
+      candidates: () => Effect.succeed({ ok: true, data: [phase === "stale" ? staleCandidate : freshCandidate] }),
+      resolve: (input) => {
+        resolveCalls += 1
+        return resolveCalls === 1
+          ? Effect.succeed({ ok: false as const, error: {
+              code: "revision_conflict", message: "replacement source changed since Review; rescan and refresh Review before resolving it", retryable: false
+            } })
+          : Effect.succeed({ ok: true as const, data: {
+              operation_id: input.operation_id,
+              candidate: { ...freshCandidate, hold_state: "eligible" as const }
+            } })
+      }
+    })
+    const libraryClient = libraryClientWith({
+      search: () => Effect.succeed({ ok: true as const, data: {
+        entries: [phase === "stale" ? staleEntry : freshEntry], has_more: false, next_cursor: null, library_change_revision: phase
+      } })
+    })
+    viewStore.set({
+      root_saved_roots: [root],
+      staged_discoveries: [staleCandidate],
+      pending_replacement_entries: [staleEntry],
+      pending_replacement_status: "ready",
+      scan_status: "ready"
+    })
+
+    await run(resolveReplacement(candidate.candidate_id, staleEntry.entry_id, "keep"), rootClientWith(), scanClient, libraryClient)
+    expect(viewStore.getState().scan_resolution_error).toContain("rescan and refresh Review")
+
+    phase = "fresh"
+    await run(refreshReplacementReview, rootClientWith(), scanClient, libraryClient)
+    expect(viewStore.getState()).toMatchObject({
+      scan_resolution_status: "idle",
+      scan_resolution_error: null,
+      staged_discoveries: [freshCandidate]
+    })
+
+    await run(resolveReplacement(candidate.candidate_id, freshEntry.entry_id, "keep"), rootClientWith(), scanClient, libraryClient)
+    expect(resolveCalls).toBe(2)
+    expect(viewStore.getState()).toMatchObject({
+      scan_resolution_status: "idle",
+      scan_resolution_error: null
+    })
+  })
+
+  it("replays loaded pending pages while retaining page-two entries after conflict and success refreshes", async () => {
+    const reviewCandidate = { ...candidate, manifest: replacementManifest }
+    const target = pendingEntry(1)
+    const fillers = Array.from({ length: 50 }, (_, index) => ({
+      ...target,
+      entry_id: `bbbbbbbb-bbbb-4bbb-8bbb-${String(index).padStart(12, "0")}`,
+      relative_path: `filler-${index}`
+    }))
+    const loadedEntries = [...fillers, target]
+    const pageOne = { entries: fillers, has_more: true, next_cursor: "page-2", library_change_revision: "1" }
+    const pageTwo = { entries: [target], has_more: false, next_cursor: null, library_change_revision: "1" }
+    const searchInputs: Array<{ readonly cursor?: string; readonly state?: "replacement-pending" }> = []
+    let resolveCalls = 0
+    const scanClient = scanClientWith({
+      candidates: () => Effect.succeed({ ok: true, data: [reviewCandidate] }),
+      resolve: (input) => {
+        resolveCalls += 1
+        return resolveCalls === 1
+          ? Effect.succeed({ ok: false as const, error: {
+              code: "revision_conflict", message: "replacement source changed since Review; rescan and refresh Review before resolving it", retryable: false
+            } })
+          : Effect.succeed({ ok: true as const, data: {
+              operation_id: input.operation_id,
+              candidate: { ...reviewCandidate, hold_state: "eligible" as const }
+            } })
+      }
+    })
+    const libraryClient = libraryClientWith({
+      search: (input) => {
+        searchInputs.push(input)
+        return Effect.succeed({ ok: true as const, data: input.cursor === undefined ? pageOne : pageTwo })
+      }
+    })
+    viewStore.set({
+      root_saved_roots: [root],
+      staged_discoveries: [reviewCandidate],
+      pending_replacement_entries: loadedEntries,
+      pending_replacement_cursor: "page-2",
+      pending_replacement_has_more: true,
+      pending_replacement_status: "ready",
+      scan_status: "ready"
+    })
+
+    await run(resolveReplacement(candidate.candidate_id, target.entry_id, "keep"), rootClientWith(), scanClient, libraryClient)
+    expect(searchInputs).toEqual([
+      { page_size: 50, state: "replacement-pending" },
+      { page_size: 50, cursor: "page-2", state: "replacement-pending" }
+    ])
+    expect(viewStore.getState()).toMatchObject({
+      scan_resolution_status: "error",
+      pending_replacement_entries: loadedEntries
+    })
+
+    await run(resolveReplacement(candidate.candidate_id, target.entry_id, "keep"), rootClientWith(), scanClient, libraryClient)
+    expect(searchInputs).toHaveLength(4)
+    expect(searchInputs.slice(2)).toEqual([
+      { page_size: 50, state: "replacement-pending" },
+      { page_size: 50, cursor: "page-2", state: "replacement-pending" }
+    ])
+    expect(viewStore.getState().pending_replacement_entries).toHaveLength(51)
+  })
+
+  it("refreshes pending replacements after terminal scan-result loading failure", async () => {
+    const submitted = { ...task("succeeded"), hold_new_discoveries: false }
+    const searchInputs: Array<{ readonly state?: "replacement-pending" }> = []
+    const libraryClient = libraryClientWith({
+      search: (input) => {
+        searchInputs.push(input)
+        return Effect.succeed({ ok: true as const, data: input.state === "replacement-pending"
+          ? { entries: [pendingEntry(1)], has_more: false, next_cursor: null, library_change_revision: "2" }
+          : { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } })
+      }
+    })
+    const rootClient = rootClientWith({
+      command: () => Effect.succeed({ ok: true, data: { task: submitted } })
+    })
+    const scanClient = scanClientWith({
+      listTasks: () => Effect.succeed({ ok: true, data: [submitted] }),
+      candidates: () => Effect.succeed(scanError)
+    })
+    viewStore.set({
+      root_preview_status: "ready",
+      root_preview: preview,
+      root_saved_roots: [root],
+      scan_hold_new_discoveries: false
+    })
+
+    await run(startManualScan(root.root_id), rootClient, scanClient, libraryClient)
+
+    expect(searchInputs).toEqual([
+      { page_size: 50 },
+      { page_size: 50, state: "replacement-pending" }
+    ])
+    expect(viewStore.getState()).toMatchObject({
+      scan_status: "error",
+      pending_replacement_entries: [pendingEntry(1)],
+      pending_replacement_status: "ready"
+    })
+  })
+
+  it("publishes only the newest pending refresh and preserves normal Library pages", async () => {
+    const normalEntry = {
+      entry_id: "99999999-9999-4999-8999-999999999999",
+      library_id: root.library_id,
+      root_id: root.root_id,
+      relative_path: "normal",
+      title: "Normal",
+      cover: null,
+      source_path: "/collections/normal",
+      kind: "image-directory" as const,
+      page_count: 1,
+      state: "accepted" as const,
+      content_version: "1",
+      location_revision: "1",
+      replacement: null
+    }
+    const oldPending = {
+      ...normalEntry,
+      entry_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      relative_path: "old-pending",
+      state: "replacement-pending" as const
+    }
+    const freshPending = {
+      ...oldPending,
+      entry_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      relative_path: "fresh-pending"
+    }
+    let firstResolve!: (value: Result<LibraryEntryPage>) => void
+    let secondResolve!: (value: Result<LibraryEntryPage>) => void
+    let calls = 0
+    const libraryClient = libraryClientWith({
+      search: (input) => {
+        expect(input.state).toBe("replacement-pending")
+        calls += 1
+        return Effect.promise(() => new Promise<Result<LibraryEntryPage>>((resolve) => {
+          if (calls === 1) firstResolve = resolve
+          else secondResolve = resolve
+        }))
+      }
+    })
+    viewStore.set({
+      library_entries: [normalEntry],
+      pending_replacement_entries: [oldPending],
+      pending_replacement_cursor: "next",
+      pending_replacement_has_more: true,
+      pending_replacement_status: "ready",
+      connection: { state: "connected", instance_id: instanceId, epoch, reason: null }
+    })
+
+    const first = run(loadPendingReplacements(true), rootClientWith(), scanClientWith(), libraryClient)
+    await Promise.resolve()
+    const second = run(loadPendingReplacements(), rootClientWith(), scanClientWith(), libraryClient)
+    await Promise.resolve()
+    secondResolve({ ok: true, data: { entries: [freshPending], has_more: false, next_cursor: null, library_change_revision: "2" } })
+    await second
+    firstResolve({ ok: true, data: { entries: [oldPending], has_more: true, next_cursor: "stale", library_change_revision: "1" } })
+    await first
+
+    expect(viewStore.getState()).toMatchObject({
+      library_entries: [normalEntry],
+      pending_replacement_entries: [freshPending],
+      pending_replacement_has_more: false,
+      pending_replacement_cursor: null,
+      pending_replacement_status: "ready"
     })
   })
 })

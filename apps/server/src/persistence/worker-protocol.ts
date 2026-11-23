@@ -431,7 +431,12 @@ export const WorkerRequest = Schema.Union([
     freshManifestJson: Schema.NullOr(Schema.String)
   }),
   Schema.Struct({ op: Schema.Literal("readLibrary") }),
-  Schema.Struct({ op: Schema.Literal("listLibraryEntries"), pageSize: Schema.Natural, cursor: Schema.NullOr(Uuid) }),
+  Schema.Struct({
+    op: Schema.Literal("listLibraryEntries"),
+    pageSize: Schema.Natural,
+    cursor: Schema.NullOr(Uuid),
+    state: Schema.NullOr(Schema.Literal("replacement-pending"))
+  }),
   Schema.Struct({
     op: Schema.Literal("listIndexedRootSamples"),
     rootId: Uuid,

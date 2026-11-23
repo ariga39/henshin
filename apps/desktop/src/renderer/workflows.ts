@@ -416,6 +416,149 @@ const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(f
   return true
 })
 
+let pendingReplacementRequestGeneration = 0
+
+const pendingReplacementPageSize = 50
+
+export const loadPendingReplacements = (append = false, preserveLoadedDepth = false) =>
+  Effect.gen(function*() {
+    const requestGeneration = pendingReplacementRequestGeneration + 1
+    pendingReplacementRequestGeneration = requestGeneration
+    const client = yield* LibraryClient
+    const current = viewStore.getState()
+    const connectionGeneration = current.connection_generation
+    const ownerInstanceId = verifiedInstanceId(current)
+    const ownerEpoch = current.connection.epoch ?? current.epoch
+    const pagesToLoad = append
+      ? 1
+      : preserveLoadedDepth
+        ? Math.max(1, Math.ceil(current.pending_replacement_entries.length / pendingReplacementPageSize))
+        : 1
+    let cursor = append ? current.pending_replacement_cursor : null
+    let entries = append ? [...current.pending_replacement_entries] : []
+    let hasMore = false
+    yield* Effect.sync(() => viewStore.set({
+      pending_replacement_status: "loading",
+      pending_replacement_error: null
+    }))
+    const isCurrentRequest = (): boolean => {
+      const state = viewStore.getState()
+      return requestGeneration === pendingReplacementRequestGeneration &&
+        state.connection_generation === connectionGeneration &&
+        verifiedInstanceId(state) === ownerInstanceId &&
+        (state.connection.epoch ?? state.epoch) === ownerEpoch
+    }
+    for (let page = 0; page < pagesToLoad; page += 1) {
+      const result = yield* client.search(cursor === null
+        ? { page_size: pendingReplacementPageSize, state: "replacement-pending" as const }
+        : { page_size: pendingReplacementPageSize, cursor, state: "replacement-pending" as const })
+      if (!isCurrentRequest()) return false
+      if (!result.ok) {
+        yield* Effect.sync(() => viewStore.set({
+          pending_replacement_status: "error",
+          pending_replacement_error: result.error.message
+        }))
+        return false
+      }
+
+      const ids = new Set(entries.map((entry) => entry.entry_id))
+      for (const entry of result.data.entries) {
+        if (!ids.has(entry.entry_id)) entries.push(entry)
+      }
+      cursor = result.data.next_cursor
+      hasMore = result.data.has_more
+      if (!hasMore || cursor === null) break
+    }
+    if (!isCurrentRequest()) return false
+    yield* Effect.sync(() => viewStore.set({
+      pending_replacement_entries: entries,
+      pending_replacement_cursor: cursor,
+      pending_replacement_has_more: hasMore,
+      pending_replacement_status: "ready",
+      pending_replacement_error: null
+    }))
+    return true
+  })
+
+export const replacementEvidenceMatches = (
+  entry: ViewState["pending_replacement_entries"][number] | undefined,
+  candidate: ViewState["staged_discoveries"][number] | undefined
+): boolean => entry !== undefined && candidate !== undefined &&
+  entry.state === "replacement-pending" &&
+  entry.root_id === candidate.root_id &&
+  entry.relative_path === candidate.relative_path &&
+  entry.replacement !== null &&
+  entry.replacement.candidate_id === candidate.candidate_id &&
+  entry.replacement.candidate_version === candidate.candidate_version
+
+const clearReplacementResolutionFeedback = (): void => {
+  viewStore.set({
+    scan_resolution_status: "idle",
+    scan_resolution_candidate_id: null,
+    scan_resolution_entry_id: null,
+    scan_resolution_operation_id: null,
+    scan_resolution_candidate_version: null,
+    scan_resolution_decision_version: null,
+    scan_resolution_location_revision: null,
+    scan_resolution_mapping_revision: null,
+    scan_resolution_policy_revision: null,
+    scan_resolution_decision: null,
+    scan_resolution_error: null
+  })
+}
+
+const replacementEvidenceKey = (
+  state: ReturnType<typeof viewStore.getState>,
+  entryId: string
+): string | null => {
+  const entry = state.pending_replacement_entries.find((item) => item.entry_id === entryId)
+  if (entry === undefined) return null
+  const candidate = state.staged_discoveries.find((item) =>
+    item.root_id === entry.root_id && item.relative_path === entry.relative_path)
+  return JSON.stringify({
+    entry_id: entry.entry_id,
+    root_id: entry.root_id,
+    relative_path: entry.relative_path,
+    entry_state: entry.state,
+    location_revision: entry.location_revision,
+    replacement: entry.replacement === null
+      ? null
+      : {
+          candidate_id: entry.replacement.candidate_id,
+          candidate_version: entry.replacement.candidate_version,
+          decision_version: entry.replacement.decision_version
+        },
+    candidate: candidate === undefined
+      ? null
+      : {
+          candidate_id: candidate.candidate_id,
+          root_id: candidate.root_id,
+          relative_path: candidate.relative_path,
+          candidate_version: candidate.candidate_version,
+          analysis_status: candidate.analysis_status
+        }
+  })
+}
+
+export const refreshReplacementReview = Effect.gen(function*() {
+  const initialState = viewStore.getState()
+  const entryId = initialState.scan_resolution_entry_id
+  const beforeEvidence = entryId === null ? null : replacementEvidenceKey(initialState, entryId)
+  const stagedLoaded = yield* loadScanResults
+  const pendingLoaded = yield* loadPendingReplacements(false, true)
+  const state = viewStore.getState()
+  const refreshedEntryId = state.scan_resolution_entry_id === null
+    ? undefined
+    : state.pending_replacement_entries.find((item) => item.entry_id === state.scan_resolution_entry_id)
+  const candidate = refreshedEntryId === undefined
+    ? undefined
+    : state.staged_discoveries.find((item) => item.root_id === refreshedEntryId.root_id && item.relative_path === refreshedEntryId.relative_path)
+  const matched = stagedLoaded && pendingLoaded && replacementEvidenceMatches(refreshedEntryId, candidate)
+  const changed = entryId !== null && beforeEvidence !== replacementEvidenceKey(state, entryId)
+  if (matched && changed) clearReplacementResolutionFeedback()
+  return { matched, changed }
+})
+
 export const loadScanResults = Effect.gen(function*() {
   const client = yield* ScanReviewClient
   return yield* loadScanResultsFor(client)
@@ -502,6 +645,143 @@ export const releaseHeldDiscovery = (candidateId: string) =>
         scan_release_error: null
       })
     })
+  })
+
+const replacementResolutionErrorMessage = (error: { readonly code: string; readonly message: string }): string =>
+  error.code === "epoch_changed" || error.code === "instance_mismatch"
+    ? `${error.message}${error.message.endsWith(".") ? "" : "."} Reconnect before retrying the resolution.`
+    : error.message
+
+export const resolveReplacement = (candidateId: string, entryId: string, decision: "keep" | "replace") =>
+  Effect.gen(function*() {
+    const client = yield* ScanReviewClient
+    const state = viewStore.getState()
+    const candidate = state.staged_discoveries.find((item) => item.candidate_id === candidateId)
+    const entry = state.pending_replacement_entries.find((item) => item.entry_id === entryId)
+    const root = candidate === undefined
+      ? undefined
+      : state.root_saved_roots.find((item) => item.root_id === candidate.root_id)
+    if (
+      candidate === undefined || entry === undefined || root === undefined ||
+      candidate.root_id !== entry.root_id || candidate.relative_path !== entry.relative_path ||
+      entry.state !== "replacement-pending" || candidate.analysis_status !== "ready" || candidate.manifest === null
+    ) return
+
+    if (!replacementEvidenceMatches(entry, candidate)) {
+      yield* Effect.sync(() => viewStore.set({
+        scan_resolution_status: "error",
+        scan_resolution_entry_id: entry.entry_id,
+        scan_resolution_operation_id: null,
+        scan_resolution_candidate_version: null,
+        scan_resolution_decision_version: null,
+        scan_resolution_mapping_revision: null,
+        scan_resolution_policy_revision: null,
+        scan_resolution_decision: decision,
+        scan_resolution_error: "replacement comparison is stale; refresh Review before deciding"
+      }))
+      yield* refreshReplacementReview
+      return
+    }
+    const comparison = entry.replacement
+    if (comparison === null) return
+    const decisionVersion = comparison.decision_version
+
+    const sameCommand = state.scan_resolution_candidate_id === candidate.candidate_id &&
+      state.scan_resolution_entry_id === entry.entry_id &&
+      state.scan_resolution_operation_id !== null &&
+      state.scan_resolution_candidate_version === candidate.candidate_version &&
+      state.scan_resolution_decision_version === decisionVersion &&
+      state.scan_resolution_location_revision === entry.location_revision &&
+      state.scan_resolution_mapping_revision === root.mapping_revision &&
+      state.scan_resolution_policy_revision === root.policy_revision &&
+      state.scan_resolution_decision === decision
+    const operationId = sameCommand ? state.scan_resolution_operation_id : newOperationId()
+    yield* Effect.sync(() => viewStore.set({
+      scan_resolution_status: "loading",
+      scan_resolution_candidate_id: candidate.candidate_id,
+      scan_resolution_entry_id: entry.entry_id,
+      scan_resolution_operation_id: operationId,
+      scan_resolution_candidate_version: candidate.candidate_version,
+      scan_resolution_decision_version: decisionVersion,
+      scan_resolution_location_revision: entry.location_revision,
+      scan_resolution_mapping_revision: root.mapping_revision,
+      scan_resolution_policy_revision: root.policy_revision,
+      scan_resolution_decision: decision,
+      scan_resolution_error: null
+    }))
+
+    const result = yield* client.resolve({
+      candidate_id: candidate.candidate_id,
+      root_id: candidate.root_id,
+      operation_id: operationId,
+      expected_candidate_version: candidate.candidate_version,
+      expected_mapping_revision: root.mapping_revision,
+      expected_policy_revision: root.policy_revision,
+      expected_decision_version: decisionVersion,
+      expected_location_revision: entry.location_revision,
+      command: { type: "resolve-replacement", entry_id: entry.entry_id, decision }
+    })
+    if (!result.ok) {
+      let refreshed = false
+      if (result.error.code === "revision_conflict" || result.error.code === "not_found") {
+        yield* loadRoots
+        const refreshedReview = yield* refreshReplacementReview
+        refreshed = refreshedReview.matched && refreshedReview.changed
+      }
+      if (refreshed) return
+      const definiteFailure = result.error.code === "invalid_request" ||
+        result.error.code === "not_found" ||
+        result.error.code === "revision_conflict" ||
+        result.error.code === "operation_conflict" ||
+        result.error.code === "operation_expired" ||
+        result.error.code === "epoch_changed" ||
+        result.error.code === "instance_mismatch"
+      yield* Effect.sync(() => viewStore.set({
+        scan_resolution_status: "error",
+        ...(definiteFailure
+          ? {
+              scan_resolution_entry_id: entry.entry_id,
+              scan_resolution_operation_id: null,
+              scan_resolution_candidate_version: null,
+              scan_resolution_decision_version: null,
+              scan_resolution_location_revision: null,
+              scan_resolution_mapping_revision: null,
+              scan_resolution_policy_revision: null,
+              scan_resolution_decision: decision
+            }
+          : {}),
+        scan_resolution_error: replacementResolutionErrorMessage(result.error)
+      }))
+      return
+    }
+
+    yield* loadScanResults
+    yield* loadPendingReplacements(false, true)
+    const resolution = result.data.resolution
+    if (resolution !== undefined) {
+      yield* Effect.sync(() => {
+        const current = viewStore.getState()
+        if (!current.library_entries.some((item) => item.entry_id === entry.entry_id)) return
+        viewStore.set({
+          library_entries: current.library_entries.map((item) =>
+            item.entry_id === entry.entry_id ? resolution.entry : item
+          )
+        })
+      })
+    }
+    yield* Effect.sync(() => viewStore.set({
+      scan_resolution_status: "idle",
+      scan_resolution_candidate_id: null,
+      scan_resolution_entry_id: null,
+      scan_resolution_operation_id: null,
+      scan_resolution_candidate_version: null,
+      scan_resolution_decision_version: null,
+      scan_resolution_location_revision: null,
+      scan_resolution_mapping_revision: null,
+      scan_resolution_policy_revision: null,
+      scan_resolution_decision: null,
+      scan_resolution_error: null
+    }))
   })
 type ScanWaitResult =
   | { readonly ok: true; readonly task: ScanTask }
@@ -605,14 +885,26 @@ export const watchHeldScans = Effect.gen(function*() {
 
 export const retryScanResults = Effect.gen(function*() {
   const loaded = yield* loadScanResults
-  if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
+  if (!loaded) {
+    yield* loadPendingReplacements()
+    return
+  }
+  if (viewStore.getState().scan_tasks.some(scanIsActive)) {
+    yield* watchHeldScans
+    yield* loadPendingReplacements()
+  }
 })
 
 export const loadRootWorkspace = Effect.gen(function*() {
   yield* loadRoots
   yield* loadLocalMappings
   const loaded = yield* loadScanResults
-  if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) yield* watchHeldScans
+  yield* loadLibrary()
+  yield* loadPendingReplacements()
+  if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) {
+    yield* watchHeldScans
+    yield* loadPendingReplacements()
+  }
 })
 
 const watchScanTask = (taskId: string) =>
@@ -738,6 +1030,7 @@ const taskError = (task: ScanTask): string | null => {
 const finishNormalScanFailure = (message: string) =>
   Effect.gen(function*() {
     yield* loadLibrary()
+    yield* loadPendingReplacements()
     yield* Effect.sync(() => viewStore.set({
       scan_start_status: "error",
       scan_start_error: message,
@@ -806,6 +1099,7 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
     const watchedState = viewStore.getState()
     const terminal = watchedState.scan_tasks.find((task) => task.task_id === submittedTask.task_id)
     if (holdNewDiscoveries) {
+      yield* loadPendingReplacements()
       yield* Effect.sync(() => viewStore.set({ scan_start_status: "idle" }))
       return
     }
@@ -824,6 +1118,7 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
     }
 
     yield* loadLibrary()
+    yield* loadPendingReplacements()
     const error = taskError(terminal)
     yield* Effect.sync(() => viewStore.set({
       scan_start_status: terminal.status === "completed_with_errors" ? "idle" : error === null ? "idle" : "error",

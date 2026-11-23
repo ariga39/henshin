@@ -8,7 +8,7 @@ import {
   DeviceRootMapping,
   LocalMappingPreview
 } from "./root"
-import { LibrarySearchRequest } from "./library"
+import { LibrarySearchRequest, ReplacementResolutionCommand } from "./library"
 import { ThumbnailKey } from "./thumbnail"
 import { ReleaseHoldCommand } from "./review"
 import type {
@@ -213,3 +213,22 @@ export const ReleaseHeldDiscoveryIpcRequest = Schema.Struct({
   command: ReleaseHoldCommand
 })
 export type ReleaseHeldDiscoveryIpcRequest = typeof ReleaseHeldDiscoveryIpcRequest.Type
+
+export const ResolveReplacementIpcRequest = Schema.Struct({
+  candidate_id: Uuid,
+  root_id: Uuid,
+  operation_id: Uuid,
+  expected_candidate_version: Schema.Natural,
+  expected_mapping_revision: Revision,
+  expected_policy_revision: Revision,
+  expected_decision_version: Revision,
+  expected_location_revision: Revision,
+  command: ReplacementResolutionCommand
+})
+export type ResolveReplacementIpcRequest = typeof ResolveReplacementIpcRequest.Type
+
+export const ReviewCandidateIpcRequest = Schema.Union([
+  ReleaseHeldDiscoveryIpcRequest,
+  ResolveReplacementIpcRequest
+])
+export type ReviewCandidateIpcRequest = typeof ReviewCandidateIpcRequest.Type
