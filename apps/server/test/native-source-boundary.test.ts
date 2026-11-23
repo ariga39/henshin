@@ -65,13 +65,21 @@ describe("native source boundary precursor", () => {
     await writeFile(join(directory, name), "book")
     const root = await selectedRoot(directory)
     const limits = { deadlineMs: 30_000 }
-    expect(await resolveSourceCandidate(root, name, { limits })).toMatchObject({ ok: true })
-
     const start = 1_000
-    const now = vi.spyOn(Date, "now").mockReturnValueOnce(start).mockReturnValue(start + limits.deadlineMs)
+    const now = vi.spyOn(Date, "now").mockReturnValue(start)
     try {
-      expect(await resolveSourceCandidate(root, name, { limits }))
-        .toMatchObject({ ok: false, code: "directory-limit" })
+      const control = await resolveSourceCandidate(root, name, { limits })
+      const finalCheck = now.mock.calls.length
+      expect(control).toMatchObject({ ok: true })
+      expect(finalCheck).toBeGreaterThan(1)
+
+      // Replay the successful lookup, reaching the inclusive deadline only
+      // on its final check, after the candidate and root have been revalidated.
+      let calls = 0
+      now.mockImplementation(() => ++calls < finalCheck ? start : start + limits.deadlineMs)
+      const expired = await resolveSourceCandidate(root, name, { limits })
+      expect(calls).toBe(finalCheck)
+      expect(expired).toMatchObject({ ok: false, code: "directory-limit" })
     } finally {
       now.mockRestore()
     }
