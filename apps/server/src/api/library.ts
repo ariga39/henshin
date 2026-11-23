@@ -192,13 +192,21 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
                   }))
                 )
               })
-            : yield* library.updatePersonalTitle({
+            : yield* (command.type === "set-personal-title" || command.type === "remove-personal-title"
+              ? library.updatePersonalTitle({
+                  entryId: params.id,
+                  operationId: payload.operation_id,
+                  epoch: server.epoch,
+                  expectedDecisionVersion: payload.expected_decision_version,
+                  command
+                })
+              : library.updateEntryNote({
                 entryId: params.id,
                 operationId: payload.operation_id,
                 epoch: server.epoch,
                 expectedDecisionVersion: payload.expected_decision_version,
                 command
-              }).pipe(
+              })).pipe(
                 Effect.mapError(() => new InternalError({
                   code: "internal_error",
                   message: "internal error",
@@ -224,14 +232,14 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
             case "operation_expired":
               return yield* new OperationExpired({
                 code: "operation_expired",
-                message: "the binding operation result expired; inspect the current entry before retrying",
+                message: "the entry command result expired; inspect the current entry before retrying",
                 retryable: false,
                 ...errorBase(server, context.request_id)
               })
             case "storage_full":
               return yield* new StorageFull({
                 code: "storage_full503",
-                message: "binding operation recovery storage is full",
+                message: "entry command recovery storage is full",
                 retryable: true,
                 ...errorBase(server, context.request_id)
               })

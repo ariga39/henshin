@@ -489,6 +489,9 @@ db.exec(`
     title_present INTEGER NOT NULL CHECK (title_present IN (0, 1)),
     title TEXT,
     title_search TEXT,
+    notes TEXT,
+    notes_revision INTEGER,
+    notes_updated_at_ms INTEGER,
     CHECK ((title_present = 0 AND title IS NULL AND title_search IS NULL) OR (title_present = 1 AND title IS NOT NULL AND title_search IS NOT NULL))
   );
   CREATE TABLE IF NOT EXISTS galleries (
@@ -773,6 +776,10 @@ if (!currentLibraryEntryColumns.has("availability_observed_at_ms")) {
   db.exec("ALTER TABLE library_entries ADD COLUMN availability_observed_at_ms INTEGER")
 }
 
+if (!entryOverrideColumns.has("notes")) db.exec("ALTER TABLE entry_overrides ADD COLUMN notes TEXT")
+if (!entryOverrideColumns.has("notes_revision")) db.exec("ALTER TABLE entry_overrides ADD COLUMN notes_revision INTEGER")
+if (!entryOverrideColumns.has("notes_updated_at_ms")) db.exec("ALTER TABLE entry_overrides ADD COLUMN notes_updated_at_ms INTEGER")
+
 const needsSummaryBackfill = addedAcceptedObservationSummary || addedCandidateObservationSummary ||
   (existingServerState !== undefined && existingServerState.schema_version < CURRENT_SCHEMA_VERSION)
 const needsSearchBackfill = addedSearchColumns ||
@@ -1010,6 +1017,7 @@ const selectEntryDetails = db.prepare(`
     e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
     b.gallery_id, g.source AS binding_source, g.gid AS binding_gid, g.token AS binding_token,
     COALESCE(b.preferred_domain, g.preferred_domain) AS binding_preferred_domain,
+    o.notes AS note_text, o.notes_revision AS note_revision,
     CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
     s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
     s.candidate_observation_json
@@ -1027,7 +1035,12 @@ const selectEntryOperation = db.prepare(
 const upsertEntryOverride = db.prepare(
   "INSERT INTO entry_overrides(entry_id, title_present, title, title_search) VALUES(?, 1, ?, ?) ON CONFLICT(entry_id) DO UPDATE SET title_present = 1, title = excluded.title, title_search = excluded.title_search"
 )
-const deleteEntryOverride = db.prepare("DELETE FROM entry_overrides WHERE entry_id = ?")
+const clearEntryOverride = db.prepare(
+  "UPDATE entry_overrides SET title_present = 0, title = NULL, title_search = NULL WHERE entry_id = ?"
+)
+const deleteEntryOverride = db.prepare(
+  "DELETE FROM entry_overrides WHERE entry_id = ? AND notes_revision IS NULL"
+)
 const insertEntryOperation = db.prepare(
   "INSERT INTO entry_operations(epoch, operation_id, entry_id, payload, result, created_at_ms) VALUES(?, ?, ?, ?, ?, ?)"
 )
@@ -1049,6 +1062,9 @@ const insertGallery = db.prepare(
 )
 const upsertBinding = db.prepare(
   "INSERT INTO bindings(entry_id, gallery_id, preferred_domain, bound_at_ms) VALUES(?, ?, ?, ?) ON CONFLICT(entry_id) DO UPDATE SET gallery_id = excluded.gallery_id, preferred_domain = excluded.preferred_domain, bound_at_ms = excluded.bound_at_ms"
+)
+const upsertEntryNote = db.prepare(
+  "INSERT INTO entry_overrides(entry_id, title_present, title, title_search, notes, notes_revision, notes_updated_at_ms) VALUES(?, 0, NULL, NULL, ?, 1, ?) ON CONFLICT(entry_id) DO UPDATE SET notes = excluded.notes, notes_revision = COALESCE(entry_overrides.notes_revision, 0) + 1, notes_updated_at_ms = excluded.notes_updated_at_ms"
 )
 const advanceEntryDecision = db.prepare(
   "UPDATE library_entries SET decision_version = decision_version + 1, updated_at_ms = ? WHERE entry_id = ?"
@@ -2476,6 +2492,8 @@ const entryDetailsRow = (row: {
   binding_gid: string | null
   binding_token: string | null
   binding_preferred_domain: "e-hentai.org" | "exhentai.org" | null
+  note_text: string | null
+  note_revision: bigint | null
   accepted_observation_json: string | null
   candidate_id: string | null
   candidate_version: bigint | null
@@ -2519,7 +2537,10 @@ const entryDetailsRow = (row: {
         gid: row.binding_gid,
         canonical_url: `https://${row.binding_preferred_domain}/g/${row.binding_gid}/${row.binding_token}/`,
         preferred_domain: row.binding_preferred_domain
-      }
+      },
+  note: row.note_text === null || row.note_revision === null
+    ? null
+    : { text: row.note_text, revision: row.note_revision.toString() }
 })
 
 const readEntryDetails = (entryId: string): import("./worker-protocol").LibraryEntryDetailsRow | null => {
@@ -2622,16 +2643,13 @@ const bindEntry = (
   }
 }
 
-const updatePersonalTitle = (
-  request: Extract<WorkerRequest, { op: "updatePersonalTitle" }>
-): import("./worker-protocol").PersonalTitleOutcome => {
-  const command = request.command.type === "set-personal-title"
-    ? { type: "set-personal-title" as const, title: request.command.title }
-    : { type: "remove-personal-title" as const }
+const updateEntryCommand = (
+  request: Extract<WorkerRequest, { op: "updateEntryCommand" }>
+): import("./worker-protocol").EntryCommandOutcome => {
   const canonicalPayload = JSON.stringify({
     entry_id: request.entryId,
     expected_decision_version: request.expectedDecisionVersion,
-    command
+    command: request.command
   })
 
   db.exec("BEGIN IMMEDIATE")
@@ -2652,7 +2670,7 @@ const updatePersonalTitle = (
         return { kind: "operation_expired" }
       }
       const replay = Schema.decodeUnknownOption(EntryCommandResult)(JSON.parse(previous.result))
-      if (Option.isNone(replay)) throw new Error("invalid persisted personal title result")
+      if (Option.isNone(replay)) throw new Error("invalid persisted entry command result")
       db.exec("COMMIT")
       return { kind: "replayed", result: replay.value }
     }
@@ -2673,18 +2691,29 @@ const updatePersonalTitle = (
       db.exec("COMMIT")
       return { kind: "storage_full" }
     }
-    const requestedTitle = request.command.type === "set-personal-title" ? request.command.title : null
-    const title = requestedTitle === null
-      ? null
-      : requestedTitle.trim().length === 0
-        ? ""
-        : requestedTitle
-    if (title === null) deleteEntryOverride.run(request.entryId)
-    else upsertEntryOverride.run(request.entryId, title, normalizeSearchText(title))
+    if (request.command.type === "set-personal-title" || request.command.type === "remove-personal-title") {
+      const requestedTitle = request.command.type === "set-personal-title" ? request.command.title : null
+      const title = requestedTitle === null
+        ? null
+        : requestedTitle.trim().length === 0
+          ? ""
+          : requestedTitle
+      if (title === null) {
+        clearEntryOverride.run(request.entryId)
+        deleteEntryOverride.run(request.entryId)
+      }
+      else upsertEntryOverride.run(request.entryId, title, normalizeSearchText(title))
+    } else {
+      upsertEntryNote.run(
+        request.entryId,
+        request.command.type === "clear-note" ? null : request.command.text,
+        now
+      )
+    }
     advanceEntryDecision.run(now, request.entryId)
     bumpLibraryRevision.run()
     const entry = readEntryDetails(request.entryId)
-    if (entry === null) throw new Error("titled entry disappeared")
+    if (entry === null) throw new Error("entry command target disappeared")
     const result = { operation_id: request.operationId, entry }
     insertEntryOperation.run(request.epoch, request.operationId, request.entryId, canonicalPayload, JSON.stringify(result), now)
     db.exec("COMMIT")
@@ -3448,8 +3477,8 @@ const handle = (request: WorkerRequest): unknown => {
       return readEntryDetails(request.entryId)
     case "bindEntry":
       return bindEntry(request)
-    case "updatePersonalTitle":
-      return updatePersonalTitle(request)
+    case "updateEntryCommand":
+      return updateEntryCommand(request)
     case "acceptOpenEvents":
       return acceptOpenEvents(request)
     case "recordDiscovery":
