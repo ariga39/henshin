@@ -60,22 +60,15 @@ export const runScheduledScanLoop = Effect.fn("runScheduledScanLoop")(function*(
         holdNewDiscoveries: false
       })
 
-      switch (started.kind) {
-        case "created":
-          yield* runManualHeldScan(started.task, root).pipe(Effect.forkScoped)
-          break
-        case "active":
-        case "replayed":
-          break
-        case "active_scan_conflict":
-        case "mapping_revision_conflict":
-        case "policy_revision_conflict":
-        case "operation_conflict":
-        case "root_not_found":
-          break
+      if (started.kind === "created") {
+        yield* runManualHeldScan(started.task, root).pipe(Effect.forkScoped)
       }
-      dueAt.set(root.rootId, now + root.scheduleIntervalMs)
-      cadenceAt.set(root.rootId, root.scheduleIntervalMs)
+      if (started.kind === "created" || started.kind === "active") {
+        dueAt.set(root.rootId, now + root.scheduleIntervalMs)
+        cadenceAt.set(root.rootId, root.scheduleIntervalMs)
+      } else {
+        yield* Effect.logWarning(`scheduled scan start deferred for ${root.rootId}: ${started.kind}`)
+      }
     }
 
     for (const rootId of dueAt.keys()) {

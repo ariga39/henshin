@@ -1886,13 +1886,31 @@ const startScan = (
     mode,
     hold_new_discoveries: request.holdNewDiscoveries
   })
+  const commandIdentity = (payload: string): string => {
+    try {
+      const parsed = JSON.parse(payload) as {
+        root_id?: unknown
+        expected_mapping_revision?: unknown
+        expected_policy_revision?: unknown
+        hold_new_discoveries?: unknown
+      }
+      return JSON.stringify({
+        root_id: parsed.root_id,
+        expected_mapping_revision: parsed.expected_mapping_revision,
+        expected_policy_revision: parsed.expected_policy_revision,
+        hold_new_discoveries: parsed.hold_new_discoveries
+      })
+    } catch {
+      return payload
+    }
+  }
   db.exec("BEGIN IMMEDIATE")
   try {
     const existing = selectScanOperation.get(request.epoch, request.operationId, request.epoch, request.operationId) as
       | { task_id: string; command_payload: string }
       | undefined
     if (existing !== undefined) {
-      if (existing.command_payload !== commandPayload) {
+      if (commandIdentity(existing.command_payload) !== commandIdentity(commandPayload)) {
         db.exec("ROLLBACK")
         return { kind: "operation_conflict" }
       }
@@ -2043,9 +2061,7 @@ const commitRootPolicy = (
     const scheduleIntervalMs = command.type === "set-schedule"
       ? command.interval_ms ?? current.scheduleIntervalMs
       : current.scheduleIntervalMs
-    const changed = exclusions.length !== current.exclusions.length ||
-      scheduleEnabled !== current.scheduleEnabled ||
-      scheduleIntervalMs !== current.scheduleIntervalMs
+    const policyChanged = exclusions.length !== current.exclusions.length
     if (exclusions.length > MAX_ROOT_EXCLUSIONS) {
       db.exec("ROLLBACK")
       return { kind: "exclusion_limit" }
@@ -2056,9 +2072,9 @@ const commitRootPolicy = (
       return { kind: "storage_full" }
     }
     const nextRevision =
-      !changed
-        ? current.policyRevision
-        : (BigInt(current.policyRevision) + 1n).toString()
+      policyChanged
+        ? (BigInt(current.policyRevision) + 1n).toString()
+        : current.policyRevision
     const root: ServerRootRow = { ...current, policyRevision: nextRevision, exclusions, scheduleEnabled, scheduleIntervalMs }
     updateRootPolicy.run(
       BigInt(root.policyRevision),

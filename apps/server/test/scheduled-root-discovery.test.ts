@@ -59,6 +59,32 @@ const waitForScheduledRootScan = async (server: RunningServer, rootId: string): 
   throw new Error(`scheduled scan for ${rootId} did not reach a terminal state`)
 }
 
+const waitForRootTask = async (
+  server: RunningServer,
+  rootId: string,
+  mode: ScanTask["mode"],
+  predicate: (task: ScanTask) => boolean
+): Promise<ScanTask> => {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const tasks = await withTaskClient(server, Effect.gen(function*() {
+      const client = yield* TaskHttpClient
+      return yield* client.list()
+    }))
+    const task = tasks.data.find((candidate) => candidate.root_id === rootId && candidate.mode === mode && predicate(candidate))
+    if (task !== undefined) return task
+    await sleep(20)
+  }
+  throw new Error(`${mode} scan for ${rootId} did not reach the expected state`)
+}
+
+const addFixtureBooks = async (rootPath: string, count: number, prefix: string): Promise<void> => {
+  for (let index = 0; index < count; index += 1) {
+    const book = path.join(rootPath, `${prefix}-${String(index).padStart(3, "0")}`)
+    await mkdir(book)
+    await writeFile(path.join(book, "001.jpg"), `${prefix}-${index}`)
+  }
+}
+
 const saveRoot = async (server: RunningServer, rootPath: string, label: string) => {
   const preview = await withServerClient(server, Effect.gen(function*() {
     const client = yield* ServerHttpClient
@@ -188,7 +214,7 @@ describe("scheduled root discovery", () => {
       if ("task" in enabled.data) throw new Error("expected a root settings response")
       expect(enabled.data.schedule_enabled).toBe(true)
       expect(enabled.data.schedule_interval_ms).toBe(100)
-      expect(enabled.data.policy_revision).toBe("1")
+      expect(enabled.data.policy_revision).toBe("0")
 
       await server.stop()
       const restarted = await startServer(dbPath)
@@ -470,6 +496,180 @@ describe("scheduled root discovery", () => {
         return yield* client.candidates()
       }))
       expect(afterManual.data).toEqual([expect.objectContaining({ relative_path: "held-book", hold_state: "held" })])
+    } finally {
+      if (previousPoll === undefined) delete process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS
+      else process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS = previousPoll
+    }
+  })
+
+  it("replays a manual retry after it joins an active scheduled scan", async () => {
+    const previousPoll = process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS
+    process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS = "20"
+    try {
+      const dbPath = await makeTempDbPath()
+      dbPaths.add(dbPath)
+      const server = await startServer(dbPath)
+      servers.push(server)
+      const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-scheduled-retry-"))
+      fixturePaths.add(fixture)
+      await addFixtureBooks(fixture, 256, "scheduled")
+      const root = await saveRoot(server, fixture, "Scheduled retry")
+
+      const enabled = await withServerClient(server, Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        return yield* client.command({
+          params: { id: root.data.root_id },
+          payload: {
+            operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+            expected_policy_revision: root.data.policy_revision,
+            command: { type: "set-schedule", enabled: true, interval_ms: 2000 }
+          }
+        })
+      }))
+      if ("task" in enabled.data) throw new Error("expected schedule settings")
+      const scheduled = await waitForRootTask(server, root.data.root_id, "scheduled", (task) => task.status === "running")
+      const operation_id = randomUUID()
+      const payload = {
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id,
+          instance_id: server.instanceId,
+          epoch: server.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: enabled.data.policy_revision,
+          command: { type: "start-scan" as const, mode: "manual" as const, hold_new_discoveries: false }
+        }
+      }
+
+      const retried = await withServerClient(server, Effect.result(Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        const first = yield* client.command(payload)
+        const second = yield* client.command(payload)
+        return [first, second] as const
+      })))
+      expect(retried._tag).toBe("Success")
+      if (retried._tag === "Success") {
+        expect(retried.success[0].data).toMatchObject({ task: { task_id: scheduled.task_id, mode: "scheduled" } })
+        expect(retried.success[1].data).toMatchObject({ task: { task_id: scheduled.task_id, mode: "scheduled" } })
+      }
+    } finally {
+      if (previousPoll === undefined) delete process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS
+      else process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS = previousPoll
+    }
+  })
+
+  it("does not fence a running scan when only cadence changes", async () => {
+    const previousPoll = process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS
+    process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS = "20"
+    try {
+      const dbPath = await makeTempDbPath()
+      dbPaths.add(dbPath)
+      const server = await startServer(dbPath)
+      servers.push(server)
+      const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-cadence-edit-"))
+      fixturePaths.add(fixture)
+      await addFixtureBooks(fixture, 256, "running")
+      const root = await saveRoot(server, fixture, "Cadence edit")
+
+      const submitted = await withServerClient(server, Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        return yield* client.command({
+          params: { id: root.data.root_id },
+          payload: {
+            operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+            expected_mapping_revision: root.data.mapping_revision,
+            expected_policy_revision: root.data.policy_revision,
+            command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+          }
+        })
+      }))
+      if (!("task" in submitted.data)) throw new Error("expected manual scan task")
+      const manualTask = submitted.data.task
+      await waitForRootTask(server, root.data.root_id, "manual", (task) => task.task_id === manualTask.task_id && task.status === "running")
+
+      const edited = await withServerClient(server, Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        return yield* client.command({
+          params: { id: root.data.root_id },
+          payload: {
+            operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+            expected_policy_revision: root.data.policy_revision,
+            command: { type: "set-schedule", enabled: false, interval_ms: 420 }
+          }
+        })
+      }))
+      if ("task" in edited.data) throw new Error("expected cadence settings")
+      expect(edited.data.policy_revision).toBe(root.data.policy_revision)
+      expect(edited.data.schedule_interval_ms).toBe(420)
+      expect((await waitForTerminal(server, manualTask.task_id)).status).toBe("succeeded")
+    } finally {
+      if (previousPoll === undefined) delete process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS
+      else process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS = previousPoll
+    }
+  })
+
+  it("retries a scheduled start after an active manual conflict", async () => {
+    const previousPoll = process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS
+    process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS = "20"
+    try {
+      const dbPath = await makeTempDbPath()
+      dbPaths.add(dbPath)
+      const server = await startServer(dbPath)
+      servers.push(server)
+      const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-scheduled-conflict-"))
+      fixturePaths.add(fixture)
+      const initialBookCount = 512
+      await addFixtureBooks(fixture, initialBookCount, "held")
+      const root = await saveRoot(server, fixture, "Scheduled conflict")
+
+      const submitted = await withServerClient(server, Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        return yield* client.command({
+          params: { id: root.data.root_id },
+          payload: {
+            operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+            expected_mapping_revision: root.data.mapping_revision,
+            expected_policy_revision: root.data.policy_revision,
+            command: { type: "start-scan", mode: "manual", hold_new_discoveries: true }
+          }
+        })
+      }))
+      if (!("task" in submitted.data)) throw new Error("expected held manual scan task")
+      const heldTask = submitted.data.task
+      await waitForRootTask(server, root.data.root_id, "manual", (task) => task.task_id === heldTask.task_id && task.status === "running")
+
+      const enabled = await withServerClient(server, Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        return yield* client.command({
+          params: { id: root.data.root_id },
+          payload: {
+            operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+            expected_policy_revision: root.data.policy_revision,
+            command: { type: "set-schedule", enabled: true, interval_ms: 2000 }
+          }
+        })
+      }))
+      if ("task" in enabled.data) throw new Error("expected schedule settings")
+      await sleep(100)
+      const duringManual = await withTaskClient(server, Effect.gen(function*() {
+        const client = yield* TaskHttpClient
+        return yield* client.list()
+      }))
+      expect(duringManual.data.some((task) => task.root_id === root.data.root_id && task.mode === "scheduled")).toBe(false)
+
+      await waitForRootTask(server, root.data.root_id, "manual", (task) =>
+        task.task_id === heldTask.task_id && task.status === "running" && task.candidates_discovered >= initialBookCount
+      )
+      const afterConflictBook = path.join(fixture, "after-conflict")
+      await mkdir(afterConflictBook)
+      await writeFile(path.join(afterConflictBook, "001.jpg"), "after conflict")
+      expect((await waitForTerminal(server, heldTask.task_id)).status).toBe("succeeded")
+
+      const retryStartedAt = Date.now()
+      const scheduled = await waitForRootTask(server, root.data.root_id, "scheduled", (task) => task.status === "succeeded")
+      expect(Date.now() - retryStartedAt).toBeLessThan(1200)
+      expect(scheduled.mode).toBe("scheduled")
+      expect((await listEntries(server)).data.entries.map((entry) => entry.relative_path)).toContain("after-conflict")
     } finally {
       if (previousPoll === undefined) delete process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS
       else process.env.HENSHIN_SCHEDULE_POLL_INTERVAL_MS = previousPoll
