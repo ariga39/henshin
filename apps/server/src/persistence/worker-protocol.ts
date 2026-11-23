@@ -238,8 +238,9 @@ export const LibraryEntryRow = Schema.Struct({
   title: Schema.String,
   title_override: Schema.optional(Schema.NullOr(Schema.String.check(Schema.isMaxLength(1024)))),
   page_count: Schema.Natural,
-  state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending")]),
+  state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending"), Schema.Literal("detached")]),
   content_version: Revision,
+  decision_version: Schema.optional(Revision),
   location_revision: Revision,
   match_fields: Schema.Array(Schema.Literals(["title", "basename"])),
   availability: ServerAvailability,
@@ -387,6 +388,21 @@ export const PersonalTitleOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("revision_conflict"), currentDecisionVersion: Revision })
 ])
 export type PersonalTitleOutcome = typeof PersonalTitleOutcome.Type
+
+export const DetachMissingOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("committed"), result: EntryCommandResult }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), result: EntryCommandResult }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("entry_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("operation_expired") }),
+  Schema.Struct({ kind: Schema.Literal("storage_full") }),
+  Schema.Struct({ kind: Schema.Literal("entry_revision_conflict"), currentDecisionVersion: Revision, currentLocationRevision: Revision }),
+  Schema.Struct({ kind: Schema.Literal("entry_not_missing") }),
+  Schema.Struct({ kind: Schema.Literal("entry_not_active") }),
+  Schema.Struct({ kind: Schema.Literal("scan_in_progress"), taskId: Uuid, policyRevision: Revision })
+])
+export type DetachMissingOutcome = typeof DetachMissingOutcome.Type
+
 export const IndexedRootSampleRow = Schema.Struct({
   relative_path: RootRelativePath,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
@@ -624,7 +640,16 @@ export const WorkerRequest = Schema.Union([
     query: Schema.String.check(Schema.isMaxLength(1024)),
     epoch: Uuid,
     cursor: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8192))),
-    state: Schema.NullOr(Schema.Literal("replacement-pending"))
+    state: Schema.NullOr(Schema.Literal("replacement-pending")),
+    view: Schema.Literals(["normal", "detached"])
+  }),
+  Schema.Struct({
+    op: Schema.Literal("detachMissing"),
+    entryId: Uuid,
+    operationId: Uuid,
+    epoch: Uuid,
+    expectedDecisionVersion: Revision,
+    expectedLocationRevision: Revision
   }),
   Schema.Struct({
     op: Schema.Literal("listIndexedRootSamples"),

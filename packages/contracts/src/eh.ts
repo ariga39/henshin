@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { Revision, Text, Uuid } from "./ids"
-import { ReplacementComparison } from "./library"
+import { DetachMissingCommand, ReplacementComparison } from "./library"
 import { ThumbnailReference } from "./thumbnail"
 
 /** Public identity and preferred link for one E-Hentai/ExHentai gallery. */
@@ -65,7 +65,8 @@ export const EntryCommandRequest = Schema.Struct({
   instance_id: Uuid,
   epoch: Uuid,
   expected_decision_version: Revision,
-  command: EntryCommand
+  expected_location_revision: Schema.optional(Revision),
+  command: Schema.Union([EntryCommand, DetachMissingCommand])
 })
 export type EntryCommandRequest = typeof EntryCommandRequest.Type
 
@@ -81,7 +82,7 @@ export const LibraryEntryDetails = Schema.Struct({
     Schema.withDecodingDefaultType(Effect.succeed(null))
   ),
   page_count: Schema.Natural,
-  state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending")]),
+  state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending"), Schema.Literal("detached")]),
   decision_version: Revision,
   content_version: Revision,
   location_revision: Revision,

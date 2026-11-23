@@ -8,7 +8,7 @@ import {
   DeviceRootMapping,
   LocalMappingPreview
 } from "./root"
-import { LibrarySearchRequest, ReplacementResolutionCommand } from "./library"
+import { DetachMissingCommand, LibrarySearchRequest, ReplacementResolutionCommand } from "./library"
 import { ThumbnailKey } from "./thumbnail"
 import { ReleaseHoldCommand } from "./review"
 import type {
@@ -203,6 +203,15 @@ export const LibraryNoteIpcRequest = Schema.Struct({
   expected_decision_version: Revision
 })
 export type LibraryNoteIpcRequest = typeof LibraryNoteIpcRequest.Type
+
+export const LibraryEntryCommandIpcRequest = Schema.Struct({
+  entry_id: Uuid,
+  operation_id: Uuid,
+  expected_decision_version: Revision,
+  expected_location_revision: Revision,
+  command: DetachMissingCommand
+})
+export type LibraryEntryCommandIpcRequest = typeof LibraryEntryCommandIpcRequest.Type
 
 export const ThumbnailGetIpcRequest = Schema.Struct({ key: ThumbnailKey })
 export type ThumbnailGetIpcRequest = typeof ThumbnailGetIpcRequest.Type

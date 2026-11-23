@@ -6,6 +6,7 @@ import type {
   DeviceRootMapping,
   DiscardedDraft,
   HandshakeView,
+  LibraryEntryCommandIpcRequest,
   LibraryEntryPage,
   LibraryEntryDetails,
   LibraryNoteIpcRequest,
@@ -161,12 +162,14 @@ export interface LibraryBridge {
     readonly page_size?: number
     readonly cursor?: string
     readonly state?: "replacement-pending"
+    readonly view?: "normal" | "detached"
   }): Promise<Result<LibraryEntryPage>>
   entry(input: { readonly entry_id: string }): Promise<Result<LibraryEntryDetails>>
   note(input: LibraryNoteIpcRequest): Promise<Result<EntryCommandResult>>
   open(input: OpenBookIpcRequest): Promise<Result<OpenBookIpcResult>>
   status(input: OpenBookStatusIpcRequest): Promise<Result<OpenBookIpcResult | null>>
   onOpenStateChanged(listener: () => void): () => void
+  command(input: LibraryEntryCommandIpcRequest): Promise<Result<{ readonly operation_id: string; readonly entry: import("@henshin/contracts").LibraryEntryDetails }>>
   getThumbnail(key: ThumbnailKey): Promise<Result<Uint8Array>>
 }
 
@@ -332,11 +335,13 @@ export class LibraryClient extends Context.Service<
       readonly page_size?: number
       readonly cursor?: string
       readonly state?: "replacement-pending"
+      readonly view?: "normal" | "detached"
     }) => Effect.Effect<Result<LibraryEntryPage>>
     readonly entry: (input: { readonly entry_id: string }) => Effect.Effect<Result<LibraryEntryDetails>>
     readonly note: (input: LibraryNoteIpcRequest) => Effect.Effect<Result<EntryCommandResult>>
     readonly open: (input: OpenBookIpcRequest) => Effect.Effect<Result<OpenBookIpcResult>>
     readonly status: (input: OpenBookStatusIpcRequest) => Effect.Effect<Result<OpenBookIpcResult | null>>
+    readonly command: (input: LibraryEntryCommandIpcRequest) => Effect.Effect<Result<{ readonly operation_id: string; readonly entry: import("@henshin/contracts").LibraryEntryDetails }>>
     readonly getThumbnail: (key: ThumbnailKey) => Effect.Effect<Result<Uint8Array>>
   }
 >()("henshin/desktop/renderer/LibraryClient") {
@@ -348,6 +353,7 @@ export class LibraryClient extends Context.Service<
       note: (input) => callIpc(() => window.henshinLibrary.note(input)),
       open: (input) => callIpc(() => window.henshinLibrary.open(input)),
       status: (input) => callIpc(() => window.henshinLibrary.status(input)),
+      command: (input) => callIpc(() => window.henshinLibrary.command(input)),
       getThumbnail: (key) => callIpc(() => window.henshinLibrary.getThumbnail(key))
     })
   )

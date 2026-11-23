@@ -17,6 +17,7 @@ import {
   selectLibraryEntry,
   showSetup
 } from "./workflows"
+import { detachMissingEntry, setLibraryView } from "./workflows"
 
 type CoverState =
   | { readonly key: string | null; readonly request: number; readonly status: "loading" | "unavailable"; readonly src: null }
@@ -208,6 +209,12 @@ export const LibraryScreen = () => {
         <button data-testid="library-setup" onClick={() => void runtime.runPromise(showSetup)}>
           Collection setup
         </button>
+        <button
+          data-testid="library-detached-toggle"
+          onClick={() => void runtime.runPromise(setLibraryView(state.library_view === "normal" ? "detached" : "normal"))}
+        >
+          {state.library_view === "normal" ? "Show detached" : "Show normal library"}
+        </button>
       </header>
 
       {state.library_scan_task !== null && (
@@ -252,6 +259,7 @@ export const LibraryScreen = () => {
         </button>
         {state.library_status === "loading" && <p role="status">Loading library…</p>}
         {state.library_status === "error" && <p role="alert">Could not load library: {state.library_error}</p>}
+        {state.library_command_error !== null && <p role="alert" data-testid="library-command-error">{state.library_command_error}</p>}
         {state.library_status === "ready" && state.library_entries.length === 0 && hasLibraryQuery && (
           <>
             <p data-testid="library-no-matches">No books match “{state.library_query}”.</p>
@@ -268,29 +276,50 @@ export const LibraryScreen = () => {
           </>
         )}
         {state.library_status === "ready" && state.library_entries.length === 0 && !hasLibraryQuery && (
-          <p data-testid="library-empty">No accepted books yet. Start a normal scan from a saved root.</p>
+          <p data-testid="library-empty">
+            {state.library_view === "normal"
+              ? "No accepted books yet. Start a normal scan from a saved root."
+              : "No detached books. Detached records remain available here after their claim is released."}
+          </p>
         )}
         <ul data-testid="library-entries">
           {state.library_entries.map((entry) => (
             <li key={entry.entry_id} data-testid="library-entry">
               <LibraryCover entry={entry} refreshGeneration={state.library_cover_generation} />
-              <button
-                type="button"
-                className="library-entry-details"
-                data-testid={`library-entry-details-${entry.entry_id}`}
-                aria-label={`Open details for ${entry.title}`}
-                onClick={() => void runtime.runPromise(selectLibraryEntry(entry.entry_id))}
-              >
-                <strong>{entry.title}</strong>
-                <span>{entry.source_path}</span>
-                {entry.match_fields.length > 0 && (
-                  <small data-testid="library-match-evidence">
-                    Matched in {entry.match_fields.map((field) => field === "title" ? "book name" : "filename").join(" and ")}.
-                  </small>
+              <div className="library-entry-body">
+                <button
+                  type="button"
+                  className="library-entry-details"
+                  data-testid={`library-entry-details-${entry.entry_id}`}
+                  aria-label={`Open details for ${entry.title}`}
+                  onClick={() => void runtime.runPromise(selectLibraryEntry(entry.entry_id))}
+                >
+                  <strong>{entry.title}</strong>
+                  <span>{entry.source_path}</span>
+                  {entry.match_fields.length > 0 && (
+                    <small data-testid="library-match-evidence">
+                      Matched in {entry.match_fields.map((field) => field === "title" ? "book name" : "filename").join(" and ")}.
+                    </small>
+                  )}
+                  <small data-testid="library-availability">{availabilityText(entry)}</small>
+                  <small data-testid="library-entry-id">{entry.entry_id}</small>
+                </button>
+                {entry.state === "detached" && (
+                  <small>Detached record; metadata and reading history retained. Last-known location: {entry.source_path}</small>
                 )}
-                <small data-testid="library-availability">{availabilityText(entry)}</small>
-                <small data-testid="library-entry-id">{entry.entry_id}</small>
-              </button>
+                {state.library_view === "normal" && entry.state !== "detached" && entry.availability.status === "missing" && (
+                  <button
+                    data-testid="library-detach-missing"
+                    disabled={state.library_command_status === "loading"}
+                    onClick={() => {
+                      if (!window.confirm(`Release the current claim for “${entry.title}”? Its metadata and reading history stay with entry ${entry.entry_id}; the record remains inspectable in the detached view.`)) return
+                      void runtime.runPromise(detachMissingEntry(entry))
+                    }}
+                  >
+                    Detach missing claim
+                  </button>
+                )}
+              </div>
             </li>
           ))}
         </ul>

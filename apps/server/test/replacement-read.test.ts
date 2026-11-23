@@ -297,6 +297,52 @@ const downgradeLibraryEntriesToKeepV8Schema = (dbPath: string): void => {
   }
 }
 
+const downgradeLibraryEntriesToKeepV9Schema = (dbPath: string): void => {
+  const db = new DatabaseSync(dbPath)
+  db.exec("PRAGMA foreign_keys = OFF")
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    db.exec(`
+      CREATE TABLE library_entries_keep_v9 (
+        entry_id TEXT PRIMARY KEY,
+        library_id TEXT NOT NULL REFERENCES server_library(library_id),
+        root_id TEXT NOT NULL REFERENCES server_roots(root_id),
+        relative_path TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
+        title TEXT NOT NULL,
+        page_count INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending')),
+        content_version INTEGER NOT NULL,
+        location_revision INTEGER NOT NULL,
+        decision_version INTEGER NOT NULL DEFAULT 1,
+        manifest_json TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        accepted_observation_json TEXT,
+        availability_status TEXT NOT NULL DEFAULT 'unknown' CHECK (availability_status IN ('present', 'missing', 'inaccessible', 'unknown')),
+        availability_observed_at_ms INTEGER,
+        UNIQUE (root_id, relative_path)
+      );
+      INSERT INTO library_entries_keep_v9
+        SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count,
+          state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms,
+          accepted_observation_json, availability_status, availability_observed_at_ms
+        FROM library_entries;
+      DROP TABLE library_entries;
+      ALTER TABLE library_entries_keep_v9 RENAME TO library_entries;
+      UPDATE server_state SET schema_version = 9 WHERE id = 1;
+    `)
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON")
+    db.close()
+  }
+}
+
 afterEach(async () => {
   for (const server of servers.splice(0)) await server.stop()
   for (const dbPath of dbPaths) await cleanupTempDb(dbPath)
@@ -449,6 +495,66 @@ describe("replacement comparison read model", () => {
     const afterThirdBook = await listLibrary(restarted)
     expect(afterThirdBook.entries.map((entry) => entry.relative_path).sort()).toEqual(["book-a", "book-b"])
     expect(afterThirdBook.entries.find((entry) => entry.relative_path === "book-a")?.state).toBe("replacement-pending")
+  })
+
+  it("preserves stored missing availability through the v9 detached migration and permits detachment", async () => {
+    const { dbPath, server, fixture, root } = await makeScenario(
+      "henshin-detached-migration-",
+      "Detached migration",
+      async (fixture) => {
+        await mkdir(path.join(fixture, "book"))
+        await writeFile(path.join(fixture, "book", "001.jpg"), "Book")
+      }
+    )
+
+    const first = await scan(server, root)
+    expect(first.status).toBe("succeeded")
+    const beforeMigration = (await listLibrary(server)).entries[0]
+    if (beforeMigration === undefined) throw new Error("expected migrated entry")
+
+    await server.stop()
+    const seeded = new DatabaseSync(dbPath)
+    const observedAtMs = 123456789
+    seeded.prepare("UPDATE library_entries SET availability_status = 'missing', availability_observed_at_ms = ? WHERE entry_id = ?")
+      .run(observedAtMs, beforeMigration.entry_id)
+    seeded.close()
+    downgradeLibraryEntriesToKeepV9Schema(dbPath)
+
+    const migrated = await startServer(dbPath)
+    servers.push(migrated)
+    const restored = await listLibrary(migrated)
+    expect(restored.entries).toHaveLength(1)
+    expect(restored.entries[0]).toMatchObject({
+      entry_id: beforeMigration.entry_id,
+      state: "accepted",
+      availability: { status: "missing", observed_at_ms: observedAtMs }
+    })
+
+    const detached = await withLibraryClient(migrated, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: beforeMigration.entry_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: migrated.instanceId,
+          epoch: migrated.epoch,
+          expected_decision_version: beforeMigration.decision_version!,
+          expected_location_revision: beforeMigration.location_revision,
+          command: { type: "detach-missing" }
+        }
+      })
+    }))
+    expect(detached.data.entry).toMatchObject({
+      entry_id: beforeMigration.entry_id,
+      state: "detached"
+    })
+    const detachedPage = await withLibraryClient(migrated, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20, view: "detached" } })
+    }))
+    expect(detachedPage.data.entries[0]).toMatchObject({
+      entry_id: beforeMigration.entry_id,
+      state: "detached",
+      availability: { status: "missing", observed_at_ms: observedAtMs }
+    })
   })
 
   it.each([

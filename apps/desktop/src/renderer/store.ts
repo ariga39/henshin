@@ -135,11 +135,14 @@ export interface ViewState {
   readonly library_note_status: "idle" | "loading" | "error"
   readonly library_note_error: string | null
   readonly library_note_server_text: string | null
+  readonly library_view: "normal" | "detached"
   readonly library_cursor: string | null
   readonly library_has_more: boolean
   readonly library_status: "idle" | "loading" | "ready" | "error"
   readonly library_error: string | null
   readonly library_request_generation: number
+  readonly library_command_status: "idle" | "loading"
+  readonly library_command_error: string | null
   readonly library_cover_generation: number
   readonly pending_replacement_entries: ReadonlyArray<LibraryEntry>
   readonly pending_replacement_cursor: string | null
@@ -248,11 +251,14 @@ const initialState: ViewState = {
   library_note_status: "idle",
   library_note_error: null,
   library_note_server_text: null,
+  library_view: "normal",
   library_cursor: null,
   library_has_more: false,
   library_status: "idle",
   library_error: null,
   library_request_generation: 0,
+  library_command_status: "idle",
+  library_command_error: null,
   library_cover_generation: 0,
   pending_replacement_entries: [],
   pending_replacement_cursor: null,

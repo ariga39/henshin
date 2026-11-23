@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto"
 import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import { BlobWriter, Uint8ArrayReader, ZipWriter } from "@zip.js/zip.js"
-import { LibraryHttpClient, ReviewHttpClient, ServerHttpClient, TaskHttpClient, type ScanTask } from "@henshin/contracts"
+import { LibraryHttpClient, OpenEventHttpClient, ReviewHttpClient, ServerHttpClient, TaskHttpClient, type ScanTask } from "@henshin/contracts"
 import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
 
 const servers: RunningServer[] = []
@@ -30,6 +30,9 @@ const withLibraryClient = <A, E>(server: RunningServer, program: Effect.Effect<A
 const withTaskClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, TaskHttpClient>): Promise<A> =>
   Effect.runPromise(Effect.provide(program, TaskHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
 
+const withOpenEventClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, OpenEventHttpClient>): Promise<A> =>
+  Effect.runPromise(Effect.provide(program, OpenEventHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
+
 const withReviewClient = <A, E>(server: RunningServer, program: Effect.Effect<A, E, ReviewHttpClient>): Promise<A> =>
   Effect.runPromise(Effect.provide(program, ReviewHttpClient.layer({ baseUrl: server.baseUrl, bearerToken: server.bearerToken })))
 
@@ -46,12 +49,15 @@ const waitForTerminal = async (server: RunningServer, taskId: string): Promise<S
 }
 
 const waitForStagedPath = async (server: RunningServer, relativePath: string): Promise<void> => {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const staged = await withReviewClient(server, Effect.gen(function*() {
-      return yield* (yield* ReviewHttpClient).candidates()
-    }))
-    if (staged.data.some((candidate) => candidate.relative_path === relativePath)) return
-    await new Promise((resolve) => setTimeout(resolve, 10))
+  const db = new DatabaseSync(server.dbPath)
+  try {
+    const select = db.prepare("SELECT 1 FROM staged_discoveries WHERE relative_path = ? LIMIT 1")
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (select.get(relativePath) !== undefined) return
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+  } finally {
+    db.close()
   }
   throw new Error(`scan did not stage ${relativePath}`)
 }
@@ -731,6 +737,347 @@ describe("normal library scan", () => {
         availability: { status: "present", observed_at_ms: expect.any(Number) }
       })
       expect(restored.data.entries[0]?.availability.observed_at_ms).toBeGreaterThan(missingObservation)
+    } finally {
+      if (previousQuietInterval === undefined) delete process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
+      else process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = previousQuietInterval
+    }
+  })
+
+  it("detaches a missing claim without losing history and permits a new identity at the released path", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-detach-missing-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "book")
+    const hiddenBook = path.join(os.tmpdir(), `henshin-detached-hidden-${randomUUID()}`)
+    fixturePaths.add(hiddenBook)
+
+    const root = await withServerClient(server, Effect.gen(function*() {
+      const client = yield* ServerHttpClient
+      const preview = yield* client.preview({ payload: { path: fixture } })
+      if (!("children" in preview.data)) throw new Error("expected setup preview")
+      return yield* client.save({
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: preview.data.instance_id,
+          epoch: preview.data.epoch,
+          label: "Detach missing",
+          path: fixture,
+          preview_identity: preview.data.preview_identity
+        }
+      })
+    }))
+
+    let active = server
+    const scan = () => withServerClient(active, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: active.instanceId,
+          epoch: active.epoch,
+          expected_mapping_revision: root.data.mapping_revision,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+        }
+      })
+    }))
+
+    const initialScan = await scan()
+    if (!("task" in initialScan.data)) throw new Error("expected initial scan")
+    expect((await waitForTerminal(active, initialScan.data.task.task_id)).status).toBe("succeeded")
+    const initial = await withLibraryClient(active, Effect.gen(function*() {
+      const result = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+      const entry = result.data.entries.find((candidate) => candidate.relative_path === "book")
+      if (entry === undefined || entry.decision_version === undefined) throw new Error("expected initial entry revisions")
+      return entry
+    }))
+    const open = await withOpenEventClient(active, Effect.gen(function*() {
+      return yield* (yield* OpenEventHttpClient).batch({
+        payload: {
+          epoch: active.epoch,
+          events: [{
+            event_id: randomUUID(),
+            instance_id: active.instanceId,
+            entry_id: initial.entry_id,
+            device_id: randomUUID(),
+            observed_location_revision: initial.location_revision,
+            observed_content_version: initial.content_version,
+            occurred_at_ms: Date.now()
+          }]
+        }
+      })
+    }))
+    expect(open.data.results[0]?.outcome).toBe("accepted")
+
+    await rename(path.join(fixture, "book"), hiddenBook)
+    const missingScan = await scan()
+    if (!("task" in missingScan.data)) throw new Error("expected missing scan")
+    expect((await waitForTerminal(active, missingScan.data.task.task_id)).status).toBe("completed_with_errors")
+    const missing = await withLibraryClient(active, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(missing.data.entries[0]).toMatchObject({
+      entry_id: initial.entry_id,
+      state: "accepted",
+      relative_path: "book",
+      availability: { status: "missing" }
+    })
+
+    await rename(hiddenBook, path.join(fixture, "book"))
+    const reappearanceScan = await scan()
+    if (!("task" in reappearanceScan.data)) throw new Error("expected reappearance scan")
+    expect((await waitForTerminal(active, reappearanceScan.data.task.task_id)).status).toBe("completed_with_errors")
+    const reappeared = await withLibraryClient(active, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(reappeared.data.entries[0]?.availability.status).toBe("present")
+    const race = await withLibraryClient(active, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: initial.entry_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: active.instanceId,
+          epoch: active.epoch,
+          expected_decision_version: initial.decision_version!,
+          expected_location_revision: initial.location_revision,
+          command: { type: "detach-missing" }
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(race._tag).toBe("InvalidRequest")
+    expect((await withLibraryClient(active, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))).data.entries[0]?.entry_id).toBe(initial.entry_id)
+
+    await rename(path.join(fixture, "book"), hiddenBook)
+    const secondMissingScan = await scan()
+    if (!("task" in secondMissingScan.data)) throw new Error("expected second missing scan")
+    expect((await waitForTerminal(active, secondMissingScan.data.task.task_id)).status).toBe("completed_with_errors")
+
+    await rename(hiddenBook, path.join(fixture, "book"))
+    const previousQuietInterval = process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
+    process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = "1000"
+    try {
+      const activeScan = await scan()
+      if (!("task" in activeScan.data)) throw new Error("expected active scan")
+      const activeDetach = await withLibraryClient(active, Effect.gen(function*() {
+        return yield* (yield* LibraryHttpClient).entryCommand({
+          params: { id: initial.entry_id },
+          payload: {
+            operation_id: randomUUID(),
+            instance_id: active.instanceId,
+            epoch: active.epoch,
+            expected_decision_version: initial.decision_version!,
+            expected_location_revision: initial.location_revision,
+            command: { type: "detach-missing" }
+          }
+        }).pipe(Effect.flip)
+      }))
+      if (activeDetach._tag !== "ActiveScanConflict") throw new Error(`expected active scan conflict, got ${activeDetach._tag}`)
+      expect(activeDetach.details.task_id).toBe(activeScan.data.task.task_id)
+      const activeTerminal = await waitForTerminal(active, activeScan.data.task.task_id)
+      expect(activeTerminal.status).toBe("completed_with_errors")
+      expect(activeTerminal.readiness_error?.code).toBe("allocation_deferred")
+    } finally {
+      if (previousQuietInterval === undefined) delete process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
+      else process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = previousQuietInterval
+    }
+    const preserved = await withLibraryClient(active, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(preserved.data.entries).toMatchObject([{ entry_id: initial.entry_id, relative_path: "book" }])
+
+    await rename(path.join(fixture, "book"), hiddenBook)
+    const thirdMissingScan = await scan()
+    if (!("task" in thirdMissingScan.data)) throw new Error("expected third missing scan")
+    expect((await waitForTerminal(active, thirdMissingScan.data.task.task_id)).status).toBe("completed_with_errors")
+
+    await active.stop()
+    active = await startServer(server.dbPath)
+    servers.push(active)
+    const stale = await withLibraryClient(active, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: initial.entry_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: active.instanceId,
+          epoch: active.epoch,
+          expected_decision_version: "0",
+          expected_location_revision: initial.location_revision,
+          command: { type: "detach-missing" }
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(stale._tag).toBe("RevisionConflict")
+
+    const operationId = randomUUID()
+    const detached = await withLibraryClient(active, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: initial.entry_id },
+        payload: {
+          operation_id: operationId,
+          instance_id: active.instanceId,
+          epoch: active.epoch,
+          expected_decision_version: initial.decision_version!,
+          expected_location_revision: initial.location_revision,
+          command: { type: "detach-missing" }
+        }
+      })
+    }))
+    expect(detached.data.entry).toMatchObject({
+      entry_id: initial.entry_id,
+      state: "detached",
+      relative_path: "book",
+      source_path: path.join(fixture, "book"),
+      decision_version: "2",
+      location_revision: "2"
+    })
+    const detachedDetails = await withLibraryClient(active, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entry({ params: { id: initial.entry_id } })
+    }))
+    expect(detachedDetails.data).toMatchObject({
+      entry_id: initial.entry_id,
+      state: "detached",
+      source_path: path.join(fixture, "book")
+    })
+    const replay = await withLibraryClient(active, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: initial.entry_id },
+        payload: {
+          operation_id: operationId,
+          instance_id: active.instanceId,
+          epoch: active.epoch,
+          expected_decision_version: initial.decision_version!,
+          expected_location_revision: initial.location_revision,
+          command: { type: "detach-missing" }
+        }
+      })
+    }))
+    expect(replay.data.entry.entry_id).toBe(initial.entry_id)
+
+    await active.stop()
+    active = await startServer(server.dbPath)
+    servers.push(active)
+
+    const normalAfterDetach = await withLibraryClient(active, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(normalAfterDetach.data.entries).toHaveLength(0)
+    const detachedView = await withLibraryClient(active, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20, view: "detached" } })
+    }))
+    expect(detachedView.data.entries).toHaveLength(1)
+    expect(detachedView.data.entries[0]?.entry_id).toBe(initial.entry_id)
+
+    await rename(hiddenBook, path.join(fixture, "book"))
+    const newScan = await scan()
+    if (!("task" in newScan.data)) throw new Error("expected new-path scan")
+    expect((await waitForTerminal(active, newScan.data.task.task_id)).status).toBe("succeeded")
+    const afterNewBook = await withLibraryClient(active, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(afterNewBook.data.entries).toHaveLength(1)
+    expect(afterNewBook.data.entries[0]?.relative_path).toBe("book")
+    expect(afterNewBook.data.entries[0]?.entry_id).not.toBe(initial.entry_id)
+
+    const db = new DatabaseSync(server.dbPath)
+    const history = db.prepare("SELECT entry_id, COUNT(*) AS count FROM open_events WHERE entry_id = ? GROUP BY entry_id").get(initial.entry_id) as { entry_id: string; count: number } | undefined
+    db.close()
+    expect(history).toEqual({ entry_id: initial.entry_id, count: 1 })
+  })
+
+  it("keeps a held reappearance present and staged while detach races the scan", async () => {
+    const previousQuietInterval = process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
+    process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = "1000"
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-held-detach-race-"))
+    fixturePaths.add(fixture)
+    const hiddenBook = path.join(os.tmpdir(), `henshin-held-detach-hidden-${randomUUID()}`)
+    fixturePaths.add(hiddenBook)
+    try {
+      await makeImageBook(fixture, "book")
+      const root = await withServerClient(server, Effect.gen(function*() {
+        const client = yield* ServerHttpClient
+        const preview = yield* client.preview({ payload: { path: fixture } })
+        if (!("children" in preview.data)) throw new Error("expected setup preview")
+        return yield* client.save({
+          payload: {
+            operation_id: randomUUID(), instance_id: preview.data.instance_id, epoch: preview.data.epoch,
+            label: "Held detach race", path: fixture, preview_identity: preview.data.preview_identity
+          }
+        })
+      }))
+      const scan = (holdNewDiscoveries: boolean) => withServerClient(server, Effect.gen(function*() {
+        return yield* (yield* ServerHttpClient).command({
+          params: { id: root.data.root_id },
+          payload: {
+            operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+            expected_mapping_revision: root.data.mapping_revision,
+            expected_policy_revision: root.data.policy_revision,
+            command: { type: "start-scan", mode: "manual", hold_new_discoveries: holdNewDiscoveries }
+          }
+        })
+      }))
+
+      const initialScan = await scan(false)
+      if (!("task" in initialScan.data)) throw new Error("expected initial scan")
+      expect((await waitForTerminal(server, initialScan.data.task.task_id)).status).toBe("succeeded")
+      const initial = await withLibraryClient(server, Effect.gen(function*() {
+        const entries = yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+        const entry = entries.data.entries[0]
+        if (entry === undefined) throw new Error("expected accepted entry")
+        return entry
+      }))
+
+      await rename(path.join(fixture, "book"), hiddenBook)
+      const missingScan = await scan(false)
+      if (!("task" in missingScan.data)) throw new Error("expected missing scan")
+      expect((await waitForTerminal(server, missingScan.data.task.task_id)).status).toBe("completed_with_errors")
+      await rename(hiddenBook, path.join(fixture, "book"))
+      for (let index = 0; index < 128; index += 1) {
+        await makeImageBook(fixture, `held-extra-${String(index).padStart(3, "0")}`)
+      }
+
+      const heldScan = await scan(true)
+      if (!("task" in heldScan.data)) throw new Error("expected held scan")
+      const heldTaskId = heldScan.data.task.task_id
+      await waitForStagedPath(server, "book")
+      const running = await withTaskClient(server, Effect.gen(function*() {
+        return yield* (yield* TaskHttpClient).get({ params: { id: heldTaskId } })
+      }))
+      expect(running.data.status).toBe("running")
+
+      const staleDetach = await withLibraryClient(server, Effect.gen(function*() {
+        return yield* (yield* LibraryHttpClient).entryCommand({
+          params: { id: initial.entry_id },
+          payload: {
+            operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+            expected_decision_version: initial.decision_version!,
+            expected_location_revision: initial.location_revision,
+            command: { type: "detach-missing" }
+          }
+        }).pipe(Effect.flip)
+      }))
+      if (staleDetach._tag === "ActiveScanConflict") {
+        expect(staleDetach.details.task_id).toBe(heldTaskId)
+      } else {
+        // The held scan can finish between the task read and the command.
+        expect(staleDetach).toMatchObject({ _tag: "InvalidRequest", retryable: false })
+      }
+      expect((await waitForTerminal(server, heldTaskId)).status).toBe("succeeded")
+
+      const after = await withLibraryClient(server, Effect.gen(function*() {
+        return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+      }))
+      expect(after.data.entries).toMatchObject([{
+        entry_id: initial.entry_id,
+        relative_path: "book",
+        availability: { status: "present" }
+      }])
+      const staged = await withReviewClient(server, Effect.gen(function*() {
+        return yield* (yield* ReviewHttpClient).candidates()
+      }))
+      expect(staged.data.find((candidate) => candidate.relative_path === "book")).toMatchObject({ relative_path: "book" })
     } finally {
       if (previousQuietInterval === undefined) delete process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS
       else process.env.HENSHIN_NORMAL_SCAN_QUIET_INTERVAL_MS = previousQuietInterval

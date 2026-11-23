@@ -223,6 +223,7 @@ export const LibraryApi = HttpApi.make("henshin-library").add(
         error: [
           AuthenticationRequired,
           EntryNotFound,
+          ActiveScanConflict,
           InvalidRequest,
           RevisionConflict,
           OperationConflict,

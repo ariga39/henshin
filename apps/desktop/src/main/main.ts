@@ -24,6 +24,7 @@ import {
   LibrarySearchIpcRequest,
   OpenBookIpcRequest,
   OpenBookStatusIpcRequest,
+  LibraryEntryCommandIpcRequest,
   ThumbnailGetIpcRequest,
   ThumbnailHttpClient,
   LoadDraftIpcRequest,
@@ -1266,6 +1267,37 @@ const registerIpc = (): void => {
     } catch (error) {
       return Promise.resolve({ ok: false as const, error: toPublicError(error) })
     }
+  })
+
+  ipcMain.handle(IpcChannels.libraryCommand, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(LibraryEntryCommandIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    let session: Session
+    try {
+      session = requireSession()
+    } catch (error) {
+      return Promise.resolve({ ok: false as const, error: toPublicError(error) })
+    }
+    const request = decoded.value
+    return runNetworkResult(
+      toResult(
+        Effect.gen(function*() {
+          const client = yield* LibraryHttpClient
+          return yield* client.entryCommand({
+            params: { id: request.entry_id },
+            payload: {
+              operation_id: request.operation_id,
+              instance_id: session.instanceId,
+              epoch: session.epoch,
+              expected_decision_version: request.expected_decision_version,
+              expected_location_revision: request.expected_location_revision,
+              command: request.command
+            }
+          })
+        })
+      )
+    )
   })
 
   ipcMain.handle(IpcChannels.thumbnailGet, (event, raw: unknown) => {

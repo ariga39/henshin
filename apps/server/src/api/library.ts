@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import {
   EntryNotFound,
+  ActiveScanConflict,
   EpochChanged,
   InstanceMismatch,
   InternalError,
@@ -88,7 +89,8 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
             query: payload.query ?? "",
             cursor: payload.cursor ?? null,
             state: payload.state,
-            epoch: server.epoch
+            epoch: server.epoch,
+            view: payload.view ?? "normal"
           }).pipe(
             Effect.mapError((error) => {
               if (error instanceof InvalidLibrarySearchCursor) {
@@ -159,6 +161,52 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
               retryable: true,
               ...errorBase(server, context.request_id)
             })
+          }
+          if (payload.command.type === "detach-missing") {
+            if (payload.expected_location_revision === undefined) {
+              return yield* new InvalidRequest({
+                code: "invalid_request",
+                message: "detaching a missing entry requires its location revision",
+                retryable: false,
+                details: { field: "expected_location_revision" },
+                ...errorBase(server, context.request_id)
+              })
+            }
+            const outcome = yield* library.detachMissing({
+              entryId: params.id,
+              operationId: payload.operation_id,
+              epoch: payload.epoch,
+              expectedDecisionVersion: payload.expected_decision_version,
+              expectedLocationRevision: payload.expected_location_revision
+            }).pipe(
+              Effect.mapError(() => new InternalError({
+                code: "internal_error",
+                message: "internal error",
+                retryable: true,
+                ...errorBase(server, context.request_id)
+              }))
+            )
+            switch (outcome.kind) {
+              case "committed":
+              case "replayed":
+                return { ...errorBase(server, context.request_id), server_time: Date.now(), data: outcome.result }
+              case "operation_conflict":
+                return yield* new OperationConflict({ code: "operation_conflict", message: "operation id reused with a different payload", retryable: false, ...errorBase(server, context.request_id) })
+              case "operation_expired":
+                return yield* new OperationExpired({ code: "operation_expired", message: "detach operation result expired; inspect the current entry before retrying", retryable: false, ...errorBase(server, context.request_id) })
+              case "storage_full":
+                return yield* new StorageFull({ code: "storage_full503", message: "entry operation recovery storage is full", retryable: true, ...errorBase(server, context.request_id) })
+              case "entry_not_found":
+                return yield* new EntryNotFound({ code: "not_found", message: "library entry not found", retryable: false, ...errorBase(server, context.request_id) })
+              case "entry_revision_conflict":
+                return yield* new RevisionConflict({ code: "revision_conflict", message: "library entry changed; refresh its details before detaching", retryable: false, details: { current_revision: outcome.currentDecisionVersion }, ...errorBase(server, context.request_id) })
+              case "entry_not_missing":
+                return yield* new InvalidRequest({ code: "invalid_request", message: "the entry is not currently confirmed missing; refresh Library", retryable: false, ...errorBase(server, context.request_id) })
+              case "entry_not_active":
+                return yield* new RevisionConflict({ code: "revision_conflict", message: "the entry is already detached; refresh its details", retryable: false, details: { current_revision: payload.expected_decision_version }, ...errorBase(server, context.request_id) })
+              case "scan_in_progress":
+                return yield* new ActiveScanConflict({ code: "active_scan_conflict", message: "the root is being scanned; retry detach after the scan finishes", retryable: true, details: { task_id: outcome.taskId, policy_revision: outcome.policyRevision }, ...errorBase(server, context.request_id) })
+            }
           }
           const command = payload.command
           const outcome = command.type === "bind"

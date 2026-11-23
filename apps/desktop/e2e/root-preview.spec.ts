@@ -343,6 +343,74 @@ test("runs normal scans from the saved-root preview and refreshes accepted books
   }
 })
 
+test("detaches a confirmed missing book through Library and preserves the detached identity across restart", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-detach-library-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-detach-library-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+  const hiddenBook = path.join(os.tmpdir(), `henshin-detach-library-hidden-${randomUUID()}`)
+  const bookDirectory = path.join(fixtureDirectory, "book")
+
+  try {
+    await mkdir(bookDirectory)
+    await writeFile(path.join(bookDirectory, "001.jpg"), "detached book")
+    const first = await launch(dbPath)
+    await first.window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await first.window.getByTestId("root-preview-submit").click()
+    await first.window.getByTestId("root-label").fill("Detach books")
+    await first.window.getByTestId("root-save").click()
+    await expect(first.window.getByTestId("root-saved")).toContainText("Detach books")
+    await first.window.getByTestId("root-saved-preview").click()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("library-scan-status")).toHaveText("Scan task succeeded.", { timeout: 30_000 })
+    await expect(first.window.getByTestId("library-entry")).toHaveCount(1)
+    const originalId = await first.window.getByTestId("library-entry-id").textContent()
+    if (originalId === null) throw new Error("expected the original entry identity")
+
+    await first.window.getByTestId("library-setup").click()
+    await rename(bookDirectory, hiddenBook)
+    await first.window.getByTestId("root-saved-preview").click()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("library-scan-status")).toContainText("completed_with_errors", { timeout: 30_000 })
+    const missingEntry = first.window.getByTestId("library-entry")
+    await expect(missingEntry).toContainText("Server availability: missing")
+    await expect(missingEntry.getByTestId("library-detach-missing")).toBeVisible()
+
+    first.window.once("dialog", (dialog) => void dialog.accept())
+    await missingEntry.getByTestId("library-detach-missing").click()
+    await expect(first.window.getByTestId("library-entry")).toHaveCount(0)
+
+    await first.window.getByTestId("library-detached-toggle").click()
+    const detachedEntry = first.window.getByTestId("library-entry")
+    await expect(detachedEntry).toHaveCount(1)
+    await expect(detachedEntry.getByTestId("library-entry-id")).toHaveText(originalId)
+    await expect(detachedEntry).toContainText(`Last-known location: ${bookDirectory}`)
+
+    await first.app.close()
+    launched.splice(launched.indexOf(first.app), 1)
+    const restarted = await launch(dbPath)
+    await restarted.window.getByTestId("open-library").click()
+    await restarted.window.getByTestId("library-detached-toggle").click()
+    const persistedDetached = restarted.window.getByTestId("library-entry")
+    await expect(persistedDetached).toHaveCount(1)
+    await expect(persistedDetached.getByTestId("library-entry-id")).toHaveText(originalId)
+    await expect(persistedDetached).toContainText(`Last-known location: ${bookDirectory}`)
+
+    await rename(hiddenBook, bookDirectory)
+    await restarted.window.getByTestId("library-setup").click()
+    await restarted.window.getByTestId("root-saved-preview").click()
+    await restarted.window.getByTestId("start-held-scan").click()
+    await expect(restarted.window.getByTestId("library-scan-status")).toHaveText("Scan task succeeded.", { timeout: 30_000 })
+    await restarted.window.getByTestId("library-detached-toggle").click()
+    await expect(restarted.window.getByTestId("library-entry")).toHaveCount(1)
+    const newId = await restarted.window.getByTestId("library-entry-id").textContent()
+    expect(newId).not.toBe(originalId)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+    await rm(hiddenBook, { recursive: true, force: true })
+  }
+})
+
 test("preserves accepted entries across an interrupted normal scan and explicitly retries restored coverage", async () => {
   const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-interrupted-scan-db-"))
   const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-interrupted-scan-fixture-"))
