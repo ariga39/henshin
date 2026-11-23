@@ -6,6 +6,8 @@ import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
 import { afterEach, describe, expect, it } from "vitest"
+import { runBackupDrill, type BackupDrillContext } from "../src/maintenance/BackupDrill"
+import type { BackupArtifactRow, BackupDestinationRow } from "../src/persistence/worker-protocol"
 
 const execFile = promisify(execFileCallback)
 const SERVER_PATH = path.resolve("apps/server/dist/server.mjs")
@@ -16,14 +18,98 @@ const runJson = async (args: ReadonlyArray<string>) => {
   return JSON.parse(result.stdout) as Record<string, any>
 }
 
-const runFailure = async (args: ReadonlyArray<string>, env?: NodeJS.ProcessEnv) => {
+const runFailure = async (args: ReadonlyArray<string>) => {
   try {
-    await execFile(process.execPath, [SERVER_PATH, ...args], { cwd: path.resolve("."), env })
+    await execFile(process.execPath, [SERVER_PATH, ...args], { cwd: path.resolve(".") })
     throw new Error("expected command failure")
   } catch (error) {
     const failure = error as { stdout?: string; stderr?: string; code?: number }
     return { code: failure.code, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" }
   }
+}
+
+const directInterruptedDrillContext = async (options: {
+  readonly dataDir: string
+  readonly destination: string
+  readonly artifactId: string
+}): Promise<{ readonly context: BackupDrillContext; readonly close: () => void }> => {
+  const database = new DatabaseSync(path.join(options.dataDir, "server.sqlite"))
+  const artifactRow = database.prepare(`
+    SELECT artifact_id, destination_id, operation_id, relative_path, publication_order,
+           retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms
+    FROM backup_artifacts WHERE artifact_id = ?
+  `).get(options.artifactId) as {
+    artifact_id: string
+    destination_id: string
+    operation_id: string
+    relative_path: string
+    publication_order: number
+    retention_class: "archive"
+    label: string | null
+    status: "completed"
+    manifest_digest: string
+    size_bytes: number
+    created_at_ms: number
+    completed_at_ms: number
+  }
+  const destinationStats = await stat(options.destination)
+  const destination: BackupDestinationRow = {
+    destinationId: artifactRow.destination_id,
+    name: "primary",
+    selectedPath: options.destination,
+    canonicalPath: await realpath(options.destination),
+    device: String(destinationStats.dev),
+    inode: String(destinationStats.ino),
+    state: "active"
+  }
+  const artifact: BackupArtifactRow = {
+    artifactId: artifactRow.artifact_id,
+    destinationId: artifactRow.destination_id,
+    operationId: artifactRow.operation_id,
+    relativePath: artifactRow.relative_path,
+    publicationOrder: artifactRow.publication_order,
+    retentionClass: artifactRow.retention_class,
+    label: artifactRow.label,
+    status: artifactRow.status,
+    manifestDigest: artifactRow.manifest_digest,
+    sizeBytes: artifactRow.size_bytes,
+    createdAtMs: artifactRow.created_at_ms,
+    completedAtMs: artifactRow.completed_at_ms
+  }
+  const context: BackupDrillContext = {
+    dbPath: path.join(options.dataDir, "server.sqlite"),
+    destination,
+    artifact,
+    roots: [],
+    beforeVerification: async () => "interrupt",
+    start: async (request) => {
+      database.prepare(`
+        INSERT INTO backup_drill_runs(
+          run_id, artifact_id, manifest_digest, status, started_at_ms,
+          completed_at_ms, duration_ms, diagnostic_code, diagnostic_message, checks_json
+        ) VALUES (?, ?, ?, 'running', ?, NULL, NULL, NULL, NULL, NULL)
+      `).run(request.runId, request.artifactId, request.manifestDigest, request.startedAtMs)
+      return {
+        kind: "started" as const,
+        run: {
+          runId: request.runId,
+          artifactId: request.artifactId,
+          manifestDigest: request.manifestDigest,
+          status: "running" as const,
+          startedAtMs: request.startedAtMs,
+          completedAtMs: null,
+          durationMs: null,
+          diagnosticCode: null,
+          diagnosticMessage: null,
+          checksJson: null
+        }
+      }
+    },
+    complete: async () => {
+      throw new Error("completion is not expected during interruption")
+    }
+  }
+  return { context, close: () => database.close() }
 }
 
 afterEach(async () => {
@@ -105,11 +191,9 @@ describe("server backup restore drill", () => {
     await writeFile(firstArchivePath, firstArchive)
     expect(createHash("sha256").update(await readFile(firstArchivePath)).digest("hex")).toBe(firstArchiveDigest)
 
-    const interrupted = await runFailure(
-      ["backup", "drill", "--data-dir", dataDir, "--artifact-id", firstArtifactId],
-      { ...process.env, HENSHIN_TEST_INTERRUPT_DRILL: "1" }
-    )
-    expect(interrupted.code).toBe(75)
+    const interrupted = await directInterruptedDrillContext({ dataDir, destination, artifactId: firstArtifactId })
+    await expect(runBackupDrill(interrupted.context)).rejects.toMatchObject({ name: "BackupDrillInterrupted" })
+    interrupted.close()
     const listed = await runJson(["backup", "drill", "list", "--data-dir", dataDir])
     expect(listed.latest_attempt.status).toBe("interrupted")
     expect(listed.latest_attempt.artifactId).toBe(firstArtifactId)

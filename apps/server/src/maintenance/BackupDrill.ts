@@ -78,6 +78,13 @@ export class BackupDrillFailure extends Error {
   }
 }
 
+export class BackupDrillInterrupted extends Error {
+  constructor() {
+    super("backup drill interrupted before verification completed")
+    this.name = "BackupDrillInterrupted"
+  }
+}
+
 export interface BackupDrillContext {
   readonly dbPath: string
   readonly destination: BackupDestinationRow
@@ -97,6 +104,8 @@ export interface BackupDrillContext {
     readonly diagnosticMessage: string | null
     readonly checksJson: string | null
   }) => Promise<BackupDrillCompletionOutcome>
+  /** Test-only interruption seam; production callers leave this unset. */
+  readonly beforeVerification?: () => Promise<"interrupt" | void>
 }
 
 export interface BackupDrillResult {
@@ -297,7 +306,9 @@ export const runBackupDrill = async (context: BackupDrillContext): Promise<Backu
   if (started.kind !== "started" && started.kind !== "replayed") throw new BackupDrillFailure("run-not-started", `backup drill could not start: ${started.kind}`)
   const stagingDirectory = await mkdtemp(join(dirname(context.dbPath), ".backup-drill-"))
   try {
-    if (process.env.HENSHIN_TEST_INTERRUPT_DRILL === "1") process.exit(75)
+    if (context.beforeVerification !== undefined && await context.beforeVerification() === "interrupt") {
+      throw new BackupDrillInterrupted()
+    }
     const members = await readArchiveMembers(archivePath)
     const manifestBytes = members.get("manifest.json")
     const stateBytes = members.get("state.sqlite")
@@ -330,6 +341,7 @@ export const runBackupDrill = async (context: BackupDrillContext): Promise<Backu
     if (completed.kind !== "completed" && completed.kind !== "replayed") throw new BackupDrillFailure("run-not-recorded", "backup drill result was not recorded")
     return { run: completed.run, checks }
   } catch (error) {
+    if (error instanceof BackupDrillInterrupted) throw error
     if (error instanceof BackupDrillFailure) {
       const completed = await context.complete({
         runId,
