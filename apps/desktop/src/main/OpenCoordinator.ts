@@ -269,6 +269,15 @@ class OpenAuthorityError extends Error {
   }
 }
 
+export class LocalAccessPreparationError extends Error {
+  readonly code = "local_access_unavailable"
+
+  constructor(message: string) {
+    super(message)
+    this.name = "LocalAccessPreparationError"
+  }
+}
+
 const withDeadline = async <A>(
   promise: Promise<A>,
   milliseconds: number,
@@ -349,6 +358,67 @@ export class OpenCoordinator {
   private accepting = true
 
   constructor(private readonly ports: OpenCoordinatorPorts) {}
+
+  async prepareLocal(input: {
+    readonly instanceId: string
+    readonly epoch: string
+    readonly entryId: string
+    readonly profileId: string
+  }): Promise<import("@henshin/contracts").PrepareLocalAccessIpcResult> {
+    try {
+      this.ports.assertCurrent(input.instanceId, input.epoch)
+      const resolution = await resolveComplete(this.ports, input.entryId)
+      if (resolution.entry_id !== input.entryId || resolution.status !== "usable") {
+        throw new OpenResolutionEvidenceError("the selected entry is not currently eligible for local Open")
+      }
+      const mapping = await this.ports.loadMapping(input.instanceId, resolution.root_id)
+      if (mapping === undefined) throw new OpenTargetError("configure a compatible local mapping before checking local access")
+      const profile = await this.ports.loadProfile(input.profileId)
+      if (profile === undefined) throw new OpenTargetError("the selected reader profile is no longer configured")
+      const target = await withDeadline(
+        resolveAcceptedTarget(mapping, resolution, profile),
+        OPEN_TARGET_DEADLINE_MS,
+        new OpenTargetDeadlineError()
+      )
+      this.ports.assertCurrent(input.instanceId, input.epoch)
+      const currentResolution = await resolveComplete(this.ports, input.entryId)
+      const currentMapping = await this.ports.loadMapping(input.instanceId, currentResolution.root_id)
+      const currentProfile = await this.ports.loadProfile(input.profileId)
+      if (
+        currentMapping === undefined ||
+        currentMapping.mappingRevision !== mapping.mappingRevision ||
+        currentMapping.selectedPath !== mapping.selectedPath ||
+        currentMapping.canonicalPath !== mapping.canonicalPath ||
+        currentMapping.admittedRootIdentity !== mapping.admittedRootIdentity ||
+        currentProfile === undefined ||
+        currentProfile.revision !== profile.revision ||
+        !sameResolution(resolution, currentResolution)
+      ) {
+        throw new OpenResolutionEvidenceError("the selected entry, mapping, or reader profile changed during local access checking")
+      }
+      const currentTarget = await withDeadline(
+        resolveAcceptedTarget(currentMapping, currentResolution, currentProfile),
+        OPEN_TARGET_DEADLINE_MS,
+        new OpenTargetDeadlineError()
+      )
+      if (currentTarget !== target) throw new OpenTargetError("the verified local target changed during local access checking")
+      this.ports.assertCurrent(input.instanceId, input.epoch)
+      await this.ports.saveCachedResolution?.({
+        instanceId: input.instanceId,
+        entryId: input.entryId,
+        epoch: input.epoch,
+        resolution
+      })
+      return {
+        entry_id: input.entryId,
+        profile_id: input.profileId,
+        status: "eligible",
+        message: "Eligible local copy verified. Open remains a separate explicit action."
+      }
+    } catch (error) {
+      throw new LocalAccessPreparationError(safeFailureMessage(error))
+    }
+  }
 
   private notifyActiveChanged(): void {
     try {

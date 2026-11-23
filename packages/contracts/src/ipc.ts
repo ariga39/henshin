@@ -41,6 +41,12 @@ export const ConnectionStatusView = Schema.Struct({
 })
 export type ConnectionStatusView = typeof ConnectionStatusView.Type
 
+export const CachedLibraryNamespace = Schema.Struct({
+  instance_id: Uuid,
+  last_observed_at_ms: Schema.Int
+})
+export type CachedLibraryNamespace = typeof CachedLibraryNamespace.Type
+
 /**
  * IPC request schemas. The renderer never supplies instance/epoch/auth: main
  * adds namespace and epoch from its own authenticated session before dispatch.
@@ -56,6 +62,18 @@ export type DisconnectIpcRequest = typeof DisconnectIpcRequest.Type
 
 export const ConnectionStatusIpcRequest = Schema.Struct({})
 export type ConnectionStatusIpcRequest = typeof ConnectionStatusIpcRequest.Type
+
+export const ListCachedNamespacesIpcRequest = Schema.Struct({})
+export type ListCachedNamespacesIpcRequest = typeof ListCachedNamespacesIpcRequest.Type
+
+export const SelectCachedNamespaceIpcRequest = Schema.Struct({ instance_id: Uuid })
+export type SelectCachedNamespaceIpcRequest = typeof SelectCachedNamespaceIpcRequest.Type
+
+export const PrepareLocalAccessIpcRequest = Schema.Struct({
+  entry_id: Uuid,
+  profile_id: Uuid
+})
+export type PrepareLocalAccessIpcRequest = typeof PrepareLocalAccessIpcRequest.Type
 
 export const ListOpenJournalIpcRequest = Schema.Struct({})
 export type ListOpenJournalIpcRequest = typeof ListOpenJournalIpcRequest.Type
@@ -249,6 +267,14 @@ export const OpenBookIpcResult = Schema.Struct({
   event_durable: Schema.Boolean
 })
 export type OpenBookIpcResult = typeof OpenBookIpcResult.Type
+
+export const PrepareLocalAccessIpcResult = Schema.Struct({
+  entry_id: Uuid,
+  profile_id: Uuid,
+  status: Schema.Literal("eligible"),
+  message: Schema.String
+})
+export type PrepareLocalAccessIpcResult = typeof PrepareLocalAccessIpcResult.Type
 
 export const TaskListIpcRequest = Schema.Struct({})
 export type TaskListIpcRequest = typeof TaskListIpcRequest.Type

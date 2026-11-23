@@ -206,6 +206,12 @@ export const LibraryPageCacheRow = Schema.Struct({
 })
 export type LibraryPageCacheRow = typeof LibraryPageCacheRow.Type
 export const LibraryPageCacheReadResult = Schema.NullOr(LibraryPageCacheRow)
+export const LibraryPageCacheNamespaces = Schema.Array(Schema.Struct({
+  instanceId: Uuid,
+  epoch: Uuid,
+  lastObservedAtMs: Schema.Int
+}))
+export type LibraryPageCacheNamespaces = typeof LibraryPageCacheNamespaces.Type
 
 export const OpenJournalReadResult = Schema.NullOr(OpenJournalRow)
 export type OpenJournalReadResult = typeof OpenJournalReadResult.Type
@@ -362,6 +368,7 @@ export const DraftWorkerRequest = Schema.Union([
     page: LibraryEntryPage,
     observedAtMs: Schema.Int
   }),
+  Schema.Struct({ op: Schema.Literal("listLibraryNamespaces") }),
   Schema.Struct({ op: Schema.Literal("close") })
 ])
 export type DraftWorkerRequest = typeof DraftWorkerRequest.Type

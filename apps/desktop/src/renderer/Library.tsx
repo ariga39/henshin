@@ -12,10 +12,13 @@ import {
   loadLibrary,
   loadActiveLibraryOpenState,
   loadReaderProfiles,
+  loadCachedNamespaces,
   openSelectedLibraryEntry,
+  prepareSelectedLibraryEntry,
   reconnectLibrary,
   searchLibrary,
   updateLibraryNote,
+  selectCachedNamespace,
   selectLibraryEntry,
   showSetup
 } from "./workflows"
@@ -170,18 +173,20 @@ export const LibraryScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState, viewStore.getState)
   const [searchText, setSearchText] = useState(state.library_query)
   const hasLibraryQuery = state.library_query.trim().length > 0
+  const [cachedNamespaceChoice, setCachedNamespaceChoice] = useState("")
 
   useEffect(() => {
     if (state.connection.state !== "connecting" && state.connection.instance_id !== null && state.library_status === "idle") {
       void runtime.runPromise(loadLibrary())
     }
+    if (state.connection.instance_id === null && state.cached_namespaces_status === "idle") void runtime.runPromise(loadCachedNamespaces)
     if (viewStore.getState().reader_profiles_status === "idle") void runtime.runPromise(loadReaderProfiles)
     const unsubscribe = window.henshinLibrary.onOpenStateChanged(() => {
       const entryId = viewStore.getState().library_selected_entry_id
       if (entryId !== null) void runtime.runPromise(loadActiveLibraryOpenState(entryId))
     })
     return unsubscribe
-  }, [state.connection.state, state.connection.instance_id, state.library_status])
+  }, [state.connection.state, state.connection.instance_id, state.cached_namespaces_status, state.library_status])
 
   useEffect(() => {
     if (state.library_status === "ready" && state.library_selected_entry_id !== null) {
@@ -203,6 +208,10 @@ export const LibraryScreen = () => {
     ? null
     : state.reader_profiles.find((profile) => profile.profile_id === openResult.profile_id) ?? null
   const selectedEntryCanOpen = selectedEntry?.state === "accepted"
+  const localAccess = selectedEntry === null || state.library_local_access?.entry_id !== selectedEntry.entry_id ||
+    state.library_local_access.profile_id !== state.library_open_profile_id
+    ? null
+    : state.library_local_access
 
   return (
     <main className="collection" data-testid="library-screen">
@@ -226,6 +235,42 @@ export const LibraryScreen = () => {
           <p role="alert" data-testid="library-connection-error">
             Reconnection failed: {state.library_error ?? "the server is unavailable"}. Check the server and try again.
           </p>
+        )}
+        {state.connection.instance_id === null && state.connection.state === "disconnected" && (
+          <section aria-labelledby="cached-namespace-heading" data-testid="cached-namespace-picker">
+            <h3 id="cached-namespace-heading">Previously verified servers</h3>
+            {state.cached_namespaces_status === "loading" && <p role="status">Loading cached servers…</p>}
+            {state.cached_namespaces_status === "error" && <p role="alert">Could not load cached servers: {state.cached_namespaces_error}</p>}
+            {state.cached_namespaces_status === "ready" && state.cached_namespaces.length === 0 && (
+              <p>No previously verified server namespace is retained on this device.</p>
+            )}
+            {state.cached_namespaces.length > 0 && (
+              <>
+                <label htmlFor="cached-namespace-select">Server namespace</label>
+                <select
+                  id="cached-namespace-select"
+                  data-testid="cached-namespace-select"
+                  value={cachedNamespaceChoice}
+                  onChange={(event) => setCachedNamespaceChoice(event.target.value)}
+                >
+                  <option value="" disabled>Select a previously verified server</option>
+                  {state.cached_namespaces.map((namespace) => (
+                    <option key={namespace.instance_id} value={namespace.instance_id}>
+                      {namespace.instance_id} — last observed {observedAtText(namespace.last_observed_at_ms)}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  data-testid="cached-namespace-select-button"
+                  disabled={cachedNamespaceChoice === ""}
+                  onClick={() => void runtime.runPromise(selectCachedNamespace(cachedNamespaceChoice))}
+                >
+                  Use cached Library
+                </button>
+              </>
+            )}
+            {state.cached_namespaces_error !== null && <p role="alert">{state.cached_namespaces_error}</p>}
+          </section>
         )}
         <button
           data-testid="library-reconnect"
@@ -428,12 +473,26 @@ export const LibraryScreen = () => {
                     </select>
                     <button
                       type="button"
+                      data-testid="library-prepare-local"
+                      disabled={state.library_open_profile_id === null || state.connection.state !== "connected" || localAccess?.status === "loading"}
+                      onClick={() => void runtime.runPromise(prepareSelectedLibraryEntry)}
+                    >
+                      {localAccess?.status === "loading" ? "Checking local access…" : "Check local access"}
+                    </button>
+                    <button
+                      type="button"
                       data-testid="library-open"
                       disabled={state.library_open_profile_id === null || openIsPending}
                       onClick={() => void runtime.runPromise(openSelectedLibraryEntry)}
                     >
                       {openIsPending ? "Opening…" : "Open"}
                     </button>
+                    {localAccess?.status === "eligible" && (
+                      <p role="status" data-testid="library-local-access-result">{localAccess.message}</p>
+                    )}
+                    {localAccess?.status === "error" && (
+                      <p role="alert" data-testid="library-local-access-result">Local access unavailable: {localAccess.message}</p>
+                    )}
                   </>
                 )}
               </>

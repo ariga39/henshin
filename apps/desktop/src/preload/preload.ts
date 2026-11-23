@@ -59,6 +59,8 @@ contextBridge.exposeInMainWorld("henshinLibrary", {
   note: (input: LibraryNoteIpcRequest) =>
     ipcRenderer.invoke(IpcChannels.libraryNote, input),
   open: (input: OpenBookIpcRequest) => ipcRenderer.invoke(IpcChannels.openBook, input),
+  prepareLocalAccess: (input: { readonly entry_id: string; readonly profile_id: string }) =>
+    ipcRenderer.invoke(IpcChannels.prepareLocalAccess, input),
   status: (input: OpenBookStatusIpcRequest) => ipcRenderer.invoke(IpcChannels.openBookStatus, input),
   onOpenStateChanged: (listener: () => void) => {
     const handler = () => listener()
@@ -71,7 +73,10 @@ contextBridge.exposeInMainWorld("henshinLibrary", {
 contextBridge.exposeInMainWorld("henshinConnection", {
   connect: () => ipcRenderer.invoke(IpcChannels.connect, {}),
   disconnect: () => ipcRenderer.invoke(IpcChannels.disconnect, {}),
-  connectionStatus: () => ipcRenderer.invoke(IpcChannels.connectionStatus, {})
+  connectionStatus: () => ipcRenderer.invoke(IpcChannels.connectionStatus, {}),
+  listCachedNamespaces: () => ipcRenderer.invoke(IpcChannels.listCachedNamespaces, {}),
+  selectCachedNamespace: (input: { readonly instance_id: string }) =>
+    ipcRenderer.invoke(IpcChannels.selectCachedNamespace, input)
 })
 
 contextBridge.exposeInMainWorld("henshinOpenJournal", {

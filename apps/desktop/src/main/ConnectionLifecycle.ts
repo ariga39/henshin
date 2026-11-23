@@ -97,6 +97,19 @@ export class ConnectionLifecycle {
     return this.cachedSession
   }
 
+  /** Selects a previously authenticated namespace for deliberate offline use. */
+  selectCachedSession(session: { readonly instanceId: string; readonly epoch: string }): void {
+    if (this.lease !== null) throw new ConnectionPausedError({ state: this.status.state })
+    this.expectedInstanceId = session.instanceId
+    this.cachedSession = { ...session }
+    this.status = {
+      state: "disconnected",
+      instance_id: session.instanceId,
+      epoch: null,
+      reason: "offline_namespace_selected"
+    }
+  }
+
   currentGeneration(): number | null {
     return this.lease?.generation ?? null
   }

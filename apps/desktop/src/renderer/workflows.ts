@@ -1296,6 +1296,7 @@ export const selectLibraryEntry = (entryId: string) =>
     yield* Effect.sync(() => viewStore.set({
       library_selected_entry_id: entryId,
       library_open_profile_id: preserveManualProfile ?? openState?.profile_id ?? null,
+      library_local_access: null,
       library_entry: null,
       library_entry_status: "loading",
       library_entry_error: null,
@@ -1357,9 +1358,36 @@ export const chooseLibraryOpenProfile = (profileId: string) => Effect.sync(() =>
   if (entryId === null) return
   const openState = libraryOpenStateFor(state, entryId)
   if (openState?.status === "loading") return
+  const namespaceId = libraryNamespace(state, entryId)
   viewStore.set({
-    library_open_profile_id: profileId
+    library_open_profile_id: profileId,
+    library_local_access: null,
+    ...(namespaceId === null
+      ? {}
+      : { library_open_states: state.library_open_states.filter((item) => !sameLibraryOpenState(item, namespaceId, entryId)) })
   })
+})
+
+export const prepareSelectedLibraryEntry = Effect.gen(function*() {
+  const state = viewStore.getState()
+  const entryId = state.library_selected_entry_id
+  const profileId = state.library_open_profile_id
+  const entry = entryId === null ? undefined : state.library_entries.find((candidate) => candidate.entry_id === entryId)
+  if (entry === undefined || entry.state !== "accepted" || profileId === null || state.connection.state !== "connected") return
+  const client = yield* LibraryClient
+  yield* Effect.sync(() => viewStore.set({
+    library_local_access: { entry_id: entry.entry_id, profile_id: profileId, status: "loading", message: null }
+  }))
+  const result = yield* client.prepareLocalAccess({ entry_id: entry.entry_id, profile_id: profileId })
+  if (result.ok) {
+    yield* Effect.sync(() => viewStore.set({
+      library_local_access: { entry_id: entry.entry_id, profile_id: profileId, status: "eligible", message: result.data.message }
+    }))
+    return
+  }
+  yield* Effect.sync(() => viewStore.set({
+    library_local_access: { entry_id: entry.entry_id, profile_id: profileId, status: "error", message: result.error.message }
+  }))
 })
 
 export const openSelectedLibraryEntry = Effect.gen(function*() {
@@ -1378,6 +1406,7 @@ export const openSelectedLibraryEntry = Effect.gen(function*() {
   const actionId = newOperationId()
   const connectionGeneration = state.connection_generation
   yield* Effect.sync(() => viewStore.set({
+    library_local_access: null,
     library_open_states: replaceLibraryOpenState(viewStore.getState().library_open_states, {
       namespace_id: namespaceId,
       entry_id: entryId,
@@ -1730,6 +1759,43 @@ export const loadLibraryWorkspace = Effect.gen(function*() {
   yield* loadRootWorkspace
 })
 
+export const loadCachedNamespaces = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  yield* Effect.sync(() => viewStore.set({ cached_namespaces_status: "loading", cached_namespaces_error: null }))
+  const result = yield* client.listCachedNamespaces()
+  if (result.ok) {
+    yield* Effect.sync(() => viewStore.set({
+      cached_namespaces: result.data,
+      cached_namespaces_status: "ready",
+      cached_namespaces_error: null
+    }))
+    return true
+  }
+  yield* Effect.sync(() => viewStore.set({
+    cached_namespaces_status: "error",
+    cached_namespaces_error: result.error.message
+  }))
+  return false
+})
+
+export const selectCachedNamespace = (instanceId: string) => Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const generation = viewStore.beginConnectionTransition("connecting")
+  const result = yield* client.selectCachedNamespace({ instance_id: instanceId })
+  if (!result.ok) {
+    if (isCurrent(generation)) yield* Effect.sync(() => viewStore.set({
+      cached_namespaces_error: result.error.message,
+      cached_namespace_id: null
+    }))
+    return false
+  }
+  if (!viewStore.publishConnection(result.data, generation)) return false
+  yield* Effect.sync(() => viewStore.set({ cached_namespace_id: instanceId, library_error: null }))
+  yield* loadLibrary()
+  yield* loadReaderProfiles
+  return true
+})
+
 export const disconnectLibrary = Effect.gen(function*() {
   const client = yield* ConnectionClient
   const connectionGeneration = viewStore.beginConnectionTransition("disconnected")
@@ -1746,14 +1812,16 @@ export const disconnectLibrary = Effect.gen(function*() {
             library_has_more: false,
             library_freshness: null,
             library_status: "error",
-            library_error: "Filtered Library results were cleared while disconnected. Reconnect to search again."
+            library_error: "Filtered Library results were cleared while disconnected. Reconnect to search again.",
+            library_local_access: null
           }
         : {
             library_status: state.library_freshness === null ? "idle" : "ready",
             library_error: null,
             library_freshness: state.library_freshness === null
               ? null
-              : { ...state.library_freshness, source: "cached", stale: true, partial: true }
+              : { ...state.library_freshness, source: "cached", stale: true, partial: true },
+            library_local_access: null
           })
     })
   } else if (isCurrent(connectionGeneration)) {

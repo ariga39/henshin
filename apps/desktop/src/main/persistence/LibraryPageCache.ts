@@ -1,5 +1,10 @@
 import { Context, Effect, Layer, Option, Schema } from "effect"
-import { LibraryPageCacheReadResult, type DraftWorkerRequest, type LibraryPageCacheRow } from "./draft-worker-protocol"
+import {
+  LibraryPageCacheReadResult,
+  LibraryPageCacheNamespaces,
+  type DraftWorkerRequest,
+  type LibraryPageCacheRow
+} from "./draft-worker-protocol"
 import { LocalDatabaseWorker, LocalDatabaseWorkerError } from "./LocalDatabaseWorker"
 
 export interface CachedLibraryPage {
@@ -29,6 +34,11 @@ export class LibraryPageCache extends Context.Service<
       readonly page: LibraryPageCacheRow["page"]
       readonly observedAtMs: number
     }) => Effect.Effect<CachedLibraryPage, LocalDatabaseWorkerError>
+    readonly listNamespaces: () => Effect.Effect<ReadonlyArray<{
+      readonly instanceId: string
+      readonly epoch: string
+      readonly lastObservedAtMs: number
+    }>, LocalDatabaseWorkerError>
   }
 >()("henshin/desktop/LibraryPageCache") {
   static readonly layerFromWorker: Layer.Layer<LibraryPageCache, never, LocalDatabaseWorker> = Layer.effect(
@@ -84,7 +94,16 @@ export class LibraryPageCache extends Context.Service<
             : Effect.succeed(value))
         )
 
-      return LibraryPageCache.of({ get, save })
+      const listNamespaces = () => call({ op: "listLibraryNamespaces" }).pipe(
+        Effect.flatMap((value) => {
+          const decoded = Schema.decodeUnknownOption(LibraryPageCacheNamespaces)(value)
+          return Option.isNone(decoded)
+            ? Effect.fail(new LocalDatabaseWorkerError({ message: "invalid cached namespace read" }))
+            : Effect.succeed(decoded.value)
+        })
+      )
+
+      return LibraryPageCache.of({ get, save, listNamespaces })
     })
   )
 }

@@ -238,6 +238,30 @@ const waitFor = async (condition: () => boolean): Promise<void> => {
 }
 
 describe("desktop Open coordinator", () => {
+  it("checks and caches eligible local access without launching or journaling", async () => {
+    await withCoordinatorFixture("prepare-local", async (fixture) => {
+      let dispatchCount = 0
+      let cacheWrites = 0
+      const coordinator = makeCoordinator(fixture, {
+        dispatch: async () => { dispatchCount += 1 },
+        saveCachedResolution: async (input) => {
+          cacheWrites += 1
+          expect(input.instanceId).toBe(fixture.input.instanceId)
+          expect(input.entryId).toBe(fixture.input.entryId)
+          expect(input.epoch).toBe(fixture.input.epoch)
+        }
+      })
+      await expect(coordinator.prepareLocal(fixture.input)).resolves.toMatchObject({
+        entry_id: fixture.input.entryId,
+        profile_id: fixture.input.profileId,
+        status: "eligible"
+      })
+      expect(cacheWrites).toBe(1)
+      expect(dispatchCount).toBe(0)
+      expect(fixture.journal.rows.size).toBe(0)
+    })
+  })
+
   it("records no event when the native reader rejects the handoff", async () => {
     await withCoordinatorFixture("failure", async (fixture) => {
       const coordinator = makeCoordinator(fixture, {

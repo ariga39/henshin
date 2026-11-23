@@ -2,6 +2,7 @@ import { Context, Effect, Layer } from "effect"
 import type {
   CommandAttempt,
   CommandReconciliation,
+  CachedLibraryNamespace,
   ConnectionStatusView,
   DeviceRootMapping,
   DiscardedDraft,
@@ -95,6 +96,8 @@ export interface ConnectionBridge {
   connect(): Promise<Result<ConnectionStatusView>>
   disconnect(): Promise<Result<ConnectionStatusView>>
   connectionStatus(): Promise<Result<ConnectionStatusView>>
+  listCachedNamespaces(): Promise<Result<ReadonlyArray<CachedLibraryNamespace>>>
+  selectCachedNamespace(input: { readonly instance_id: string }): Promise<Result<ConnectionStatusView>>
 }
 
 export interface OpenJournalBridge {
@@ -173,6 +176,7 @@ export interface LibraryBridge {
   entry(input: { readonly entry_id: string }): Promise<Result<LibraryEntryDetails>>
   note(input: LibraryNoteIpcRequest): Promise<Result<EntryCommandResult>>
   open(input: OpenBookIpcRequest): Promise<Result<OpenBookIpcResult>>
+  prepareLocalAccess(input: { readonly entry_id: string; readonly profile_id: string }): Promise<Result<import("@henshin/contracts").PrepareLocalAccessIpcResult>>
   status(input: OpenBookStatusIpcRequest): Promise<Result<OpenBookIpcResult | null>>
   onOpenStateChanged(listener: () => void): () => void
   getThumbnail(key: ThumbnailKey): Promise<Result<Uint8Array>>
@@ -242,6 +246,8 @@ export class ConnectionClient extends Context.Service<
     readonly connect: () => Effect.Effect<Result<ConnectionStatusView>>
     readonly disconnect: () => Effect.Effect<Result<ConnectionStatusView>>
     readonly connectionStatus: () => Effect.Effect<Result<ConnectionStatusView>>
+    readonly listCachedNamespaces: () => Effect.Effect<Result<ReadonlyArray<CachedLibraryNamespace>>>
+    readonly selectCachedNamespace: (input: { readonly instance_id: string }) => Effect.Effect<Result<ConnectionStatusView>>
   }
 >()("henshin/desktop/renderer/ConnectionClient") {
   static readonly layer = Layer.succeed(
@@ -249,7 +255,9 @@ export class ConnectionClient extends Context.Service<
     ConnectionClient.of({
       connect: () => callIpc(() => window.henshinConnection.connect()),
       disconnect: () => callIpc(() => window.henshinConnection.disconnect()),
-      connectionStatus: () => callIpc(() => window.henshinConnection.connectionStatus())
+      connectionStatus: () => callIpc(() => window.henshinConnection.connectionStatus()),
+      listCachedNamespaces: () => callIpc(() => window.henshinConnection.listCachedNamespaces()),
+      selectCachedNamespace: (input) => callIpc(() => window.henshinConnection.selectCachedNamespace(input))
     })
   )
 }
@@ -362,6 +370,7 @@ export class LibraryClient extends Context.Service<
     readonly entry: (input: { readonly entry_id: string }) => Effect.Effect<Result<LibraryEntryDetails>>
     readonly note: (input: LibraryNoteIpcRequest) => Effect.Effect<Result<EntryCommandResult>>
     readonly open: (input: OpenBookIpcRequest) => Effect.Effect<Result<OpenBookIpcResult>>
+    readonly prepareLocalAccess: (input: { readonly entry_id: string; readonly profile_id: string }) => Effect.Effect<Result<import("@henshin/contracts").PrepareLocalAccessIpcResult>>
     readonly status: (input: OpenBookStatusIpcRequest) => Effect.Effect<Result<OpenBookIpcResult | null>>
     readonly getThumbnail: (key: ThumbnailKey) => Effect.Effect<Result<Uint8Array>>
   }
@@ -373,6 +382,7 @@ export class LibraryClient extends Context.Service<
       entry: (input) => callIpc(() => window.henshinLibrary.entry(input)),
       note: (input) => callIpc(() => window.henshinLibrary.note(input)),
       open: (input) => callIpc(() => window.henshinLibrary.open(input)),
+      prepareLocalAccess: (input) => callIpc(() => window.henshinLibrary.prepareLocalAccess(input)),
       status: (input) => callIpc(() => window.henshinLibrary.status(input)),
       getThumbnail: (key) => callIpc(() => window.henshinLibrary.getThumbnail(key))
     })

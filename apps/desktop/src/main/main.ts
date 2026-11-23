@@ -47,6 +47,10 @@ import {
   ReconcileCommandIpcRequest,
   RecoverOpenJournalIpcRequest,
   ConnectionStatusView,
+  CachedLibraryNamespace,
+  ListCachedNamespacesIpcRequest,
+  SelectCachedNamespaceIpcRequest,
+  PrepareLocalAccessIpcRequest,
   localMappingSampleCanActivate,
   type PublicError,
   type LocalMappingPreview,
@@ -107,7 +111,7 @@ import {
   ConnectionLifecycle,
   ConnectionPausedError
 } from "./ConnectionLifecycle"
-import { OpenCoordinator, type OpenCoordinatorPorts } from "./OpenCoordinator"
+import { LocalAccessPreparationError, OpenCoordinator, type OpenCoordinatorPorts } from "./OpenCoordinator"
 import { loadDeviceId } from "./device-identity"
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
@@ -143,6 +147,7 @@ let readyToQuit = false
 const prototypeMode = process.env.HENSHIN_PROTOTYPE_MODE === "1"
 let protectedWritablePaths: ReadonlyArray<string> = []
 let deviceId = ""
+let managedServerDbPath = ""
 const localMappingPreviews = new Map<string, {
   readonly epoch: string
   readonly previewToken: string
@@ -163,6 +168,13 @@ class OfflineLibraryUnavailableError extends Error {
 
   constructor() {
     super("this server's cached Library is not available on this device; reconnect before browsing it offline")
+  }
+}
+class CachedNamespaceNotFoundError extends Error {
+  readonly code = "cached_namespace_not_found"
+
+  constructor() {
+    super("that server namespace has no retained Library data on this device; select a previously verified namespace")
   }
 }
 const executableSelections = new Map<string, { readonly path: string; readonly createdAt: number }>()
@@ -258,6 +270,12 @@ const toPublicError = (error: unknown): PublicError => {
     return { code: error.code, message: error.message, retryable: true }
   }
   if (error instanceof LocalMappingStaleError) {
+    return { code: error.code, message: error.message, retryable: true }
+  }
+  if (error instanceof CachedNamespaceNotFoundError) {
+    return { code: error.code, message: error.message, retryable: false }
+  }
+  if (error instanceof LocalAccessPreparationError) {
     return { code: error.code, message: error.message, retryable: true }
   }
   if (error instanceof CommandAttemptConflictError) {
@@ -447,6 +465,27 @@ const requireNamespace = (): string => {
 const requireConnection = (): ConnectionLifecycle => {
   if (connection === null) throw new Error("connection lifecycle is not ready")
   return connection
+}
+
+const startAndConnectManagedService = async (): Promise<ConnectionStatusView> => {
+  if (serverChild === null) {
+    if (process.env.HENSHIN_PROTOTYPE_MANAGED_SERVER_UNAVAILABLE === "1") {
+      throw new Error("managed service is unavailable")
+    }
+    const child = await startServerChild(managedServerDbPath)
+    serverChild = child
+    const previousCachedSession = connection?.getCachedSession() ?? null
+    const previousNamespace = connection?.getNamespace() ?? null
+    const nextConnection = new ConnectionLifecycle({
+      baseUrl: child.baseUrl,
+      bearerToken: child.bearerToken
+    })
+    if (previousCachedSession !== null && previousNamespace === previousCachedSession.instanceId) {
+      nextConnection.selectCachedSession(previousCachedSession)
+    }
+    connection = nextConnection
+  }
+  return requireConnection().connect()
 }
 
 const notifyOpenJournalChanged = (): void => {
@@ -1342,6 +1381,24 @@ const registerIpc = (): void => {
     }
   })
 
+  ipcMain.handle(IpcChannels.prepareLocalAccess, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(PrepareLocalAccessIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    try {
+      const session = requireSession()
+      if (openCoordinator === null) return { ok: false as const, error: opaqueError }
+      return openCoordinator.prepareLocal({
+        instanceId: session.instanceId,
+        epoch: session.epoch,
+        entryId: decoded.value.entry_id,
+        profileId: decoded.value.profile_id
+      }).then((data) => ({ ok: true as const, data })).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+    } catch (error) {
+      return Promise.resolve({ ok: false as const, error: toPublicError(error) })
+    }
+  })
+
   ipcMain.handle(IpcChannels.openBookStatus, (event, raw: unknown) => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(OpenBookStatusIpcRequest)(raw)
@@ -1487,8 +1544,7 @@ const registerIpc = (): void => {
     assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(ConnectIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    return requireConnection()
-      .connect()
+    return startAndConnectManagedService()
       .then((status) => {
         openEventDeliveryScheduler.schedule()
         return connectionStatusResult(status)
@@ -1508,6 +1564,47 @@ const registerIpc = (): void => {
     const decoded = Schema.decodeUnknownOption(ConnectionStatusIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return connectionStatusResult(requireConnection().getStatus())
+  })
+
+  ipcMain.handle(IpcChannels.listCachedNamespaces, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(ListCachedNamespacesIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    return runLocalResult(
+      toRawResult(
+        Effect.gen(function*() {
+          const cache = yield* LibraryPageCache
+          const namespaces = yield* cache.listNamespaces()
+          return namespaces.map((namespace): CachedLibraryNamespace => ({
+            instance_id: namespace.instanceId,
+            last_observed_at_ms: namespace.lastObservedAtMs
+          }))
+        })
+      )
+    )
+  })
+
+  ipcMain.handle(IpcChannels.selectCachedNamespace, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(SelectCachedNamespaceIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    try {
+      const lifecycle = requireConnection()
+      if (lifecycle.getSession() !== null) throw new ConnectionPausedError({ state: lifecycle.getStatus().state })
+      return runLocalResult(
+        toRawResult(
+          Effect.gen(function*() {
+            const cache = yield* LibraryPageCache
+            const namespace = (yield* cache.listNamespaces()).find((candidate) => candidate.instanceId === decoded.value.instance_id)
+            if (namespace === undefined) return yield* Effect.fail(new CachedNamespaceNotFoundError())
+            lifecycle.selectCachedSession({ instanceId: namespace.instanceId, epoch: namespace.epoch })
+            return lifecycle.getStatus()
+          })
+        )
+      )
+    } catch (error) {
+      return Promise.resolve({ ok: false as const, error: toPublicError(error) })
+    }
   })
 
   if (!prototypeMode) return
@@ -1862,7 +1959,7 @@ const bootstrap = async (): Promise<void> => {
     path.dirname(dbPath),
     path.dirname(clientDbPath)
   ]
-  serverChild = await startServerChild(dbPath)
+  managedServerDbPath = dbPath
 
   const draftWorkerUrl = pathToFileURL(path.join(app.getAppPath(), "dist", "draft-worker.mjs"))
   const localWorker = LocalDatabaseWorker.layer(clientDbPath, { workerUrl: draftWorkerUrl })
@@ -1879,18 +1976,25 @@ const bootstrap = async (): Promise<void> => {
   )
 
   // The owned child remains supervised independently; disconnect only pauses
-  // the authenticated HTTP scope for this managed endpoint.
-  connection = new ConnectionLifecycle({
-    baseUrl: serverChild.baseUrl,
-    bearerToken: serverChild.bearerToken
-  })
-  await connection.connect()
+  // the authenticated HTTP scope for this managed endpoint. A cold startup
+  // may render the cached-namespace picker before the child is available.
+  let startupConnected = false
+  try {
+    await startAndConnectManagedService()
+    startupConnected = true
+  } catch (error) {
+    console.warn("managed service unavailable during startup; rendering cached Library", error instanceof Error ? error.message : error)
+    connection = new ConnectionLifecycle({
+      baseUrl: "http://127.0.0.1:1",
+      bearerToken: randomUUID()
+    })
+  }
   openCoordinator = createOpenCoordinator()
-  openEventDeliveryScheduler.schedule()
 
   registerIpc()
   installApplicationMenu()
-  createWindow()
+  if (startupConnected) openEventDeliveryScheduler.schedule()
+  createWindow(startupConnected ? "setup" : "library")
 }
 
 app.disableHardwareAcceleration()

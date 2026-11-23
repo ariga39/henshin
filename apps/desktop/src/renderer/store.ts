@@ -2,6 +2,7 @@ import type {
   CommandAttempt,
   CommandReconciliation,
   ConnectionStatusView,
+  CachedLibraryNamespace,
   DeviceRootMapping,
   LocalMappingPreview,
   LibraryEntry,
@@ -40,6 +41,13 @@ export interface LibraryOpenState {
   readonly connection_generation: number
   readonly status: LibraryOpenStatus
   readonly result: OpenBookIpcResult | null
+}
+
+export interface LibraryLocalAccessState {
+  readonly entry_id: string
+  readonly profile_id: string
+  readonly status: "loading" | "eligible" | "error"
+  readonly message: string | null
 }
 
 export interface ViewState {
@@ -115,6 +123,10 @@ export interface ViewState {
   readonly scan_hold_new_discoveries: boolean
   readonly connection: ConnectionStatusView
   readonly connection_generation: number
+  readonly cached_namespaces: ReadonlyArray<CachedLibraryNamespace>
+  readonly cached_namespaces_status: "idle" | "loading" | "ready" | "error"
+  readonly cached_namespaces_error: string | null
+  readonly cached_namespace_id: string | null
   readonly reader_profiles: ReadonlyArray<ReaderProfile>
   readonly reader_profiles_status: "idle" | "loading" | "ready" | "error"
   readonly reader_profiles_error: string | null
@@ -154,6 +166,7 @@ export interface ViewState {
   readonly library_selected_entry_id: string | null
   readonly library_open_profile_id: string | null
   readonly library_open_states: ReadonlyArray<LibraryOpenState>
+  readonly library_local_access: LibraryLocalAccessState | null
 }
 
 const initialState: ViewState = {
@@ -229,6 +242,10 @@ const initialState: ViewState = {
   scan_hold_new_discoveries: false,
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
   connection_generation: 0,
+  cached_namespaces: [],
+  cached_namespaces_status: "idle",
+  cached_namespaces_error: null,
+  cached_namespace_id: null,
   reader_profiles: [],
   reader_profiles_status: "idle",
   reader_profiles_error: null,
@@ -267,7 +284,8 @@ const initialState: ViewState = {
   library_scan_task: null,
   library_selected_entry_id: null,
   library_open_profile_id: null,
-  library_open_states: []
+  library_open_states: [],
+  library_local_access: null
 }
 
 const sameConnection = (left: ConnectionStatusView, right: ConnectionStatusView): boolean =>

@@ -20,6 +20,7 @@ import {
   type OpenResolutionCacheRow,
   type LibraryPageCacheRow,
   type DraftWorkerRequest,
+  type LibraryPageCacheNamespaces,
   OPEN_RESOLUTION_CACHE_BUDGET_BYTES
 } from "./draft-worker-protocol"
 
@@ -386,6 +387,19 @@ const selectLibraryPage = db.prepare(`
   WHERE instance_id = ? AND page_size = ? AND cursor_key = ?
 `)
 selectLibraryPage.setReadBigInts(true)
+const listLibraryNamespaces = db.prepare(`
+  SELECT instance_id, epoch, observed_at_ms AS last_observed_at_ms
+  FROM library_page_cache
+  WHERE rowid IN (
+    SELECT rowid
+    FROM library_page_cache AS latest
+    WHERE latest.instance_id = library_page_cache.instance_id
+    ORDER BY latest.observed_at_ms DESC, latest.rowid DESC
+    LIMIT 1
+  )
+  ORDER BY observed_at_ms DESC, instance_id ASC
+`)
+listLibraryNamespaces.setReadBigInts(true)
 const compactLibraryPages = db.prepare(`
   DELETE FROM library_page_cache
   WHERE rowid IN (
@@ -682,6 +696,17 @@ const readLibraryPage = (instanceId: string, pageSize: number, cursorKey: string
     observedAtMs: Number(row.observed_at_ms)
   }
 }
+
+const readLibraryNamespaces = (): LibraryPageCacheNamespaces =>
+  (listLibraryNamespaces.all() as unknown as ReadonlyArray<{
+    readonly instance_id: string
+    readonly epoch: string
+    readonly last_observed_at_ms: bigint
+  }>).map((row) => ({
+    instanceId: row.instance_id,
+    epoch: row.epoch,
+    lastObservedAtMs: Number(row.last_observed_at_ms)
+  }))
 
 const sameOpenIntent = (
   row: OpenJournalRow,
@@ -1742,6 +1767,8 @@ const handle = (request: DraftWorkerRequest): unknown => {
         throw error
       }
     }
+    case "listLibraryNamespaces":
+      return readLibraryNamespaces()
     case "close":
       db.close()
       return null
