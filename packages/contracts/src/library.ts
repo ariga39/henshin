@@ -92,13 +92,13 @@ export type IndexedRootSamplePage = typeof IndexedRootSamplePage.Type
 export const ReplacementResolutionCommand = Schema.Struct({
   type: Schema.Literal("resolve-replacement"),
   entry_id: Uuid,
-  decision: Schema.Literal("keep")
+  decision: Schema.Union([Schema.Literal("keep"), Schema.Literal("replace")])
 })
 export type ReplacementResolutionCommand = typeof ReplacementResolutionCommand.Type
 
 export const ReplacementResolutionResult = Schema.Struct({
   operation_id: Uuid,
-  decision: Schema.Literal("keep"),
+  decision: Schema.Union([Schema.Literal("keep"), Schema.Literal("replace")]),
   entry: LibraryEntry,
   detached_entry_id: Schema.NullOr(Uuid)
 })

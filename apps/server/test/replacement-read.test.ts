@@ -106,6 +106,64 @@ const listLibrary = (server: RunningServer): Promise<LibraryEntryPage> =>
     return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
   })).then((result) => result.data)
 
+const readReplacementState = (dbPath: string, rootId: string) => {
+  const db = new DatabaseSync(dbPath)
+  const entries = db.prepare(
+    "SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, decision_version, content_version, location_revision, manifest_json FROM library_entries WHERE root_id = ? ORDER BY entry_id"
+  ).all(rootId)
+  const staged = db.prepare(
+    "SELECT candidate_id, candidate_version, relative_path, kind, hold_state, analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? ORDER BY candidate_id"
+  ).all(rootId)
+  const entryIds = db.prepare(
+    "SELECT entry_id FROM library_entries WHERE root_id = ? ORDER BY entry_id"
+  ).all(rootId) as Array<{ entry_id: string }>
+  const openEvents = entryIds.length === 0
+    ? []
+    : db.prepare(
+        `SELECT event_id, instance_id, entry_id, device_id, observed_location_revision, observed_content_version, occurred_at_ms
+         FROM open_events WHERE entry_id IN (${entryIds.map(() => "?").join(", ")}) ORDER BY event_id`
+      ).all(...entryIds.map((entry) => entry.entry_id))
+  const statistics = entryIds.length === 0
+    ? []
+    : db.prepare(
+        `SELECT entry_id, open_count, last_opened_at_ms
+         FROM entry_statistics WHERE entry_id IN (${entryIds.map(() => "?").join(", ")}) ORDER BY entry_id`
+      ).all(...entryIds.map((entry) => entry.entry_id))
+  const library = db.prepare("SELECT change_revision FROM server_library WHERE id = 1").all()
+  db.close()
+  return { entries, staged, openEvents, statistics, library }
+}
+
+const setCandidateObservationTokens = (
+  dbPath: string,
+  candidateId: string,
+  beforeToken: string | undefined,
+  afterToken: string | undefined
+): void => {
+  const db = new DatabaseSync(dbPath)
+  const row = db.prepare("SELECT manifest_json FROM staged_discoveries WHERE candidate_id = ?").get(candidateId) as
+    | { manifest_json: string | null }
+    | undefined
+  if (row?.manifest_json === null || row?.manifest_json === undefined) throw new Error("expected candidate manifest")
+  const manifest = JSON.parse(row.manifest_json) as {
+    before: { observation_token?: string }
+    after: { observation_token?: string }
+  }
+  if (beforeToken === undefined) delete manifest.before.observation_token
+  else manifest.before.observation_token = beforeToken
+  if (afterToken === undefined) delete manifest.after.observation_token
+  else manifest.after.observation_token = afterToken
+  db.prepare("UPDATE staged_discoveries SET manifest_json = ? WHERE candidate_id = ?").run(
+    JSON.stringify(manifest),
+    candidateId
+  )
+  db.close()
+}
+
+const removeCandidateObservationTokens = (dbPath: string, candidateId: string): void => {
+  setCandidateObservationTokens(dbPath, candidateId, undefined, undefined)
+}
+
 const downgradeLibraryEntriesToPreReplacementSchema = (dbPath: string): void => {
   const db = new DatabaseSync(dbPath)
   db.exec("PRAGMA foreign_keys = OFF")
@@ -193,6 +251,50 @@ const seedLegacyStagedError = (
     Date.now()
   )
   db.close()
+}
+
+const downgradeLibraryEntriesToKeepV8Schema = (dbPath: string): void => {
+  const db = new DatabaseSync(dbPath)
+  db.exec("PRAGMA foreign_keys = OFF")
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    db.exec(`
+      CREATE TABLE library_entries_keep_v8 (
+        entry_id TEXT PRIMARY KEY,
+        library_id TEXT NOT NULL REFERENCES server_library(library_id),
+        root_id TEXT NOT NULL REFERENCES server_roots(root_id),
+        relative_path TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
+        title TEXT NOT NULL,
+        page_count INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending')),
+        content_version INTEGER NOT NULL,
+        location_revision INTEGER NOT NULL,
+        decision_version INTEGER NOT NULL DEFAULT 1,
+        manifest_json TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        accepted_observation_json TEXT,
+        UNIQUE (root_id, relative_path)
+      );
+      INSERT INTO library_entries_keep_v8
+        SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count,
+          state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms,
+          accepted_observation_json
+        FROM library_entries;
+      DROP TABLE library_entries;
+      ALTER TABLE library_entries_keep_v8 RENAME TO library_entries;
+      UPDATE server_state SET schema_version = 8 WHERE id = 1;
+    `)
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON")
+    db.close()
+  }
 }
 
 afterEach(async () => {
@@ -530,7 +632,7 @@ describe("replacement comparison read model", () => {
   })
 
   it("keeps the original entry after fresh validation and replays after the source changes", async () => {
-    const { server, fixture, root } = await makeScenario(
+    const { dbPath, server, fixture, root } = await makeScenario(
       "henshin-replacement-keep-",
       "Keep replacement",
       async (fixture) => {
@@ -584,7 +686,7 @@ describe("replacement comparison read model", () => {
       command: { type: "resolve-replacement" as const, entry_id: initial.entry_id, decision: "keep" as const }
     }
 
-    await writeFile(page, "Book C")
+    await writeFile(page, "Book C changed length")
     const stale = await withReviewClient(server, Effect.gen(function*() {
       return yield* (yield* ReviewHttpClient).command({
         params: { id: candidate.candidate_id },
@@ -605,6 +707,20 @@ describe("replacement comparison read model", () => {
       return yield* (yield* ReviewHttpClient).candidates()
     }))).data.find((item) => item.candidate_id === candidate.candidate_id)
     if (refreshedCandidate === undefined) throw new Error("expected refreshed replacement candidate")
+
+    setCandidateObservationTokens(dbPath, refreshedCandidate.candidate_id, "stale-before", "stale-after")
+    const beforeTokenMismatch = readReplacementState(dbPath, root.root_id)
+    const tokenMismatch = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).command({
+        params: { id: refreshedCandidate.candidate_id },
+        payload: { ...command, operation_id: randomUUID(), expected_candidate_version: refreshedCandidate.candidate_version }
+      }).pipe(Effect.flip)
+    }))
+    expect(tokenMismatch._tag).toBe("RevisionConflict")
+    expect(tokenMismatch.message).toContain("source changed since Review")
+    expect(readReplacementState(dbPath, root.root_id)).toEqual(beforeTokenMismatch)
+
+    removeCandidateObservationTokens(dbPath, refreshedCandidate.candidate_id)
     const operationId = randomUUID()
     const resolved = await withReviewClient(server, Effect.gen(function*() {
       return yield* (yield* ReviewHttpClient).command({
@@ -631,7 +747,7 @@ describe("replacement comparison read model", () => {
     }))
     expect(historyReplay.data.results[0]?.outcome).toBe("already_accepted")
 
-    await writeFile(page, "Book D")
+    await writeFile(page, "Book D changed length")
     const replay = await withReviewClient(server, Effect.gen(function*() {
       return yield* (yield* ReviewHttpClient).command({
         params: { id: refreshedCandidate.candidate_id },
@@ -651,5 +767,179 @@ describe("replacement comparison read model", () => {
         candidate_observation: { page_count: 2, entry_count: 2 }
       }
     })
+  })
+
+  it("creates a distinct replacement entry, rescans its original observation, preserves history, and replays the result", async () => {
+    const { dbPath, server: initialServer, fixture, root } = await makeScenario(
+      "henshin-replacement-replace-",
+      "Replace replacement",
+      async (fixture) => {
+        await mkdir(path.join(fixture, "book"))
+        await writeFile(path.join(fixture, "book", "001.jpg"), "Book A")
+      }
+    )
+    let server = initialServer
+    const book = path.join(fixture, "book")
+    const page = path.join(book, "001.jpg")
+
+    expect((await scan(server, root)).status).toBe("succeeded")
+    const accepted = await listLibrary(server)
+    const initial = accepted.entries[0]
+    if (initial === undefined) throw new Error("expected accepted entry")
+    const resolution = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: initial.entry_id }, query: {} })
+    }))
+    const openEvent = await withOpenEventClient(server, Effect.gen(function*() {
+      return yield* (yield* OpenEventHttpClient).batch({
+        payload: {
+          epoch: server.epoch,
+          events: [{
+            event_id: randomUUID(),
+            instance_id: server.instanceId,
+            entry_id: initial.entry_id,
+            device_id: randomUUID(),
+            observed_location_revision: initial.location_revision,
+            observed_content_version: initial.content_version,
+            occurred_at_ms: Date.now()
+          }]
+        }
+      })
+    }))
+    expect(openEvent.data.results[0]?.outcome).toBe("accepted")
+
+    await writeFile(page, "Book B")
+    await writeFile(path.join(book, "002.jpg"), "Book B second page")
+    expect((await scan(server, root)).readiness_error?.code).toBe("allocation_deferred")
+    const candidate = (await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).candidates()
+    }))).data[0]
+    if (candidate === undefined) throw new Error("expected replacement candidate")
+
+    let command = {
+      root_id: root.root_id,
+      instance_id: server.instanceId,
+      epoch: server.epoch,
+      expected_candidate_version: candidate.candidate_version,
+      expected_mapping_revision: root.mapping_revision,
+      expected_policy_revision: root.policy_revision,
+      expected_decision_version: resolution.data.decision_version,
+      expected_location_revision: resolution.data.location_revision,
+      command: { type: "resolve-replacement" as const, entry_id: initial.entry_id, decision: "replace" as const }
+    }
+
+    const beforeStale = readReplacementState(dbPath, root.root_id)
+    await writeFile(page, "Book C changed length")
+    const stale = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).command({
+        params: { id: candidate.candidate_id },
+        payload: { ...command, operation_id: randomUUID() }
+      }).pipe(Effect.flip)
+    }))
+    expect(stale._tag).toBe("RevisionConflict")
+    expect(stale.message).toContain("source changed since Review")
+    expect(readReplacementState(dbPath, root.root_id)).toEqual(beforeStale)
+
+    await writeFile(page, "Book B")
+    expect((await scan(server, root)).readiness_error?.code).toBe("allocation_deferred")
+    let refreshedCandidate = (await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).candidates()
+    }))).data.find((item) => item.candidate_id === candidate.candidate_id)
+    if (refreshedCandidate === undefined) throw new Error("expected refreshed replacement candidate")
+
+    await server.stop()
+    downgradeLibraryEntriesToKeepV8Schema(dbPath)
+    server = await startServer(dbPath)
+    servers.push(server)
+    const migratedEntries = await listLibrary(server)
+    expect(migratedEntries.entries[0]).toMatchObject({
+      entry_id: initial.entry_id,
+      state: "replacement-pending",
+      replacement: {
+        old_observation: { page_count: 1, entry_count: 1 },
+        candidate_observation: { page_count: 2, entry_count: 2 }
+      }
+    })
+    const migratedDb = new DatabaseSync(dbPath)
+    const migratedTable = migratedDb.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'library_entries'").get() as { sql: string } | undefined
+    const storedSummary = migratedDb.prepare("SELECT accepted_observation_json FROM library_entries WHERE entry_id = ?").get(initial.entry_id) as { accepted_observation_json: string | null } | undefined
+    migratedDb.close()
+    expect(migratedTable?.sql).toContain("detached")
+    expect(storedSummary?.accepted_observation_json).toEqual(expect.any(String))
+    const migratedCandidate = (await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).candidates()
+    }))).data.find((item) => item.candidate_id === candidate.candidate_id)
+    if (migratedCandidate === undefined) throw new Error("expected migrated replacement candidate")
+    refreshedCandidate = migratedCandidate
+    command = { ...command, instance_id: server.instanceId, epoch: server.epoch }
+
+    removeCandidateObservationTokens(dbPath, refreshedCandidate.candidate_id)
+
+    const operationId = randomUUID()
+    const resolved = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).command({
+        params: { id: refreshedCandidate.candidate_id },
+        payload: { ...command, operation_id: operationId, expected_candidate_version: refreshedCandidate.candidate_version }
+      })
+    }))
+    const newEntryId = resolved.data.resolution?.entry.entry_id
+    if (newEntryId === undefined) throw new Error("expected replacement result")
+    expect(newEntryId).not.toBe(initial.entry_id)
+    expect(resolved.data.resolution).toMatchObject({
+      entry: { entry_id: newEntryId, state: "accepted", content_version: "1" },
+      detached_entry_id: initial.entry_id
+    })
+
+    const acceptedReplacement = await listLibrary(server)
+    expect(acceptedReplacement.entries).toHaveLength(1)
+    expect(acceptedReplacement.entries[0]).toMatchObject({ entry_id: newEntryId, state: "accepted", replacement: null })
+
+    await writeFile(path.join(book, "003.jpg"), "Book B third page")
+    expect((await scan(server, root)).readiness_error?.code).toBe("allocation_deferred")
+    const rescanned = await listLibrary(server)
+    expect(rescanned.entries).toHaveLength(1)
+    expect(rescanned.entries[0]).toMatchObject({
+      entry_id: newEntryId,
+      state: "replacement-pending",
+      replacement: {
+        old_observation: { page_count: 2, entry_count: 2 },
+        candidate_observation: { page_count: 3, entry_count: 3 }
+      }
+    })
+
+    const delayedEvent = await withOpenEventClient(server, Effect.gen(function*() {
+      return yield* (yield* OpenEventHttpClient).batch({
+        payload: {
+          epoch: server.epoch,
+          events: [{
+            event_id: randomUUID(),
+            instance_id: server.instanceId,
+            entry_id: initial.entry_id,
+            device_id: randomUUID(),
+            observed_location_revision: initial.location_revision,
+            observed_content_version: initial.content_version,
+            occurred_at_ms: Date.now()
+          }]
+        }
+      })
+    }))
+    expect(delayedEvent.data.results[0]?.outcome).toBe("accepted")
+
+    await writeFile(page, "Book D changed length")
+    const replay = await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).command({
+        params: { id: refreshedCandidate.candidate_id },
+        payload: { ...command, operation_id: operationId, expected_candidate_version: refreshedCandidate.candidate_version }
+      })
+    }))
+    expect(replay.data.resolution).toEqual(resolved.data.resolution)
+
+    const db = new DatabaseSync(dbPath)
+    const oldRow = db.prepare("SELECT state FROM library_entries WHERE entry_id = ?").get(initial.entry_id) as { state: string } | undefined
+    const history = db.prepare("SELECT COUNT(*) AS count FROM open_events WHERE entry_id = ?").get(initial.entry_id) as { count: number } | undefined
+    const newHistory = db.prepare("SELECT COUNT(*) AS count FROM open_events WHERE entry_id = ?").get(newEntryId) as { count: number } | undefined
+    db.close()
+    expect(oldRow?.state).toBe("detached")
+    expect(history?.count).toBe(2)
+    expect(newHistory?.count).toBe(0)
   })
 })
