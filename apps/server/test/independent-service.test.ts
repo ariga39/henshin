@@ -6,7 +6,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 
-const SERVER_PATH = fileURLToPath(new URL("../dist/server.mjs", import.meta.url))
+const SERVER_PATH = process.env.HENSHIN_SERVER_ENTRYPOINT ?? fileURLToPath(new URL("../dist/server.mjs", import.meta.url))
+const SERVER_CWD = process.env.HENSHIN_SERVER_CWD ?? process.cwd()
 const READY_TIMEOUT_MS = 5_000
 const EXIT_TIMEOUT_MS = 5_000
 
@@ -54,6 +55,7 @@ const waitForExit = (
 
 const launch = (args: ReadonlyArray<string>): Attempt => {
   const child = spawn(process.execPath, [SERVER_PATH, ...args], {
+    cwd: SERVER_CWD,
     stdio: ["pipe", "pipe", "pipe"]
   })
   let stdout = ""

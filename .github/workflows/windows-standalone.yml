@@ -1,0 +1,81 @@
+name: Windows standalone service
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-standalone.yml"
+      - "apps/server/**"
+      - "packages/contracts/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-standalone:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Windows x64 standalone archive
+        shell: pwsh
+        env:
+          HENSHIN_ARTIFACT_DIR: ${{ runner.temp }}\henshin-artifact
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:HENSHIN_ARTIFACT_DIR | Out-Null
+          Write-Host "Windows: $([System.Environment]::OSVersion.VersionString)"
+          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
+          Write-Host "Node: $(node --version), architecture: $(node -p 'process.arch')"
+          Write-Host "pnpm: $(pnpm --version)"
+          pnpm build:server:distribution
+          if ($LASTEXITCODE -ne 0) { throw "standalone distribution build failed" }
+
+      - name: Restore workspace test dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Unpack outside the checkout
+        id: unpack
+        shell: pwsh
+        env:
+          HENSHIN_ARTIFACT_DIR: ${{ runner.temp }}\henshin-artifact
+        run: |
+          $archive = @(Get-ChildItem -LiteralPath $env:HENSHIN_ARTIFACT_DIR -Filter "henshin-server-*.tar.gz" -File)
+          if ($archive.Count -ne 1) { throw "expected exactly one standalone archive" }
+          if ($archive.Name -notmatch "win32-x64") { throw "unexpected Windows archive: $($archive.Name)" }
+          Write-Host "Artifact: $($archive.FullName)"
+          $unpack = Join-Path $env:RUNNER_TEMP "henshin standalone unpacked path"
+          Remove-Item -LiteralPath $unpack -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $unpack | Out-Null
+          tar -xzf $archive.FullName -C $unpack
+          if ($LASTEXITCODE -ne 0) { throw "standalone archive extraction failed" }
+          if (-not (Test-Path -LiteralPath (Join-Path $unpack "server.mjs"))) { throw "server entrypoint missing" }
+          "archive=$($archive.FullName)" >> $env:GITHUB_OUTPUT
+          "unpack=$unpack" >> $env:GITHUB_OUTPUT
+
+      - name: Exercise relocated service with native cover decoding
+        shell: pwsh
+        env:
+          HENSHIN_SERVER_ENTRYPOINT: ${{ steps.unpack.outputs.unpack }}\server.mjs
+          HENSHIN_SERVER_CWD: ${{ steps.unpack.outputs.unpack }}
+          HENSHIN_TEMP_ROOT: ${{ runner.temp }}\henshin test temp
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:HENSHIN_TEMP_ROOT | Out-Null
+          $env:TEMP = $env:HENSHIN_TEMP_ROOT
+          $env:TMP = $env:HENSHIN_TEMP_ROOT
+          pnpm exec vitest run apps/server/test/independent-service.test.ts apps/server/test/thumbnail.test.ts
