@@ -93,7 +93,8 @@ export type BackupRetentionPolicyRow = typeof BackupRetentionPolicyRow.Type
 
 export const BackupRetentionPolicyMutationOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("updated"), policy: BackupRetentionPolicyRow }),
-  Schema.Struct({ kind: Schema.Literal("destination_not_found") })
+  Schema.Struct({ kind: Schema.Literal("destination_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("restore_reconciliation_required") })
 ])
 export type BackupRetentionPolicyMutationOutcome = typeof BackupRetentionPolicyMutationOutcome.Type
 

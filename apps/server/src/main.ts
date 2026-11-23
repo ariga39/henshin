@@ -900,6 +900,9 @@ const runBackupRetentionCommand = async (options: BackupRetentionOptions): Promi
         authorizedAtMs: Date.now()
       }))
       if (updated.kind === "destination_not_found") return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination was not found" }))
+      if (updated.kind === "restore_reconciliation_required") {
+        return yield* Effect.fail(new DatabaseWorkerError({ message: "backup retention authorization is unavailable until restore reconciliation completes" }))
+      }
       return {
         retention: retentionView(updated.policy, destination),
         confirmed: true

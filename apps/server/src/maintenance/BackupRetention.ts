@@ -31,6 +31,8 @@ export const ROTATING_KEEP_COUNT = 7
 const ROTATING_DIRECTORY = "rotating"
 const ARCHIVE_SUFFIX = ".henshin.zip"
 const textDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
+const MAX_WARNING_CODE_LENGTH = 100
+const MAX_WARNING_MESSAGE_LENGTH = 512
 
 const Digest = Schema.String.check(Schema.isMinLength(64), Schema.isMaxLength(64))
 const RetentionManifest = Schema.Struct({
@@ -106,8 +108,8 @@ const retentionWarning = (
   state: "warning",
   keepCount: ROTATING_KEEP_COUNT,
   deletedArtifactIds,
-  warningCode: code,
-  warningMessage: message
+  warningCode: code.slice(0, MAX_WARNING_CODE_LENGTH),
+  warningMessage: message.slice(0, MAX_WARNING_MESSAGE_LENGTH)
 })
 
 const isMissing = (error: unknown): boolean =>
@@ -307,39 +309,101 @@ export const applyBackupRetention = async (
 
   const eligible = rotating.slice(0, -ROTATING_KEEP_COUNT)
   const verified = new Map<string, VerifiedArtifact>([[newest.artifactId, newestVerified]])
-  try {
-    for (const artifact of eligible) {
-      verified.set(artifact.artifactId, await verifyOwnedArchive(context.destination, artifact))
-    }
-  } catch (error) {
-    return record(context, retentionWarning(
-      isMissing(error) ? "eligible-artifact-missing" : "catalog-ownership-uncertain",
-      isMissing(error) ? "an eligible rotating artifact is missing; cleanup was left intact" :
-        (error instanceof Error ? error.message : String(error))
-    ))
-  }
-
-  try {
-    for (const candidate of verified.values()) await revalidateVerifiedArtifact(candidate)
-  } catch (error) {
-    return record(context, retentionWarning(
-      isMissing(error) ? "eligible-artifact-missing" : "catalog-ownership-uncertain",
-      isMissing(error) ? "a verified rotating artifact disappeared before cleanup; cleanup was left intact" :
-        (error instanceof Error ? error.message : String(error))
-    ))
-  }
-
   const deletedArtifactIds: Array<string> = []
+  const recordDeleted = (artifactId: string): void => {
+    if (!deletedArtifactIds.includes(artifactId)) deletedArtifactIds.push(artifactId)
+  }
+  const reconcileMissing = async (artifact: BackupArtifactRow): Promise<void> => {
+    const deleted = await context.markDeleted({ artifactId: artifact.artifactId, deletedAtMs: Date.now() })
+    if (deleted.kind !== "deleted" && deleted.kind !== "artifact_not_completed") {
+      throw new Error(`catalog deletion was not recorded: ${deleted.kind}`)
+    }
+    recordDeleted(artifact.artifactId)
+  }
+
+  for (const artifact of eligible) {
+    try {
+      verified.set(artifact.artifactId, await verifyOwnedArchive(context.destination, artifact))
+    } catch (error) {
+      if (!isMissing(error)) {
+        return record(context, retentionWarning(
+          "catalog-ownership-uncertain",
+          error instanceof Error ? error.message : String(error),
+          deletedArtifactIds
+        ))
+      }
+      try {
+        await reconcileMissing(artifact)
+      } catch (reconcileError) {
+        return record(context, retentionWarning(
+          "cleanup-failed",
+          `retention cleanup stopped after reconciling ${deletedArtifactIds.length} artifact(s): ${reconcileError instanceof Error ? reconcileError.message : String(reconcileError)}`,
+          deletedArtifactIds
+        ))
+      }
+    }
+  }
+
+  try {
+    await revalidateVerifiedArtifact(newestVerified)
+  } catch (error) {
+    return record(context, retentionWarning(
+      isMissing(error) ? "newest-recovery-point-missing" : "catalog-ownership-uncertain",
+      isMissing(error) ? "the newest verified rotating recovery point disappeared before cleanup; cleanup was left intact" :
+        (error instanceof Error ? error.message : String(error)),
+      deletedArtifactIds
+    ))
+  }
   for (const artifact of eligible) {
     const candidate = verified.get(artifact.artifactId)
-    if (candidate === undefined) return record(context, retentionWarning("catalog-ownership-uncertain", "eligible artifact path was not retained", deletedArtifactIds))
+    if (candidate === undefined) continue
+    try {
+      await revalidateVerifiedArtifact(candidate)
+    } catch (error) {
+      if (!isMissing(error)) {
+        return record(context, retentionWarning(
+          "catalog-ownership-uncertain",
+          error instanceof Error ? error.message : String(error),
+          deletedArtifactIds
+        ))
+      }
+      try {
+        await reconcileMissing(artifact)
+        verified.delete(artifact.artifactId)
+      } catch (reconcileError) {
+        return record(context, retentionWarning(
+          "cleanup-failed",
+          `retention cleanup stopped after reconciling ${deletedArtifactIds.length} artifact(s): ${reconcileError instanceof Error ? reconcileError.message : String(reconcileError)}`,
+          deletedArtifactIds
+        ))
+      }
+    }
+  }
+
+  for (const artifact of eligible) {
+    const candidate = verified.get(artifact.artifactId)
+    if (candidate === undefined) continue
     try {
       await revalidateVerifiedArtifact(candidate)
       await rm(candidate.path)
       const deleted = await context.markDeleted({ artifactId: artifact.artifactId, deletedAtMs: Date.now() })
-      if (deleted.kind !== "deleted") throw new Error(`catalog deletion was not recorded: ${deleted.kind}`)
-      deletedArtifactIds.push(artifact.artifactId)
+      if (deleted.kind !== "deleted" && deleted.kind !== "artifact_not_completed") {
+        throw new Error(`catalog deletion was not recorded: ${deleted.kind}`)
+      }
+      recordDeleted(artifact.artifactId)
     } catch (error) {
+      if (isMissing(error)) {
+        try {
+          await reconcileMissing(artifact)
+          continue
+        } catch (reconcileError) {
+          return record(context, retentionWarning(
+            "cleanup-failed",
+            `retention cleanup stopped after reconciling ${deletedArtifactIds.length} artifact(s): ${reconcileError instanceof Error ? reconcileError.message : String(reconcileError)}`,
+            deletedArtifactIds
+          ))
+        }
+      }
       return record(context, retentionWarning(
         "cleanup-failed",
         `retention cleanup stopped after ${deletedArtifactIds.length} artifact(s): ${error instanceof Error ? error.message : String(error)}`,

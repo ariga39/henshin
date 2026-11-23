@@ -1682,6 +1682,20 @@ const setBackupRetentionPolicy = (
       db.exec("ROLLBACK")
       return { kind: "destination_not_found" }
     }
+    if (request.enabled) {
+      const restoreTable = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'server_restore_state'"
+      ).get() as { name: string } | undefined
+      if (restoreTable !== undefined) {
+        const restored = db.prepare(
+          "SELECT status FROM server_restore_state WHERE id = 1"
+        ).get() as { status: "normal" | "needs-reconciliation" } | undefined
+        if (restored?.status === "needs-reconciliation") {
+          db.exec("ROLLBACK")
+          return { kind: "restore_reconciliation_required" }
+        }
+      }
+    }
     upsertBackupRetentionPolicy.run(
       request.destinationId,
       request.enabled ? 1 : 0,

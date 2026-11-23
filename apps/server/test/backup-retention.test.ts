@@ -120,7 +120,7 @@ describe("server backup retention", () => {
     })])
   })
 
-  it("reports recoverable cleanup failure and requires fresh authorization after reattach and restore", async () => {
+  it("reconciles missing artifacts after interrupted cleanup and replacement, then requires fresh restore authorization", async () => {
     const { dataDir, destination, destinationId } = await setup()
     for (let index = 0; index < 8; index += 1) await publishRotating(dataDir, destinationId, `before-enable-${index}`)
     await run(["backup", "retention", "enable", "--data-dir", dataDir, "--destination-id", destinationId, "--confirm"])
@@ -131,14 +131,13 @@ describe("server backup retention", () => {
     const missingPath = path.join(destination, active[0].relative_path)
     const missingBackupPath = `${missingPath}.missing`
     await rename(missingPath, missingBackupPath)
-    const failedCleanup = await publishRotating(dataDir, destinationId, "cleanup-warning")
-    expect(failedCleanup.retention).toMatchObject({
-      state: "warning",
-      warning: { code: "eligible-artifact-missing" },
-      deleted_artifact_ids: []
+    const recoveredCleanup = await publishRotating(dataDir, destinationId, "cleanup-recovery")
+    expect(recoveredCleanup.retention).toMatchObject({
+      state: "applied",
+      deleted_artifact_ids: [active[0].artifact_id, active[1].artifact_id]
     })
     expect(await readFile(missingBackupPath)).not.toHaveLength(0)
-    await expect(stat(path.join(destination, failedCleanup.relative_path as string))).resolves.toBeDefined()
+    await expect(stat(path.join(destination, recoveredCleanup.relative_path as string))).resolves.toBeDefined()
 
     const detachedDestination = `${destination}-detached`
     await rename(destination, detachedDestination)
@@ -164,6 +163,18 @@ describe("server backup retention", () => {
     })])
 
     await run(["backup", "retention", "enable", "--data-dir", dataDir, "--destination-id", destinationId, "--confirm"])
+    const detachedRotating = await readdir(path.join(detachedDestination, "rotating"))
+    for (let index = 0; index < 7; index += 1) await publishRotating(dataDir, destinationId, `replacement-${index}`)
+    expect((await readdir(path.join(destination, "rotating"))).filter((name) => name.endsWith(".henshin.zip"))).toHaveLength(7)
+    for (const name of detachedRotating.filter((candidate) => candidate.endsWith(".henshin.zip"))) {
+      await expect(stat(path.join(detachedDestination, "rotating", name))).resolves.toBeDefined()
+    }
+
+    const replacementListing = await run(["backup", "list", "--data-dir", dataDir])
+    const replacementArtifacts = replacementListing.artifacts as Array<{ status: string; publication_order: number; relative_path: string }>
+    expect(replacementArtifacts.filter((artifact) => artifact.status === "completed" && artifact.relative_path.startsWith("rotating/"))).toHaveLength(7)
+    expect(replacementArtifacts.filter((artifact) => artifact.status === "deleted" && artifact.relative_path.startsWith("rotating/")).length).toBeGreaterThanOrEqual(9)
+
     const database = new DatabaseSync(path.join(dataDir, "server.sqlite"))
     try {
       database.exec(`
@@ -175,7 +186,7 @@ describe("server backup retention", () => {
           recovery_point TEXT
         );
         INSERT INTO server_restore_state(id, status, restored_at_ms)
-        VALUES (1, 'normal', ${Date.now() + 10_000});
+        VALUES (1, 'needs-reconciliation', ${Date.now()});
       `)
     } finally {
       database.close()
@@ -187,8 +198,24 @@ describe("server backup retention", () => {
       state: "needs-reactivation",
       warning: expect.objectContaining({ code: "restore-requires-reactivation" })
     })])
-    const preview = await run(["backup", "retention", "enable", "--data-dir", dataDir, "--destination-id", destinationId])
-    expect(preview.proposal).toMatchObject({ store_kind: "server", destination_id: destinationId, keep_count: 7, requires_confirmation: true })
+    const rejectedEnable = await runFailure([
+      "backup", "retention", "enable", "--data-dir", dataDir,
+      "--destination-id", destinationId, "--confirm"
+    ])
+    expect(rejectedEnable.code).toBe(1)
+    expect(rejectedEnable.stderr).toContain("authorization is unavailable until restore reconciliation completes")
+
+    const normalDatabase = new DatabaseSync(path.join(dataDir, "server.sqlite"))
+    try {
+      normalDatabase.exec("UPDATE server_restore_state SET status = 'normal'")
+    } finally {
+      normalDatabase.close()
+    }
+    const reenabled = await run([
+      "backup", "retention", "enable", "--data-dir", dataDir,
+      "--destination-id", destinationId, "--confirm"
+    ])
+    expect(reenabled.retention).toMatchObject({ enabled: true, state: "enabled" })
   })
 
   it("preserves every file when the newest rotating archive is corrupt", async () => {
