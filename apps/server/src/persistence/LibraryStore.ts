@@ -8,6 +8,7 @@ import {
   LibraryEntryResolutionResult,
   LibraryEntryDetailsRow,
   BindEntryOutcome,
+  PersonalTitleOutcome,
   LibrarySummaryRow,
   EntryResolutionLookupOutcome,
   ResolveReplacementOutcome
@@ -46,6 +47,7 @@ const decodeReplacement = Schema.decodeUnknownOption(ResolveReplacementOutcome)
 const decodeEntryResolutionLookup = Schema.decodeUnknownOption(EntryResolutionLookupOutcome)
 const decodeEntryDetailsResult = Schema.decodeUnknownOption(Schema.NullOr(LibraryEntryDetailsRow))
 const decodeBindEntry = Schema.decodeUnknownOption(BindEntryOutcome)
+const decodePersonalTitle = Schema.decodeUnknownOption(PersonalTitleOutcome)
 const decodeStaged = Schema.decodeUnknownOption(StagedDiscovery)
 
 const jsonValue = (value: string | null): unknown => {
@@ -90,6 +92,15 @@ export class LibraryStore extends Context.Service<
       readonly preferredDomain: "e-hentai.org" | "exhentai.org"
       readonly canonicalUrl: string
     }) => Effect.Effect<typeof BindEntryOutcome.Type, DatabaseWorkerError>
+    readonly updatePersonalTitle: (input: {
+      readonly entryId: string
+      readonly operationId: string
+      readonly epoch: string
+      readonly expectedDecisionVersion: string
+      readonly command:
+        | { readonly type: "set-personal-title"; readonly title: string }
+        | { readonly type: "remove-personal-title" }
+    }) => Effect.Effect<typeof PersonalTitleOutcome.Type, DatabaseWorkerError>
     readonly indexedRootSamples: (rootId: string) => Effect.Effect<IndexedRootSamplePage, DatabaseWorkerError>
     readonly resolution: (input: {
       readonly entryId: string
@@ -142,6 +153,12 @@ export class LibraryStore extends Context.Service<
         ...input
       }).pipe(
         Effect.flatMap((value) => decodeOrFail(decodeBindEntry, value, "invalid bind entry result"))
+      )
+      const updatePersonalTitle = (input: Parameters<LibraryStore["Service"]["updatePersonalTitle"]>[0]) => worker.call({
+        op: "updatePersonalTitle",
+        ...input
+      }).pipe(
+        Effect.flatMap((value) => decodeOrFail(decodePersonalTitle, value, "invalid personal title result"))
       )
       const resolution = (input: {
         readonly entryId: string
@@ -229,6 +246,7 @@ export class LibraryStore extends Context.Service<
         resolution,
         resolveReplacement,
         bindEntry,
+        updatePersonalTitle,
         entry,
         summary,
         page

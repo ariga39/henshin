@@ -160,34 +160,52 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
               ...errorBase(server, context.request_id)
             })
           }
-          const parsed = parseCanonicalEhGalleryUrl(payload.command.url)
-          if (parsed === null) {
-            return yield* new InvalidRequest({
-              code: "invalid_request",
-              message: "gallery URL must use https://e-hentai.org or https://exhentai.org with /g/{gid}/{token}/",
-              retryable: false,
-              details: { field: "command.url" },
-              ...errorBase(server, context.request_id)
-            })
-          }
-          const outcome = yield* library.bindEntry({
-            entryId: params.id,
-            operationId: payload.operation_id,
-            epoch: server.epoch,
-            expectedDecisionVersion: payload.expected_decision_version,
-            source: parsed.source,
-            gid: parsed.gid,
-            token: parsed.token,
-            preferredDomain: parsed.preferredDomain,
-            canonicalUrl: parsed.canonicalUrl
-          }).pipe(
-            Effect.mapError(() => new InternalError({
-              code: "internal_error",
-              message: "internal error",
-              retryable: false,
-              ...errorBase(server, context.request_id)
-            }))
-          )
+          const command = payload.command
+          const outcome = command.type === "bind"
+            ? yield* Effect.gen(function*() {
+                const parsed = parseCanonicalEhGalleryUrl(command.url)
+                if (parsed === null) {
+                  return yield* new InvalidRequest({
+                    code: "invalid_request",
+                    message: "gallery URL must use https://e-hentai.org or https://exhentai.org with /g/{gid}/{token}/",
+                    retryable: false,
+                    details: { field: "command.url" },
+                    ...errorBase(server, context.request_id)
+                  })
+                }
+                return yield* library.bindEntry({
+                  entryId: params.id,
+                  operationId: payload.operation_id,
+                  epoch: server.epoch,
+                  expectedDecisionVersion: payload.expected_decision_version,
+                  source: parsed.source,
+                  gid: parsed.gid,
+                  token: parsed.token,
+                  preferredDomain: parsed.preferredDomain,
+                  canonicalUrl: parsed.canonicalUrl
+                }).pipe(
+                  Effect.mapError(() => new InternalError({
+                    code: "internal_error",
+                    message: "internal error",
+                    retryable: false,
+                    ...errorBase(server, context.request_id)
+                  }))
+                )
+              })
+            : yield* library.updatePersonalTitle({
+                entryId: params.id,
+                operationId: payload.operation_id,
+                epoch: server.epoch,
+                expectedDecisionVersion: payload.expected_decision_version,
+                command
+              }).pipe(
+                Effect.mapError(() => new InternalError({
+                  code: "internal_error",
+                  message: "internal error",
+                  retryable: false,
+                  ...errorBase(server, context.request_id)
+                }))
+              )
           switch (outcome.kind) {
             case "committed":
             case "replayed":

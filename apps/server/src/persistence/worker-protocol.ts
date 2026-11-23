@@ -5,7 +5,12 @@ import { OpenEvent, OpenEventOutcome } from "@henshin/contracts/event"
 import { RootExclusions, RootPolicyCommand, RootRelativePath, ScanManifestObservation, ScanManifestPage } from "@henshin/contracts/root"
 import { ThumbnailReference } from "@henshin/contracts/thumbnail"
 import { ReplacementComparison } from "@henshin/contracts"
-import { EntryCommandResult, LibraryEntryDetails } from "@henshin/contracts"
+import {
+  EntryCommandResult,
+  LibraryEntryDetails,
+  RemovePersonalTitleCommand,
+  SetPersonalTitleCommand
+} from "@henshin/contracts"
 
 /** A persisted prototype note row, always with a canonical decimal revision. */
 export const NoteRow = Schema.Struct({
@@ -139,6 +144,7 @@ export const LibraryEntryRow = Schema.Struct({
   source_path: Schema.String,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
   title: Schema.String,
+  title_override: Schema.optional(Schema.NullOr(Schema.String.check(Schema.isMaxLength(1024)))),
   page_count: Schema.Natural,
   state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending")]),
   content_version: Revision,
@@ -277,6 +283,16 @@ export const BindEntryOutcome = Schema.Union([
 ])
 export type BindEntryOutcome = typeof BindEntryOutcome.Type
 
+export const PersonalTitleOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("committed"), result: EntryCommandResult }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), result: EntryCommandResult }),
+  Schema.Struct({ kind: Schema.Literal("operation_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("entry_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("operation_expired") }),
+  Schema.Struct({ kind: Schema.Literal("storage_full") }),
+  Schema.Struct({ kind: Schema.Literal("revision_conflict"), currentDecisionVersion: Revision })
+])
+export type PersonalTitleOutcome = typeof PersonalTitleOutcome.Type
 export const IndexedRootSampleRow = Schema.Struct({
   relative_path: RootRelativePath,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
@@ -488,6 +504,14 @@ export const WorkerRequest = Schema.Union([
     token: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{1,64}$/)),
     preferredDomain: Schema.Union([Schema.Literal("e-hentai.org"), Schema.Literal("exhentai.org")]),
     canonicalUrl: Schema.String.check(Schema.isMaxLength(2048))
+  }),
+  Schema.Struct({
+    op: Schema.Literal("updatePersonalTitle"),
+    entryId: Uuid,
+    operationId: Uuid,
+    epoch: Uuid,
+    expectedDecisionVersion: Revision,
+    command: Schema.Union([SetPersonalTitleCommand, RemovePersonalTitleCommand])
   }),
   Schema.Struct({ op: Schema.Literal("readAcceptedThumbnailEntry"), entryId: Uuid }),
   Schema.Struct({ op: Schema.Literal("acceptOpenEvents"), events: Schema.Array(OpenEvent) }),

@@ -177,6 +177,106 @@ describe("durable EH binding", () => {
     expect(stale._tag).toBe("RevisionConflict")
     if (stale._tag === "RevisionConflict") expect(stale.details.current_revision).toBe("2")
 
+    const statsBeforeDb = new DatabaseSync(server.dbPath)
+    const readingStatsBefore = statsBeforeDb.prepare("SELECT entry_id, open_count FROM entry_statistics WHERE entry_id = ?").get(indexed.entry_id)
+    statsBeforeDb.close()
+    const identity = {
+      relative_path: bound.data.entry.relative_path,
+      source_path: bound.data.entry.source_path,
+      content_version: bound.data.entry.content_version,
+      location_revision: bound.data.entry.location_revision
+    }
+    const setTitlePayload = {
+      operation_id: randomUUID(),
+      instance_id: server.instanceId,
+      epoch: server.epoch,
+      expected_decision_version: "2",
+      command: { type: "set-personal-title" as const, title: "Personal title" }
+    }
+    const titled = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: setTitlePayload
+      })
+    }))
+    expect(titled.data.entry.title).toBe("Personal title")
+    expect(titled.data.entry.title_override).toBe("Personal title")
+    expect(titled.data.entry.decision_version).toBe("3")
+    expect(titled.data.entry).toMatchObject(identity)
+
+    const titleReplay = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: setTitlePayload
+      })
+    }))
+    expect(titleReplay.data).toEqual(titled.data)
+
+    const emptyTitle = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: {
+          ...setTitlePayload,
+          operation_id: randomUUID(),
+          expected_decision_version: "3",
+          command: { type: "set-personal-title" as const, title: "" }
+        }
+      })
+    }))
+    expect(emptyTitle.data.entry.title).toBe("")
+    expect(emptyTitle.data.entry.title_override).toBe("")
+    expect(emptyTitle.data.entry.decision_version).toBe("4")
+    expect(emptyTitle.data.entry).toMatchObject(identity)
+    const emptyPage = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 10 } })
+    }))
+    expect(emptyPage.data.entries.find((entry) => entry.entry_id === indexed.entry_id)).toMatchObject({
+      title: "",
+      title_override: ""
+    })
+
+    const removedTitle = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: {
+          ...setTitlePayload,
+          operation_id: randomUUID(),
+          expected_decision_version: "4",
+          command: { type: "remove-personal-title" as const }
+        }
+      })
+    }))
+    expect(removedTitle.data.entry.title).toBe(bound.data.entry.title)
+    expect(removedTitle.data.entry.title_override).toBeNull()
+    expect(removedTitle.data.entry.decision_version).toBe("5")
+    expect(removedTitle.data.entry).toMatchObject(identity)
+
+    const staleTitle = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: {
+          ...setTitlePayload,
+          operation_id: randomUUID(),
+          expected_decision_version: "4",
+          command: { type: "set-personal-title" as const, title: "stale" }
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(staleTitle._tag).toBe("RevisionConflict")
+    if (staleTitle._tag === "RevisionConflict") expect(staleTitle.details.current_revision).toBe("5")
+
+    const crossCommandCollision = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: indexed.entry_id },
+        payload: {
+          ...setTitlePayload,
+          expected_decision_version: "5",
+          command: { type: "set-personal-title" as const, title: "collision" }
+        }
+      }).pipe(Effect.flip)
+    }))
+    expect(crossCommandCollision._tag).toBe("OperationConflict")
+
     const db = new DatabaseSync(server.dbPath)
     expect(db.prepare("SELECT source, gid, token, preferred_domain FROM galleries").all()).toEqual([{
       source: "EH",
@@ -185,6 +285,8 @@ describe("durable EH binding", () => {
       preferred_domain: "exhentai.org"
     }])
     expect(db.prepare("SELECT entry_id FROM bindings").get()).toEqual({ entry_id: indexed.entry_id })
+    expect(db.prepare("SELECT entry_id, open_count FROM entry_statistics WHERE entry_id = ?").get(indexed.entry_id)).toEqual(readingStatsBefore)
+    expect(db.prepare("SELECT entry_id FROM entry_overrides WHERE entry_id = ?").get(indexed.entry_id)).toBeUndefined()
     db.close()
 
     await server.stop()
@@ -194,7 +296,10 @@ describe("durable EH binding", () => {
       return yield* (yield* LibraryHttpClient).entry({ params: { id: indexed.entry_id } })
     }))
     expect(afterRestart.data.binding).toEqual(bound.data.entry.binding)
-    expect(afterRestart.data.decision_version).toBe("2")
+    expect(afterRestart.data.title).toBe(bound.data.entry.title)
+    expect(afterRestart.data.title_override).toBeNull()
+    expect(afterRestart.data.decision_version).toBe("5")
+    expect(afterRestart.data).toMatchObject(identity)
   })
 
   it("expires retained bind results, isolates preferred domains, and reports conflicts", async () => {

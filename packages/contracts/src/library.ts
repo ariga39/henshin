@@ -45,6 +45,7 @@ export const LibraryEntry = Schema.Struct({
   source_path: Schema.String,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
   title: Schema.String,
+  title_override: Schema.optional(Schema.NullOr(Schema.String.check(Schema.isMaxLength(1024)))),
   page_count: Schema.Natural,
   state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending")]),
   content_version: Revision,

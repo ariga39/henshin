@@ -1733,5 +1733,89 @@ describe("literal library search", () => {
       return yield* (yield* LibraryHttpClient).search({ payload: { query: "alpha beta" } })
     }))
     expect(boundary.data.entries).toHaveLength(0)
+
+    const sharpBook = empty.data.entries.find((entry) => entry.relative_path === "sharp-book")
+    if (sharpBook === undefined) throw new Error("expected sharp-book fixture")
+    const setTitle = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: sharpBook.entry_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: restarted.instanceId,
+          epoch: restarted.epoch,
+          expected_decision_version: "1",
+          command: { type: "set-personal-title" as const, title: "Literal % title" }
+        }
+      })
+    }))
+    expect(setTitle.data.entry).toMatchObject({
+      entry_id: sharpBook.entry_id,
+      title: "Literal % title",
+      title_override: "Literal % title",
+      decision_version: "2",
+      relative_path: "sharp-book",
+      source_path: "/search/sharp-book",
+      content_version: "1",
+      location_revision: "1"
+    })
+    const customTitleSearch = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "% ti" } })
+    }))
+    expect(customTitleSearch.data.entries).toEqual([
+      expect.objectContaining({ entry_id: sharpBook.entry_id, title: "Literal % title", match_fields: ["title"] })
+    ])
+
+    const emptyTitle = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: sharpBook.entry_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: restarted.instanceId,
+          epoch: restarted.epoch,
+          expected_decision_version: "2",
+          command: { type: "set-personal-title" as const, title: "" }
+        }
+      })
+    }))
+    expect(emptyTitle.data.entry.title).toBe("")
+    expect(emptyTitle.data.entry.title_override).toBe("")
+    const emptyTitleSearch = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "literal %" } })
+    }))
+    expect(emptyTitleSearch.data.entries).toHaveLength(0)
+    const fallbackSearch = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "sharp-book" } })
+    }))
+    expect(fallbackSearch.data.entries).toEqual([
+      expect.objectContaining({ entry_id: sharpBook.entry_id, title: "", title_override: "", match_fields: ["basename"] })
+    ])
+
+    const removedTitle = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).entryCommand({
+        params: { id: sharpBook.entry_id },
+        payload: {
+          operation_id: randomUUID(),
+          instance_id: restarted.instanceId,
+          epoch: restarted.epoch,
+          expected_decision_version: "3",
+          command: { type: "remove-personal-title" as const }
+        }
+      })
+    }))
+    expect(removedTitle.data.entry).toMatchObject({
+      title: "Straße",
+      title_override: null,
+      decision_version: "4",
+      relative_path: "sharp-book",
+      source_path: "/search/sharp-book",
+      content_version: "1",
+      location_revision: "1"
+    })
+    const restoredTitleSearch = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "straße" } })
+    }))
+    expect(restoredTitleSearch.data.entries).toEqual([
+      expect.objectContaining({ entry_id: sharpBook.entry_id, title: "Straße", title_override: null, match_fields: ["title"] })
+    ])
   })
 })

@@ -21,12 +21,25 @@ export const BindEntryCommand = Schema.Struct({
 })
 export type BindEntryCommand = typeof BindEntryCommand.Type
 
+const personalTitle = Schema.String.check(Schema.isMaxLength(1024))
+
+export const SetPersonalTitleCommand = Schema.Struct({
+  type: Schema.Literal("set-personal-title"),
+  title: personalTitle
+})
+export type SetPersonalTitleCommand = typeof SetPersonalTitleCommand.Type
+
+export const RemovePersonalTitleCommand = Schema.Struct({
+  type: Schema.Literal("remove-personal-title")
+})
+export type RemovePersonalTitleCommand = typeof RemovePersonalTitleCommand.Type
+
 export const EntryCommandRequest = Schema.Struct({
   operation_id: Uuid,
   instance_id: Uuid,
   epoch: Uuid,
   expected_decision_version: Revision,
-  command: BindEntryCommand
+  command: Schema.Union([BindEntryCommand, SetPersonalTitleCommand, RemovePersonalTitleCommand])
 })
 export type EntryCommandRequest = typeof EntryCommandRequest.Type
 
@@ -38,6 +51,7 @@ export const LibraryEntryDetails = Schema.Struct({
   source_path: Schema.String,
   kind: Schema.Union([Schema.Literal("archive"), Schema.Literal("image-directory")]),
   title: Schema.String,
+  title_override: Schema.NullOr(personalTitle),
   page_count: Schema.Natural,
   state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending")]),
   decision_version: Revision,

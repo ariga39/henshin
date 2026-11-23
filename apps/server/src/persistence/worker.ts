@@ -431,6 +431,13 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS library_entries_current_location_unique
     ON library_entries(root_id, relative_path)
     WHERE state IN ('accepted', 'replacement-pending');
+  CREATE TABLE IF NOT EXISTS entry_overrides (
+    entry_id TEXT PRIMARY KEY REFERENCES library_entries(entry_id) ON DELETE CASCADE,
+    title_present INTEGER NOT NULL CHECK (title_present IN (0, 1)),
+    title TEXT,
+    title_search TEXT,
+    CHECK ((title_present = 0 AND title IS NULL AND title_search IS NULL) OR (title_present = 1 AND title IS NOT NULL AND title_search IS NOT NULL))
+  );
   CREATE TABLE IF NOT EXISTS galleries (
     gallery_id TEXT PRIMARY KEY,
     source TEXT NOT NULL CHECK (source = 'EH'),
@@ -683,6 +690,28 @@ const currentLibraryEntryColumns = new Set(
     (column) => column.name
   )
 )
+db.exec(`
+  CREATE TABLE IF NOT EXISTS entry_overrides (
+    entry_id TEXT PRIMARY KEY REFERENCES library_entries(entry_id) ON DELETE CASCADE,
+    title_present INTEGER NOT NULL CHECK (title_present IN (0, 1)),
+    title TEXT,
+    title_search TEXT,
+    CHECK ((title_present = 0 AND title IS NULL AND title_search IS NULL) OR (title_present = 1 AND title IS NOT NULL AND title_search IS NOT NULL))
+  )
+`)
+const entryOverrideColumns = new Set(
+  (db.prepare("PRAGMA table_info(entry_overrides)").all() as unknown as ReadonlyArray<{ name: string }>).map(
+    (column) => column.name
+  )
+)
+if (!entryOverrideColumns.has("title_search")) {
+  db.exec("ALTER TABLE entry_overrides ADD COLUMN title_search TEXT")
+  const existingOverrides = db.prepare(
+    "SELECT entry_id, title FROM entry_overrides WHERE title_present = 1 AND title IS NOT NULL"
+  ).all() as unknown as ReadonlyArray<{ entry_id: string; title: string }>
+  const updateOverrideSearch = db.prepare("UPDATE entry_overrides SET title_search = ? WHERE entry_id = ?")
+  for (const row of existingOverrides) updateOverrideSearch.run(normalizeSearchText(row.title), row.entry_id)
+}
 if (!currentLibraryEntryColumns.has("availability_status")) {
   db.exec("ALTER TABLE library_entries ADD COLUMN availability_status TEXT NOT NULL DEFAULT 'unknown' CHECK (availability_status IN ('present', 'missing', 'inaccessible', 'unknown'))")
 }
@@ -835,7 +864,7 @@ selectEntryResolution.setReadBigInts(true)
 const selectStagedForResolution = db.prepare(
   "SELECT kind, analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
-const selectEntryForResolution = db.prepare("SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count, state, decision_version, content_version, location_revision, accepted_observation_json, availability_status, availability_observed_at_ms, NULL AS candidate_id, NULL AS candidate_version, NULL AS candidate_kind, NULL AS candidate_analysis_status, NULL AS candidate_observation_json FROM library_entries WHERE entry_id = ? AND root_id = ?")
+const selectEntryForResolution = db.prepare("SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title AS fallback_title, CASE WHEN o.title_present = 1 THEN o.title ELSE NULL END AS title_override, CASE WHEN o.title_present = 1 THEN o.title_search ELSE e.title_search END AS title_search, e.basename_search, e.page_count, e.state, e.decision_version, e.content_version, e.location_revision, e.accepted_observation_json, e.availability_status, e.availability_observed_at_ms, NULL AS candidate_id, NULL AS candidate_version, NULL AS candidate_kind, NULL AS candidate_analysis_status, NULL AS candidate_observation_json FROM library_entries e LEFT JOIN entry_overrides o ON o.entry_id = e.entry_id WHERE e.entry_id = ? AND e.root_id = ?")
 selectEntryForResolution.setReadBigInts(true)
 const selectResolutionSiblingClaims = db.prepare(
   "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
@@ -849,7 +878,8 @@ const selectResolutionSiblingCursor = db.prepare(
 const MAX_RESOLUTION_SIBLINGS = 128
 const selectEntryById = db.prepare("SELECT entry_id FROM library_entries WHERE entry_id = ?")
 const selectEntryDetails = db.prepare(`
-  SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
+  SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title AS fallback_title,
+    CASE WHEN o.title_present = 1 THEN o.title ELSE NULL END AS title_override,
     e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
     b.gallery_id, g.source AS binding_source, g.gid AS binding_gid, g.token AS binding_token,
     COALESCE(b.preferred_domain, g.preferred_domain) AS binding_preferred_domain,
@@ -857,6 +887,7 @@ const selectEntryDetails = db.prepare(`
     s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
     s.candidate_observation_json
   FROM library_entries e
+  LEFT JOIN entry_overrides o ON o.entry_id = e.entry_id
   LEFT JOIN bindings b ON b.entry_id = e.entry_id
   LEFT JOIN galleries g ON g.gallery_id = b.gallery_id
   LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
@@ -866,6 +897,10 @@ selectEntryDetails.setReadBigInts(true)
 const selectEntryOperation = db.prepare(
   "SELECT entry_id, payload, result, created_at_ms FROM entry_operations WHERE epoch = ? AND operation_id = ?"
 )
+const upsertEntryOverride = db.prepare(
+  "INSERT INTO entry_overrides(entry_id, title_present, title, title_search) VALUES(?, 1, ?, ?) ON CONFLICT(entry_id) DO UPDATE SET title_present = 1, title = excluded.title, title_search = excluded.title_search"
+)
+const deleteEntryOverride = db.prepare("DELETE FROM entry_overrides WHERE entry_id = ?")
 const insertEntryOperation = db.prepare(
   "INSERT INTO entry_operations(epoch, operation_id, entry_id, payload, result, created_at_ms) VALUES(?, ?, ?, ?, ?, ?)"
 )
@@ -930,28 +965,34 @@ const selectLibraryEntries = (
 ) => {
   const queryClause = query.length === 0
     ? ""
-    : " AND (instr(e.title_search, ?) > 0 OR instr(e.basename_search, ?) > 0)"
+    : " AND (instr(CASE WHEN o.title_present = 1 THEN o.title_search ELSE e.title_search END, ?) > 0 OR instr(e.basename_search, ?) > 0)"
   const stateClause = state === null ? "e.state IN ('accepted', 'replacement-pending')" : "e.state = 'replacement-pending'"
   const statement = db.prepare(lastEntryId === null
-    ? `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
-         e.title_search, e.basename_search,
+    ? `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title AS fallback_title,
+         CASE WHEN o.title_present = 1 THEN o.title ELSE NULL END AS title_override,
+         CASE WHEN o.title_present = 1 THEN o.title_search ELSE e.title_search END AS title_search,
+         e.basename_search,
          e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
          e.availability_status, e.availability_observed_at_ms,
          CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
          s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
          s.candidate_observation_json
        FROM library_entries e
+       LEFT JOIN entry_overrides o ON o.entry_id = e.entry_id
        LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
        WHERE ${stateClause}${queryClause}
        ORDER BY e.entry_id ASC LIMIT ?`
-    : `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title,
-         e.title_search, e.basename_search,
+    : `SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title AS fallback_title,
+         CASE WHEN o.title_present = 1 THEN o.title ELSE NULL END AS title_override,
+         CASE WHEN o.title_present = 1 THEN o.title_search ELSE e.title_search END AS title_search,
+         e.basename_search,
          e.page_count, e.state, e.decision_version, e.content_version, e.location_revision,
          e.availability_status, e.availability_observed_at_ms,
          CASE WHEN e.state = 'replacement-pending' AND s.candidate_id IS NOT NULL THEN e.accepted_observation_json ELSE NULL END AS accepted_observation_json,
          s.candidate_id, s.candidate_version, s.kind AS candidate_kind, s.analysis_status AS candidate_analysis_status,
          s.candidate_observation_json
        FROM library_entries e
+       LEFT JOIN entry_overrides o ON o.entry_id = e.entry_id
        LEFT JOIN staged_discoveries s ON s.root_id = e.root_id AND s.relative_path = e.relative_path
        WHERE e.entry_id > ? AND ${stateClause}${queryClause}
        ORDER BY e.entry_id ASC LIMIT ?`)
@@ -1867,6 +1908,13 @@ const resolveReplacement = (
     throw error
   }
 }
+const effectiveTitle = (input: {
+  readonly fallbackTitle: string
+  readonly titleOverride: string | null
+}): string => {
+  if (input.titleOverride !== null) return input.titleOverride
+  return input.fallbackTitle
+}
 
 const entryRow = (row: {
   entry_id: string
@@ -1875,7 +1923,8 @@ const entryRow = (row: {
   relative_path: string
   source_path: string
   kind: "archive" | "image-directory"
-  title: string
+  fallback_title: string
+  title_override: string | null
   title_search: string
   basename_search: string
   page_count: bigint
@@ -1898,7 +1947,8 @@ const entryRow = (row: {
   relative_path: row.relative_path,
   source_path: row.source_path,
   kind: row.kind,
-  title: row.title,
+  title: effectiveTitle({ fallbackTitle: row.fallback_title, titleOverride: row.title_override }),
+  title_override: row.title_override,
   page_count: Number(row.page_count),
   state: row.state,
   content_version: row.content_version.toString(),
@@ -1935,7 +1985,8 @@ const entryDetailsRow = (row: {
   relative_path: string
   source_path: string
   kind: "archive" | "image-directory"
-  title: string
+  fallback_title: string
+  title_override: string | null
   page_count: bigint
   state: "accepted" | "replacement-pending"
   decision_version: bigint
@@ -1958,7 +2009,11 @@ const entryDetailsRow = (row: {
   relative_path: row.relative_path,
   source_path: row.source_path,
   kind: row.kind,
-  title: row.title,
+  title: effectiveTitle({
+    fallbackTitle: row.fallback_title,
+    titleOverride: row.title_override
+  }),
+  title_override: row.title_override,
   page_count: Number(row.page_count),
   state: row.state,
   decision_version: row.decision_version.toString(),
@@ -2077,6 +2132,71 @@ const bindEntry = (
     bumpLibraryRevision.run()
     const entry = readEntryDetails(request.entryId)
     if (entry === null) throw new Error("bound entry disappeared")
+    const result = { operation_id: request.operationId, entry }
+    insertEntryOperation.run(request.epoch, request.operationId, request.entryId, canonicalPayload, JSON.stringify(result), now)
+    db.exec("COMMIT")
+    return { kind: "committed", result }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const updatePersonalTitle = (
+  request: Extract<WorkerRequest, { op: "updatePersonalTitle" }>
+): import("./worker-protocol").PersonalTitleOutcome => {
+  const canonicalPayload = JSON.stringify({
+    entry_id: request.entryId,
+    expected_decision_version: request.expectedDecisionVersion,
+    command: request.command
+  })
+
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const previous = selectEntryOperation.get(request.epoch, request.operationId) as {
+      entry_id: string
+      payload: string
+      result: string
+      created_at_ms: number
+    } | undefined
+    if (previous !== undefined) {
+      if (previous.entry_id !== request.entryId || previous.payload !== canonicalPayload) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_conflict" }
+      }
+      if (previous.created_at_ms <= Date.now() - RESULT_RETENTION_MS) {
+        db.exec("ROLLBACK")
+        return { kind: "operation_expired" }
+      }
+      const replay = Schema.decodeUnknownOption(EntryCommandResult)(JSON.parse(previous.result))
+      if (Option.isNone(replay)) throw new Error("invalid persisted personal title result")
+      db.exec("COMMIT")
+      return { kind: "replayed", result: replay.value }
+    }
+
+    const current = selectEntryDetails.get(request.entryId) as Parameters<typeof entryDetailsRow>[0] | undefined
+    if (current === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "entry_not_found" }
+    }
+    if (current.decision_version.toString() !== request.expectedDecisionVersion) {
+      db.exec("ROLLBACK")
+      return { kind: "revision_conflict", currentDecisionVersion: current.decision_version.toString() }
+    }
+
+    const now = Date.now()
+    compactEntryOperations.run(now - RESULT_RETENTION_MS, request.epoch, COMPACTION_BATCH)
+    if (Number(countEntryOperations.get()?.count) >= MAX_OPERATION_RESULTS) {
+      db.exec("COMMIT")
+      return { kind: "storage_full" }
+    }
+    const title = request.command.type === "set-personal-title" ? request.command.title : null
+    if (title === null) deleteEntryOverride.run(request.entryId)
+    else upsertEntryOverride.run(request.entryId, title, normalizeSearchText(title))
+    advanceEntryDecision.run(now, request.entryId)
+    bumpLibraryRevision.run()
+    const entry = readEntryDetails(request.entryId)
+    if (entry === null) throw new Error("titled entry disappeared")
     const result = { operation_id: request.operationId, entry }
     insertEntryOperation.run(request.epoch, request.operationId, request.entryId, canonicalPayload, JSON.stringify(result), now)
     db.exec("COMMIT")
@@ -2319,7 +2439,8 @@ const libraryEntries = (request: Extract<WorkerRequest, { op: "listLibraryEntrie
     relative_path: string
     source_path: string
     kind: "archive" | "image-directory"
-    title: string
+    fallback_title: string
+    title_override: string | null
     title_search: string
     basename_search: string
     page_count: bigint
@@ -2818,6 +2939,8 @@ const handle = (request: WorkerRequest): unknown => {
       return readEntryDetails(request.entryId)
     case "bindEntry":
       return bindEntry(request)
+    case "updatePersonalTitle":
+      return updatePersonalTitle(request)
     case "acceptOpenEvents":
       return acceptOpenEvents(request)
     case "recordDiscovery":
