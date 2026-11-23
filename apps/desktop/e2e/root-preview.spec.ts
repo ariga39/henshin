@@ -412,7 +412,7 @@ test("preserves accepted entries across an interrupted normal scan and explicitl
   }
 })
 
-test("loads an additional Library page after a normal scan", async () => {
+test("pages the Library and reviews an off-page replacement after a held scan", async () => {
   const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-pages-db-"))
   const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-pages-fixture-"))
   const dbPath = path.join(dbDirectory, "prototype.db")
@@ -439,6 +439,24 @@ test("loads an additional Library page after a normal scan", async () => {
     await expect(first.window.getByTestId("library-load-more")).toBeVisible()
     await first.window.getByTestId("library-load-more").click()
     await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(51, { timeout: 30_000 })
+
+    const lastBook = first.window.getByTestId("library-entry").last()
+    const lastTitle = await lastBook.locator(".library-entry-details > strong").innerText()
+    const lastId = await lastBook.locator("small").innerText()
+    await first.window.getByTestId("library-refresh").click()
+    await expect(first.window.getByTestId("library-entry")).toHaveCount(50)
+    await expect(first.window.getByText(lastId, { exact: true })).toHaveCount(0)
+
+    await first.window.getByTestId("library-setup").click()
+    await writeFile(path.join(fixtureDirectory, lastTitle, "002.jpg"), "Replacement second page")
+    await first.window.getByTestId("root-saved-preview").click()
+    await first.window.getByTestId("scan-hold-new-discoveries").check()
+    await first.window.getByTestId("start-held-scan").click()
+    const pending = first.window.getByTestId(`replacement-${lastId}`)
+    await expect(pending.getByTestId("replacement-candidate-path")).toHaveText(lastTitle, { timeout: 30_000 })
+    await expect(pending.getByTestId("replacement-candidate-pages")).toHaveText("2")
+    await pending.getByTestId(`replacement-keep-${lastId}`).click()
+    await expect(pending).toHaveCount(0)
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })
