@@ -45,6 +45,9 @@
   align-content: center;
 }
 .library-entry-details {
+  display: grid;
+  gap: .15rem;
+  align-content: center;
   border: 0 !important;
   border-radius: 0 !important;
   background: transparent !important;
