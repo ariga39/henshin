@@ -299,6 +299,31 @@ describe("independent foreground service", () => {
     expect(refused.stderr()).toContain("newer database schema")
   })
 
+  it("leaves a newer library and its uncheckpointed WAL intact", async () => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "henshin-future-wal-"))
+    dataDirectories.add(dataDir)
+    const dbPath = path.join(dataDir, "server.sqlite")
+    await initializeOwner(["--data-dir", dataDir])
+    // Abrupt exit leaves committed pages in the WAL, as after a crashed newer server.
+    await execFileAsync(process.execPath, ["-e", `
+      const { DatabaseSync } = require("node:sqlite")
+      const db = new DatabaseSync(process.argv[1])
+      db.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0")
+      db.exec("CREATE TABLE server_state(id INTEGER PRIMARY KEY, instance_id TEXT, schema_version INTEGER)")
+      db.exec("INSERT INTO server_state VALUES(1, 'future-instance', 9999)")
+      process.exit(0)
+    `, dbPath])
+    const files = [dbPath, dbPath + "-wal", dbPath + "-shm"]
+    const before = await Promise.all(files.map((file) => readFile(file)))
+    expect(before[1].length).toBeGreaterThan(32)
+    const refused = launch(["--data-dir", dataDir, "--port", String(await freeLoopbackPort())])
+    expect((await waitForExit(refused.child, EXIT_TIMEOUT_MS)).code).toBe(1)
+    expect(refused.stderr()).toContain("newer database schema")
+    for (const [index, file] of files.entries()) {
+      expect((await readFile(file)).equals(before[index]), path.basename(file)).toBe(true)
+    }
+  })
+
   it("initializes an owner, serves authenticated HTTP on a stable port, and restarts with a new epoch", async () => {
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "henshin-independent-service-"))
     dataDirectories.add(dataDir)
