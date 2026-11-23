@@ -5,6 +5,7 @@ import type {
   DeviceRootMapping,
   LocalMappingPreview,
   LibraryEntry,
+  LibraryTagOption,
   NoteView,
   RootPreviewRequest,
   RootPreviewResult,
@@ -127,6 +128,10 @@ export interface ViewState {
   readonly reader_profile_test_error: string | null
   readonly library_entries: ReadonlyArray<LibraryEntry>
   readonly library_query: string
+  readonly library_include_tags: ReadonlyArray<string>
+  readonly library_exclude_tags: ReadonlyArray<string>
+  readonly library_tag_options: ReadonlyArray<LibraryTagOption>
+  readonly library_filter_error: string | null
   readonly library_cursor: string | null
   readonly library_has_more: boolean
   readonly library_status: "idle" | "loading" | "ready" | "error"
@@ -233,6 +238,10 @@ const initialState: ViewState = {
   reader_profile_test_error: null,
   library_entries: [],
   library_query: "",
+  library_include_tags: [],
+  library_exclude_tags: [],
+  library_tag_options: [],
+  library_filter_error: null,
   library_cursor: null,
   library_has_more: false,
   library_status: "idle",

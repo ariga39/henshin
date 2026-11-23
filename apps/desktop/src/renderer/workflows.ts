@@ -1406,9 +1406,13 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
       library_error: null,
       library_request_generation: requestGeneration
     }))
+    const filters = {
+      include_tags: current.library_include_tags,
+      exclude_tags: current.library_exclude_tags
+    }
     const result = yield* client.search(cursor === null
-      ? { query, page_size: 50 }
-      : { query, page_size: 50, cursor })
+      ? { query, page_size: 50, ...filters }
+      : { query, page_size: 50, cursor, ...filters })
     if (viewStore.getState().library_request_generation !== requestGeneration) return
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({ library_status: "error", library_error: result.error.message }))
@@ -1425,6 +1429,8 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
       viewStore.set({
         library_entries: entries,
         library_query: query,
+        library_tag_options: result.data.tag_options ?? [],
+        library_filter_error: null,
         library_cursor: result.data.next_cursor,
         library_has_more: result.data.has_more,
         library_status: "ready",
@@ -1452,6 +1458,52 @@ export const searchLibrary = (query: string) =>
           })
     }))
     yield* loadLibrary(false, query)
+  })
+
+export const setLibraryTagFilter = (tag: string, mode: "include" | "exclude") =>
+  Effect.gen(function*() {
+    const current = viewStore.getState()
+    const includeTags = mode === "include"
+      ? Array.from(new Set([...current.library_include_tags, tag])).sort()
+      : current.library_include_tags
+    const excludeTags = mode === "exclude"
+      ? Array.from(new Set([...current.library_exclude_tags, tag])).sort()
+      : current.library_exclude_tags
+    const conflicting = includeTags.includes(tag) && excludeTags.includes(tag)
+    yield* Effect.sync(() => viewStore.set({
+      library_include_tags: includeTags,
+      library_exclude_tags: excludeTags,
+      library_filter_error: conflicting ? `“${tag}” cannot be both included and excluded.` : null
+    }))
+    if (!conflicting) yield* searchLibrary(current.library_query)
+  })
+
+export const clearLibraryTagFilter = (tag: string, mode: "include" | "exclude") =>
+  Effect.gen(function*() {
+    const current = viewStore.getState()
+    const includeTags = mode === "include"
+      ? current.library_include_tags.filter((candidate) => candidate !== tag)
+      : current.library_include_tags
+    const excludeTags = mode === "exclude"
+      ? current.library_exclude_tags.filter((candidate) => candidate !== tag)
+      : current.library_exclude_tags
+    yield* Effect.sync(() => viewStore.set({
+      library_include_tags: includeTags,
+      library_exclude_tags: excludeTags,
+      library_filter_error: null
+    }))
+    yield* searchLibrary(current.library_query)
+  })
+
+export const clearLibraryTagFilters = () =>
+  Effect.gen(function*() {
+    const query = viewStore.getState().library_query
+    yield* Effect.sync(() => viewStore.set({
+      library_include_tags: [],
+      library_exclude_tags: [],
+      library_filter_error: null
+    }))
+    yield* searchLibrary(query)
   })
 
 export const saveRoot = Effect.gen(function*() {

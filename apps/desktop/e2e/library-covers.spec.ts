@@ -1,11 +1,13 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Locator, type Page } from "@playwright/test"
 import electronPath from "electron"
 import { execFile } from "node:child_process"
+import { DatabaseSync } from "node:sqlite"
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
 import { fileURLToPath } from "node:url"
+import { randomUUID } from "node:crypto"
 
 const APP_DIR = fileURLToPath(new URL("..", import.meta.url))
 const launched: ElectronApplication[] = []
@@ -186,6 +188,82 @@ test("searches the real Library screen and shows field match evidence", async ()
     await expect(window.getByTestId("library-empty")).toHaveCount(0)
     await window.getByTestId("library-clear-search").click()
     await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(3)
+  } finally {
+    await rm(dbDirectory, { recursive: true, force: true })
+    await rm(fixtureDirectory, { recursive: true, force: true })
+  }
+})
+
+test("filters effective tags with the canonical picker after reopening the real Library", async () => {
+  const dbDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-tags-db-"))
+  const fixtureDirectory = await mkdtemp(path.join(os.tmpdir(), "henshin-library-tags-fixture-"))
+  const dbPath = path.join(dbDirectory, "prototype.db")
+
+  try {
+    for (const name of ["alpha-one", "alpha-two", "alpha-three", "beta"]) {
+      const book = path.join(fixtureDirectory, name)
+      await mkdir(book)
+      await writeFile(path.join(book, "001.png"), validPng)
+    }
+
+    const first = await launch(dbPath)
+    await expect(first.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await first.window.getByTestId("root-preview-path").fill(fixtureDirectory)
+    await first.window.getByTestId("root-preview-submit").click()
+    await first.window.getByTestId("root-label").fill("Tag cases")
+    await first.window.getByTestId("root-save").click()
+    await first.window.getByTestId("root-saved-preview").click()
+    await first.window.getByTestId("scan-hold-new-discoveries").uncheck()
+    await first.window.getByTestId("start-held-scan").click()
+    await expect(first.window.getByTestId("library-entries").locator("li")).toHaveCount(4, { timeout: 30_000 })
+
+    const serverPid = await bundledServerPid(first.app)
+    if (serverPid === null) throw new Error("bundled server process was not found")
+    process.kill(serverPid, "SIGTERM")
+    await expect.poll(() => bundledServerPid(first.app), { timeout: 5_000 }).toBeNull()
+    const db = new DatabaseSync(dbPath)
+    const entries = db.prepare("SELECT entry_id, relative_path FROM library_entries WHERE state = 'accepted'").all() as unknown as ReadonlyArray<{ entry_id: string; relative_path: string }>
+    const tagsByPath: Record<string, ReadonlyArray<string>> = {
+      "alpha-one": ["artist:alpha", "genre:comic"],
+      "alpha-two": ["artist:alpha", "genre:comic"],
+      "alpha-three": ["artist:alpha", "genre:other", "group:alpha"],
+      beta: ["artist:beta"]
+    }
+    const insertGallery = db.prepare(
+      "INSERT INTO galleries(gallery_id, source, gid, token, preferred_domain, metadata_tags_json, created_at_ms, updated_at_ms) VALUES(?, 'EH', ?, 'token', 'e-hentai.org', ?, 0, 0)"
+    )
+    const insertBinding = db.prepare(
+      "INSERT INTO bindings(entry_id, gallery_id, preferred_domain, bound_at_ms) VALUES(?, ?, 'e-hentai.org', 0)"
+    )
+    for (const [index, entry] of entries.entries()) {
+      const galleryId = randomUUID()
+      insertGallery.run(galleryId, String(index + 1), JSON.stringify(tagsByPath[entry.relative_path] ?? []))
+      insertBinding.run(entry.entry_id, galleryId)
+    }
+    db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1").run()
+    db.close()
+    await first.app.close()
+
+    const reopened = await launch(dbPath)
+    await expect(reopened.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await expect(reopened.window.getByTestId("root-saved")).toContainText("Tag cases", { timeout: 30_000 })
+    await reopened.window.getByRole("button", { name: "Library" }).click()
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(4, { timeout: 30_000 })
+
+    const picker = reopened.window.getByTestId("library-tag-picker")
+    await expect(picker.locator("option")).toContainText(["artist:alpha", "group:alpha"])
+    await picker.selectOption("artist:alpha")
+    await reopened.window.getByTestId("library-include-tag").click()
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(3)
+    await expect(reopened.window.getByTestId("library-include-chip")).toContainText("artist:alpha")
+
+    await picker.selectOption("genre:comic")
+    await reopened.window.getByTestId("library-exclude-tag").click()
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(1)
+    await expect(reopened.window.getByTestId("library-entry")).toContainText("alpha-three")
+
+    await reopened.window.getByTestId("library-clear-filters").click()
+    await expect(reopened.window.getByTestId("library-entries").locator("li")).toHaveCount(4)
   } finally {
     await rm(dbDirectory, { recursive: true, force: true })
     await rm(fixtureDirectory, { recursive: true, force: true })

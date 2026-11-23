@@ -158,6 +158,8 @@ export interface LibraryBridge {
     readonly page_size?: number
     readonly cursor?: string
     readonly state?: "replacement-pending"
+    readonly include_tags?: ReadonlyArray<string>
+    readonly exclude_tags?: ReadonlyArray<string>
   }): Promise<Result<LibraryEntryPage>>
   open(input: OpenBookIpcRequest): Promise<Result<OpenBookIpcResult>>
   status(input: OpenBookStatusIpcRequest): Promise<Result<OpenBookIpcResult | null>>

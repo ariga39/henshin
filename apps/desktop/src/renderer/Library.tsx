@@ -6,6 +6,8 @@ import { runtime } from "./runtime"
 import { viewStore } from "./store"
 import { createThumbnailLoadRequest } from "./thumbnail-loading"
 import {
+  clearLibraryTagFilter,
+  clearLibraryTagFilters,
   chooseLibraryOpenProfile,
   libraryOpenStateFor,
   loadLibrary,
@@ -14,6 +16,7 @@ import {
   openSelectedLibraryEntry,
   searchLibrary,
   selectLibraryEntry,
+  setLibraryTagFilter,
   showSetup
 } from "./workflows"
 
@@ -164,7 +167,20 @@ const LibraryCover = ({
 export const LibraryScreen = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState, viewStore.getState)
   const [searchText, setSearchText] = useState(state.library_query)
+  const [tagChoice, setTagChoice] = useState("")
+  const [tagSearchText, setTagSearchText] = useState("")
   const hasLibraryQuery = state.library_query.trim().length > 0
+  const hasLibraryFilters = state.library_include_tags.length > 0 || state.library_exclude_tags.length > 0
+  const normalizedTagSearch = tagSearchText.trim().normalize("NFKC").toLowerCase().normalize("NFC")
+  const visibleTagOptions = normalizedTagSearch.length === 0
+    ? state.library_tag_options
+    : state.library_tag_options.filter((tag) => {
+        const searchable = `${tag.namespace}:${tag.name}${tag.alias === null ? "" : ` ${tag.alias}`}`
+          .normalize("NFKC")
+          .toLowerCase()
+          .normalize("NFC")
+        return searchable.includes(normalizedTagSearch)
+      })
 
   useEffect(() => {
     if (viewStore.getState().library_status === "idle") void runtime.runPromise(loadLibrary())
@@ -246,27 +262,118 @@ export const LibraryScreen = () => {
           />
           <button type="submit" data-testid="library-search-submit">Search</button>
         </form>
+        <div data-testid="library-tag-filter">
+          <label htmlFor="library-tag-picker">Filter by canonical tag</label>
+          <input
+            id="library-tag-search"
+            data-testid="library-tag-search"
+            type="search"
+            value={tagSearchText}
+            onChange={(event) => setTagSearchText(event.target.value)}
+            placeholder="Search tags"
+          />
+          <select
+            id="library-tag-picker"
+            data-testid="library-tag-picker"
+            value={tagChoice}
+            onChange={(event) => setTagChoice(event.target.value)}
+          >
+            <option value="">Choose a tag…</option>
+            {visibleTagOptions.map((tag) => (
+              <option key={tag.id} value={tag.id}>
+                {tag.namespace}:{tag.name}{tag.alias === null ? "" : ` (${tag.alias})`}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            data-testid="library-include-tag"
+            disabled={tagChoice.length === 0}
+            onClick={() => {
+              void runtime.runPromise(setLibraryTagFilter(tagChoice, "include"))
+              setTagChoice("")
+            }}
+          >
+            Include tag
+          </button>
+          <button
+            type="button"
+            data-testid="library-exclude-tag"
+            disabled={tagChoice.length === 0}
+            onClick={() => {
+              void runtime.runPromise(setLibraryTagFilter(tagChoice, "exclude"))
+              setTagChoice("")
+            }}
+          >
+            Exclude tag
+          </button>
+          {state.library_include_tags.length > 0 && (
+            <div data-testid="library-included-tags">
+              Included: {state.library_include_tags.map((tag) => (
+                <button
+                  type="button"
+                  key={tag}
+                  data-testid="library-include-chip"
+                  onClick={() => void runtime.runPromise(clearLibraryTagFilter(tag, "include"))}
+                >
+                  {tag} ×
+                </button>
+              ))}
+            </div>
+          )}
+          {state.library_exclude_tags.length > 0 && (
+            <div data-testid="library-excluded-tags">
+              Excluded: {state.library_exclude_tags.map((tag) => (
+                <button
+                  type="button"
+                  key={tag}
+                  data-testid="library-exclude-chip"
+                  onClick={() => void runtime.runPromise(clearLibraryTagFilter(tag, "exclude"))}
+                >
+                  {tag} ×
+                </button>
+              ))}
+            </div>
+          )}
+          {state.library_filter_error !== null && (
+            <p role="alert" data-testid="library-filter-error">{state.library_filter_error}</p>
+          )}
+          {hasLibraryFilters && (
+            <button type="button" data-testid="library-clear-filters" onClick={() => void runtime.runPromise(clearLibraryTagFilters())}>
+              Clear filters
+            </button>
+          )}
+        </div>
         <button data-testid="library-refresh" onClick={() => void runtime.runPromise(loadLibrary())}>
           Refresh
         </button>
         {state.library_status === "loading" && <p role="status">Loading library…</p>}
         {state.library_status === "error" && <p role="alert">Could not load library: {state.library_error}</p>}
-        {state.library_status === "ready" && state.library_entries.length === 0 && hasLibraryQuery && (
+        {state.library_status === "ready" && state.library_entries.length === 0 && (hasLibraryQuery || hasLibraryFilters) && (
           <>
-            <p data-testid="library-no-matches">No books match “{state.library_query}”.</p>
-            <button
-              type="button"
-              data-testid="library-clear-search"
-              onClick={() => {
-                setSearchText("")
-                void runtime.runPromise(searchLibrary(""))
-              }}
-            >
-              Clear search
-            </button>
+            <p data-testid="library-no-matches">
+              {hasLibraryQuery ? `No books match “${state.library_query}”.` : "No books match the selected tags."}
+            </p>
+            {hasLibraryQuery && (
+              <button
+                type="button"
+                data-testid="library-clear-search"
+                onClick={() => {
+                  setSearchText("")
+                  void runtime.runPromise(searchLibrary(""))
+                }}
+              >
+                Clear search
+              </button>
+            )}
+            {hasLibraryFilters && (
+              <button type="button" data-testid="library-clear-empty-filters" onClick={() => void runtime.runPromise(clearLibraryTagFilters())}>
+                Clear filters
+              </button>
+            )}
           </>
         )}
-        {state.library_status === "ready" && state.library_entries.length === 0 && !hasLibraryQuery && (
+        {state.library_status === "ready" && state.library_entries.length === 0 && !hasLibraryQuery && !hasLibraryFilters && (
           <p data-testid="library-empty">No accepted books yet. Start a normal scan from a saved root.</p>
         )}
         <ul data-testid="library-entries">
