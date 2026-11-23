@@ -48,6 +48,7 @@ import {
 import { ReviewCandidateCommandRequest, ReviewCommandResult } from "./review"
 import { ThumbnailKey } from "./thumbnail"
 import { EntryResolution, EntryResolutionQuery } from "./library"
+import { MetadataExportDocument, MetadataExportRequest } from "./export"
 
 /**
  * Isolated synthetic prototype API. The `/prototype/v1` prefix and the
@@ -209,6 +210,11 @@ export const LibraryApi = HttpApi.make("henshin-library").add(
       HttpApiEndpoint.post("search", "/entries/search", {
         payload: LibrarySearchRequest,
         success: SuccessEnvelope(LibraryEntryPage),
+        error: [AuthenticationRequired, InvalidRequest, InternalError]
+      }),
+      HttpApiEndpoint.post("export", "/entries/export", {
+        payload: MetadataExportRequest,
+        success: SuccessEnvelope(MetadataExportDocument),
         error: [AuthenticationRequired, InvalidRequest, InternalError]
       }),
       HttpApiEndpoint.get("entry", "/entries/:id", {

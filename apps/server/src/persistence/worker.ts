@@ -8,6 +8,7 @@ import { canonicalEditPayload, canonicalOpenEventPayload } from "@henshin/contra
 import {
   INDEXED_ROOT_SAMPLE_LIMIT,
   EntryCommandResult,
+  MetadataExportDocument,
   ReplacementCandidateObservation,
   ReplacementObservation,
   ScanManifest,
@@ -500,6 +501,14 @@ db.exec(`
     gid TEXT NOT NULL,
     token TEXT NOT NULL,
     preferred_domain TEXT NOT NULL CHECK (preferred_domain IN ('e-hentai.org', 'exhentai.org')),
+    metadata_title TEXT,
+    metadata_title_jpn TEXT,
+    metadata_tags_json TEXT,
+    metadata_status TEXT NOT NULL DEFAULT 'pending' CHECK (metadata_status IN ('pending', 'ready', 'error')),
+    metadata_error TEXT,
+    metadata_last_attempt_at_ms INTEGER,
+    metadata_last_success_at_ms INTEGER,
+    refresh_revision INTEGER NOT NULL DEFAULT 0,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     UNIQUE (source, gid)
@@ -511,6 +520,12 @@ db.exec(`
     bound_at_ms INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS bindings_gallery_id ON bindings(gallery_id);
+  CREATE TABLE IF NOT EXISTS entry_tag_overrides (
+    entry_id TEXT NOT NULL REFERENCES library_entries(entry_id) ON DELETE CASCADE,
+    tag TEXT NOT NULL CHECK (length(tag) BETWEEN 1 AND 512),
+    action TEXT NOT NULL CHECK (action IN ('add', 'suppress')),
+    PRIMARY KEY (entry_id, tag)
+  );
   CREATE TABLE IF NOT EXISTS entry_operations (
     epoch TEXT NOT NULL,
     operation_id TEXT NOT NULL,
@@ -585,6 +600,24 @@ const bindingColumns = new Set(
 if (!bindingColumns.has("preferred_domain")) {
   db.exec("ALTER TABLE bindings ADD COLUMN preferred_domain TEXT NOT NULL DEFAULT 'e-hentai.org' CHECK (preferred_domain IN ('e-hentai.org', 'exhentai.org'))")
   db.exec("UPDATE bindings SET preferred_domain = (SELECT preferred_domain FROM galleries WHERE galleries.gallery_id = bindings.gallery_id)")
+}
+const galleryColumns = new Set(
+  (db.prepare("PRAGMA table_info(galleries)").all() as unknown as ReadonlyArray<{ name: string }>).map(
+    (column) => column.name
+  )
+)
+for (const column of [
+  "metadata_title TEXT",
+  "metadata_title_jpn TEXT",
+  "metadata_tags_json TEXT",
+  "metadata_status TEXT NOT NULL DEFAULT 'pending' CHECK (metadata_status IN ('pending', 'ready', 'error'))",
+  "metadata_error TEXT",
+  "metadata_last_attempt_at_ms INTEGER",
+  "metadata_last_success_at_ms INTEGER",
+  "refresh_revision INTEGER NOT NULL DEFAULT 0"
+]) {
+  const name = column.slice(0, column.indexOf(" "))
+  if (!galleryColumns.has(name)) db.exec(`ALTER TABLE galleries ADD COLUMN ${column}`)
 }
 
 const stagedDiscoveryColumns = db.prepare("PRAGMA table_info(staged_discoveries)").all() as unknown as ReadonlyArray<{ name: string }>
@@ -751,6 +784,7 @@ const entryOverrideColumns = new Set(
     (column) => column.name
   )
 )
+if (!entryOverrideColumns.has("notes")) db.exec("ALTER TABLE entry_overrides ADD COLUMN notes TEXT")
 const missingOverrideSearch = entryOverrideColumns.has("title_search")
   ? db.prepare("SELECT 1 FROM entry_overrides WHERE title_present = 1 AND title IS NOT NULL AND title_search IS NULL LIMIT 1")
   : undefined
@@ -1011,6 +1045,7 @@ const selectResolutionSiblingCursor = db.prepare(
 )
 const MAX_RESOLUTION_SIBLINGS = 128
 const selectEntryById = db.prepare("SELECT entry_id FROM library_entries WHERE entry_id = ?")
+
 const selectEntryDetails = db.prepare(`
   SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.source_path, e.kind, e.title AS fallback_title,
     CASE WHEN o.title_present = 1 THEN o.title ELSE NULL END AS title_override,
@@ -1029,6 +1064,29 @@ const selectEntryDetails = db.prepare(`
   WHERE e.entry_id = ? AND e.state IN ('accepted', 'replacement-pending')
 `)
 selectEntryDetails.setReadBigInts(true)
+const selectExportEntries = (placeholders: string) => db.prepare(`
+  SELECT e.entry_id, e.library_id, e.root_id, e.relative_path, e.kind, e.title, e.page_count, e.state,
+    COALESCE(b.preferred_domain, g.preferred_domain) AS binding_preferred_domain,
+    g.gid AS binding_gid, g.token AS binding_token,
+    g.metadata_title AS source_title,
+    g.metadata_title_jpn AS source_title_jpn,
+    g.metadata_tags_json AS source_tags_json,
+    CASE WHEN o.title_present = 1 THEN o.title ELSE NULL END AS override_title,
+    o.notes AS note_text,
+    COALESCE(s.open_count, 0) AS open_count, s.last_opened_at_ms
+  FROM library_entries e
+  LEFT JOIN bindings b ON b.entry_id = e.entry_id
+  LEFT JOIN galleries g ON g.gallery_id = b.gallery_id
+  LEFT JOIN entry_overrides o ON o.entry_id = e.entry_id
+  LEFT JOIN entry_statistics s ON s.entry_id = e.entry_id
+  WHERE e.entry_id IN (${placeholders})
+`)
+const selectExportTagOverrides = (placeholders: string) => db.prepare(`
+  SELECT entry_id, tag, action
+  FROM entry_tag_overrides
+  WHERE entry_id IN (${placeholders})
+  ORDER BY entry_id ASC, tag ASC
+`)
 const selectEntryOperation = db.prepare(
   "SELECT entry_id, payload, result, created_at_ms FROM entry_operations WHERE epoch = ? AND operation_id = ?"
 )
@@ -2548,6 +2606,135 @@ const readEntryDetails = (entryId: string): import("./worker-protocol").LibraryE
   return row === undefined ? null : entryDetailsRow(row)
 }
 
+const parsedStringArray = (value: string | null): ReadonlyArray<string> | undefined => {
+  if (value === null) return undefined
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return Array.isArray(parsed) && parsed.every((item): item is string => typeof item === "string")
+      ? parsed
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const exportSelectedEntries = (
+  request: Extract<WorkerRequest, { op: "exportSelectedEntries" }>
+): import("./worker-protocol").MetadataExportWorkerResult => {
+  const selectedEntryIds = Array.from(new Set(request.entryIds))
+  const placeholders = selectedEntryIds.map(() => "?").join(", ")
+  const select = selectExportEntries(placeholders)
+  select.setReadBigInts(true)
+  const selectTags = selectExportTagOverrides(placeholders)
+
+  db.exec("BEGIN")
+  let exportedAtMs: number
+  let instanceId: string
+  let libraryId: string
+  let rows: ReadonlyArray<{
+    entry_id: string
+    library_id: string
+    root_id: string
+    relative_path: string
+    kind: "archive" | "image-directory"
+    title: string
+    page_count: bigint
+    state: "accepted" | "replacement-pending" | "detached"
+    binding_preferred_domain: "e-hentai.org" | "exhentai.org" | null
+    binding_gid: string | null
+    binding_token: string | null
+    source_title: string | null
+    source_title_jpn: string | null
+    source_tags_json: string | null
+    override_title: string | null
+    note_text: string | null
+    open_count: bigint | number
+    last_opened_at_ms: bigint | number | null
+  }>
+  let tagRows: ReadonlyArray<{ entry_id: string; tag: string; action: "add" | "suppress" }> = []
+  try {
+    exportedAtMs = Date.now()
+    const identity = db.prepare(`
+      SELECT s.instance_id, l.library_id
+      FROM server_state s CROSS JOIN server_library l
+      WHERE s.id = 1 AND l.id = 1
+    `).get() as { instance_id: string; library_id: string } | undefined
+    if (identity === undefined) throw new Error("server identity is not initialized")
+    instanceId = identity.instance_id
+    libraryId = identity.library_id
+    rows = select.all(...selectedEntryIds) as unknown as typeof rows
+    tagRows = selectTags.all(...selectedEntryIds) as unknown as typeof tagRows
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+
+  const tagsByEntry = new Map<string, { readonly added: Array<string>; readonly suppressed: Array<string> }>()
+  for (const tag of tagRows) {
+    const current = tagsByEntry.get(tag.entry_id) ?? { added: [], suppressed: [] }
+    current[tag.action === "add" ? "added" : "suppressed"].push(tag.tag)
+    tagsByEntry.set(tag.entry_id, current)
+  }
+  const rowsById = new Map(rows.map((row) => [row.entry_id, row]))
+  const missingEntryIds = selectedEntryIds.filter((entryId) => !rowsById.has(entryId))
+  const entries = selectedEntryIds.flatMap((entryId) => {
+    const row = rowsById.get(entryId)
+    if (row === undefined) return []
+    const sourceTags = parsedStringArray(row.source_tags_json)
+    const sourceMetadata = {
+      ...(row.source_title === null ? {} : { title: row.source_title }),
+      ...(row.source_title_jpn === null ? {} : { title_jpn: row.source_title_jpn }),
+      ...(sourceTags === undefined ? {} : { tags: sourceTags })
+    }
+    const tagOverrides = tagsByEntry.get(entryId)
+    const localOverrides = {
+      ...(row.override_title === null ? {} : { title: row.override_title }),
+      ...(tagOverrides === undefined || tagOverrides.added.length === 0 ? {} : { tags: tagOverrides.added }),
+      ...(tagOverrides === undefined || tagOverrides.suppressed.length === 0 ? {} : { suppressed_tags: tagOverrides.suppressed })
+    }
+    const notes = request.includeNotes ? row.note_text === null ? [] : [row.note_text] : undefined
+    const entry: (typeof MetadataExportDocument.Type)["entries"][number] = {
+      entry_id: row.entry_id,
+      state: row.state,
+      root_id: row.root_id,
+      relative_path: row.relative_path,
+      kind: row.kind,
+      title: row.title,
+      page_count: Number(row.page_count),
+      binding_url: row.binding_preferred_domain === null || row.binding_gid === null || row.binding_token === null
+        ? null
+        : `https://${row.binding_preferred_domain}/g/${row.binding_gid}/${row.binding_token}/`,
+      ...(Object.keys(sourceMetadata).length === 0 ? {} : { source_metadata: sourceMetadata }),
+      ...(Object.keys(localOverrides).length === 0 ? {} : { local_overrides: localOverrides }),
+      statistics: {
+        open_count: Number(row.open_count),
+        last_opened_at_ms: row.last_opened_at_ms === null ? null : Number(row.last_opened_at_ms)
+      },
+      ...(notes === undefined ? {} : { notes })
+    }
+    return [entry]
+  })
+  const omitted = ["native prefixes", "credentials", "raw source responses", "file bytes", "device history"]
+  if (!request.includeNotes) omitted.push("personal notes")
+  const result: typeof MetadataExportDocument.Type = {
+    schema: "henshin-metadata-export-v1",
+    exported_at_ms: exportedAtMs,
+    instance_id: instanceId,
+    library_id: libraryId,
+    selected_entry_ids: selectedEntryIds,
+    missing_entry_ids: missingEntryIds,
+    privacy: {
+      classification: "private",
+      locator_disclosure: "Gallery URLs contain private locators.",
+      notes_included: request.includeNotes,
+      omitted,
+    },
+    entries
+  }
+  return result
+}
+
 const bindEntry = (
   request: Extract<WorkerRequest, { op: "bindEntry" }>
 ): import("./worker-protocol").BindEntryOutcome => {
@@ -3467,6 +3654,8 @@ const handle = (request: WorkerRequest): unknown => {
       return resolveReplacement(request)
     case "readLibrary":
       return librarySummary()
+    case "exportSelectedEntries":
+      return exportSelectedEntries(request)
     case "listLibraryEntries":
       return libraryEntries(request)
     case "listIndexedRootSamples":

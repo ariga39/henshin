@@ -115,6 +115,27 @@ export const LibraryHandlers = HttpApiBuilder.group(LibraryApi, "library", (hand
           }
         })
       )
+      .handle("export", ({ payload }) =>
+        Effect.gen(function*() {
+          const context = yield* RequestContext
+          const document = yield* library.exportSelected({
+            entryIds: payload.entry_ids,
+            includeNotes: payload.include_notes
+          }).pipe(
+            Effect.mapError(() => new InternalError({
+              code: "internal_error",
+              message: "internal error",
+              retryable: false,
+              ...errorBase(server, context.request_id)
+            }))
+          )
+          return {
+            ...errorBase(server, context.request_id),
+            server_time: Date.now(),
+            data: document
+          }
+        })
+      )
       .handle("entry", ({ params }) =>
         Effect.gen(function*() {
           const context = yield* RequestContext

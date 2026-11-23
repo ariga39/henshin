@@ -1,5 +1,5 @@
 import { Schema } from "effect"
-import { INDEXED_ROOT_SAMPLE_LIMIT, ServerAvailability } from "@henshin/contracts"
+import { INDEXED_ROOT_SAMPLE_LIMIT, MetadataExportDocument, ServerAvailability } from "@henshin/contracts"
 import { NoteId, Revision, Text, Uuid } from "@henshin/contracts/ids"
 import { OpenEvent, OpenEventOutcome } from "@henshin/contracts/event"
 import { RootExclusions, RootPolicyCommand, RootRelativePath, ScanManifestObservation, ScanManifestPage } from "@henshin/contracts/root"
@@ -619,6 +619,11 @@ export const WorkerRequest = Schema.Union([
   }),
   Schema.Struct({ op: Schema.Literal("readLibrary") }),
   Schema.Struct({
+    op: Schema.Literal("exportSelectedEntries"),
+    entryIds: Schema.Array(Uuid).check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+    includeNotes: Schema.Boolean
+  }),
+  Schema.Struct({
     op: Schema.Literal("listLibraryEntries"),
     pageSize: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(200)),
     query: Schema.String.check(Schema.isMaxLength(1024)),
@@ -709,3 +714,5 @@ export const WorkerResponse = Schema.Union([
   Schema.Struct({ id: Schema.Int, ok: Schema.Literal(false), error: Schema.String })
 ])
 export type WorkerResponse = typeof WorkerResponse.Type
+
+export type MetadataExportWorkerResult = typeof MetadataExportDocument.Type

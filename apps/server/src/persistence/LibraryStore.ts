@@ -1,5 +1,5 @@
 import { Context, Data, Effect, Layer, Option, Schema } from "effect"
-import { EntryResolution, INDEXED_ROOT_SAMPLE_LIMIT, IndexedRootSamplePage, LibraryEntryPage, StagedDiscovery } from "@henshin/contracts"
+import { EntryResolution, INDEXED_ROOT_SAMPLE_LIMIT, IndexedRootSamplePage, LibraryEntryPage, MetadataExportDocument, StagedDiscovery } from "@henshin/contracts"
 import { DatabaseWorker, DatabaseWorkerError } from "./DatabaseWorker"
 import {
   AcceptedThumbnailEntryRow,
@@ -40,6 +40,7 @@ export type EntryResolutionLookupResult =
   | { readonly kind: "operation_conflict" | "operation_expired" | "not_found" }
 
 const decodeSummary = Schema.decodeUnknownOption(LibrarySummaryRow)
+const decodeMetadataExport = Schema.decodeUnknownOption(MetadataExportDocument)
 const decodePage = Schema.decodeUnknownOption(LibraryEntryPageResult)
 const decodeResolution = Schema.decodeUnknownOption(LibraryEntryResolutionResult)
 const decodeAcceptedThumbnailEntry = Schema.decodeUnknownOption(Schema.NullOr(AcceptedThumbnailEntryRow))
@@ -82,6 +83,10 @@ export class LibraryStore extends Context.Service<
       readonly state?: "replacement-pending"
       readonly epoch: string
     }) => Effect.Effect<LibraryEntryPage, DatabaseWorkerError | InvalidLibrarySearchCursor>
+    readonly exportSelected: (input: {
+      readonly entryIds: ReadonlyArray<string>
+      readonly includeNotes: boolean
+    }) => Effect.Effect<MetadataExportDocument, DatabaseWorkerError>
     readonly entry: (entryId: string) => Effect.Effect<import("@henshin/contracts").LibraryEntryDetails | null, DatabaseWorkerError>
     readonly bindEntry: (input: {
       readonly entryId: string
@@ -153,6 +158,16 @@ export class LibraryStore extends Context.Service<
             ? Effect.fail(new InvalidLibrarySearchCursor())
             : Effect.succeed(result.page)
         )
+      )
+      const exportSelected = (input: {
+        readonly entryIds: ReadonlyArray<string>
+        readonly includeNotes: boolean
+      }) => worker.call({
+        op: "exportSelectedEntries",
+        entryIds: input.entryIds,
+        includeNotes: input.includeNotes
+      }).pipe(
+        Effect.flatMap((value) => decodeOrFail(decodeMetadataExport, value, "invalid metadata export"))
       )
       const entry = (entryId: string) => worker.call({ op: "readEntry", entryId }).pipe(
         Effect.flatMap((value) => decodeOrFail(decodeEntryDetailsResult, value, "invalid library entry details"))
@@ -265,7 +280,8 @@ export class LibraryStore extends Context.Service<
         updateEntryNote,
         entry,
         summary,
-        page
+        page,
+        exportSelected
       })
     })
   )
