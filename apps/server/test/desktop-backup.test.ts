@@ -13,8 +13,11 @@ const execFile = promisify(execFileCallback)
 const SERVER_PATH = path.resolve("apps/server/dist/server.mjs")
 const workspaces: Array<string> = []
 
-const createDesktopStore = async (dataDirectory: string): Promise<void> => {
-  await writeFile(path.join(dataDirectory, "device-id"), "11111111-1111-4111-8111-111111111111\n", { mode: 0o600 })
+const createDesktopStore = async (
+  dataDirectory: string,
+  installationId = "11111111-1111-4111-8111-111111111111"
+): Promise<void> => {
+  await writeFile(path.join(dataDirectory, "device-id"), `${installationId}\n`, { mode: 0o600 })
   const database = new DatabaseSync(path.join(dataDirectory, "prototype-client.db"))
   database.exec(`
     CREATE TABLE unsent_drafts(
@@ -56,8 +59,13 @@ const createDesktopStore = async (dataDirectory: string): Promise<void> => {
       resolution_json TEXT NOT NULL, cached_at_ms INTEGER NOT NULL,
       PRIMARY KEY(instance_id, entry_id)
     );
-    CREATE TABLE secret_sentinel(value TEXT NOT NULL);
+    CREATE TABLE desktop_store_metadata(
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      installation_id TEXT NOT NULL,
+      schema_version INTEGER NOT NULL
+    );
   `)
+  database.prepare("INSERT INTO desktop_store_metadata VALUES(1, ?, 1)").run(installationId)
   database.prepare(`
     INSERT INTO unsent_drafts(
       instance_id, note_id, form_id, text, local_revision, base_server_revision,
@@ -72,7 +80,18 @@ const createDesktopStore = async (dataDirectory: string): Promise<void> => {
     ) VALUES('22222222-2222-4222-8222-222222222222', '44444444-4444-4444-8444-444444444444', 'note-1', 'durable pending command', 0, '33333333-3333-4333-8333-333333333333', 'unresolved', 1, 1, NULL, NULL, NULL, NULL, NULL, 0)
   `).run()
   database.prepare("INSERT INTO open_resolution_cache VALUES('cache', 'entry', 'epoch', 'cache-secret', 1)").run()
-  database.prepare("INSERT INTO secret_sentinel VALUES('must-not-be-published')").run()
+  database.prepare(`
+    INSERT INTO launch_journal(
+      instance_id, action_id, entry_id, profile_id, device_id,
+      observed_location_revision, observed_content_version, status, event_json,
+      delivery_status, delivery_error_code, delivery_error_message,
+      failure_code, failure_message, created_at_ms, updated_at_ms
+    ) VALUES(
+      '22222222-2222-4222-8222-222222222222', '55555555-5555-4555-8555-555555555555',
+      'entry-1', 'reader-1', '11111111-1111-4111-8111-111111111111',
+      1, 1, 'prepared', NULL, 'pending', NULL, NULL, NULL, NULL, 1, 1
+    )
+  `).run()
   database.close()
 }
 
@@ -143,7 +162,10 @@ describe("stopped desktop backup", () => {
     expect((snapshot.prepare("SELECT intent_text FROM command_attempts").get() as { intent_text: string }).intent_text)
       .toBe("durable pending command")
     expect(snapshot.prepare("SELECT name FROM sqlite_master WHERE name = 'open_resolution_cache'").get()).toBeUndefined()
-    expect(snapshot.prepare("SELECT name FROM sqlite_master WHERE name = 'secret_sentinel'").get()).toBeUndefined()
+    expect((snapshot.prepare("SELECT status FROM launch_journal WHERE action_id = '55555555-5555-4555-8555-555555555555'").get() as { status: string }).status)
+      .toBe("prepared")
+    expect(snapshot.prepare("SELECT installation_id, schema_version FROM desktop_store_metadata WHERE id = 1").get())
+      .toEqual({ installation_id: "11111111-1111-4111-8111-111111111111", schema_version: 1 })
     snapshot.close()
   })
 
@@ -177,6 +199,28 @@ describe("stopped desktop backup", () => {
     expect((await readdir(dataDirectory)).filter((name) => name.startsWith(".desktop-backup-staging-"))).toEqual([])
   })
 
+  it("refuses an unrecognized client schema instead of silently omitting durable work", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-backup-schema-"))
+    workspaces.push(workspace)
+    const dataDirectory = path.join(workspace, "desktop-data")
+    const outputDirectory = path.join(workspace, "backups")
+    const destination = path.join(outputDirectory, "schema.henshin.zip")
+    await mkdir(dataDirectory)
+    await mkdir(outputDirectory)
+    await createDesktopStore(dataDirectory)
+    const database = new DatabaseSync(path.join(dataDirectory, "prototype-client.db"))
+    database.exec("CREATE TABLE future_durable_work(id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+    database.close()
+
+    await expect(createDesktopBackupArchive({
+      dataDirectory,
+      outputPath: destination,
+      installationId: "11111111-1111-4111-8111-111111111111",
+      label: null
+    })).rejects.toThrow("unrecognized schema object")
+    await expect(stat(destination)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
   it("lets only one stopped installation publish a contested output", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-backup-race-"))
     workspaces.push(workspace)
@@ -187,7 +231,10 @@ describe("stopped desktop backup", () => {
     await mkdir(firstDataDirectory)
     await mkdir(secondDataDirectory)
     await mkdir(outputDirectory)
-    await Promise.all([createDesktopStore(firstDataDirectory), createDesktopStore(secondDataDirectory)])
+    await Promise.all([
+      createDesktopStore(firstDataDirectory, "11111111-1111-4111-8111-111111111111"),
+      createDesktopStore(secondDataDirectory, "22222222-2222-4222-8222-222222222222")
+    ])
 
     const results = await Promise.allSettled([
       createDesktopBackupArchive({

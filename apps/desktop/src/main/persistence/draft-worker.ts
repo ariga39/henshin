@@ -36,6 +36,8 @@ const OPEN_JOURNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const OPEN_JOURNAL_COMPACTION_BATCH = 64
 const MAX_OPEN_RESOLUTION_CACHE_ROWS = 256
 const dbPath = (workerData as { readonly dbPath: string }).dbPath
+const installationId = (workerData as { readonly installationId?: string }).installationId
+const DESKTOP_STORE_SCHEMA_VERSION = 1
 const db = new DatabaseSync(dbPath)
 
 const rollbackIfActive = (): void => {
@@ -135,7 +137,25 @@ db.exec(`
     cached_at_ms INTEGER NOT NULL,
     PRIMARY KEY (instance_id, entry_id)
   );
+  CREATE TABLE IF NOT EXISTS desktop_store_metadata (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    installation_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL
+  );
 `)
+
+if (installationId !== undefined) {
+  const storedIdentity = db.prepare(
+    "SELECT installation_id, schema_version FROM desktop_store_metadata WHERE id = 1"
+  ).get() as { installation_id: string; schema_version: number } | undefined
+  if (storedIdentity === undefined) {
+    db.prepare(
+      "INSERT INTO desktop_store_metadata(id, installation_id, schema_version) VALUES(1, ?, ?)"
+    ).run(installationId, DESKTOP_STORE_SCHEMA_VERSION)
+  } else if (storedIdentity.installation_id !== installationId || storedIdentity.schema_version !== DESKTOP_STORE_SCHEMA_VERSION) {
+    throw new Error("desktop client store identity or schema version is incompatible")
+  }
+}
 
 const launchJournalColumns = new Set(
   (db.prepare("PRAGMA table_info(launch_journal)").all() as unknown as ReadonlyArray<{ name: string }>).map((column) => column.name)

@@ -2,6 +2,7 @@ import { backup, DatabaseSync } from "node:sqlite"
 import { chmod, lstat, link, mkdtemp, open, realpath, rm, stat, unlink } from "node:fs/promises"
 import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
+import serverPackage from "../../package.json"
 import {
   digest,
   jsonBytes,
@@ -17,12 +18,15 @@ const DESKTOP_DATABASE_NAME = "prototype-client.db"
 const DESKTOP_IDENTITY_NAME = "device-id"
 const INSTALLATION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const DURABLE_TABLES = new Set([
+  "desktop_store_metadata",
   "unsent_drafts",
   "command_attempts",
   "client_mappings",
   "reader_profiles",
   "launch_journal"
 ])
+const DISPOSABLE_TABLES = new Set(["open_resolution_cache"])
+const DESKTOP_STORE_SCHEMA_VERSION = 1
 
 export interface DesktopBackupArchiveContext {
   readonly dataDirectory: string
@@ -98,9 +102,17 @@ const validateSnapshot = (snapshot: DatabaseSync): void => {
   }
 }
 
-const sourcePaths = (snapshot: DatabaseSync): ReadonlyArray<string> =>
-  (snapshot.prepare("SELECT canonical_path FROM client_mappings").all() as unknown as ReadonlyArray<{ canonical_path: string }>)
-    .map((row) => path.resolve(row.canonical_path))
+const sourcePaths = async (snapshot: DatabaseSync): Promise<ReadonlyArray<string>> => {
+  const resolved: string[] = []
+  for (const row of snapshot.prepare("SELECT canonical_path FROM client_mappings").all() as unknown as ReadonlyArray<{ canonical_path: string }>) {
+    try {
+      resolved.push(await realpath(row.canonical_path))
+    } catch (error) {
+      if (!isMissing(error)) throw error
+    }
+  }
+  return resolved
+}
 
 /**
  * The client database also contains an evictable resolution cache. Copy the
@@ -117,14 +129,15 @@ const retainDurableSchema = (snapshot: DatabaseSync): void => {
     ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 WHEN 'table' THEN 2 ELSE 3 END
   `).all() as unknown as ReadonlyArray<{ type: string; name: string; tbl_name: string }>
   for (const object of objects) {
-    if (object.type === "table" && !DURABLE_TABLES.has(object.name)) {
+    if (object.type === "table" && DISPOSABLE_TABLES.has(object.name)) {
       snapshot.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(object.name)}`)
-    } else if (object.type === "view") {
-      snapshot.exec(`DROP VIEW IF EXISTS ${quoteIdentifier(object.name)}`)
-    } else if (object.type === "trigger") {
-      snapshot.exec(`DROP TRIGGER IF EXISTS ${quoteIdentifier(object.name)}`)
-    } else if (object.type === "index" && !DURABLE_TABLES.has(object.tbl_name)) {
-      snapshot.exec(`DROP INDEX IF EXISTS ${quoteIdentifier(object.name)}`)
+    } else if (
+      (object.type === "table" && !DURABLE_TABLES.has(object.name)) ||
+      object.type === "view" ||
+      object.type === "trigger" ||
+      (object.type === "index" && !DURABLE_TABLES.has(object.tbl_name))
+    ) {
+      throw new Error(`desktop client database contains an unrecognized schema object: ${object.name}`)
     }
   }
   if (snapshot.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'").get() !== undefined) {
@@ -139,6 +152,7 @@ const retainDurableSchema = (snapshot: DatabaseSync): void => {
 const readConfiguration = (installationId: string) => ({
   format_version: 1,
   store_kind: "desktop",
+  schema_version: DESKTOP_STORE_SCHEMA_VERSION,
   installation_id: installationId,
   included_data_classes: [
     "local mappings",
@@ -156,6 +170,21 @@ const readConfiguration = (installationId: string) => ({
   ],
   credential_reset_instructions: "Reauthenticate the recovered desktop explicitly; copied connection credentials are not restored."
 })
+
+const snapshotIdentity = (snapshotPath: string): { readonly installationId: string; readonly schemaVersion: number } => {
+  const snapshot = new DatabaseSync(snapshotPath, { readOnly: true })
+  try {
+    const row = snapshot.prepare(
+      "SELECT installation_id, schema_version FROM desktop_store_metadata WHERE id = 1"
+    ).get() as { installation_id: string; schema_version: number } | undefined
+    if (row === undefined || !INSTALLATION_ID_PATTERN.test(row.installation_id)) {
+      throw new Error("desktop backup snapshot is missing installation identity")
+    }
+    return { installationId: row.installation_id, schemaVersion: row.schema_version }
+  } finally {
+    snapshot.close()
+  }
+}
 
 const writeAndVerify = async (
   archivePath: string,
@@ -240,7 +269,7 @@ export const createDesktopBackupArchive = async (
     const source = new DatabaseSync(canonicalDatabasePath, { readOnly: true })
     let mappedSources: ReadonlyArray<string>
     try {
-      mappedSources = sourcePaths(source)
+      mappedSources = await sourcePaths(source)
       await backup(source, snapshotPath)
     } finally {
       source.close()
@@ -265,7 +294,14 @@ export const createDesktopBackupArchive = async (
     if (stateSize > MAX_STATE_BYTES) throw new Error("desktop backup snapshot exceeds the size limit")
     const stateDigest = await digestFile(snapshotPath, stateSize)
 
-    const configurationBytes = jsonBytes(readConfiguration(context.installationId))
+    const storedIdentity = snapshotIdentity(snapshotPath)
+    if (storedIdentity.installationId !== context.installationId) {
+      throw new Error("desktop client database identity does not match device identity")
+    }
+    if (storedIdentity.schemaVersion !== DESKTOP_STORE_SCHEMA_VERSION) {
+      throw new Error("desktop client database schema is not supported by this maintenance tool")
+    }
+    const configurationBytes = jsonBytes(readConfiguration(storedIdentity.installationId))
     if (configurationBytes.byteLength > MAX_CONFIGURATION_BYTES) {
       throw new Error("desktop backup configuration exceeds the size limit")
     }
@@ -277,6 +313,8 @@ export const createDesktopBackupArchive = async (
       snapshot_started_at: snapshotStartedAt,
       snapshot_completed_at: new Date().toISOString(),
       retention_class: "archive",
+      application_version: serverPackage.version,
+      schema_version: storedIdentity.schemaVersion,
       label: context.label,
       payloads: {
         "state.sqlite": { size_bytes: stateSize, sha256: stateDigest },

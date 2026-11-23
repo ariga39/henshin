@@ -1781,7 +1781,10 @@ const bootstrap = async (): Promise<void> => {
   serverChild = await startServerChild(dbPath)
 
   const draftWorkerUrl = pathToFileURL(path.join(app.getAppPath(), "dist", "draft-worker.mjs"))
-  const localWorker = LocalDatabaseWorker.layer(clientDbPath, { workerUrl: draftWorkerUrl })
+  const localWorker = LocalDatabaseWorker.layer(clientDbPath, {
+    workerUrl: draftWorkerUrl,
+    installationId: deviceId
+  })
   runtime = ManagedRuntime.make(
     Layer.mergeAll(
       DraftStore.layerFromWorker,

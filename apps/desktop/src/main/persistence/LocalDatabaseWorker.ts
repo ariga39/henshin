@@ -14,6 +14,7 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 export interface LocalDatabaseWorkerOptions {
   readonly workerUrl: URL
+  readonly installationId?: string
   readonly callDeadline?: Duration.Duration
   readonly shutdownDeadlineMs?: number
 }
@@ -44,7 +45,9 @@ export class LocalDatabaseWorker extends Context.Service<
 
         const worker = yield* Effect.acquireRelease(
           Effect.sync(() => {
-            const instance = new Worker(options.workerUrl, { workerData: { dbPath } })
+            const instance = new Worker(options.workerUrl, {
+              workerData: { dbPath, installationId: options.installationId }
+            })
             instance.on("message", (raw: unknown) => {
               const decoded = Schema.decodeUnknownOption(DraftWorkerResponse)(raw)
               if (Option.isNone(decoded)) {

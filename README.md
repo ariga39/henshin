@@ -247,5 +247,7 @@ launch journals, saved drafts, and command attempts. It excludes display and
 resolution caches, connection credentials, the server database, collection
 files, and host service configuration. Publication writes a private,
 content-verified archive atomically and never overwrites an existing output.
+The bundle records the client-store schema and installation identity; an
+unknown client schema is refused rather than published with omitted work.
 The backup cannot include local events created after the snapshot, and a
 recovered desktop must be reauthenticated before use.
