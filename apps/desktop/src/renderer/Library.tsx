@@ -215,6 +215,7 @@ export const LibraryScreen = () => {
   const selectedDetails = selectedEntry !== null && state.library_entry?.entry_id === selectedEntry.entry_id
     ? state.library_entry
     : selectedEntry
+  const savingEntry = state.library_title_status === "loading" || state.library_note_status === "loading"
   const hasPersonalTitle = selectedDetails?.title_override !== null && selectedDetails?.title_override !== undefined
 
   return (
@@ -360,15 +361,15 @@ export const LibraryScreen = () => {
                     value={state.library_title_draft}
                     onChange={(event) => viewStore.set({ library_title_draft: event.target.value })}
                     placeholder="Leave empty for Untitled"
-                    disabled={state.library_title_status === "loading"}
+                    disabled={savingEntry}
                   />
-                  <button type="submit" data-testid="entry-personal-title-save" disabled={state.library_title_status === "loading"}>
+                  <button type="submit" data-testid="entry-personal-title-save" disabled={savingEntry}>
                     {state.library_title_status === "loading" ? "Saving…" : "Save title"}
                   </button>
                   <button
                     type="button"
                     data-testid="entry-personal-title-remove"
-                    disabled={state.library_title_status === "loading" || !hasPersonalTitle}
+                    disabled={savingEntry || !hasPersonalTitle}
                     onClick={() => void runtime.runPromise(removeLibraryPersonalTitle)}
                   >
                     Remove override
@@ -395,16 +396,16 @@ export const LibraryScreen = () => {
                     data-testid="entry-note"
                     value={state.library_note_text}
                     onChange={(event) => viewStore.set({ library_note_text: event.target.value })}
-                    disabled={state.library_note_status === "loading"}
+                    disabled={savingEntry}
                     rows={5}
                   />
-                  <button type="submit" data-testid="entry-note-save" disabled={state.library_note_status === "loading"}>
+                  <button type="submit" data-testid="entry-note-save" disabled={savingEntry}>
                     {state.library_note_status === "loading" ? "Saving…" : "Save note"}
                   </button>
                   <button
                     type="button"
                     data-testid="entry-note-clear"
-                    disabled={state.library_note_status === "loading" || state.library_note_text.length === 0}
+                    disabled={savingEntry || state.library_note_text.length === 0}
                     onClick={() => void runtime.runPromise(updateLibraryNote(""))}
                   >
                     Clear note

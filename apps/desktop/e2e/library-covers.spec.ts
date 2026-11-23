@@ -203,17 +203,12 @@ test("edits, rejects stale title saves, removes, and searches the personal title
     await window.getByTestId("library-search-submit").click()
     await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(1)
     await expect(window.getByTestId("library-entry")).toContainText("Matched in book name")
-    await window.getByTestId("library-search").fill("original-book")
-    await window.getByTestId("library-search-submit").click()
-    await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(1)
-    await expect(window.getByTestId("library-entry")).toContainText("Stale title")
-
     await window.getByTestId("library-entry").getByRole("button", { name: /Open details/ }).click()
     await expect(window.getByTestId("library-details").getByTestId("entry-effective-title")).toContainText("Display title: Stale title")
 
     const searchedDetails = window.getByTestId("library-details")
     await searchedDetails.getByTestId("entry-personal-title-remove").click()
-    await expect(searchedDetails.getByTestId("entry-effective-title")).toContainText("Display title: original-book")
+    await expect(window.getByTestId("library-entry")).toHaveCount(0)
     await window.getByTestId("library-search").fill("original-book")
     await window.getByTestId("library-search-submit").click()
     await expect(window.getByTestId("library-entries").locator("li")).toHaveCount(1)

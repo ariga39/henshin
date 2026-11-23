@@ -1263,7 +1263,7 @@ export const loadLibraryEntry = (entryId: string) =>
       library_entry_request_generation: requestGeneration,
       library_entry_status: "loading",
       library_entry_error: null,
-      library_note_status: preserveDrafts ? current.library_note_status : "loading",
+      library_note_status: preserveDrafts ? (current.library_note_status === "loading" ? "idle" : current.library_note_status) : "loading",
       library_note_error: preserveDrafts ? current.library_note_error : null,
       library_note_server_text: preserveDrafts ? current.library_note_server_text : null,
       library_title_status: "idle",
@@ -1330,6 +1330,7 @@ export const updateLibraryNote = (text: string) =>
     const entryId = state.library_selected_entry_id
     const requestGeneration = state.library_entry_request_generation
     if (entry === null || entryId === null || entry.entry_id !== entryId) return
+    if (state.library_title_status === "loading") return
     const expectedDecisionVersion = entry.decision_version
     yield* Effect.sync(() => viewStore.set({ library_note_status: "loading", library_note_error: null }))
     const result = yield* client.note({
@@ -1384,12 +1385,13 @@ const replaceLibraryDetails = (entry: LibraryEntryDetails): void => {
   })
 }
 
-export const saveLibraryPersonalTitle = (title: string) =>
+const changeLibraryPersonalTitle = (title: string | null) =>
   Effect.gen(function*() {
     const client = yield* LibraryClient
     const state = viewStore.getState()
     const entry = state.library_entry
     const entryId = state.library_selected_entry_id
+    if (state.library_note_status === "loading") return
     const requestGeneration = state.library_entry_request_generation
     const titleRequestGeneration = state.library_title_request_generation + 1
     if (entry === null || entry.entry_id !== entryId || entryId === null) return
@@ -1401,75 +1403,26 @@ export const saveLibraryPersonalTitle = (title: string) =>
     const result = yield* client.updatePersonalTitle({
       entry_id: entryId,
       expected_decision_version: entry.decision_version,
-      command: { type: "set-personal-title", title }
+      command: title === null ? { type: "remove-personal-title" } : { type: "set-personal-title", title }
     })
-    if (!result.ok) {
-      yield* Effect.sync(() => {
-        const current = viewStore.getState()
-        if (
-          current.library_selected_entry_id !== entryId ||
-          current.library_entry_request_generation !== requestGeneration ||
-          current.library_title_request_generation !== titleRequestGeneration
-        ) return
-        viewStore.set({ library_title_status: "error", library_title_error: result.error.message })
-      })
-      return
-    }
-    yield* Effect.sync(() => {
-      const current = viewStore.getState()
-      if (
-        current.library_selected_entry_id !== entryId ||
-        current.library_entry_request_generation !== requestGeneration ||
-        current.library_title_request_generation !== titleRequestGeneration
-      ) return
-      replaceLibraryListEntry(result.data.entry)
-      replaceLibraryDetails(result.data.entry)
-      viewStore.set({ library_title_status: "idle", library_title_error: null })
-    })
-  })
-
-export const removeLibraryPersonalTitle = Effect.gen(function*() {
-  const client = yield* LibraryClient
-  const state = viewStore.getState()
-  const entry = state.library_entry
-  const entryId = state.library_selected_entry_id
-  const requestGeneration = state.library_entry_request_generation
-  const titleRequestGeneration = state.library_title_request_generation + 1
-  if (entry === null || entry.entry_id !== entryId || entryId === null) return
-  yield* Effect.sync(() => viewStore.set({
-    library_title_request_generation: titleRequestGeneration,
-    library_title_status: "loading",
-    library_title_error: null
-  }))
-  const result = yield* client.updatePersonalTitle({
-    entry_id: entryId,
-    expected_decision_version: entry.decision_version,
-    command: { type: "remove-personal-title" }
-  })
-  if (!result.ok) {
-    yield* Effect.sync(() => {
-      const current = viewStore.getState()
-      if (
-        current.library_selected_entry_id !== entryId ||
-        current.library_entry_request_generation !== requestGeneration ||
-        current.library_title_request_generation !== titleRequestGeneration
-      ) return
-      viewStore.set({ library_title_status: "error", library_title_error: result.error.message })
-    })
-    return
-  }
-  yield* Effect.sync(() => {
     const current = viewStore.getState()
     if (
       current.library_selected_entry_id !== entryId ||
       current.library_entry_request_generation !== requestGeneration ||
       current.library_title_request_generation !== titleRequestGeneration
     ) return
+    if (!result.ok) {
+      viewStore.set({ library_title_status: "error", library_title_error: result.error.message })
+      return
+    }
     replaceLibraryListEntry(result.data.entry)
     replaceLibraryDetails(result.data.entry)
     viewStore.set({ library_title_status: "idle", library_title_error: null })
+    if (current.library_query !== "") yield* loadLibrary(false, current.library_query)
   })
-})
+
+export const saveLibraryPersonalTitle = (title: string) => changeLibraryPersonalTitle(title)
+export const removeLibraryPersonalTitle = changeLibraryPersonalTitle(null)
 
 export const chooseLibraryOpenProfile = (profileId: string) => Effect.sync(() => {
   const state = viewStore.getState()

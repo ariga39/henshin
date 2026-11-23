@@ -141,7 +141,7 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_entry?.decision_version).toBe("2")
   })
 
-  it("keeps title and note drafts independent while their saves overlap", async () => {
+  it("preserves the title draft until a pending note save releases the entry", async () => {
     let resolveTitle!: (value: Result<ReturnType<typeof commandResult>>) => void
     let resolveNote!: (value: Result<ReturnType<typeof commandResult>>) => void
     const client = makeLibraryClient({
@@ -162,18 +162,43 @@ describe("library renderer workflow", () => {
     const titleSave = run(saveLibraryPersonalTitle("Draft title"), client)
     await Promise.resolve()
 
-    resolveTitle({ ok: true, data: commandResult({ ...details(entryAId, "Draft title", "2"), note: null }) })
     await titleSave
-    expect(viewStore.getState().library_note_text).toBe("Draft note")
-
+    expect(resolveTitle).toBeUndefined()
     resolveNote({
       ok: true,
-      data: commandResult({ ...details(entryAId, "Draft title", "3"), note: { text: "Draft note", revision: "1" } })
+      data: commandResult({ ...details(entryAId, "Original title", "2"), note: { text: "Draft note", revision: "1" } })
     })
     await noteSave
+    const retry = run(saveLibraryPersonalTitle("Draft title"), client)
+    await Promise.resolve()
+    resolveTitle({ ok: true, data: commandResult({ ...details(entryAId, "Draft title", "3"), note: { text: "Draft note", revision: "1" } }) })
+    await retry
     expect(viewStore.getState().library_title_draft).toBe("Draft title")
     expect(viewStore.getState().library_note_text).toBe("Draft note")
     expect(viewStore.getState().library_entry?.title).toBe("Draft title")
+  })
+
+  it("keeps a note editable after reloading while its save is pending", async () => {
+    let finish!: (value: Result<ReturnType<typeof commandResult>>) => void
+    const serverEntry = details(entryAId, "Original", "2")
+    const client = makeLibraryClient({
+      entry: () => Effect.succeed({ ok: true as const, data: serverEntry }),
+      note: () => Effect.promise(() => new Promise<Result<ReturnType<typeof commandResult>>>((resolve) => { finish = resolve }))
+    })
+    viewStore.set({
+      library_selected_entry_id: entryAId,
+      library_entry: details(entryAId, "Original", "1"),
+      library_entry_status: "ready",
+      library_title_status: "idle",
+      library_note_text: "Retained draft"
+    })
+    const save = run(updateLibraryNote("Retained draft"), client)
+    await Promise.resolve()
+    expect(viewStore.getState().library_note_status).toBe("loading")
+    await run(loadLibraryEntry(entryAId), client)
+    finish({ ok: true, data: commandResult(serverEntry) })
+    await save
+    expect(viewStore.getState()).toMatchObject({ library_note_status: "idle", library_note_text: "Retained draft" })
   })
 
   it("does not let an older title command regress the visible list after a newer save", async () => {
@@ -254,7 +279,7 @@ describe("library renderer workflow", () => {
     expect(viewStore.getState().library_title_error).toBe("the entry changed")
     expect(viewStore.getState().library_title_draft).toBe("Draft title")
 
-    await run(loadLibraryEntry(entryAId, { preserveTitleDraft: true }), client)
+    await run(loadLibraryEntry(entryAId), client)
     expect(viewStore.getState().library_entry?.decision_version).toBe("2")
     expect(viewStore.getState().library_title_draft).toBe("Draft title")
 
