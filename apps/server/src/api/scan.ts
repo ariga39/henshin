@@ -22,6 +22,7 @@ import { LibraryStore, type EntryResolutionLookupResult, type ReplacementResolut
 import { RootStore } from "../persistence/RootStore"
 import { analyzeSourceManifest } from "../analysis/SourceManifestAnalysis"
 import { resolveSourceCandidate, type SourceRootObservation } from "../analysis/NativeSourceBoundary"
+import { FINGERPRINT_DEADLINE_MS, FINGERPRINT_MAX_BYTES, fingerprintSource } from "../analysis/SourceFingerprint"
 import { sourceManifestView } from "../scan/ManualScanCoordinator"
 import type { ServerRootRow } from "../persistence/worker-protocol"
 import type { StagedDiscovery } from "@henshin/contracts"
@@ -49,7 +50,21 @@ const freshReplacementManifest = (
     Effect.flatMap((resolved) => {
       if (resolved === null || !resolved.ok || resolved.value.kind !== candidate.kind) return Effect.succeed(null)
       return Effect.result(analyzeSourceManifest({ sourcePath: resolved.value.nativePath })).pipe(
-        Effect.map((result) => Result.isSuccess(result) ? JSON.stringify(sourceManifestView(result.success)) : null)
+        Effect.flatMap((result) => {
+          if (!Result.isSuccess(result)) return Effect.succeed(null)
+          return Effect.result(Effect.tryPromise({
+            try: (signal) => fingerprintSource(resolved.value.nativePath, result.success, {
+              signal,
+              maxBytes: FINGERPRINT_MAX_BYTES,
+              deadlineMs: FINGERPRINT_DEADLINE_MS
+            }),
+            catch: () => undefined
+          })).pipe(
+            Effect.map((fingerprint) => Result.isSuccess(fingerprint)
+              ? JSON.stringify({ ...sourceManifestView(result.success), fingerprint: fingerprint.success })
+              : null)
+          )
+        })
       )
     })
   )

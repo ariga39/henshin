@@ -171,6 +171,18 @@ const manifestsEquivalent = (left: string, right: string): boolean => {
         comparableLeft.fingerprint.digest === comparableRight.fingerprint.digest))
 }
 
+const manifestsEquivalentWithFingerprint = (left: string, right: string): boolean => {
+  const comparableLeft = comparableManifest(left)
+  const comparableRight = comparableManifest(right)
+  return comparableLeft !== null && comparableRight !== null &&
+    comparableLeft.fingerprint !== undefined && comparableRight.fingerprint !== undefined &&
+    comparableLeft.value === comparableRight.value &&
+    observationsEquivalent(comparableLeft.beforeToken, comparableRight.beforeToken) &&
+    observationsEquivalent(comparableLeft.afterToken, comparableRight.afterToken) &&
+    comparableLeft.fingerprint.profile === comparableRight.fingerprint.profile &&
+    comparableLeft.fingerprint.digest === comparableRight.fingerprint.digest
+}
+
 const fingerprintFromManifest = (value: string): { readonly profile: string; readonly digest: string } | null => {
   try {
     const decoded = Schema.decodeUnknownOption(ScanManifest)(JSON.parse(value))
@@ -180,6 +192,9 @@ const fingerprintFromManifest = (value: string): { readonly profile: string; rea
     return null
   }
 }
+
+const fingerprintKey = (fingerprint: { readonly profile: string; readonly digest: string }): string =>
+  `${fingerprint.profile}:${fingerprint.digest}`
 
 const fingerprintPrefilterFromManifest = (value: string): string | null => {
   try {
@@ -2398,7 +2413,7 @@ const resolveReplacement = (
     }
     if (
       request.freshManifestJson === null ||
-      !manifestsEquivalent(candidate.manifest_json, request.freshManifestJson)
+      !manifestsEquivalentWithFingerprint(candidate.manifest_json, request.freshManifestJson)
     ) {
       db.exec("ROLLBACK")
       return { kind: "fresh_observation_conflict" }
@@ -2947,66 +2962,78 @@ const publishNormalScan = (request: Extract<WorkerRequest, { op: "publishNormalS
       candidatesByFingerprint.set(key, matches)
     }
     const existingPathSet = new Set(existingEntries.map((entry) => entry.relative_path))
-    for (const [key, targets] of candidatesByFingerprint) {
-      if (targets.length !== 1) continue
-      const sourceMatches = existingEntries.filter((entry) =>
-        missingPaths.includes(entry.relative_path) &&
-        entry.state === "accepted" &&
-        existingMetadata.get(entry.entry_id)?.fingerprint !== null &&
-        `${existingMetadata.get(entry.entry_id)?.fingerprint?.profile}:${existingMetadata.get(entry.entry_id)?.fingerprint?.digest}` === key
-      )
-      if (sourceMatches.length !== 1) continue
-      const source = sourceMatches[0]
-      if (source === undefined || source.state !== "accepted") continue
-      const sourceMetadata = existingMetadata.get(source.entry_id)
-      const hasUnresolvedCandidate = staged.some((candidate) =>
-        observed.has(candidate.relative_path) &&
-        !existingPathSet.has(candidate.relative_path) &&
-        (candidate.hold_state !== "eligible" ||
+    if (missingPaths.length > 0) {
+      const missingPathSet = new Set(missingPaths)
+      const stagedFingerprintByPath = new Map<string, { readonly profile: string; readonly digest: string }>()
+      for (const candidate of staged) {
+        const fingerprint = stagedMetadata.get(candidate.candidate_id)?.fingerprint
+        if (fingerprint !== null && fingerprint !== undefined) stagedFingerprintByPath.set(candidate.relative_path, fingerprint)
+      }
+      const activeClaimsByFingerprint = new Map<string, Array<(typeof existingEntries)[number]>>()
+      for (const entry of existingEntries) {
+        const fingerprint = stagedFingerprintByPath.get(entry.relative_path) ?? existingMetadata.get(entry.entry_id)?.fingerprint
+        if (fingerprint === null || fingerprint === undefined) continue
+        const claims = activeClaimsByFingerprint.get(fingerprintKey(fingerprint)) ?? []
+        claims.push(entry)
+        activeClaimsByFingerprint.set(fingerprintKey(fingerprint), claims)
+      }
+      const unresolvedPrefilters = new Set<string>()
+      let unresolvedWithoutPrefilter = false
+      for (const candidate of staged) {
+        if (!observed.has(candidate.relative_path) || existingPathSet.has(candidate.relative_path)) continue
+        const metadata = stagedMetadata.get(candidate.candidate_id)
+        const unresolved = candidate.hold_state !== "eligible" ||
           candidate.analysis_status !== "ready" ||
           !observedCandidates.has(candidate.relative_path) ||
-          (() => {
-            const candidateManifest = stagedMetadata.get(candidate.candidate_id)
-            return candidateManifest?.fingerprint === null &&
-              (sourceMetadata === undefined || candidateManifest.prefilter === null || sourceMetadata.prefilter === null || candidateManifest.prefilter === sourceMetadata.prefilter)
-          })())
-      )
-      if (hasUnresolvedCandidate) continue
+          metadata?.fingerprint === null
+        if (!unresolved) continue
+        if (metadata?.prefilter === null || metadata === undefined) unresolvedWithoutPrefilter = true
+        else unresolvedPrefilters.add(metadata.prefilter)
+      }
       const hasPresentPending = existingEntries.some((entry) =>
         entry.state === "replacement-pending" && observed.has(entry.relative_path) && !isExcluded(entry.relative_path)
       )
-      const hasPresentMatchingCopy = existingEntries.some((entry) =>
-        entry.entry_id !== source.entry_id &&
-        observed.has(entry.relative_path) &&
-        existingMetadata.get(entry.entry_id)?.fingerprint !== null &&
-        `${existingMetadata.get(entry.entry_id)?.fingerprint?.profile}:${existingMetadata.get(entry.entry_id)?.fingerprint?.digest}` === key
-      )
-      if (hasPresentPending || hasPresentMatchingCopy) continue
-      const target = targets[0]
-      if (target === undefined || target.manifest_json === null || target.kind !== source.kind) continue
-      const targetManifest = persistedManifest(target.manifest_json, "relocation target manifest")
-      const targetSourcePath = sourcePathFor(target.relative_path)
-      const targetTitle = titleForCandidate(target.relative_path, target.kind)
-      const moved = relocateAcceptedEntry.run(
-        target.relative_path,
-        targetSourcePath,
-        targetTitle,
-        normalizeSearchText(targetTitle),
-        normalizeSearchText(searchBasename(target.relative_path)),
-        target.manifest_json,
-        JSON.stringify(replacementObservation(targetManifest, target.kind)),
-        observedAtMs,
-        observedAtMs,
-        source.entry_id,
-        request.rootId,
-        source.decision_version,
-        source.location_revision
-      )
-      if (Number(moved.changes) !== 1) continue
-      deleteStaged.run(target.candidate_id)
-      relocatedMissingPaths.add(source.relative_path)
-      relocatedTargetPaths.add(target.relative_path)
-      changed = true
+      for (const [key, targets] of candidatesByFingerprint) {
+        if (targets.length !== 1) continue
+        const claims = activeClaimsByFingerprint.get(key) ?? []
+        const sourceMatches = claims.filter((entry) =>
+          missingPathSet.has(entry.relative_path) && entry.state === "accepted"
+        )
+        if (sourceMatches.length !== 1 || claims.length !== 1) continue
+        const source = sourceMatches[0]
+        if (source === undefined || source.state !== "accepted") continue
+        const sourceMetadata = existingMetadata.get(source.entry_id)
+        const hasUnresolvedCandidate = unresolvedWithoutPrefilter ||
+          sourceMetadata?.prefilter === null ||
+          sourceMetadata === undefined ||
+          unresolvedPrefilters.has(sourceMetadata.prefilter)
+        if (hasUnresolvedCandidate || hasPresentPending) continue
+        const target = targets[0]
+        if (target === undefined || target.manifest_json === null || target.kind !== source.kind) continue
+        const targetManifest = persistedManifest(target.manifest_json, "relocation target manifest")
+        const targetSourcePath = sourcePathFor(target.relative_path)
+        const targetTitle = titleForCandidate(target.relative_path, target.kind)
+        const moved = relocateAcceptedEntry.run(
+          target.relative_path,
+          targetSourcePath,
+          targetTitle,
+          normalizeSearchText(targetTitle),
+          normalizeSearchText(searchBasename(target.relative_path)),
+          target.manifest_json,
+          JSON.stringify(replacementObservation(targetManifest, target.kind)),
+          observedAtMs,
+          observedAtMs,
+          source.entry_id,
+          request.rootId,
+          source.decision_version,
+          source.location_revision
+        )
+        if (Number(moved.changes) !== 1) continue
+        deleteStaged.run(target.candidate_id)
+        relocatedMissingPaths.add(source.relative_path)
+        relocatedTargetPaths.add(target.relative_path)
+        changed = true
+      }
     }
     missingPaths = missingPaths.filter((relativePath) => !relocatedMissingPaths.has(relativePath))
     for (const candidate of staged) {
@@ -3213,19 +3240,43 @@ const indexedRootSamples = (
 
 const normalScanFingerprintPlan = (
   request: Extract<WorkerRequest, { op: "readNormalScanFingerprintPlan" }>
-): ReadonlyArray<string> =>
-  (selectNormalScanFingerprintPlan.all(request.taskId, request.rootId) as unknown as ReadonlyArray<{
+): ReadonlyArray<string> => {
+  const root = rootById(request.rootId)
+  if (root === undefined) return []
+  const rows = selectNormalScanFingerprintPlan.all(request.taskId, request.rootId) as unknown as ReadonlyArray<{
     relative_path: string
     manifest_json: string
     accepted_manifest_json: string | null
     accepted_state: "accepted" | "replacement-pending" | null
-  }>)
-    .filter((row) => row.accepted_manifest_json === null || (
-      (row.accepted_state === "accepted" || row.accepted_state === "replacement-pending") &&
-      (fingerprintFromManifest(row.accepted_manifest_json) === null ||
-        !manifestsEquivalent(row.accepted_manifest_json, row.manifest_json))
-    ))
+  }>
+  const activeEntries = selectEntriesForRoot.all(request.rootId) as unknown as ReadonlyArray<{
+    relative_path: string
+    state: "accepted" | "replacement-pending"
+    manifest_json: string
+  }>
+  const stagedPaths = new Set(rows.map((row) => row.relative_path))
+  const isExcluded = (relativePath: string): boolean => root.exclusions.some(
+    (exclusion) => exclusion.scope === "exact"
+      ? exclusion.path === relativePath
+      : relativePath === exclusion.path || relativePath.startsWith(`${exclusion.path}/`)
+  )
+  const missingPrefilters = new Set(
+    activeEntries
+      .filter((entry) => entry.state === "accepted" && !stagedPaths.has(entry.relative_path) && !isExcluded(entry.relative_path))
+      .map((entry) => fingerprintPrefilterFromManifest(entry.manifest_json))
+      .filter((prefilter): prefilter is string => prefilter !== null)
+  )
+  return rows
+    .filter((row) => {
+      if (row.accepted_manifest_json !== null) {
+        return (row.accepted_state === "accepted" || row.accepted_state === "replacement-pending") &&
+          !manifestsEquivalent(row.accepted_manifest_json, row.manifest_json)
+      }
+      const prefilter = fingerprintPrefilterFromManifest(row.manifest_json)
+      return prefilter !== null && missingPrefilters.has(prefilter)
+    })
     .map((row) => row.relative_path)
+}
 
 const entryResolution = (
   request: Extract<WorkerRequest, { op: "readEntryResolution" }>

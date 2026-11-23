@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdir, mkdtemp, open, rename, rm, writeFile } from "node:fs/promises"
+import { chmod, copyFile, mkdir, mkdtemp, open, rename, rm, utimes, writeFile } from "node:fs/promises"
 import { DatabaseSync } from "node:sqlite"
 import os from "node:os"
 import path from "node:path"
@@ -7,6 +7,8 @@ import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import { BlobWriter, Uint8ArrayReader, ZipWriter } from "@zip.js/zip.js"
 import { LibraryHttpClient, OpenEventHttpClient, ReviewHttpClient, ServerHttpClient, TaskHttpClient, type ScanTask } from "@henshin/contracts"
+import { analyzeSourceManifest } from "../src/analysis/SourceManifestAnalysis"
+import { fingerprintSource } from "../src/analysis/SourceFingerprint"
 import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
 
 const servers: RunningServer[] = []
@@ -83,6 +85,18 @@ const makeOversizedImageBook = async (rootPath: string, name: string): Promise<v
       await page.close()
     }
   }
+}
+
+const seedFingerprint = async (dbPath: string, entryId: string, sourcePath: string): Promise<void> => {
+  const analysis = await Effect.runPromise(analyzeSourceManifest({ sourcePath }))
+  const fingerprint = await fingerprintSource(sourcePath, analysis)
+  const db = new DatabaseSync(dbPath)
+  const row = db.prepare("SELECT manifest_json FROM library_entries WHERE entry_id = ?").get(entryId) as { manifest_json: string } | undefined
+  if (row === undefined) throw new Error("expected accepted manifest")
+  const manifest = JSON.parse(row.manifest_json) as Record<string, unknown>
+  manifest.fingerprint = fingerprint
+  db.prepare("UPDATE library_entries SET manifest_json = ? WHERE entry_id = ?").run(JSON.stringify(manifest), entryId)
+  db.close()
 }
 
 const registerRoot = (server: RunningServer, fixture: string, label: string) => withServerClient(server, Effect.gen(function*() {
@@ -315,6 +329,7 @@ describe("normal library scan", () => {
       if (entry === undefined) throw new Error("expected accepted entry")
       return entry
     }))
+    await seedFingerprint(server.dbPath, initial.entry_id, path.join(fixture, "before"))
 
     const event = await withOpenEventClient(server, Effect.gen(function*() {
       return yield* (yield* OpenEventHttpClient).batch({
@@ -388,7 +403,7 @@ describe("normal library scan", () => {
     expect(history).toEqual([{ entry_id: initial.entry_id, observed_location_revision: 1, observed_content_version: 1 }])
   })
 
-  it("baselines an accepted entry missing its fingerprint before retaining a later rename", async () => {
+  it("does not acquire an accepted baseline during an ordinary scan", async () => {
     const server = await start()
     const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-rename-baseline-"))
     fixturePaths.add(fixture)
@@ -421,23 +436,22 @@ describe("normal library scan", () => {
     const baselined = new DatabaseSync(server.dbPath)
     const stored = baselined.prepare("SELECT manifest_json FROM library_entries WHERE entry_id = ?").get(initial.entry_id) as { manifest_json: string } | undefined
     baselined.close()
-    expect(stored === undefined ? undefined : JSON.parse(stored.manifest_json).fingerprint).toEqual({
-      profile: "directory-pages-sha256-v1",
-      digest: expect.any(String)
-    })
+    expect(stored === undefined ? undefined : JSON.parse(stored.manifest_json).fingerprint).toBeUndefined()
 
     await rename(path.join(fixture, "before"), path.join(fixture, "after"))
     const renamedScan = await scanRoot(restarted, root)
     if (!("task" in renamedScan.data)) throw new Error("expected rename scan task")
-    expect((await waitForTerminal(restarted, renamedScan.data.task.task_id)).status).toBe("succeeded")
+    const renamedTerminal = await waitForTerminal(restarted, renamedScan.data.task.task_id)
+    expect(renamedTerminal.status).toBe("completed_with_errors")
+    expect(renamedTerminal.readiness_error?.code).toBe("allocation_deferred")
     const renamed = await withLibraryClient(restarted, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
     }))
     expect(renamed.data.entries).toMatchObject([{
       entry_id: initial.entry_id,
-      relative_path: "after",
-      title: "after",
-      location_revision: "2"
+      relative_path: "before",
+      title: "before",
+      location_revision: "1"
     }])
   })
 
@@ -452,21 +466,20 @@ describe("normal library scan", () => {
     const first = await scanRoot(server, root)
     if (!("task" in first.data)) throw new Error("expected initial scan task")
     const firstTerminal = await waitForTerminal(server, first.data.task.task_id)
-    expect(firstTerminal.status).toBe("completed_with_errors")
-    expect(firstTerminal.error?.code).toBe("fingerprint_unavailable")
+    expect(firstTerminal.status).toBe("succeeded")
     const initial = await withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
     }))
     expect(initial.data.entries.map((entry) => entry.relative_path).sort()).toEqual(["oversized", "source"])
     const source = initial.data.entries.find((entry) => entry.relative_path === "source")
     if (source === undefined) throw new Error("expected source entry")
+    await seedFingerprint(server.dbPath, source.entry_id, path.join(fixture, "source"))
 
     await rename(path.join(fixture, "source"), path.join(fixture, "renamed"))
     const moved = await scanRoot(server, root)
     if (!("task" in moved.data)) throw new Error("expected rename scan task")
     const movedTerminal = await waitForTerminal(server, moved.data.task.task_id)
-    expect(movedTerminal.status).toBe("completed_with_errors")
-    expect(movedTerminal.error?.code).toBe("fingerprint_unavailable")
+    expect(movedTerminal.status).toBe("succeeded")
     expect(movedTerminal.readiness_error).toBeNull()
     const after = await withLibraryClient(server, Effect.gen(function*() {
       return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
@@ -553,6 +566,7 @@ describe("normal library scan", () => {
       if (entry === undefined) throw new Error("expected source entry")
       return entry
     }))
+    await seedFingerprint(server.dbPath, initial.entry_id, path.join(fixture, "source"))
 
     await rename(path.join(fixture, "source"), path.join(fixture, "target-a"))
     await mkdir(path.join(fixture, "target-b"))
@@ -674,6 +688,170 @@ describe("normal library scan", () => {
     expect(result.data.entries).toHaveLength(2)
     expect(result.data.entries.find((entry) => entry.entry_id === initial.entry_id)).toMatchObject({ relative_path: "source" })
     expect(result.data.entries.find((entry) => entry.relative_path === "target")?.entry_id).not.toBe(initial.entry_id)
+  })
+
+  it("does not let an excluded duplicate steal a missing identity", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-duplicate-excluded-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "source", "same bytes")
+    await makeImageBook(fixture, "excluded-copy", "same bytes")
+    const root = await registerRoot(server, fixture, "Excluded duplicate")
+
+    const first = await scanRoot(server, root)
+    if (!("task" in first.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
+    const initial = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    const source = initial.data.entries.find((entry) => entry.relative_path === "source")
+    const excludedCopy = initial.data.entries.find((entry) => entry.relative_path === "excluded-copy")
+    if (source === undefined || excludedCopy === undefined) throw new Error("expected duplicate entries")
+    await seedFingerprint(server.dbPath, source.entry_id, path.join(fixture, "source"))
+    await seedFingerprint(server.dbPath, excludedCopy.entry_id, path.join(fixture, "excluded-copy"))
+
+    const policy = await withServerClient(server, Effect.gen(function*() {
+      return yield* (yield* ServerHttpClient).command({
+        params: { id: root.data.root_id },
+        payload: {
+          operation_id: randomUUID(), instance_id: server.instanceId, epoch: server.epoch,
+          expected_policy_revision: root.data.policy_revision,
+          command: { type: "exclude", exclusion: { path: "excluded-copy", scope: "exact" } }
+        }
+      })
+    }))
+    if ("task" in policy.data) throw new Error("expected policy response")
+
+    await rm(path.join(fixture, "source"), { recursive: true, force: true })
+    await makeImageBook(fixture, "target", "same bytes")
+    const moved = await scanRoot(server, { ...root, data: policy.data })
+    if (!("task" in moved.data)) throw new Error("expected duplicate scan task")
+    const terminal = await waitForTerminal(server, moved.data.task.task_id)
+    expect(terminal.status).toBe("completed_with_errors")
+    expect(terminal.readiness_error?.code).toBe("allocation_deferred")
+    const entries = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(entries.data.entries).toHaveLength(2)
+    expect(entries.data.entries.find((entry) => entry.entry_id === source.entry_id)).toMatchObject({
+      relative_path: "source",
+      location_revision: "1"
+    })
+    expect(entries.data.entries.find((entry) => entry.entry_id === excludedCopy.entry_id)).toMatchObject({
+      relative_path: "excluded-copy",
+      location_revision: "1"
+    })
+    expect(entries.data.entries.find((entry) => entry.relative_path === "target")).toBeUndefined()
+  })
+
+  it("does not let a missing pending duplicate steal a missing identity", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-duplicate-pending-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "source", "same bytes")
+    await makeImageBook(fixture, "pending-copy", "same bytes")
+    const root = await registerRoot(server, fixture, "Pending duplicate")
+
+    const first = await scanRoot(server, root)
+    if (!("task" in first.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
+    const initial = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    const source = initial.data.entries.find((entry) => entry.relative_path === "source")
+    const pendingCopy = initial.data.entries.find((entry) => entry.relative_path === "pending-copy")
+    if (source === undefined || pendingCopy === undefined) throw new Error("expected duplicate entries")
+    await seedFingerprint(server.dbPath, source.entry_id, path.join(fixture, "source"))
+    await seedFingerprint(server.dbPath, pendingCopy.entry_id, path.join(fixture, "pending-copy"))
+
+    const changedTime = new Date(Date.now() + 10_000)
+    await utimes(path.join(fixture, "pending-copy", "001.jpg"), changedTime, changedTime)
+    const pendingScan = await scanRoot(server, root)
+    if (!("task" in pendingScan.data)) throw new Error("expected pending scan task")
+    expect((await waitForTerminal(server, pendingScan.data.task.task_id)).readiness_error?.code).toBe("allocation_deferred")
+    const pendingEntries = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(pendingEntries.data.entries.find((entry) => entry.entry_id === pendingCopy.entry_id)?.state).toBe("replacement-pending")
+
+    await rm(path.join(fixture, "pending-copy"), { recursive: true, force: true })
+    await makeImageBook(fixture, "target", "same bytes")
+    const moved = await scanRoot(server, root)
+    if (!("task" in moved.data)) throw new Error("expected duplicate scan task")
+    const terminal = await waitForTerminal(server, moved.data.task.task_id)
+    expect(terminal.readiness_error?.code).toBe("allocation_deferred")
+    const entries = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(entries.data.entries.find((entry) => entry.entry_id === source.entry_id)?.relative_path).toBe("source")
+    expect(entries.data.entries.find((entry) => entry.entry_id === pendingCopy.entry_id)?.relative_path).toBe("pending-copy")
+    expect(entries.data.entries.find((entry) => entry.relative_path === "target")).toBeUndefined()
+  })
+
+  it("does not let a staged fingerprint on a present duplicate steal a missing identity", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-duplicate-staged-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "source", "same bytes")
+    await makeImageBook(fixture, "duplicate", "same bytes")
+    const root = await registerRoot(server, fixture, "Staged duplicate")
+
+    const first = await scanRoot(server, root)
+    if (!("task" in first.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
+    const initial = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    const source = initial.data.entries.find((entry) => entry.relative_path === "source")
+    const duplicate = initial.data.entries.find((entry) => entry.relative_path === "duplicate")
+    if (source === undefined || duplicate === undefined) throw new Error("expected duplicate entries")
+    await seedFingerprint(server.dbPath, source.entry_id, path.join(fixture, "source"))
+
+    await rm(path.join(fixture, "source"), { recursive: true, force: true })
+    const changedTime = new Date(Date.now() + 10_000)
+    await utimes(path.join(fixture, "duplicate", "001.jpg"), changedTime, changedTime)
+    await makeImageBook(fixture, "target", "same bytes")
+    const moved = await scanRoot(server, root)
+    if (!("task" in moved.data)) throw new Error("expected duplicate scan task")
+    const terminal = await waitForTerminal(server, moved.data.task.task_id)
+    expect(terminal.readiness_error?.code).toBe("allocation_deferred")
+    const entries = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(entries.data.entries.find((entry) => entry.entry_id === duplicate.entry_id)?.state).toBe("replacement-pending")
+    expect(entries.data.entries.find((entry) => entry.entry_id === source.entry_id)?.relative_path).toBe("source")
+    expect(entries.data.entries.find((entry) => entry.relative_path === "target")).toBeUndefined()
+  })
+
+  it("does not authorize a move when the target page set changed", async () => {
+    const server = await start()
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "henshin-library-page-set-change-"))
+    fixturePaths.add(fixture)
+    await makeImageBook(fixture, "source", "same bytes")
+    const root = await registerRoot(server, fixture, "Changed page set")
+
+    const first = await scanRoot(server, root)
+    if (!("task" in first.data)) throw new Error("expected initial scan task")
+    expect((await waitForTerminal(server, first.data.task.task_id)).status).toBe("succeeded")
+    const initial = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    const source = initial.data.entries[0]
+    if (source === undefined) throw new Error("expected source entry")
+    await seedFingerprint(server.dbPath, source.entry_id, path.join(fixture, "source"))
+
+    await rm(path.join(fixture, "source"), { recursive: true, force: true })
+    await makeImageBook(fixture, "target", "same bytes")
+    await writeFile(path.join(fixture, "target", "002.jpg"), "an added page")
+    const moved = await scanRoot(server, root)
+    if (!("task" in moved.data)) throw new Error("expected changed-page scan task")
+    const terminal = await waitForTerminal(server, moved.data.task.task_id)
+    expect(terminal.readiness_error?.code).toBe("allocation_deferred")
+    const entries = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 20 } })
+    }))
+    expect(entries.data.entries.find((entry) => entry.entry_id === source.entry_id)?.relative_path).toBe("source")
+    expect(entries.data.entries.find((entry) => entry.relative_path === "target")).toBeUndefined()
   })
 
   it("does not accept held discoveries when a later normal scan sees the same paths", async () => {

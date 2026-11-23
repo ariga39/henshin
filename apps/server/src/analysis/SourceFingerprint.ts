@@ -3,7 +3,7 @@ import { lstat, open } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 import type { ScanFingerprint } from "@henshin/contracts/root"
-import type { SourceManifest } from "./SourceManifestAnalysis"
+import { recheckSourceObservation, type SourceManifest } from "./SourceManifestAnalysis"
 
 const MAX_READ_BYTES = 1024 * 1024
 export const FINGERPRINT_MAX_BYTES = 4 * 1024 ** 3
@@ -83,12 +83,12 @@ const hashFile = async (sourcePath: string, budget: FingerprintBudget): Promise<
   }
 }
 
-const archiveFingerprint = async (sourcePath: string, budget: FingerprintBudget): Promise<ScanFingerprint> => {
-  checkBudget(budget)
+const archiveFingerprint = async (sourcePath: string, manifest: SourceManifest, budget: FingerprintBudget): Promise<ScanFingerprint> => {
+  await assertManifestObservation(sourcePath, manifest, budget)
   const before = await lstat(sourcePath, { bigint: false })
   if (!before.isFile()) throw new FingerprintSourceChanged()
   const hashed = await hashFile(sourcePath, budget)
-  checkBudget(budget)
+  await assertManifestObservation(sourcePath, manifest, budget)
   const after = await lstat(sourcePath, { bigint: false })
   if (!after.isFile() || statKey(before) !== statKey(after)) throw new FingerprintSourceChanged()
   return { profile: "archive-sha256-v1", digest: hashed.digest.toString("hex") }
@@ -106,8 +106,22 @@ const writeSize = (hash: ReturnType<typeof createHash>, size: number): void => {
   hash.update(encoded)
 }
 
-const directoryFingerprint = async (sourcePath: string, manifest: SourceManifest, budget: FingerprintBudget): Promise<ScanFingerprint> => {
+const assertManifestObservation = async (
+  sourcePath: string,
+  manifest: SourceManifest,
+  budget: FingerprintBudget
+): Promise<void> => {
   checkBudget(budget)
+  const remainingMs = Math.max(1, budget.deadlineAt - Date.now())
+  const observation = await recheckSourceObservation(sourcePath, manifest.sourceKind, manifest.after.entryCount, {
+    signal: budget.signal,
+    limits: { deadlineMs: remainingMs }
+  })
+  if (observation.observationToken !== manifest.after.observationToken) throw new FingerprintSourceChanged()
+}
+
+const directoryFingerprint = async (sourcePath: string, manifest: SourceManifest, budget: FingerprintBudget): Promise<ScanFingerprint> => {
+  await assertManifestObservation(sourcePath, manifest, budget)
   const before = await lstat(sourcePath, { bigint: false })
   if (!before.isDirectory()) throw new FingerprintSourceChanged()
   const digest = createHash("sha256")
@@ -124,7 +138,7 @@ const directoryFingerprint = async (sourcePath: string, manifest: SourceManifest
     writeSize(digest, hashed.size)
     digest.update(hashed.digest)
   }
-  checkBudget(budget)
+  await assertManifestObservation(sourcePath, manifest, budget)
   const after = await lstat(sourcePath, { bigint: false })
   if (!after.isDirectory() || statKey(before) !== statKey(after)) throw new FingerprintSourceChanged()
   return { profile: "directory-pages-sha256-v1", digest: digest.digest("hex") }
@@ -144,6 +158,6 @@ export const fingerprintSource = async (
     filesRead: 0
   }
   return manifest.sourceKind === "archive"
-    ? archiveFingerprint(sourcePath, budget)
+    ? archiveFingerprint(sourcePath, manifest, budget)
     : directoryFingerprint(sourcePath, manifest, budget)
 }
