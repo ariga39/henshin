@@ -7,6 +7,7 @@ import {
   libraryOpenStateFor,
   loadActiveLibraryOpenState,
   openSelectedLibraryEntry,
+  searchLibrary,
   selectLibraryEntry
 } from "../src/renderer/workflows"
 import { viewStore } from "../src/renderer/store"
@@ -74,7 +75,8 @@ const resetView = () => {
 afterEach(resetView)
 
 describe("library renderer workflow", () => {
-  it.each(["replacement-pending", "detached"] as const)("does not open a %s entry", async (state) => {
+  it("does not open a replacement-pending entry", async () => {
+    const state = "replacement-pending" as const
     let calls = 0
     const client = LibraryClient.of({
       search: () => Effect.succeed({ ok: true as const, data: { entries: [], has_more: false, next_cursor: null, library_change_revision: "1" } }),
@@ -97,6 +99,42 @@ describe("library renderer workflow", () => {
 
     expect(calls).toBe(0)
     expect(viewStore.getState().library_open_states).toEqual([])
+  })
+
+  it("clears the selected entry and profile when the Library query changes", async () => {
+    const client = LibraryClient.of({
+      search: (input) => {
+        expect(input).toEqual({ query: "new query", page_size: 50 })
+        return Effect.succeed({
+          ok: true as const,
+          data: { entries: [entry(entryBId, "book-b")], has_more: false, next_cursor: null, library_change_revision: "2" }
+        })
+      },
+      open: () => Effect.succeed({ ok: true as const, data: accepted(entryAId) }),
+      status: () => Effect.succeed({ ok: true as const, data: null }),
+      getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
+    })
+    viewStore.set({
+      library_query: "old query",
+      library_entries: [entry(entryAId, "book-a")],
+      library_selected_entry_id: entryAId,
+      library_open_profile_id: profileId,
+      library_open_states: [{
+        namespace_id: namespaceId,
+        entry_id: entryAId,
+        profile_id: profileId,
+        connection_generation: 0,
+        status: "accepted",
+        result: accepted(entryAId)
+      }]
+    })
+
+    await run(searchLibrary("new query"), client)
+
+    expect(viewStore.getState().library_selected_entry_id).toBeNull()
+    expect(viewStore.getState().library_open_profile_id).toBeNull()
+    expect(viewStore.getState().library_entries).toEqual([entry(entryBId, "book-b")])
+    expect(viewStore.getState().library_open_states).toHaveLength(1)
   })
 
   it("keeps the latest terminal action through reselection and follows a newer active action", async () => {

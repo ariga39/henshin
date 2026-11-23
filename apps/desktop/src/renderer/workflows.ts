@@ -1438,11 +1438,18 @@ export const loadLibrary = (append = false, query = viewStore.getState().library
 
 export const searchLibrary = (query: string) =>
   Effect.gen(function*() {
+    const current = viewStore.getState()
     yield* Effect.sync(() => viewStore.set({
       library_query: query,
       library_entries: [],
       library_cursor: null,
-      library_has_more: false
+      library_has_more: false,
+      ...(current.library_query === query
+        ? {}
+        : {
+            library_selected_entry_id: null,
+            library_open_profile_id: null
+          })
     }))
     yield* loadLibrary(false, query)
   })

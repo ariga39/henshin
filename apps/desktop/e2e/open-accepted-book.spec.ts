@@ -197,6 +197,8 @@ test("opens an accepted Library entry through one native fixture handoff", async
     await followerEntry.getByRole("button", { name: "Open details for accepted-book" }).click()
     const followerInFlight = secondWindow.getByTestId("library-open-result")
     await expect(followerInFlight).toHaveText(/^in-flight: .*\(action [0-9a-f-]+; reader System default reader\)$/)
+    await expect(secondWindow.getByTestId("library-open-profile")).toBeDisabled()
+    await expect(secondWindow.getByTestId("library-open")).toBeDisabled()
     const inFlightText = await followerInFlight.textContent()
     const actionId = inFlightText?.match(/action ([0-9a-f-]+);/)?.[1]
     if (actionId === undefined) throw new Error("follower did not render the active action ID")
@@ -209,6 +211,9 @@ test("opens an accepted Library entry through one native fixture handoff", async
       hook.release("")
     })
     await expect(followerInFlight).toHaveText(new RegExp(`^accepted: .*\\(action ${actionId}; reader System default reader\\)$`))
+    await expect(secondWindow.getByTestId("library-open-profile")).toBeEnabled()
+    await secondWindow.getByTestId("library-open-profile").selectOption(systemProfileId)
+    await expect(secondWindow.getByTestId("library-open")).toBeEnabled()
     expect(await app.evaluate(() => (globalThis as unknown as {
       readonly __henshinOpenPathTest: { readonly calls: ReadonlyArray<string> }
     }).__henshinOpenPathTest.calls)).toEqual([expectedTarget])

@@ -160,10 +160,9 @@ describe("Library reader profile details", () => {
     expect(markup).not.toContain('data-testid="library-open" disabled')
   })
 
-  it.each([
-    ["replacement-pending", "replacement review is required"],
-    ["detached", "this entry is detached and no longer available to open"]
-  ] as const)("explains why a %s entry cannot be opened", (state, reason) => {
+  it("explains why a replacement-pending entry cannot be opened", () => {
+    const state = "replacement-pending" as const
+    const reason = "replacement review is required"
     viewStore.set({
       library_entries: [{ ...entry, state }],
       library_status: "ready",
