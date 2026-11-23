@@ -15,11 +15,16 @@ import {
 } from "./persistence/ServerOwnership"
 import { DatabaseWorker, DatabaseWorkerError } from "./persistence/DatabaseWorker"
 import { createBackupArchive } from "./maintenance/BackupArchive"
+import { runBackupDrill } from "./maintenance/BackupDrill"
 import {
+  BackupArtifactRow,
   BackupArtifactCompletionOutcome,
   BackupArtifactReservationOutcome,
   BackupDestinationRegistrationOutcome,
   BackupDestinationRow,
+  BackupDrillCompletionOutcome,
+  BackupDrillRunRow,
+  BackupDrillStartOutcome,
   ServerRootRow,
 } from "./persistence/worker-protocol"
 import {
@@ -55,7 +60,8 @@ interface IndependentOptions {
 const usage = (): string =>
   "usage: server.mjs (--data-dir <directory> | --database <path>) [--port <1-65535>] [--initialize-owner | --rotate-owner]\n" +
   "       server.mjs backup-destination <list|register|replace> (--data-dir <directory> | --database <path>) [--name <name>] [--path <directory>] [--id <destination-id>] [--confirm]\n" +
-  "       server.mjs backup create (--data-dir <directory> | --database <path>) --destination-id <destination-id> [--label <label>]"
+  "       server.mjs backup create (--data-dir <directory> | --database <path>) --destination-id <destination-id> [--label <label>]\n" +
+  "       server.mjs backup drill [list] (--data-dir <directory> | --database <path>) [--artifact-id <artifact-id>]"
 
 interface BackupDestinationOptions {
   readonly command: "list" | "register" | "replace"
@@ -72,6 +78,13 @@ interface BackupCreateOptions {
   readonly database?: string
   readonly destinationId: string
   readonly label: string | null
+}
+
+interface BackupDrillOptions {
+  readonly command: "run" | "list"
+  readonly dataDir?: string
+  readonly database?: string
+  readonly artifactId?: string
 }
 
 const parseBackupCreateOptions = (args: ReadonlyArray<string>): BackupCreateOptions => {
@@ -106,6 +119,39 @@ const parseBackupCreateOptions = (args: ReadonlyArray<string>): BackupCreateOpti
   }
   if ((dataDir === undefined) === (database === undefined) || destinationId === undefined) throw new Error(usage())
   return { dataDir, database, destinationId, label }
+}
+
+const parseBackupDrillOptions = (args: ReadonlyArray<string>): BackupDrillOptions => {
+  if (args[1] !== "drill") throw new Error(usage())
+  const command = args[2] === "list" ? "list" : "run"
+  let dataDir: string | undefined
+  let database: string | undefined
+  let artifactId: string | undefined
+  const firstOption = command === "list" ? 3 : 2
+  for (let index = firstOption; index < args.length; index += 1) {
+    switch (args[index]) {
+      case "--data-dir":
+        dataDir = args[++index]
+        if (dataDir === undefined || dataDir.startsWith("--")) throw new Error(usage())
+        break
+      case "--database":
+        database = args[++index]
+        if (database === undefined || database.startsWith("--")) throw new Error(usage())
+        break
+      case "--artifact-id":
+        artifactId = args[++index]
+        if (artifactId === undefined || artifactId.startsWith("--")) throw new Error(usage())
+        break
+      case "--help":
+        throw new Error(usage())
+      default:
+        throw new Error(usage())
+    }
+  }
+  if ((dataDir === undefined) === (database === undefined)) throw new Error(usage())
+  if (command === "run" && artifactId === undefined) throw new Error(usage())
+  if (command === "list" && artifactId !== undefined) throw new Error(usage())
+  return { command, dataDir, database, artifactId }
 }
 
 const parseBackupDestinationOptions = (args: ReadonlyArray<string>): BackupDestinationOptions => {
@@ -421,6 +467,36 @@ const decodeBackupArtifactCompletionOutcome = (value: unknown): typeof BackupArt
   return decoded.value
 }
 
+const decodeBackupArtifacts = (value: unknown): ReadonlyArray<typeof BackupArtifactRow.Type> => {
+  const decoded = Schema.decodeUnknownOption(Schema.Array(BackupArtifactRow))(value)
+  if (Option.isNone(decoded)) throw new Error("database returned invalid backup artifacts")
+  return decoded.value
+}
+
+const decodeBackupDrillStartOutcome = (value: unknown): typeof BackupDrillStartOutcome.Type => {
+  const decoded = Schema.decodeUnknownOption(BackupDrillStartOutcome)(value)
+  if (Option.isNone(decoded)) throw new Error("database returned invalid backup drill start result")
+  return decoded.value
+}
+
+const decodeBackupDrillCompletionOutcome = (value: unknown): typeof BackupDrillCompletionOutcome.Type => {
+  const decoded = Schema.decodeUnknownOption(BackupDrillCompletionOutcome)(value)
+  if (Option.isNone(decoded)) throw new Error("database returned invalid backup drill completion result")
+  return decoded.value
+}
+
+const decodeBackupDrillRuns = (value: unknown): ReadonlyArray<typeof BackupDrillRunRow.Type> => {
+  const decoded = Schema.decodeUnknownOption(Schema.Array(BackupDrillRunRow))(value)
+  if (Option.isNone(decoded)) throw new Error("database returned invalid backup drill runs")
+  return decoded.value
+}
+
+const drillSummary = (runs: ReadonlyArray<typeof BackupDrillRunRow.Type>) => ({
+  latest_attempt: runs[0] ?? null,
+  last_successful: runs.find((run) => run.status === "passed") ?? null,
+  runs
+})
+
 const runDestinationWorker = async <A>(
   dbPath: string,
   program: (worker: DatabaseWorker["Service"]) => Effect.Effect<A, DatabaseWorkerError>
@@ -592,6 +668,49 @@ const runBackupCreateCommand = async (options: BackupCreateOptions): Promise<voi
   process.stdout.write(JSON.stringify(result) + "\n")
 }
 
+const runBackupDrillCommand = async (options: BackupDrillOptions): Promise<void> => {
+  const dbPath = await resolveIndependentDatabasePath(options)
+  const result = await runDestinationWorker(dbPath, (worker) =>
+    Effect.gen(function*() {
+      const runs = decodeBackupDrillRuns(yield* worker.call({ op: "listBackupDrillRuns" }))
+      if (options.command === "list") return drillSummary(runs)
+      const artifactId = options.artifactId
+      if (artifactId === undefined) return yield* Effect.fail(new DatabaseWorkerError({ message: "backup artifact id is required" }))
+      const artifacts = decodeBackupArtifacts(yield* worker.call({ op: "listBackupArtifacts" }))
+      const artifact = artifacts.find((candidate) => candidate.artifactId === artifactId)
+      if (artifact === undefined) return yield* Effect.fail(new DatabaseWorkerError({ message: "backup artifact was not found" }))
+      if (artifact.status !== "completed" || artifact.manifestDigest === null) {
+        return yield* Effect.fail(new DatabaseWorkerError({ message: "backup artifact is not completed" }))
+      }
+      const destinations = decodeBackupDestinations(yield* worker.call({ op: "listBackupDestinations" }))
+      const destination = destinations.find((candidate) => candidate.destinationId === artifact.destinationId)
+      if (destination === undefined) return yield* Effect.fail(new DatabaseWorkerError({ message: "backup destination was not found" }))
+      const roots = decodeServerRoots(yield* worker.call({ op: "listRoots" }))
+      const drill = yield* Effect.promise(() => runBackupDrill({
+        dbPath,
+        destination,
+        artifact,
+        roots,
+        start: async (request) => decodeBackupDrillStartOutcome(await Effect.runPromise(worker.call({
+          op: "startBackupDrill",
+          ...request
+        }))),
+        complete: async (request) => decodeBackupDrillCompletionOutcome(await Effect.runPromise(worker.call({
+          op: "completeBackupDrill",
+          ...request
+        })))
+      }))
+      const completedRuns = decodeBackupDrillRuns(yield* worker.call({ op: "listBackupDrillRuns" }))
+      return { ...drill, ...drillSummary(completedRuns) }
+    })
+  )
+  process.stdout.write(JSON.stringify(result) + "\n")
+  if (options.command === "run") {
+    const drillResult = result as unknown as { readonly run: typeof BackupDrillRunRow.Type }
+    if (drillResult.run.status !== "passed") process.exitCode = 1
+  }
+}
+
 const main = async () => {
   const args = process.argv.slice(2)
   if (args.length === 0) {
@@ -618,16 +737,17 @@ const main = async () => {
   }
 
   if (args[0] === "backup") {
-    let options: BackupCreateOptions
+    let options: BackupCreateOptions | BackupDrillOptions
     try {
-      options = parseBackupCreateOptions(args)
+      options = args[1] === "create" ? parseBackupCreateOptions(args) : parseBackupDrillOptions(args)
     } catch (error) {
       console.error(error instanceof Error ? error.message : usage())
       process.exitCode = 2
       return
     }
     try {
-      await runBackupCreateCommand(options)
+      if ("label" in options) await runBackupCreateCommand(options)
+      else await runBackupDrillCommand(options)
     } catch (error) {
       console.error(error instanceof Error ? error.message : "backup creation failed")
       process.exitCode = 1

@@ -197,3 +197,15 @@ node apps/server/dist/server.mjs backup create \
   --destination-id <destination-id> \
   --label "pre-upgrade archive"
 ```
+
+Run an isolated restore drill while the service is stopped. The drill records
+its result against the exact artifact and manifest digest; it never replaces
+the live database or writes collection files:
+
+```sh
+node apps/server/dist/server.mjs backup drill \
+  --data-dir "$PWD/.henshin-server-data" \
+  --artifact-id <artifact-id>
+node apps/server/dist/server.mjs backup drill list \
+  --data-dir "$PWD/.henshin-server-data"
+```

@@ -91,6 +91,43 @@ export const BackupArtifactCompletionOutcome = Schema.Union([
 ])
 export type BackupArtifactCompletionOutcome = typeof BackupArtifactCompletionOutcome.Type
 
+export const BackupDrillRunRow = Schema.Struct({
+  runId: Uuid,
+  artifactId: Uuid,
+  manifestDigest: Schema.String,
+  status: Schema.Union([
+    Schema.Literal("running"),
+    Schema.Literal("passed"),
+    Schema.Literal("failed"),
+    Schema.Literal("interrupted")
+  ]),
+  startedAtMs: Schema.Int,
+  completedAtMs: Schema.NullOr(Schema.Int),
+  durationMs: Schema.NullOr(Schema.Natural),
+  diagnosticCode: Schema.NullOr(Schema.String.check(Schema.isMaxLength(100))),
+  diagnosticMessage: Schema.NullOr(Schema.String.check(Schema.isMaxLength(512))),
+  checksJson: Schema.NullOr(Schema.String.check(Schema.isMaxLength(64 * 1024)))
+})
+export type BackupDrillRunRow = typeof BackupDrillRunRow.Type
+
+export const BackupDrillStartOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("started"), run: BackupDrillRunRow }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), run: BackupDrillRunRow }),
+  Schema.Struct({ kind: Schema.Literal("run_conflict") }),
+  Schema.Struct({ kind: Schema.Literal("artifact_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("artifact_not_completed") }),
+  Schema.Struct({ kind: Schema.Literal("manifest_conflict") })
+])
+export type BackupDrillStartOutcome = typeof BackupDrillStartOutcome.Type
+
+export const BackupDrillCompletionOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("completed"), run: BackupDrillRunRow }),
+  Schema.Struct({ kind: Schema.Literal("replayed"), run: BackupDrillRunRow }),
+  Schema.Struct({ kind: Schema.Literal("run_not_found") }),
+  Schema.Struct({ kind: Schema.Literal("run_conflict") })
+])
+export type BackupDrillCompletionOutcome = typeof BackupDrillCompletionOutcome.Type
+
 export const RootRegistrationOutcome = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("registered"), root: ServerRootRow }),
   Schema.Struct({ kind: Schema.Literal("replayed"), root: ServerRootRow }),
@@ -418,6 +455,7 @@ export const WorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("listRoots") }),
   Schema.Struct({ op: Schema.Literal("listBackupDestinations") }),
   Schema.Struct({ op: Schema.Literal("listBackupArtifacts") }),
+  Schema.Struct({ op: Schema.Literal("listBackupDrillRuns") }),
   Schema.Struct({
     op: Schema.Literal("registerBackupDestination"),
     name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
@@ -449,6 +487,22 @@ export const WorkerRequest = Schema.Union([
     manifestDigest: Schema.String,
     sizeBytes: Schema.Natural,
     completedAtMs: Schema.Int
+  }),
+  Schema.Struct({
+    op: Schema.Literal("startBackupDrill"),
+    runId: Uuid,
+    artifactId: Uuid,
+    manifestDigest: Schema.String,
+    startedAtMs: Schema.Int
+  }),
+  Schema.Struct({
+    op: Schema.Literal("completeBackupDrill"),
+    runId: Uuid,
+    status: Schema.Union([Schema.Literal("passed"), Schema.Literal("failed"), Schema.Literal("interrupted")]),
+    completedAtMs: Schema.Int,
+    diagnosticCode: Schema.NullOr(Schema.String.check(Schema.isMaxLength(100))),
+    diagnosticMessage: Schema.NullOr(Schema.String.check(Schema.isMaxLength(512))),
+    checksJson: Schema.NullOr(Schema.String.check(Schema.isMaxLength(64 * 1024)))
   }),
   Schema.Struct({
     op: Schema.Literal("lookupRootOperation"),
