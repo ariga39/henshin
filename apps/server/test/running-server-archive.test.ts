@@ -270,6 +270,23 @@ describe("running-server manual archive", () => {
     expect(createHash("sha256").update(await readFile(archivePath)).digest("hex")).toBe(archiveDigest)
     expect((await stat(archivePath)).ino).toBe(archiveIdentity.ino)
 
+    const independent = await Promise.all([
+      withClient(server, Effect.gen(function*() {
+        return yield* (yield* MaintenanceHttpClient).createBackup({
+          payload: { ...payload, operation_id: randomUUID(), label: "independent archive one" }
+        })
+      })),
+      withClient(server, Effect.gen(function*() {
+        return yield* (yield* MaintenanceHttpClient).createBackup({
+          payload: { ...payload, operation_id: randomUUID(), label: "independent archive two" }
+        })
+      }))
+    ])
+    expect(independent[0].data.task.task_id).not.toBe(independent[1].data.task.task_id)
+    expect(independent[0].data.task.artifact_id).not.toBe(independent[1].data.task.artifact_id)
+    expect((await Promise.all(independent.map((submission) => waitForBackup(server, submission.data.task.task_id)))).map((task) => task.status))
+      .toEqual(["succeeded", "succeeded"])
+
     const movedDestination = path.join(workspace, "previous-destination")
     await rename(destination, movedDestination)
     await mkdir(destination)
@@ -278,7 +295,24 @@ describe("running-server manual archive", () => {
         payload: { ...payload, operation_id: randomUUID() }
       })
     }))
+    const changedFailed = await waitForBackup(server, changed.data.task.task_id)
+    expect(changedFailed.status).toBe("failed")
+    expect(changedFailed.error?.message).toContain("backup destination changed")
+    const changedRetry = await withClient(server, Effect.gen(function*() {
+      return yield* (yield* MaintenanceHttpClient).createBackup({
+        payload: { ...payload, operation_id: changed.data.task.operation_id }
+      })
+    }))
+    expect(changedRetry.data.task.task_id).toBe(changed.data.task.task_id)
     expect((await waitForBackup(server, changed.data.task.task_id)).status).toBe("failed")
+    await server.stop()
+    server = await startServer(dbPath)
+    servers.push(server)
+    const failedAfterRestart = await withClient(server, Effect.gen(function*() {
+      return yield* (yield* TaskHttpClient).get({ params: { id: changed.data.task.task_id } })
+    }))
+    if (failedAfterRestart.data.kind !== "backup") throw new Error("expected a backup task after restart")
+    expect(failedAfterRestart.data.status).toBe("failed")
     expect((await readFile(path.join(movedDestination, completed.relative_path))).byteLength).toBeGreaterThan(0)
   })
 })

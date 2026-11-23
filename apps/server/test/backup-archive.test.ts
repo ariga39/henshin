@@ -29,7 +29,11 @@ const directArchiveContext = async (options: {
   readonly dataDir: string
   readonly destination: string
   readonly destinationId: string
+  readonly artifactId?: string
+  readonly operationId?: string
+  readonly afterSnapshot?: () => Promise<void>
   readonly beforePublish?: () => Promise<void>
+  readonly afterPublish?: () => Promise<void>
 }): Promise<{ readonly context: BackupArchiveContext; readonly close: () => void }> => {
   const database = new DatabaseSync(path.join(options.dataDir, "server.sqlite"))
   const destinationStats = await stat(options.destination)
@@ -47,8 +51,47 @@ const directArchiveContext = async (options: {
     destination: destinationRow,
     roots: [],
     label: null,
+    artifactId: options.artifactId,
+    operationId: options.operationId,
+    afterSnapshot: options.afterSnapshot,
     beforePublish: options.beforePublish,
+    afterPublish: options.afterPublish,
     reserve: async (request) => {
+      const existing = database.prepare(
+        "SELECT artifact_id, destination_id, operation_id, relative_path, publication_order, retention_class, label, status, manifest_digest, size_bytes, created_at_ms, completed_at_ms FROM backup_artifacts WHERE operation_id = ?"
+      ).get(request.operationId) as {
+        artifact_id: string
+        destination_id: string
+        operation_id: string
+        relative_path: string
+        publication_order: number
+        retention_class: "archive"
+        label: string | null
+        status: "reserved" | "completed"
+        manifest_digest: string | null
+        size_bytes: number | null
+        created_at_ms: number
+        completed_at_ms: number | null
+      } | undefined
+      if (existing !== undefined) {
+        return {
+          kind: "replayed" as const,
+          artifact: {
+            artifactId: existing.artifact_id,
+            destinationId: existing.destination_id,
+            operationId: existing.operation_id,
+            relativePath: existing.relative_path,
+            publicationOrder: existing.publication_order,
+            retentionClass: existing.retention_class,
+            label: existing.label,
+            status: existing.status,
+            manifestDigest: existing.manifest_digest,
+            sizeBytes: existing.size_bytes,
+            createdAtMs: existing.created_at_ms,
+            completedAtMs: existing.completed_at_ms
+          }
+        }
+      }
       const nextOrder = (database.prepare(
         "SELECT COALESCE(MAX(publication_order), 0) + 1 AS next_order FROM backup_artifacts WHERE destination_id = ?"
       ).get(request.destinationId) as { next_order: number }).next_order
@@ -155,8 +198,8 @@ describe("server backup archive", () => {
       cwd: path.resolve(".")
     })
     await stat(path.join(dataDir, ".henshin-server-auth.sqlite"))
-    const database = new DatabaseSync(path.join(dataDir, "server.sqlite"))
     const entryId = randomUUID()
+    const database = new DatabaseSync(path.join(dataDir, "server.sqlite"))
     try {
       const library = database.prepare("SELECT library_id FROM server_library WHERE id = 1").get() as { library_id: string }
       const identity = await stat(collection)
@@ -252,6 +295,41 @@ describe("server backup archive", () => {
     snapshot.close()
     expect(await readFile(sourceFile)).toEqual(sourceBytes)
 
+    const deterministic = await directArchiveContext({
+      dataDir,
+      destination,
+      destinationId: saved.destination_id,
+      afterSnapshot: async () => {
+        const live = new DatabaseSync(path.join(dataDir, "server.sqlite"))
+        try {
+          live.prepare(
+            "INSERT INTO entry_overrides(entry_id, title_present, title, title_search, notes, notes_revision, notes_updated_at_ms) VALUES(?, 0, NULL, NULL, ?, 1, ?)"
+          ).run(entryId, "edit after snapshot", Date.now())
+        } finally {
+          live.close()
+        }
+      }
+    })
+    const deterministicResult = await createBackupArchive(deterministic.context)
+    deterministic.close()
+    const deterministicReader = new ZipReader(new Uint8ArrayReader(new Uint8Array(await readFile(deterministicResult.archivePath))))
+    const deterministicEntry = (await deterministicReader.getEntries()).find((entry) => entry.filename === "state.sqlite")
+    if (deterministicEntry === undefined || deterministicEntry.directory) throw new Error("deterministic archive omitted its snapshot")
+    const deterministicState = await deterministicEntry.getData(new Uint8ArrayWriter())
+    await deterministicReader.close()
+    const deterministicSnapshotPath = path.join(workspace, "deterministic-snapshot.sqlite")
+    await writeFile(deterministicSnapshotPath, deterministicState)
+    const deterministicSnapshot = new DatabaseSync(deterministicSnapshotPath, { readOnly: true })
+    const deterministicLive = new DatabaseSync(path.join(dataDir, "server.sqlite"), { readOnly: true })
+    try {
+      expect(deterministicSnapshot.prepare("SELECT notes FROM entry_overrides WHERE entry_id = ?").get(entryId)).toBeUndefined()
+      expect((deterministicLive.prepare("SELECT notes FROM entry_overrides WHERE entry_id = ?").get(entryId) as { notes: string }).notes)
+        .toBe("edit after snapshot")
+    } finally {
+      deterministicSnapshot.close()
+      deterministicLive.close()
+    }
+
     const interrupted = await directArchiveContext({
       dataDir,
       destination,
@@ -262,7 +340,65 @@ describe("server backup archive", () => {
     })
     await expect(createBackupArchive(interrupted.context)).rejects.toThrow("test publication interruption")
     interrupted.close()
-    expect((await readdir(path.join(destination, "archives"))).filter((name) => name.endsWith(".henshin.zip"))).toHaveLength(1)
+    expect((await readdir(path.join(destination, "archives"))).filter((name) => name.endsWith(".henshin.zip"))).toHaveLength(2)
+
+    const recoverableArtifactId = randomUUID()
+    const recoverableOperationId = randomUUID()
+    const published = await directArchiveContext({
+      dataDir,
+      destination,
+      destinationId: saved.destination_id,
+      artifactId: recoverableArtifactId,
+      operationId: recoverableOperationId,
+      afterPublish: async () => {
+        throw new Error("test catalog interruption")
+      }
+    })
+    await expect(createBackupArchive(published.context)).rejects.toThrow("test catalog interruption")
+    const publishedPath = path.join(destination, "archives", `${recoverableArtifactId}.henshin.zip`)
+    const publishedBeforeRetry = await stat(publishedPath)
+    const publishedDigest = createHash("sha256").update(await readFile(publishedPath)).digest("hex")
+    published.close()
+
+    const retry = await directArchiveContext({
+      dataDir,
+      destination,
+      destinationId: saved.destination_id,
+      artifactId: recoverableArtifactId,
+      operationId: recoverableOperationId
+    })
+    const reconciled = await createBackupArchive(retry.context)
+    retry.close()
+    expect(reconciled.artifact.status).toBe("completed")
+    expect(createHash("sha256").update(await readFile(publishedPath)).digest("hex")).toBe(publishedDigest)
+    expect((await stat(publishedPath)).ino).toBe(publishedBeforeRetry.ino)
+
+    const unrecognizedArtifactId = randomUUID()
+    const unrecognizedOperationId = randomUUID()
+    const unrecognized = await directArchiveContext({
+      dataDir,
+      destination,
+      destinationId: saved.destination_id,
+      artifactId: unrecognizedArtifactId,
+      operationId: unrecognizedOperationId,
+      beforePublish: async () => {
+        throw new Error("test stale publication")
+      }
+    })
+    await expect(createBackupArchive(unrecognized.context)).rejects.toThrow("test stale publication")
+    unrecognized.close()
+    const unrecognizedPath = path.join(destination, "archives", `${unrecognizedArtifactId}.henshin.zip`)
+    await writeFile(unrecognizedPath, "unrecognized file")
+    const repaired = await directArchiveContext({
+      dataDir,
+      destination,
+      destinationId: saved.destination_id,
+      artifactId: unrecognizedArtifactId,
+      operationId: unrecognizedOperationId
+    })
+    await expect(createBackupArchive(repaired.context)).rejects.toThrow()
+    repaired.close()
+    expect(await readFile(unrecognizedPath, "utf8")).toBe("unrecognized file")
 
     const replacedPath = path.join(workspace, "destination-before-replacement")
     const replacement = await directArchiveContext({
@@ -276,7 +412,7 @@ describe("server backup archive", () => {
     })
     await expect(createBackupArchive(replacement.context)).rejects.toThrow("backup destination changed and publication was blocked")
     replacement.close()
-    expect((await readdir(path.join(replacedPath, "archives"))).filter((name) => name.endsWith(".henshin.zip"))).toHaveLength(1)
+    expect((await readdir(path.join(replacedPath, "archives"))).filter((name) => name.endsWith(".henshin.zip"))).toHaveLength(4)
     await expect(stat(path.join(destination, "archives"))).rejects.toMatchObject({ code: "ENOENT" })
 
     const catalog = new DatabaseSync(path.join(dataDir, "server.sqlite"))
@@ -284,7 +420,7 @@ describe("server backup archive", () => {
       const artifacts = catalog.prepare(
         "SELECT status FROM backup_artifacts ORDER BY publication_order"
       ).all() as Array<{ status: string }>
-      expect(artifacts.map((artifact) => artifact.status)).toEqual(["completed", "reserved", "reserved"])
+      expect(artifacts.map((artifact) => artifact.status)).toEqual(["completed", "completed", "reserved", "completed", "reserved", "reserved"])
     } finally {
       catalog.close()
     }

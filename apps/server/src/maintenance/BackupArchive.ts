@@ -1,7 +1,8 @@
 import { backup, DatabaseSync } from "node:sqlite"
 import { createHash, randomUUID } from "node:crypto"
-import { chmod, lstat, mkdir, mkdtemp, open, realpath, rename, rm, stat } from "node:fs/promises"
+import { chmod, lstat, link, mkdir, mkdtemp, open, realpath, rm, stat } from "node:fs/promises"
 import { join, dirname } from "node:path"
+import { Option, Schema } from "effect"
 import serverPackage from "../../package.json"
 import {
   Uint8ArrayReader,
@@ -14,6 +15,7 @@ import {
   MAX_CONFIGURATION_BYTES,
   MAX_MANIFEST_BYTES,
   MAX_STATE_BYTES,
+  readBackupArchiveMember,
   streamBackupArchiveEntry
 } from "./BackupArchiveIO"
 import {
@@ -57,7 +59,11 @@ export interface BackupArchiveContext {
     readonly completedAtMs: number
   }) => Promise<BackupArtifactCompletionOutcome>
   /** Test-only failure seam; production callers leave this unset. */
+  readonly afterSnapshot?: () => Promise<void>
+  /** Test-only failure seam; production callers leave this unset. */
   readonly beforePublish?: () => Promise<void>
+  /** Test-only failure seam; production callers leave this unset. */
+  readonly afterPublish?: () => Promise<void>
 }
 
 export const backupArchiveRelativePath = (artifactId: string): string =>
@@ -90,15 +96,20 @@ const destinationObservation = (destination: BackupDestinationRow): WritableLoca
 const isMissing = (error: unknown): boolean =>
   typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
 
+const errorCode = (error: unknown): string | undefined =>
+  typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+    ? error.code
+    : undefined
+
 const ensureArchiveDirectory = async (destination: string): Promise<string> => {
   const expected = join(destination, ARCHIVE_DIRECTORY)
   try {
-    const existing = await lstat(expected)
-    if (!existing.isDirectory() || existing.isSymbolicLink()) throw new Error("backup destination archive directory is unsafe")
-  } catch (error) {
-    if (!isMissing(error)) throw error
     await mkdir(expected, { mode: 0o700 })
+  } catch (error) {
+    if (errorCode(error) !== "EEXIST") throw error
   }
+  const existing = await lstat(expected)
+  if (!existing.isDirectory() || existing.isSymbolicLink()) throw new Error("backup destination archive directory is unsafe")
   await chmod(expected, 0o700)
   const canonical = await realpath(expected)
   if (canonical !== expected) throw new Error("backup destination archive directory is unsafe")
@@ -222,6 +233,88 @@ const verifyArchive = async (
   })
 }
 
+const Digest = Schema.String.check(Schema.isMinLength(64), Schema.isMaxLength(64))
+const ArchiveManifest = Schema.Struct({
+  format_version: Schema.Literal(1),
+  artifact_id: Schema.String,
+  operation_id: Schema.String,
+  destination_id: Schema.String,
+  relative_path: Schema.String,
+  publication_order: Schema.Natural,
+  retention_class: Schema.Literal("archive"),
+  payloads: Schema.Struct({
+    "state.sqlite": Schema.Struct({ size_bytes: Schema.Natural, sha256: Digest }),
+    "configuration.json": Schema.Struct({ size_bytes: Schema.Natural, sha256: Digest })
+  })
+})
+
+const decodePublishedManifest = (bytes: Uint8Array) => {
+  try {
+    const decoded = Schema.decodeUnknownOption(ArchiveManifest)(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)))
+    if (Option.isSome(decoded)) return decoded.value
+  } catch {
+    // Validation below rejects an unrecognized manifest.
+  }
+  throw new Error("backup archive manifest is invalid")
+}
+
+const verifyPublishedArchive = async (
+  archivePath: string,
+  artifact: BackupArtifactRow
+): Promise<{ readonly manifestDigest: string; readonly archiveSizeBytes: number }> => {
+  const { manifestDigest, archiveSizeBytes } = await inspectBackupArchive(archivePath, async (entries) => {
+    if (entries.length !== 3) throw new Error("backup archive has an unexpected member count")
+    const members = new Map<string, (typeof entries)[number]>()
+    for (const entry of entries) {
+      if (entry.directory || entry.symlink || entry.filename.includes("/") || entry.filename.startsWith("/") || members.has(entry.filename)) {
+        throw new Error("backup archive contains an unsafe member")
+      }
+      if (!new Set(["manifest.json", "state.sqlite", "configuration.json"]).has(entry.filename)) {
+        throw new Error("backup archive contains an unexpected member")
+      }
+      members.set(entry.filename, entry)
+    }
+    const manifestEntry = members.get("manifest.json")
+    const stateEntry = members.get("state.sqlite")
+    const configurationEntry = members.get("configuration.json")
+    if (manifestEntry === undefined || stateEntry === undefined || configurationEntry === undefined) {
+      throw new Error("backup archive is incomplete")
+    }
+    if (manifestEntry.uncompressedSize !== undefined && manifestEntry.uncompressedSize > MAX_MANIFEST_BYTES) {
+      throw new Error("backup manifest exceeds the size limit")
+    }
+    const manifestBytes = await readBackupArchiveMember(manifestEntry, MAX_MANIFEST_BYTES)
+    const manifest = decodePublishedManifest(manifestBytes)
+    if (
+      manifest.artifact_id !== artifact.artifactId ||
+      manifest.operation_id !== artifact.operationId ||
+      manifest.destination_id !== artifact.destinationId ||
+      manifest.relative_path !== artifact.relativePath ||
+      manifest.publication_order !== artifact.publicationOrder ||
+      manifest.retention_class !== artifact.retentionClass
+    ) throw new Error("backup archive manifest does not match the catalog artifact")
+
+    const expected = new Map([
+      ["state.sqlite", { entry: stateEntry, ...manifest.payloads["state.sqlite"], limit: MAX_STATE_BYTES }],
+      ["configuration.json", { entry: configurationEntry, ...manifest.payloads["configuration.json"], limit: MAX_CONFIGURATION_BYTES }]
+    ])
+    for (const { entry, size_bytes, sha256, limit } of expected.values()) {
+      if (size_bytes > limit || (entry.uncompressedSize !== undefined && entry.uncompressedSize > limit)) {
+        throw new Error("backup archive member exceeds the size limit")
+      }
+      const hash = createHash("sha256")
+      const size = await streamBackupArchiveEntry(entry, size_bytes, (chunk) => {
+        hash.update(chunk)
+      })
+      if (size !== size_bytes || hash.digest("hex") !== sha256) {
+        throw new Error(`backup archive member failed verification: ${entry.filename}`)
+      }
+    }
+    return { manifestDigest: digest(manifestBytes), archiveSizeBytes: (await stat(archivePath)).size }
+  })
+  return { manifestDigest, archiveSizeBytes }
+}
+
 const writeArchive = async (
   filePath: string,
   statePath: string,
@@ -270,6 +363,45 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
   const artifact = reservation.artifact
   const archiveDirectory = await ensureArchiveDirectory(selected.value.canonicalPath)
   const finalPath = join(archiveDirectory, `${artifact.artifactId}${ARCHIVE_SUFFIX}`)
+
+  let published: { readonly manifestDigest: string; readonly archiveSizeBytes: number } | undefined
+  try {
+    const existing = await lstat(finalPath)
+    if (!existing.isFile() || existing.isSymbolicLink()) throw new Error("backup archive is not a regular file")
+    published = await verifyPublishedArchive(finalPath, artifact)
+  } catch (error) {
+    if (!isMissing(error)) throw error
+    if (artifact.status === "completed") throw new Error("completed backup archive is missing")
+  }
+  if (published !== undefined) {
+    if (artifact.status === "completed") {
+      if (artifact.manifestDigest !== published.manifestDigest || artifact.sizeBytes !== published.archiveSizeBytes) {
+        throw new Error("completed backup archive does not match the catalog")
+      }
+      return {
+        artifact,
+        archivePath: finalPath,
+        manifestDigest: published.manifestDigest,
+        archiveSizeBytes: published.archiveSizeBytes
+      }
+    }
+    const completed = await context.complete({
+      artifactId: artifact.artifactId,
+      manifestDigest: published.manifestDigest,
+      sizeBytes: published.archiveSizeBytes,
+      completedAtMs: Date.now()
+    })
+    if (completed.kind !== "completed" && completed.kind !== "replayed") {
+      throw new Error(`backup artifact publication was not recorded: ${completed.kind}`)
+    }
+    return {
+      artifact: completed.artifact,
+      archivePath: finalPath,
+      manifestDigest: published.manifestDigest,
+      archiveSizeBytes: published.archiveSizeBytes
+    }
+  }
+
   const stagingDirectory = await mkdtemp(join(dirname(context.dbPath), ".backup-staging-"))
   await chmod(stagingDirectory, 0o700)
   let temporaryArchivePath: string | undefined
@@ -282,6 +414,7 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
     } finally {
       source.close()
     }
+    if (context.afterSnapshot !== undefined) await context.afterSnapshot()
     const stateSize = (await stat(snapshotPath)).size
     if (stateSize > MAX_STATE_BYTES) throw new Error("backup snapshot exceeds the size limit")
     const stateDigest = await digestFile(snapshotPath, stateSize)
@@ -331,7 +464,7 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
     }
     const manifestBytes = jsonBytes(manifest)
     if (manifestBytes.byteLength > MAX_MANIFEST_BYTES) throw new Error("backup manifest exceeds the size limit")
-    temporaryArchivePath = join(archiveDirectory, `.${artifact.artifactId}.tmp`)
+    temporaryArchivePath = join(archiveDirectory, `.${artifact.artifactId}.${randomUUID()}.tmp`)
     await writeArchive(temporaryArchivePath, snapshotPath, stateSize, manifestBytes, configurationBytes)
     const expectedPayloads = new Map([
       ["manifest.json", { size: manifestBytes.byteLength, sha256: digest(manifestBytes) }],
@@ -356,7 +489,8 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
     } catch (error) {
       if (!isMissing(error)) throw error
     }
-    await rename(temporaryArchivePath, finalPath)
+    await link(temporaryArchivePath, finalPath)
+    await rm(temporaryArchivePath)
     temporaryArchivePath = undefined
     const directoryHandle = await open(archiveDirectory, "r")
     try {
@@ -366,6 +500,7 @@ export const createBackupArchive = async (context: BackupArchiveContext): Promis
     }
     await verifyArchive(finalPath, expectedPayloads)
     const finalSize = (await stat(finalPath)).size
+    if (context.afterPublish !== undefined) await context.afterPublish()
     const completed = await context.complete({
       artifactId: artifact.artifactId,
       manifestDigest: digest(manifestBytes),

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { Context, Effect, Layer, Option, Schema } from "effect"
+import { Context, Effect, Layer, Option, PartitionedSemaphore, Schema } from "effect"
 import { BackupTask, type BackupTask as BackupTaskType } from "@henshin/contracts"
 import { createBackupArchive, backupArchiveRelativePath } from "../maintenance/BackupArchive"
 import { BackupDestinationStore } from "./BackupDestinationStore"
@@ -67,6 +67,7 @@ export class BackupTaskStore extends Context.Service<
       const destinations = yield* BackupDestinationStore
       const roots = yield* RootStore
       const active = new Set<string>()
+      const destinationLocks = PartitionedSemaphore.makeUnsafe<string>({ permits: 1 })
 
       const readRow = (taskId: string) => worker.call({ op: "readBackupTask", taskId }).pipe(
         Effect.flatMap((value) => value === null
@@ -91,6 +92,22 @@ export class BackupTaskStore extends Context.Service<
         readonly destinationId: string
         readonly label: string | null
       }) => Effect.gen(function*() {
+        const persisted = yield* worker.call({ op: "listBackupTasks" }).pipe(
+          Effect.flatMap((value) => {
+            const decoded = decodeTasks(value)
+            return Option.isNone(decoded)
+              ? Effect.fail(new DatabaseWorkerError({ message: "invalid backup task list" }))
+              : Effect.succeed(decoded.value)
+          })
+        )
+        const existing = persisted.find((task) => task.operation_id === input.operationId)
+        if (existing !== undefined) {
+          if (existing.destination_id !== input.destinationId || existing.label !== (input.label ?? null)) {
+            return { kind: "operation_conflict" } as const
+          }
+          return { kind: "replayed", task: taskView(existing) } as const
+        }
+
         const destination = (yield* destinations.list()).find(
           (candidate) => candidate.destinationId === input.destinationId
         )
@@ -145,12 +162,12 @@ export class BackupTaskStore extends Context.Service<
         if (active.has(taskId)) return Effect.void
         active.add(taskId)
 
-        const finishFailure = () => worker.call({
+        const finishFailure = (message: string) => worker.call({
           op: "finishBackupTask",
           taskId,
           status: "failed",
           errorCode: "archive_failed",
-          errorMessage: "backup archive could not be published",
+          errorMessage: message,
           updatedAtMs: Date.now()
         }).pipe(Effect.asVoid, Effect.catch(() => Effect.void))
 
@@ -158,60 +175,62 @@ export class BackupTaskStore extends Context.Service<
           const task = yield* readRow(taskId)
           if (task === null || task.status === "succeeded") return
 
-          // Artifact completion is the durable publication proof. If the
-          // process stopped after publication but before task completion, a
-          // retry reconciles the task without touching the verified file.
-          if (task.artifact_status === "completed") {
-            yield* worker.call({
-              op: "finishBackupTask",
-              taskId,
-              status: "succeeded",
-              errorCode: null,
-              errorMessage: null,
-              updatedAtMs: Date.now()
+          yield* destinationLocks.withPermit(task.destination_id)(Effect.gen(function*() {
+            // Artifact completion is the durable publication proof. If the
+            // process stopped after publication but before task completion, a
+            // retry reconciles the task without touching the verified file.
+            if (task.artifact_status === "completed") {
+              yield* worker.call({
+                op: "finishBackupTask",
+                taskId,
+                status: "succeeded",
+                errorCode: null,
+                errorMessage: null,
+                updatedAtMs: Date.now()
+              })
+              return
+            }
+
+            yield* worker.call({ op: "markBackupTaskRunning", taskId, updatedAtMs: Date.now() })
+            const currentRoots: ReadonlyArray<ServerRootRow> = yield* roots.list()
+            const destination: BackupDestinationRow = {
+              destinationId: task.destination_id,
+              name: "registered backup destination",
+              selectedPath: task.destination_selected_path,
+              canonicalPath: task.destination_canonical_path,
+              device: task.destination_device,
+              inode: task.destination_inode,
+              state: "active"
+            }
+
+            yield* Effect.tryPromise({
+              try: () => createBackupArchive({
+                dbPath,
+                destination,
+                roots: currentRoots,
+                label: task.label,
+                artifactId: task.artifact_id,
+                operationId: task.operation_id,
+                createdAtMs: task.created_at_ms,
+                reserve: async (request) => {
+                  const value = await Effect.runPromise(worker.call({ op: "reserveBackupArtifact", ...request }))
+                  const decoded = Schema.decodeUnknownOption(BackupArtifactReservationOutcome)(value)
+                  if (Option.isNone(decoded)) throw new Error("invalid backup artifact reservation result")
+                  return decoded.value
+                },
+                complete: async (request) => {
+                  const value = await Effect.runPromise(worker.call({ op: "completeBackupArtifact", ...request }))
+                  const decoded = Schema.decodeUnknownOption(BackupArtifactCompletionOutcome)(value)
+                  if (Option.isNone(decoded)) throw new Error("invalid backup artifact completion result")
+                  return decoded.value
+                }
+              }),
+              catch: (error) => error instanceof Error ? error : new Error(String(error))
             })
-            return
-          }
-
-          yield* worker.call({ op: "markBackupTaskRunning", taskId, updatedAtMs: Date.now() })
-          const currentRoots: ReadonlyArray<ServerRootRow> = yield* roots.list()
-          const destination: BackupDestinationRow = {
-            destinationId: task.destination_id,
-            name: "registered backup destination",
-            selectedPath: task.destination_selected_path,
-            canonicalPath: task.destination_canonical_path,
-            device: task.destination_device,
-            inode: task.destination_inode,
-            state: "active"
-          }
-
-          yield* Effect.tryPromise({
-            try: () => createBackupArchive({
-              dbPath,
-              destination,
-              roots: currentRoots,
-              label: task.label,
-              artifactId: task.artifact_id,
-              operationId: task.operation_id,
-              createdAtMs: task.created_at_ms,
-              reserve: async (request) => {
-                const value = await Effect.runPromise(worker.call({ op: "reserveBackupArtifact", ...request }))
-                const decoded = Schema.decodeUnknownOption(BackupArtifactReservationOutcome)(value)
-                if (Option.isNone(decoded)) throw new Error("invalid backup artifact reservation result")
-                return decoded.value
-              },
-              complete: async (request) => {
-                const value = await Effect.runPromise(worker.call({ op: "completeBackupArtifact", ...request }))
-                const decoded = Schema.decodeUnknownOption(BackupArtifactCompletionOutcome)(value)
-                if (Option.isNone(decoded)) throw new Error("invalid backup artifact completion result")
-                return decoded.value
-              }
-            }),
-            catch: () => new Error("backup archive failed")
-          })
-          yield* worker.call({ op: "finishBackupTask", taskId, status: "succeeded", errorCode: null, errorMessage: null, updatedAtMs: Date.now() })
+            yield* worker.call({ op: "finishBackupTask", taskId, status: "succeeded", errorCode: null, errorMessage: null, updatedAtMs: Date.now() })
+          }))
         }).pipe(
-          Effect.catch(() => finishFailure()),
+          Effect.catch((error) => finishFailure(error instanceof Error ? error.message : String(error))),
           Effect.ensuring(Effect.sync(() => active.delete(taskId))),
           Effect.asVoid
         )
