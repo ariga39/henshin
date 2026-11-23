@@ -53,6 +53,7 @@ if ((sandboxMode & 0o4000) === 0) throw new Error(`Electron sandbox helper is no
 
 const launch = async () => {
   const app = await electron.launch({
+    chromiumSandbox: true,
     executablePath,
     args: [],
     env: {
