@@ -55,7 +55,7 @@ afterEach(async () => {
 })
 
 describe("accepted default thumbnails", () => {
-  it("starts without its optional cache, regenerates covers, then keeps a changed source on the placeholder", async () => {
+  it("starts without its optional cache, regenerates covers, preserves entry identity across restart, then keeps a changed source on the placeholder", async () => {
     const dbPath = await makeTempDbPath()
     dbPaths.add(dbPath)
     await writeFile(path.join(path.dirname(dbPath), "thumbnail-cache"), Buffer.from("cache unavailable"))
@@ -142,23 +142,36 @@ describe("accepted default thumbnails", () => {
 
     const directEntry = page.data.entries.find((entry) => entry.relative_path === "direct-pages")
     if (directEntry?.cover === null || directEntry === undefined) throw new Error("direct cover reference missing")
+
+    await server.stop()
+    const restarted = await startServer(dbPath)
+    servers.push(restarted)
+    expect(restarted.instanceId).toBe(server.instanceId)
+    expect(restarted.epoch).not.toBe(server.epoch)
+    const afterRestart = await withLibraryClient(restarted, Effect.gen(function*() {
+      const client = yield* LibraryHttpClient
+      return yield* client.search({ payload: { page_size: 200 } })
+    }))
+    const restartedDirectEntry = afterRestart.data.entries.find((entry) => entry.relative_path === "direct-pages")
+    expect(restartedDirectEntry?.entry_id).toBe(directEntry.entry_id)
+
     await writeFile(path.join(direct, "001.png"), Buffer.from("not an image"))
-    const stale = await fetch(`${server.baseUrl}/api/v1/thumbnails/${encodeURIComponent(directEntry.cover.key)}`, {
-      headers: { authorization: `Bearer ${server.bearerToken}` }
+    const stale = await fetch(`${restarted.baseUrl}/api/v1/thumbnails/${encodeURIComponent(directEntry.cover.key)}`, {
+      headers: { authorization: `Bearer ${restarted.bearerToken}` }
     })
     expect(stale.status).toBe(404)
     await expect(stale.json()).resolves.toMatchObject({ code: "thumbnail_missing" })
 
-    const unauthenticated = await fetch(`${server.baseUrl}/api/v1/thumbnails/${encodeURIComponent(directEntry.cover.key)}`)
+    const unauthenticated = await fetch(`${restarted.baseUrl}/api/v1/thumbnails/${encodeURIComponent(directEntry.cover.key)}`)
     expect(unauthenticated.status).toBe(401)
 
-    const malformed = await fetch(`${server.baseUrl}/api/v1/thumbnails/${encodeURIComponent("default-v1.000000000000000000000000000000000000.1")}`, {
-      headers: { authorization: `Bearer ${server.bearerToken}` }
+    const malformed = await fetch(`${restarted.baseUrl}/api/v1/thumbnails/${encodeURIComponent("default-v1.000000000000000000000000000000000000.1")}`, {
+      headers: { authorization: `Bearer ${restarted.bearerToken}` }
     })
     expect(malformed.status).toBe(400)
 
-    const unknown = await fetch(`${server.baseUrl}/api/v1/thumbnails/${encodeURIComponent(`default-v1.${randomUUID()}.1`)}`, {
-      headers: { authorization: `Bearer ${server.bearerToken}` }
+    const unknown = await fetch(`${restarted.baseUrl}/api/v1/thumbnails/${encodeURIComponent(`default-v1.${randomUUID()}.1`)}`, {
+      headers: { authorization: `Bearer ${restarted.bearerToken}` }
     })
     expect(unknown.status).toBe(404)
     await expect(unknown.json()).resolves.toMatchObject({ code: "thumbnail_missing" })
