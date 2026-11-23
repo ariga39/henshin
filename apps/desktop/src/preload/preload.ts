@@ -17,7 +17,8 @@ import type {
   LibrarySearchIpcRequest,
   LibraryNoteIpcRequest,
   LibraryEntryCommandIpcRequest,
-  ConnectionTargetView
+  ConnectionTargetView,
+  ConnectionStatusView
 } from "@henshin/contracts"
 import { IpcChannels } from "@henshin/contracts/channels"
 
@@ -98,6 +99,11 @@ contextBridge.exposeInMainWorld("henshinConnection", {
     const handler = (_event: Electron.IpcRendererEvent, target: ConnectionTargetView) => listener(target)
     ipcRenderer.on(IpcChannels.connectionChanged, handler)
     return () => ipcRenderer.removeListener(IpcChannels.connectionChanged, handler)
+  },
+  onStatusChanged: (listener: (status: ConnectionStatusView) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, status: ConnectionStatusView) => listener(status)
+    ipcRenderer.on(IpcChannels.connectionStatusChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.connectionStatusChanged, handler)
   }
 })
 

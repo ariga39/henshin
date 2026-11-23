@@ -36,6 +36,7 @@ export const IpcChannels = {
   useManaged: "henshin:use-managed",
   connectionTarget: "henshin:connection-target",
   connectionChanged: "henshin:connection-changed",
+  connectionStatusChanged: "henshin:connection-status-changed",
   openJournalChanged: "henshin-prototype:open-journal-changed",
   listOpenJournal: "henshin-prototype:list-open-journal",
   recoverOpenJournal: "henshin-prototype:recover-open-journal",

@@ -741,6 +741,12 @@ const notifyConnectionTargetChanged = (): void => {
   }
 }
 
+const notifyConnectionStatusChanged = (status: ConnectionStatusView): void => {
+  for (const window of appWindows) {
+    if (!window.isDestroyed()) window.webContents.send(IpcChannels.connectionStatusChanged, status)
+  }
+}
+
 const setConnectionTarget = (target: ConnectionTargetView): void => {
   if (
     connectionTarget.mode === target.mode &&
@@ -783,10 +789,14 @@ const registerIpc = (): void => {
         .connect()
         .then((status) => {
           updateTargetFromStatus(status)
+          notifyConnectionStatusChanged(status)
           openEventDeliveryScheduler.schedule()
           return connectionStatusResult(status)
         })
-    }).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+    }).catch((error) => {
+      notifyConnectionStatusChanged(requireConnection().getStatus())
+      return { ok: false as const, error: toPublicError(error) }
+    })
   })
 
   ipcMain.handle(IpcChannels.disconnect, (event, raw: unknown) => {
@@ -795,8 +805,14 @@ const registerIpc = (): void => {
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return serializeConnectionOperation(async () => {
       await discardPendingRemoteConnection()
-      return requireConnection().disconnect().then(connectionStatusResult)
-    }).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+      return requireConnection().disconnect().then((status) => {
+        notifyConnectionStatusChanged(status)
+        return connectionStatusResult(status)
+      })
+    }).catch((error) => {
+      notifyConnectionStatusChanged(requireConnection().getStatus())
+      return { ok: false as const, error: toPublicError(error) }
+    })
   })
 
   ipcMain.handle(IpcChannels.connectRemote, (event, raw: unknown) => {
@@ -897,6 +913,7 @@ const registerIpc = (): void => {
         setConnectionTarget({ mode: "managed", base_url: null, instance_id: status.instance_id })
         await previous.close()
         updateTargetFromStatus(status)
+        notifyConnectionStatusChanged(status)
         openEventDeliveryScheduler.schedule()
         return connectionStatusResult(status)
       })

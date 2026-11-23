@@ -6,7 +6,7 @@ import { App } from "./App"
 import { LibraryScreen } from "./Library"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { handleConnectionTargetChanged, loadConnectionStatus, loadConnectionWorkspace } from "./workflows"
+import { handleConnectionStatusChanged, handleConnectionTargetChanged, loadConnectionStatus, loadConnectionWorkspace } from "./workflows"
 
 const container = document.getElementById("root")
 if (container === null) throw new Error("missing #root container")
@@ -20,6 +20,12 @@ const Root = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   useEffect(() => {
     void runtime.runPromise(prototype ? loadConnectionStatus : loadConnectionWorkspace)
+  }, [])
+  useEffect(() => {
+    if (prototype) return
+    return window.henshinConnection.onStatusChanged((status) => {
+      void runtime.runPromise(handleConnectionStatusChanged(status))
+    })
   }, [])
   useEffect(() => {
     if (prototype) return

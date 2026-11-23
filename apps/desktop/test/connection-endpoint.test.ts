@@ -68,6 +68,11 @@ describe("remote connection failure diagnostics", () => {
     expect(failure.message).toContain("compatible Henshin server")
   })
 
+  it("keeps a TLS handshake timeout retryable instead of calling it an untrusted certificate", () => {
+    const failure = classifyConnectionFailure(transportFailure("ERR_TLS_HANDSHAKE_TIMEOUT", "TLS handshake timeout"))
+    expect(failure).toMatchObject({ code: "connection_failed", retryable: true })
+  })
+
   it("uses the response status when the API client reports an unknown status as a decode failure", () => {
     expect(classifyConnectionFailure(decodeFailure(404)).code).toBe("connection_endpoint_failed")
     expect(classifyConnectionFailure(decodeFailure(503)).code).toBe("connection_server_failed")

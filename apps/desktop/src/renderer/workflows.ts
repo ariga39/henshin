@@ -943,6 +943,9 @@ export const handleConnectionTargetChanged = (target: ConnectionTargetView) =>
     yield* loadConnectionWorkspace
   })
 
+export const handleConnectionStatusChanged = (status: ConnectionStatusView) =>
+  Effect.sync(() => viewStore.set({ connection: status }))
+
 const watchScanTask = (taskId: string) =>
   Effect.gen(function*() {
     const result = yield* waitForScanTask(taskId)
@@ -1749,6 +1752,7 @@ export const detachMissingEntry = (entry: LibraryEntry) =>
 export const saveRoot = Effect.gen(function*() {
   const client = yield* RootPreviewClient
   const state = viewStore.getState()
+  const connectionGeneration = state.connection_generation
   const preview = state.root_preview
   if (!preview || !("children" in preview) || !canSaveRoot(state)) return
 
@@ -1772,6 +1776,7 @@ export const saveRoot = Effect.gen(function*() {
     path: preview.selected_server_path,
     preview_identity: preview.preview_identity
   })
+  if (!isCurrent(connectionGeneration)) return
   if (result.ok) {
     yield* Effect.sync(() => {
       const roots = viewStore.getState().root_saved_roots
@@ -1787,6 +1792,7 @@ export const saveRoot = Effect.gen(function*() {
     })
   } else {
     const listed = yield* client.list()
+    if (!isCurrent(connectionGeneration)) return
     const existing = listed.ok
       ? listed.data.find((root) => root.canonical_server_path === preview.preview_identity.canonical_server_path)
       : undefined

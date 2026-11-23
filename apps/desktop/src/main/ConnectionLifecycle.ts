@@ -105,7 +105,7 @@ const tlsFailureKind = (cause: unknown): TlsFailureKind | null => {
   if (code === "ERR_TLS_CERT_ALTNAME_INVALID" || /hostname|host name|altname|ip address.*(match|mismatch)/iu.test(details)) {
     return "hostname"
   }
-  if (tlsCauseCodes.has(code) || /certificate|\btls\b|\bssl\b/iu.test(details)) return "untrusted"
+  if (tlsCauseCodes.has(code) || /certificate/iu.test(details)) return "untrusted"
   return null
 }
 
