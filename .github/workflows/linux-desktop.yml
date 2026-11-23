@@ -66,6 +66,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Restore workspace test dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Exercise AppImage through its normal entrypoint
         env:
           HENSHIN_DESKTOP_ARTIFACT_DIR: ${{ runner.temp }}/henshin-desktop-output
