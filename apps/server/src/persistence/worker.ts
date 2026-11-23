@@ -983,8 +983,11 @@ const selectEntryOperation = db.prepare(
 const upsertEntryOverride = db.prepare(
   "INSERT INTO entry_overrides(entry_id, title_present, title, title_search) VALUES(?, 1, ?, ?) ON CONFLICT(entry_id) DO UPDATE SET title_present = 1, title = excluded.title, title_search = excluded.title_search"
 )
-const deleteEntryOverride = db.prepare(
+const clearEntryOverride = db.prepare(
   "UPDATE entry_overrides SET title_present = 0, title = NULL, title_search = NULL WHERE entry_id = ?"
+)
+const deleteEntryOverride = db.prepare(
+  "DELETE FROM entry_overrides WHERE entry_id = ? AND notes_revision IS NULL"
 )
 const insertEntryOperation = db.prepare(
   "INSERT INTO entry_operations(epoch, operation_id, entry_id, payload, result, created_at_ms) VALUES(?, ?, ?, ?, ?, ?)"
@@ -2524,7 +2527,10 @@ const updateEntryCommand = (
         : requestedTitle.trim().length === 0
           ? ""
           : requestedTitle
-      if (title === null) deleteEntryOverride.run(request.entryId)
+      if (title === null) {
+        clearEntryOverride.run(request.entryId)
+        deleteEntryOverride.run(request.entryId)
+      }
       else upsertEntryOverride.run(request.entryId, title, normalizeSearchText(title))
     } else {
       upsertEntryNote.run(
