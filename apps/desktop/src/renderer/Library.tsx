@@ -367,7 +367,7 @@ export const LibraryScreen = () => {
               <button
                 type="button"
                 data-testid="library-open-status-retry"
-                onClick={() => void runtime.runPromise(loadActiveLibraryOpenState(selectedEntry.entry_id))}
+                onClick={() => void runtime.runPromise(loadActiveLibraryOpenState(selectedEntry.entry_id, openResult.action_id))}
               >
                 Retry status
               </button>

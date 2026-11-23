@@ -1173,16 +1173,19 @@ export const libraryOpenStateFor = (state: ViewState, entryId: string): LibraryO
       ) ?? null
 }
 
-export const loadActiveLibraryOpenState = (entryId: string) => Effect.gen(function*() {
+export const loadActiveLibraryOpenState = (entryId: string, retryActionId?: string) => Effect.gen(function*() {
   const client = yield* LibraryClient
   const initial = viewStore.getState()
   const initialGeneration = initial.connection_generation
   const namespaceId = libraryNamespace(initial, entryId)
   if (namespaceId === null || initial.library_selected_entry_id !== entryId) return
   const observed = libraryOpenStateFor(initial, entryId)
-  const request = observed?.status === "loading" && observed.result?.status === "in-flight"
-    ? { action_id: observed.result.action_id }
-    : { entry_id: entryId }
+  if (retryActionId !== undefined && observed?.result?.action_id !== retryActionId) return
+  const request = retryActionId !== undefined
+    ? { action_id: retryActionId }
+    : observed?.status === "loading" && observed.result?.status === "in-flight"
+      ? { action_id: observed.result.action_id }
+      : { entry_id: entryId }
   const result = yield* client.status(request)
   const current = viewStore.getState()
   const currentObserved = libraryOpenStateFor(current, entryId)
@@ -1198,9 +1201,9 @@ export const loadActiveLibraryOpenState = (entryId: string) => Effect.gen(functi
     ? observed.result
     : null
   const activeProfileId = activeResult?.profile_id ?? null
-  if (!result.ok) {
+  const publishUnknown = (message: string) => Effect.sync(() => {
     if (activeResult === null || activeProfileId === null) return
-    yield* Effect.sync(() => viewStore.set({
+    viewStore.set({
       library_open_states: replaceLibraryOpenState(viewStore.getState().library_open_states, {
         namespace_id: namespaceId,
         entry_id: entryId,
@@ -1212,32 +1215,18 @@ export const loadActiveLibraryOpenState = (entryId: string) => Effect.gen(functi
           entry_id: entryId,
           profile_id: activeProfileId,
           status: "unknown",
-          message: "The reader handoff outcome is temporarily unavailable. Retry status before opening again.",
+          message,
           event_durable: false
         }
       })
-    }))
+    })
+  })
+  if (!result.ok) {
+    yield* publishUnknown("The reader handoff outcome is temporarily unavailable. Retry status before opening again.")
     return
   }
   if (result.data === null) {
-    if (activeResult === null || activeProfileId === null) return
-    yield* Effect.sync(() => viewStore.set({
-      library_open_states: replaceLibraryOpenState(viewStore.getState().library_open_states, {
-        namespace_id: namespaceId,
-        entry_id: entryId,
-        profile_id: activeProfileId,
-        connection_generation: initialGeneration,
-        status: "unknown",
-        result: {
-          action_id: activeResult.action_id,
-          entry_id: entryId,
-          profile_id: activeProfileId,
-          status: "unknown",
-          message: "The reader handoff has no available terminal result; it may have opened. Retry status or open again deliberately.",
-          event_durable: false
-        }
-      })
-    }))
+    yield* publishUnknown("The reader handoff has no available terminal result; it may have opened. Retry status or open again deliberately.")
     return
   }
   const data = result.data

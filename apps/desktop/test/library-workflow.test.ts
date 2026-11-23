@@ -328,6 +328,7 @@ describe("library renderer workflow", () => {
   it("keeps missing outcomes unknown and makes transient lookup failure retryable", async () => {
     let lookup: Result<OpenBookIpcResult | null> = { ok: true, data: null }
     let openCalls = 0
+    const statusRequests: Array<{ readonly entry_id?: string; readonly action_id?: string }> = []
     const activeResult: OpenBookIpcResult = {
       ...accepted(entryAId),
       status: "in-flight",
@@ -340,7 +341,10 @@ describe("library renderer workflow", () => {
         openCalls += 1
         return Effect.succeed({ ok: true as const, data: accepted(entryAId, "99999999-9999-4999-8999-999999999999") })
       },
-      status: () => Effect.succeed(lookup),
+      status: (input) => {
+        statusRequests.push(input)
+        return Effect.succeed(lookup)
+      },
       getThumbnail: () => Effect.succeed({ ok: true as const, data: new Uint8Array() })
     })
     viewStore.set({
@@ -360,6 +364,7 @@ describe("library renderer workflow", () => {
     })
 
     await run(loadActiveLibraryOpenState(entryAId), client)
+    expect(statusRequests[0]).toEqual({ action_id: activeResult.action_id })
     expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
       status: "unknown",
       result: {
@@ -372,6 +377,34 @@ describe("library renderer workflow", () => {
       }
     })
     expect(openCalls).toBe(0)
+
+    lookup = { ok: true, data: accepted(entryAId, activeResult.action_id) }
+    await run(loadActiveLibraryOpenState(entryAId, activeResult.action_id), client)
+    expect(statusRequests[1]).toEqual({ action_id: activeResult.action_id })
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
+      status: "accepted",
+      result: { action_id: activeResult.action_id, status: "accepted" }
+    })
+
+    const newerActiveResult: OpenBookIpcResult = {
+      ...activeResult,
+      action_id: "99999999-9999-4999-8999-999999999999"
+    }
+    lookup = { ok: true, data: newerActiveResult }
+    viewStore.set({ library_open_states: [{
+      namespace_id: namespaceId,
+      entry_id: entryAId,
+      profile_id: profileId,
+      connection_generation: 7,
+      status: "accepted",
+      result: accepted(entryAId, activeResult.action_id)
+    }] })
+    await run(loadActiveLibraryOpenState(entryAId), client)
+    expect(statusRequests[2]).toEqual({ entry_id: entryAId })
+    expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
+      status: "loading",
+      result: { action_id: newerActiveResult.action_id, status: "in-flight" }
+    })
 
     lookup = {
       ok: false,
@@ -386,6 +419,7 @@ describe("library renderer workflow", () => {
       result: activeResult
     }] })
     await run(loadActiveLibraryOpenState(entryAId), client)
+    expect(statusRequests[3]).toEqual({ action_id: activeResult.action_id })
     expect(libraryOpenStateFor(viewStore.getState(), entryAId)).toMatchObject({
       status: "unknown",
       result: {
