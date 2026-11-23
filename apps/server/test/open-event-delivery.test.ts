@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto"
 import { Effect, Layer, ManagedRuntime } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import { LibraryHttpClient, OpenEventHttpClient, ServerHttpClient, TaskHttpClient, type ScanTask } from "@henshin/contracts"
-import { drainOpenEvents } from "../../desktop/src/main/OpenEventDelivery"
+import { deliverOpenEvents, drainOpenEvents } from "../../desktop/src/main/OpenEventDelivery"
 import { ConnectionLifecycle } from "../../desktop/src/main/ConnectionLifecycle"
 import { LocalDatabaseWorker } from "../../desktop/src/main/persistence/LocalDatabaseWorker"
 import { OpenJournalStore } from "../../desktop/src/main/persistence/OpenJournalStore"
@@ -191,7 +191,12 @@ describe("desktop open event delivery boundary", () => {
         catch: (error) => error as never
       })
     }
-    const drain = await Effect.runPromise(drainOpenEvents(store, client, firstSession, { random: () => 0 }))
+    await expect(Effect.runPromise(deliverOpenEvents(store, client, firstSession))).rejects.toThrow()
+    await lifecycle.disconnect()
+    await lifecycle.connect()
+    const secondSession = lifecycle.getSession()
+    if (secondSession === null) throw new Error("reconnect did not establish a session")
+    const drain = await Effect.runPromise(drainOpenEvents(store, client, secondSession, { random: () => 0 }))
     expect(drain).toMatchObject({ attempted: 33, acknowledged: 33, alreadyAccepted: 32, held: 0 })
     expect(proxy.requestCount()).toBe(3)
     for (const actionId of eventIds) {
