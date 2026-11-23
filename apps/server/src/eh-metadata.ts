@@ -106,6 +106,12 @@ const decodedResponse = (value: unknown): typeof GdataResponse.Type | null => {
   return decoded._tag === "Some" ? decoded.value : null
 }
 
+const preserveNumericGidSource = (
+  key: string,
+  value: unknown,
+  context: { readonly source: string }
+): unknown => key === "gid" && typeof value === "number" ? context.source : value
+
 export const fetchEhMetadata = async (locator: EhMetadataLocator): Promise<EhMetadataFetchResult> => {
   const url = endpoint()
   if (url === null) return failure("metadata adapter endpoint is not supported")
@@ -132,7 +138,7 @@ export const fetchEhMetadata = async (locator: EhMetadataLocator): Promise<EhMet
     const text = await readBoundedText(response)
     let parsed: unknown
     try {
-      parsed = JSON.parse(text) as unknown
+      parsed = JSON.parse(text, preserveNumericGidSource as Parameters<typeof JSON.parse>[1]) as unknown
     } catch {
       return failure("metadata upstream returned invalid JSON")
     }

@@ -1095,7 +1095,10 @@ const upsertEntryNote = db.prepare(
   "INSERT INTO entry_overrides(entry_id, title_present, title, title_search, notes, notes_revision, notes_updated_at_ms) VALUES(?, 0, NULL, NULL, ?, 1, ?) ON CONFLICT(entry_id) DO UPDATE SET notes = excluded.notes, notes_revision = COALESCE(entry_overrides.notes_revision, 0) + 1, notes_updated_at_ms = excluded.notes_updated_at_ms"
   )
 const selectGalleryForRefresh = db.prepare(
-  "SELECT gallery_id, token, refresh_revision FROM galleries WHERE source = ? AND gid = ?"
+  `SELECT gallery_id, token, refresh_revision
+     FROM galleries
+    WHERE source = ? AND gid = ?
+      AND EXISTS (SELECT 1 FROM bindings WHERE bindings.gallery_id = galleries.gallery_id)`
 )
 selectGalleryForRefresh.setReadBigInts(true)
 const startGalleryRefresh = db.prepare(

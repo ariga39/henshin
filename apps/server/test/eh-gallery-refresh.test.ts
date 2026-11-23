@@ -11,7 +11,7 @@ import { makeEhRefreshCoalescer } from "../src/api/library"
 import { fetchEhMetadata, makeEhMetadataScheduler } from "../src/eh-metadata"
 import { cleanupTempDb, makeTempDbPath, startServer, type RunningServer } from "./support/server-process"
 
-type FixtureMode = "success" | "malformed" | "blocked" | "mismatched" | "bare-error" | "rate-limited" | "oversized"
+type FixtureMode = "success" | "numeric-exact" | "malformed" | "blocked" | "mismatched" | "bare-error" | "rate-limited" | "oversized"
 
 const servers: RunningServer[] = []
 const dbPaths = new Set<string>()
@@ -59,6 +59,7 @@ const startFixture = async () => {
     }
     requests.push(parsed)
     const [gid, token] = parsed.gidlist[0] ?? []
+    const outboundGid = /"gidlist":\[\[([0-9]+)/u.exec(body)?.[1] ?? String(gid)
     if (mode === "blocked") await new Promise<void>((resolve) => { releaseBlocked = resolve })
     if (mode === "rate-limited" && rateLimitRemaining > 0) {
       rateLimitRemaining -= 1
@@ -77,7 +78,10 @@ const startFixture = async () => {
         : mode === "bare-error"
           ? { gmetadata: [{ error: "fixture blocked" }] }
           : { gmetadata: [{ gid: Number(gid), token, title: `title-${gid}`, title_jpn: `日本語-${gid}`, tags: ["artist:fixture", "language:english"] }] }
-    response.end(JSON.stringify(bodyForMode))
+    const responseBody = mode === "numeric-exact"
+      ? `{"gmetadata":[{"gid":${outboundGid},"token":${JSON.stringify(token)},"title":"title-${outboundGid}","title_jpn":"日本語-${outboundGid}","tags":["artist:fixture","language:english"],"unknown_upstream_field":{"source":"fixture","value":7}}]}`
+      : JSON.stringify(bodyForMode)
+    response.end(responseBody)
   })
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject)
@@ -338,6 +342,50 @@ describe("durable EH metadata refresh", () => {
 
     expect(result).toMatchObject({ kind: "failure", error: "metadata upstream request failed", retryable: true })
     await upstream.close()
+  })
+
+  it("accepts an exact large numeric GID from the fixture HTTP response", async () => {
+    const upstream = await startFixture()
+    const dbPath = await makeTempDbPath()
+    dbPaths.add(dbPath)
+    process.env.HENSHIN_EH_GDATA_URL = upstream.baseUrl
+    const server = await startServer(dbPath)
+    servers.push(server)
+    const [entry] = await indexTwoEntries(server)
+    if (entry === undefined) throw new Error("expected indexed entry")
+
+    await bind(server, entry.entry_id, "9007199254740993", "1")
+    upstream.setMode("numeric-exact")
+    const refreshed = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).ehRefresh({ payload: { source: "EH", gid: "9007199254740993" } })
+    }))
+
+    expect(refreshed.data.metadata.status).toBe("ready")
+    expect(upstream.rawBodies[0]).toContain('"gidlist":[[9007199254740993,"fixture-token"]]')
+    expect((await readEntry(server, entry.entry_id)).data.binding?.gid).toBe("9007199254740993")
+  })
+
+  it("rejects refresh for an orphan gallery before contacting fixture HTTP", async () => {
+    const upstream = await startFixture()
+    const dbPath = await makeTempDbPath()
+    dbPaths.add(dbPath)
+    process.env.HENSHIN_EH_GDATA_URL = upstream.baseUrl
+    const server = await startServer(dbPath)
+    servers.push(server)
+    const [entry] = await indexTwoEntries(server)
+    if (entry === undefined) throw new Error("expected indexed entry")
+    await bind(server, entry.entry_id, "12345", "1")
+
+    const db = new DatabaseSync(server.dbPath)
+    db.prepare("DELETE FROM bindings WHERE entry_id = ?").run(entry.entry_id)
+    db.close()
+
+    const error = await withLibraryClient(server, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).ehRefresh({ payload: { source: "EH", gid: "12345" } }).pipe(Effect.flip)
+    }))
+    expect(error._tag).toBe("InvalidRequest")
+    expect(error.message).toBe("the gallery is not currently bound")
+    expect(upstream.requests).toHaveLength(0)
   })
 
   it("publishes shared metadata, preserves it on failure, and survives restart", async () => {
