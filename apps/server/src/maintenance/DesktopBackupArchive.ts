@@ -223,7 +223,7 @@ interface PreparedBackupSource {
   readonly readOnly: boolean
 }
 
-const prepareBackupSource = async (databasePath: string, stagingDirectory: string): Promise<PreparedBackupSource> => {
+export const prepareDesktopBackupSource = async (databasePath: string, stagingDirectory: string): Promise<PreparedBackupSource> => {
   const dirtySidecars: Array<"-wal" | "-journal"> = []
   for (const suffix of ["-wal", "-journal"] as const) {
     try {
@@ -304,7 +304,7 @@ export const createDesktopBackupArchive = async (
   try {
     const snapshotPath = path.join(stagingDirectory, "state.sqlite")
     const snapshotStartedAt = new Date().toISOString()
-    const preparedSource = await prepareBackupSource(canonicalDatabasePath, stagingDirectory)
+    const preparedSource = await prepareDesktopBackupSource(canonicalDatabasePath, stagingDirectory)
     const source = preparedSource.readOnly
       ? new DatabaseSync(preparedSource.path, { readOnly: true })
       : new DatabaseSync(preparedSource.path)

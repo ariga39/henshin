@@ -246,7 +246,22 @@ describe("stopped desktop backup", () => {
     fixture.close()
     await execFile(process.execPath, [SERVER_PATH, "backup", "desktop", "--data-dir", dataDirectory, "--output", archive])
     const preview = () => execFile(process.execPath, [SERVER_PATH, "backup", "desktop", "restore", "--data-dir", dataDirectory, "--input", archive])
-    expect(JSON.parse((await preview()).stdout)).toMatchObject({
+    await execFile(process.execPath, ["-e", `
+      const { DatabaseSync } = require("node:sqlite")
+      const db = new DatabaseSync(process.argv[1])
+      db.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0")
+      db.prepare("INSERT INTO client_mappings(instance_id, root_id, mapping_revision, selected_path, canonical_path, state) VALUES (?, ?, 1, ?, ?, ?)").run("test", "root", "/collection", "/collection", "active")
+      process.exit(0)
+    `, dbPath])
+    const files = [dbPath, dbPath + "-wal", dbPath + "-shm"]
+    const beforePreview = await Promise.all(files.map((file) => readFile(file)))
+    expect(beforePreview[1].length).toBeGreaterThan(32)
+    const report = JSON.parse((await preview()).stdout)
+    expect(await Promise.all(files.map((file) => readFile(file)))).toEqual(beforePreview)
+    expect(report.lost_interval.estimated_milliseconds).toBeGreaterThan(0)
+    expect(report).toMatchObject({
+      applied: false,
+      mappings_changed_since_backup: true,
       pending_work: { drafts: 1, command_attempts: 1, launch_journal: 1 },
       requires_confirmation: true
     })

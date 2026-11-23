@@ -1,3 +1,5 @@
+import { prepareDesktopBackupSource } from "./DesktopBackupArchive"
+import { pathToFileURL } from "node:url"
 import { DatabaseSync } from "node:sqlite"
 import { createHash } from "node:crypto"
 import {
@@ -70,6 +72,7 @@ interface DesktopConfiguration {
 
 export interface DesktopTarget {
   readonly installationId: string
+  readonly mappingsChanged: boolean
   readonly latestUpdatedAtMs: number | null
 }
 
@@ -82,6 +85,8 @@ export interface LoadedDesktopBundle {
 
 export interface DesktopRecoveryPreview {
   readonly store_kind: "desktop"
+  readonly applied: false
+  readonly mappings_changed_since_backup: boolean
   readonly target_installation_id: string
   readonly recovery_installation_id: string
   readonly recovery_point: {
@@ -285,10 +290,13 @@ export const validateDesktopSnapshot = (statePath: string, installationId: strin
   }
 }
 
-export const readDesktopRecoveryTarget = async (dataDirectory: string): Promise<DesktopTarget> => {
+export const readDesktopRecoveryTarget = async (dataDirectory: string, stagingDirectory: string, snapshotPath: string): Promise<DesktopTarget> => {
   const installationId = (await readFile(path.join(dataDirectory, DESKTOP_IDENTITY_NAME), "utf8")).trim()
   if (!INSTALLATION_ID_PATTERN.test(installationId)) throw new Error("desktop maintenance failed at data-directory: installation identity is unavailable")
-  const database = new DatabaseSync(path.join(dataDirectory, DESKTOP_DATABASE_NAME), { readOnly: true, timeout: 0 })
+  const source = await prepareDesktopBackupSource(path.join(dataDirectory, DESKTOP_DATABASE_NAME), stagingDirectory)
+  const database = new DatabaseSync(source.readOnly ? pathToFileURL(source.path).href + "?immutable=1" : source.path, {
+    readOnly: source.readOnly, timeout: 0
+  })
   try {
     const identity = database.prepare(
       "SELECT installation_id, schema_version FROM desktop_store_metadata WHERE id = 1"
@@ -303,7 +311,12 @@ export const readDesktopRecoveryTarget = async (dataDirectory: string): Promise<
         UNION ALL SELECT updated_at_ms FROM launch_journal
       )
     `).get() as { updated_at_ms: number | null }
-    return { installationId, latestUpdatedAtMs: latest.updated_at_ms }
+    database.prepare("ATTACH DATABASE ? AS archived").run(snapshotPath)
+    const columns = "instance_id, root_id, mapping_revision, selected_path, canonical_path, state"
+    const live = `SELECT ${columns} FROM main.client_mappings`
+    const saved = `SELECT ${columns} FROM archived.client_mappings`
+    const comparison = database.prepare(`SELECT EXISTS(${live} EXCEPT ${saved}) OR EXISTS(${saved} EXCEPT ${live}) AS changed`).get()
+    return { installationId, latestUpdatedAtMs: latest.updated_at_ms, mappingsChanged: comparison?.changed === 1 }
   } finally {
     database.close()
   }
@@ -317,14 +330,16 @@ export const previewDesktopRecovery = async (dataDirectory: string, archivePath:
   await chmod(stagingDirectory, 0o700)
   try {
     const bundle = await loadDesktopBackupArchive(selectedArchive, stagingDirectory)
-    const target = await readDesktopRecoveryTarget(targetDirectory)
+    const target = await readDesktopRecoveryTarget(targetDirectory, stagingDirectory, bundle.statePath)
     if (bundle.manifest.installation_id !== target.installationId) throw new Error("desktop backup belongs to another installation")
     const { pending } = validateDesktopSnapshot(bundle.statePath, bundle.manifest.installation_id)
     const recoveryPointMs = Date.parse(bundle.manifest.snapshot_completed_at)
     const latestTargetMs = target.latestUpdatedAtMs ?? recoveryPointMs
-    const lostToMs = Math.max(recoveryPointMs, latestTargetMs)
+    const lostToMs = Math.max(recoveryPointMs, latestTargetMs, target.mappingsChanged ? Date.now() : recoveryPointMs)
     return {
       store_kind: "desktop",
+      applied: false,
+      mappings_changed_since_backup: target.mappingsChanged,
       target_installation_id: target.installationId,
       recovery_installation_id: bundle.manifest.installation_id,
       recovery_point: {
