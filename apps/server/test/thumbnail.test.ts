@@ -1,7 +1,7 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import sharp from "sharp"
 import { Effect, Result } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
@@ -44,6 +44,8 @@ const makeArchive = async (archivePath: string, page: Uint8Array): Promise<void>
   await writeFile(archivePath, Buffer.from(await blob.arrayBuffer()))
 }
 
+const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex")
+
 afterEach(async () => {
   for (const server of servers.splice(0)) await server.stop()
   for (const dbPath of dbPaths) await cleanupTempDb(dbPath)
@@ -67,6 +69,7 @@ describe("accepted default thumbnails", () => {
     await writeFile(path.join(direct, "001.png"), directPage)
     const archivePath = path.join(fixture, "archive.cbz")
     await makeArchive(archivePath, await makePage({ r: 30, g: 90, b: 220 }))
+    const archiveBefore = sha256(await readFile(archivePath))
 
     const root = await withServerClient(server, Effect.gen(function*() {
       const client = yield* ServerHttpClient
@@ -135,6 +138,7 @@ describe("accepted default thumbnails", () => {
       expect(metadata.height).toBe(480)
       expect(bytes.byteLength).toBeLessThanOrEqual(512 * 1024)
     }
+    expect(sha256(await readFile(archivePath))).toBe(archiveBefore)
 
     const directEntry = page.data.entries.find((entry) => entry.relative_path === "direct-pages")
     if (directEntry?.cover === null || directEntry === undefined) throw new Error("direct cover reference missing")

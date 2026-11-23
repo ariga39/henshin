@@ -12,6 +12,13 @@ const SERVER_CWD = process.env.HENSHIN_SERVER_CWD ?? process.cwd()
 const READY_TIMEOUT_MS = 5_000
 const EXIT_TIMEOUT_MS = 5_000
 const execFileAsync = promisify(execFile)
+const WINDOWS_POWERSHELL_PATH = path.win32.resolve(
+  process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows",
+  "System32",
+  "WindowsPowerShell",
+  "v1.0",
+  "powershell.exe"
+)
 
 interface Attempt {
   readonly child: ChildProcessWithoutNullStreams
@@ -207,7 +214,7 @@ const expectProtectedOwnerState = async (authPath: string): Promise<void> => {
   }
 
   const { stdout } = await execFileAsync(
-    "powershell.exe",
+    WINDOWS_POWERSHELL_PATH,
     ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_ACL_SCRIPT],
     { windowsHide: true, env: { ...process.env, HENSHIN_AUTH_PATH: authPath } }
   )
@@ -287,6 +294,11 @@ describe("independent foreground service", () => {
       expect(unauthorized.status).toBe(401)
       expect(unauthorizedBody).not.toContain(first.instanceId)
       expect(unauthorizedBody).not.toContain(first.epoch)
+
+      const wrongBearer = await fetch(`${first.baseUrl}/prototype/v1/handshake`, {
+        headers: { authorization: "Bearer not-the-token" }
+      })
+      expect(wrongBearer.status).toBe(401)
 
       const authenticated = await fetch(`${first.baseUrl}/prototype/v1/handshake`, {
         headers: { authorization: `Bearer ${initialized.token}` }

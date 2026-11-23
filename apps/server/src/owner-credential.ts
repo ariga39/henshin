@@ -8,6 +8,13 @@ import { DatabaseSync } from "node:sqlite"
 const OWNER_AUTH_DATABASE_NAME = ".henshin-server-auth.sqlite"
 const OWNER_TOKEN_BYTES = 32
 const execFileAsync = promisify(execFile)
+const WINDOWS_POWERSHELL_PATH = path.win32.resolve(
+  process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows",
+  "System32",
+  "WindowsPowerShell",
+  "v1.0",
+  "powershell.exe"
+)
 
 const WINDOWS_PROTECT_AUTH_FILE_SCRIPT = `$ErrorActionPreference = 'Stop'
 $path = $env:HENSHIN_AUTH_PATH
@@ -77,7 +84,7 @@ const protectWindowsAuthFile = async (filePath: string, create: boolean): Promis
     createFile = true
   }
   await execFileAsync(
-    "powershell.exe",
+    WINDOWS_POWERSHELL_PATH,
     ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_PROTECT_AUTH_FILE_SCRIPT],
     {
       windowsHide: true,

@@ -73,6 +73,16 @@ jobs:
           tar -xzf $archive.FullName -C $unpack
           if ($LASTEXITCODE -ne 0) { throw "standalone archive extraction failed" }
           if (-not (Test-Path -LiteralPath (Join-Path $unpack "server.mjs"))) { throw "server entrypoint missing" }
+          $unpackRoot = [System.IO.Path]::GetFullPath($unpack).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+          $reparsePoints = @(Get-ChildItem -LiteralPath $unpack -Recurse -Force | Where-Object {
+            ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+          })
+          foreach ($entry in $reparsePoints) {
+            $resolved = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $entry.FullName -ErrorAction Stop).Path)
+            if (-not $resolved.StartsWith($unpackRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+              throw "archive reparse point resolves outside extraction root: $($entry.Name)"
+            }
+          }
           "archive=$($archive.FullName)" >> $env:GITHUB_OUTPUT
           "unpack=$unpack" >> $env:GITHUB_OUTPUT
 
@@ -86,4 +96,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path $env:HENSHIN_TEMP_ROOT | Out-Null
           $env:TEMP = $env:HENSHIN_TEMP_ROOT
           $env:TMP = $env:HENSHIN_TEMP_ROOT
+          $nodePath = Split-Path -Parent (Get-Command node -ErrorAction Stop).Source
+          $pnpmPath = Split-Path -Parent (Get-Command pnpm -ErrorAction Stop).Source
+          $env:PATH = @(
+            $nodePath
+            $pnpmPath
+            (Join-Path $env:SystemRoot "System32")
+            $env:SystemRoot
+          ) -join [System.IO.Path]::PathSeparator
+          Remove-Item Env:NODE_PATH -ErrorAction SilentlyContinue
           pnpm exec vitest run apps/server/test/independent-service.test.ts apps/server/test/thumbnail.test.ts
