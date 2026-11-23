@@ -251,7 +251,7 @@ const toPublicError = (error: unknown): PublicError => {
   if (error instanceof OpenJournalStoreFullError) {
     return {
       code: "open_journal_full",
-      message: "reader handoff journal is full (64 rows); dismiss an unknown intent or discard a held event after reviewing its consequence",
+      message: "reader handoff admission is full (64 outstanding handoffs or 8,192 terminal rows admitted); review the diagnostics to dismiss an unknown intent, discard a held event, or wait for terminal retention to expire",
       retryable: false
     }
   }
