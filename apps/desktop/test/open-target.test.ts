@@ -100,6 +100,57 @@ describe("accepted local target evidence", () => {
     }
   })
 
+  it("stops starting sibling identity checks after a slow-mount deadline and allows a fresh retry", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-open-slow-mount-"))
+    try {
+      await writeFile(path.join(root, "fixture.cbz"), "fixture")
+      const resolution = await archiveResolution(root, "fixture.cbz", [
+        { entry_id: randomUUID(), relative_path: "sibling-a.cbz" },
+        { entry_id: randomUUID(), relative_path: "sibling-b.cbz" }
+      ])
+      const configured = await mapping(root)
+      const controller = new AbortController()
+      let expired = false
+      let started = 0
+      let startedAfterExpiration = 0
+      let active = 0
+      let maxConcurrent = 0
+      const startedAt = performance.now()
+      const expirationTimer = setTimeout(() => {
+        expired = true
+        controller.abort()
+      }, 25)
+      try {
+        await expect(resolveAcceptedTarget(configured, resolution, archiveProfile, {
+          signal: controller.signal,
+          readSiblingIdentity: async () => {
+            started += 1
+            if (expired) startedAfterExpiration += 1
+            active += 1
+            maxConcurrent = Math.max(maxConcurrent, active)
+            await new Promise((resolve) => setTimeout(resolve, 50))
+            active -= 1
+            return null
+          }
+        })).rejects.toThrow("local target check timed out")
+      } finally {
+        clearTimeout(expirationTimer)
+      }
+      const elapsedMs = performance.now() - startedAt
+      console.info(`[local-target-benchmark] slow sibling check elapsed=${elapsedMs.toFixed(1)}ms started=${started} after-expiration=${startedAfterExpiration} max-concurrent=${maxConcurrent}`)
+      expect(started).toBe(1)
+      expect(startedAfterExpiration).toBe(0)
+      expect(maxConcurrent).toBe(1)
+      expect(elapsedMs).toBeGreaterThanOrEqual(45)
+
+      await expect(resolveAcceptedTarget(configured, resolution, archiveProfile)).resolves.toBe(
+        path.join(configured.canonicalPath, "fixture.cbz")
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("rejects collisions from equivalent parent spellings", async () => {
     const cases = [
       ["Books/Book.zip", "books/book.zip"],

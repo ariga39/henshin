@@ -95,19 +95,26 @@ const readBigintStat = async (
 
 const readSiblingEvidenceWithinRoot = async (
   root: string,
-  target: string
+  target: string,
+  signal?: AbortSignal
 ): Promise<{ readonly identity: string } | null> => {
+  const checkActive = (): void => {
+    if (signal?.aborted) throw new OpenTargetError("the local target check timed out; verify the mount or permissions before retrying")
+  }
   if (!isWithin(root, target)) return null
 
   const suffix = relative(root, target)
   const segments = suffix.length === 0 ? [] : suffix.split(sep)
   let current = root
   for (const [index, segment] of segments.entries()) {
+    checkActive()
     current = join(current, segment)
     let metadata: Stats
     try {
       metadata = await lstat(current) as Stats
+      checkActive()
     } catch (error) {
+      if (error instanceof OpenTargetError) throw error
       if (isMissingError(error) || isUnrepresentablePathError(error)) return null
       return throwFilesystemError(
         error,
@@ -121,8 +128,11 @@ const readSiblingEvidenceWithinRoot = async (
 
   let canonicalPath: string
   try {
+    checkActive()
     canonicalPath = await realpath(target)
+    checkActive()
   } catch (error) {
+    if (error instanceof OpenTargetError) throw error
     if (isMissingError(error) || isUnrepresentablePathError(error)) return null
     return throwFilesystemError(
       error,
@@ -134,8 +144,11 @@ const readSiblingEvidenceWithinRoot = async (
 
   let metadata: BigIntStats
   try {
+    checkActive()
     metadata = await stat(canonicalPath, { bigint: true }) as BigIntStats
+    checkActive()
   } catch (error) {
+    if (error instanceof OpenTargetError) throw error
     if (isMissingError(error) || isUnrepresentablePathError(error)) return null
     return throwFilesystemError(
       error,
@@ -148,6 +161,16 @@ const readSiblingEvidenceWithinRoot = async (
     throw new OpenTargetError("sibling identity evidence is unavailable; refresh before opening")
   }
   return { identity }
+}
+
+export interface AcceptedTargetResolutionOptions {
+  readonly signal?: AbortSignal
+  readonly onSiblingIdentityCheckStarted?: () => void
+  readonly readSiblingIdentity?: (
+    root: string,
+    target: string,
+    signal?: AbortSignal
+  ) => Promise<{ readonly identity: string } | null>
 }
 
 export const isWindowsInvalidComponent = (component: string): boolean =>
@@ -261,8 +284,14 @@ const resolveConfiguredRoot = async (mapping: AcceptedTargetMapping): Promise<st
 
 const ensureSiblingClaimsAreUnambiguous = async (
   root: string,
-  resolution: EntryResolution
+  resolution: EntryResolution,
+  options: AcceptedTargetResolutionOptions
 ): Promise<void> => {
+  const checkActive = (): void => {
+    if (options.signal?.aborted) {
+      throw new OpenTargetError("the local target check timed out; verify the mount or permissions before retrying")
+    }
+  }
   if (resolution.sibling_claims_truncated || resolution.sibling_claims_next_cursor !== null) {
     throw new OpenTargetError("sibling identity evidence is incomplete; refresh before opening")
   }
@@ -283,6 +312,7 @@ const ensureSiblingClaimsAreUnambiguous = async (
     throw new OpenTargetError("the accepted target identity is unavailable; verify the mapping before opening")
   }
   for (const sibling of resolution.sibling_claims) {
+    checkActive()
     const claimedSegments = portableSegments(sibling.relative_path)
     const siblingSegments = process.platform === "win32" && claimedSegments.some(isWindowsInvalidComponent)
       ? normalizedWindowsSiblingSegments(claimedSegments)
@@ -292,7 +322,9 @@ const ensureSiblingClaimsAreUnambiguous = async (
     // The server's sibling set uses its NFC/case-folded parent key. Resolve every
     // candidate here and let the device's native path and file identities decide,
     // but never follow a link or read identity outside the admitted root.
-    const siblingEvidence = await readSiblingEvidenceWithinRoot(root, siblingPath)
+    options.onSiblingIdentityCheckStarted?.()
+    const siblingEvidence = await (options.readSiblingIdentity ?? readSiblingEvidenceWithinRoot)(root, siblingPath, options.signal)
+    checkActive()
     if (siblingEvidence === null) continue
     if (targetIdentity === siblingEvidence.identity) {
       throw new OpenTargetError("the accepted target is ambiguous with another entry on this device")
@@ -303,7 +335,8 @@ const ensureSiblingClaimsAreUnambiguous = async (
 export const resolveAcceptedTarget = async (
   mapping: AcceptedTargetMapping,
   resolution: EntryResolution,
-  profile: StoredReaderProfile
+  profile: StoredReaderProfile,
+  options: AcceptedTargetResolutionOptions = {}
 ): Promise<string> => {
   if (resolution.status !== "usable" || resolution.reason !== null) {
     throw new OpenTargetError("the accepted entry needs reconciliation before it can be opened")
@@ -348,7 +381,7 @@ export const resolveAcceptedTarget = async (
   if (Math.trunc(entryMetadata.mtimeMs) !== Math.trunc(resolution.accepted_observation.mtime_ms)) {
     throw new OpenTargetError("the accepted source changed; reconcile the library before opening")
   }
-  await ensureSiblingClaimsAreUnambiguous(root, resolution)
+  await ensureSiblingClaimsAreUnambiguous(root, resolution, options)
   let target = entryTarget
   if (firstPage !== null) {
     target = resolve(target, firstPage.name)

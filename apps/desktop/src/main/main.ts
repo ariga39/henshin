@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from "electron"
 import { Cause, Duration, Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
@@ -22,6 +22,8 @@ import {
   LocalMappingListIpcRequest,
   LocalMappingPreviewIpcRequest,
   LibrarySearchIpcRequest,
+  OpenBookIpcRequest,
+  OpenBookStatusIpcRequest,
   ThumbnailGetIpcRequest,
   ThumbnailHttpClient,
   LoadDraftIpcRequest,
@@ -69,6 +71,7 @@ import {
   reconcileNoteCommand
 } from "./CommandCoordinator"
 import { LocalDatabaseWorker } from "./persistence/LocalDatabaseWorker"
+import { OpenResolutionCache } from "./persistence/OpenResolutionCache"
 import {
   OpenJournalConflictError,
   OpenJournalNotFoundError,
@@ -100,6 +103,8 @@ import {
   ConnectionLifecycle,
   ConnectionPausedError
 } from "./ConnectionLifecycle"
+import { OpenCoordinator, type OpenCoordinatorPorts } from "./OpenCoordinator"
+import { loadDeviceId } from "./device-identity"
 
 const SHUTDOWN_TIMEOUT_MS = 5_000
 const LOCAL_MAPPING_REQUEST_TIMEOUT = Duration.seconds(12)
@@ -122,15 +127,18 @@ interface IpcErr {
 }
 
 let mainWindow: BrowserWindow | null = null
+const appWindows = new Set<BrowserWindow>()
+const trustedWindowUrls = new Map<BrowserWindow, string>()
 let serverChild: ServerChild | null = null
-type MainServices = DraftStore | CommandAttemptStore | OpenJournalStore | LocalMappingStore | ReaderProfileStore
+type MainServices = DraftStore | CommandAttemptStore | OpenJournalStore | LocalMappingStore | ReaderProfileStore | OpenResolutionCache
 let runtime: ManagedRuntime.ManagedRuntime<MainServices, never> | null = null
 let connection: ConnectionLifecycle | null = null
-let rendererUrl = ""
+let openCoordinator: OpenCoordinator | null = null
 let shutdownPromise: Promise<void> | null = null
 let readyToQuit = false
 const prototypeMode = process.env.HENSHIN_PROTOTYPE_MODE === "1"
 let protectedWritablePaths: ReadonlyArray<string> = []
+let deviceId = ""
 const localMappingPreviews = new Map<string, {
   readonly epoch: string
   readonly previewToken: string
@@ -157,7 +165,6 @@ const testTargetSelections = new Map<string, {
 }>()
 const TEST_TARGET_SELECTION_TTL_MS = 10 * 60 * 1000
 const MAX_TEST_TARGET_SELECTIONS = 32
-
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 const dispatchExplicitReaderTest = (executablePath: string, argumentsList: ReadonlyArray<string>): Promise<void> =>
@@ -185,6 +192,23 @@ const dispatchExplicitReaderTest = (executablePath: string, argumentsList: Reado
       settle("failed")
     }
   })
+
+const dispatchReader = (profile: {
+  readonly launch_mode: "explicit-executable" | "system-association"
+  readonly executablePath: string | null
+  readonly argument_tokens: ReadonlyArray<string>
+}, resolvedTarget: string): Promise<void> => {
+  if (profile.launch_mode === "explicit-executable") {
+    if (profile.executablePath === null) return Promise.reject(new ReaderTestLaunchError("the saved profile has no executable"))
+    return dispatchExplicitReaderTest(
+      profile.executablePath,
+      profile.argument_tokens.map((token) => token === "{target}" ? resolvedTarget : token)
+    )
+  }
+  return shell.openPath(resolvedTarget).then((error) => {
+    if (error !== "") throw new ReaderTestLaunchError("the operating system could not open the resolved target")
+  })
+}
 
 const opaqueError: PublicError = { code: "internal_error", message: "request failed", retryable: false }
 const localMappingTimeoutError: PublicError = {
@@ -252,7 +276,7 @@ const toPublicError = (error: unknown): PublicError => {
   if (error instanceof OpenJournalStoreFullError) {
     return {
       code: "open_journal_full",
-      message: "reader handoff admission is full (64 outstanding handoffs or 8,192 terminal rows admitted); review the diagnostics to dismiss an unknown intent, discard a held event, or wait for terminal retention to expire",
+      message: "reader handoff admission is full (64 outstanding handoffs or 8,192 terminal rows admitted); use Open recovery to dismiss an unknown intent or discard a held event, or wait for terminal retention to expire",
       retryable: false
     }
   }
@@ -354,17 +378,25 @@ const toRawResult = <A, R>(effect: Effect.Effect<A, unknown, R>): Effect.Effect<
     })
   )
 
-const assertTrustedSender = (event: IpcMainInvokeEvent): void => {
-  if (mainWindow === null || event.sender !== mainWindow.webContents) {
+const assertTrustedSender = (event: IpcMainInvokeEvent): BrowserWindow => {
+  const senderWindow = BrowserWindow.fromWebContents(event.sender)
+  if (
+    senderWindow === null ||
+    senderWindow.isDestroyed() ||
+    !appWindows.has(senderWindow) ||
+    senderWindow.getParentWindow() !== null ||
+    event.sender !== senderWindow.webContents
+  ) {
     throw new Error("rejected IPC from an untrusted web contents")
   }
   const frame = event.senderFrame
-  if (frame === null || frame !== mainWindow.webContents.mainFrame) {
+  if (frame === null || frame !== senderWindow.webContents.mainFrame) {
     throw new Error("rejected IPC from an untrusted frame")
   }
-  if (frame.url !== rendererUrl) {
+  if (trustedWindowUrls.get(senderWindow) !== frame.url) {
     throw new Error("rejected IPC from an untrusted origin")
   }
+  return senderWindow
 }
 
 const requireRuntime = (): ManagedRuntime.ManagedRuntime<MainServices, never> => {
@@ -377,6 +409,17 @@ const requireSession = (): Session => {
   const session = connection.getSession()
   if (session === null) throw new ConnectionPausedError({ state: connection.getStatus().state })
   return { instanceId: session.instanceId, epoch: session.epoch }
+}
+
+const requireOpenSession = (): { readonly session: Session; readonly offline: boolean } => {
+  if (connection === null) throw new Error("connection lifecycle is not ready")
+  const session = connection.getSession()
+  if (session !== null) return { session, offline: false }
+  const status = connection.getStatus()
+  if (status.state !== "disconnected") throw new ConnectionPausedError({ state: status.state })
+  const cached = connection.getCachedSession()
+  if (cached === null) throw new ConnectionPausedError({ state: status.state })
+  return { session: cached, offline: true }
 }
 
 const requireNamespace = (): string => {
@@ -392,8 +435,14 @@ const requireConnection = (): ConnectionLifecycle => {
 }
 
 const notifyOpenJournalChanged = (): void => {
-  if (mainWindow !== null && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(IpcChannels.openJournalChanged)
+  for (const window of appWindows) {
+    if (!window.isDestroyed()) window.webContents.send(IpcChannels.openJournalChanged)
+  }
+}
+
+const notifyOpenStateChanged = (): void => {
+  for (const window of appWindows) {
+    if (!window.isDestroyed()) window.webContents.send(IpcChannels.openStateChanged)
   }
 }
 
@@ -471,6 +520,106 @@ const endLocalMappingCheck = (key: string): void => {
 
 const hasBlockingLocalEvidence = (preview: LocalMappingPreview): boolean =>
   preview.samples.some((sample) => !localMappingSampleCanActivate(sample))
+
+const createOpenCoordinator = (): OpenCoordinator => {
+  const ports: OpenCoordinatorPorts = {
+    deviceId,
+    journal: {
+      get: (instanceId, actionId) => requireRuntime().runPromise(
+        Effect.gen(function*() {
+          const store = yield* OpenJournalStore
+          return yield* store.get({ instanceId, actionId })
+        })
+      ),
+      findLatestByEntry: (instanceId, entryId) => requireRuntime().runPromise(
+        Effect.gen(function*() {
+          const store = yield* OpenJournalStore
+          return yield* store.findLatestByEntry({ instanceId, entryId })
+        })
+      ),
+      findUnresolvedByEntry: (instanceId, entryId) => requireRuntime().runPromise(
+        Effect.gen(function*() {
+          const store = yield* OpenJournalStore
+          return yield* store.findUnresolvedByEntry({ instanceId, entryId })
+        })
+      ),
+      prepare: (input) => requireRuntime().runPromise(
+        Effect.gen(function*() {
+          const store = yield* OpenJournalStore
+          return yield* store.prepare(input)
+        })
+      ),
+      recordAccepted: (key, event) => requireRuntime().runPromise(
+        Effect.gen(function*() {
+          const store = yield* OpenJournalStore
+          return yield* store.recordAccepted(key, event)
+        })
+      ),
+      recordUnknown: (key) => requireRuntime().runPromise(
+        Effect.gen(function*() {
+          const store = yield* OpenJournalStore
+          return yield* store.recordUnknown(key)
+        })
+      ),
+      recordFailed: (key, failure) => requireRuntime().runPromise(
+        Effect.gen(function*() {
+          const store = yield* OpenJournalStore
+          return yield* store.recordFailed({ ...key, ...failure })
+        })
+      )
+    },
+    loadMapping: (instanceId, rootId) => requireRuntime().runPromise(
+      Effect.gen(function*() {
+        const store = yield* LocalMappingStore
+        return yield* store.load({ instanceId, rootId })
+      })
+    ),
+    loadProfile: (profileId) => requireRuntime().runPromise(
+      Effect.gen(function*() {
+        const store = yield* ReaderProfileStore
+        return yield* store.get(profileId)
+      })
+    ),
+    resolve: (entryId, query) => requireConnection().run(
+      Effect.gen(function*() {
+        const client = yield* LibraryHttpClient
+        return (yield* client.resolution({
+          params: { id: entryId },
+          query: query === undefined
+            ? {}
+            : {
+                ...(query.siblingCursor === undefined ? {} : { sibling_cursor: query.siblingCursor }),
+                ...(query.siblingClaimsRevision === undefined ? {} : { sibling_claims_revision: query.siblingClaimsRevision })
+              }
+        })).data
+      })
+    ),
+    loadCachedResolution: (instanceId, entryId) => requireRuntime().runPromise(
+      Effect.gen(function*() {
+        const cache = yield* OpenResolutionCache
+        return yield* cache.get({ instanceId, entryId })
+      })
+    ),
+    saveCachedResolution: (input) => requireRuntime().runPromise(
+      Effect.gen(function*() {
+        const cache = yield* OpenResolutionCache
+        yield* cache.save(input)
+      })
+    ),
+    dispatch: (profile, target) => dispatchReader(profile, target),
+    assertCurrent: (instanceId, epoch) => {
+      const current = requireSession()
+      if (current.instanceId !== instanceId || current.epoch !== epoch) {
+        throw new ConnectionPausedError({ state: requireConnection().getStatus().state })
+      }
+    },
+    onAcceptedEventDurable: () => {
+      void deliverPendingOpenEvents()
+    },
+    onActiveChanged: notifyOpenStateChanged
+  }
+  return new OpenCoordinator(ports)
+}
 
 const stableSample = (sample: LocalMappingPreview["samples"][number]) => ({
   ...sample,
@@ -591,7 +740,7 @@ const registerIpc = (): void => {
   })
 
   ipcMain.handle(IpcChannels.localMappingPreview, async (event, raw: unknown) => {
-    assertTrustedSender(event)
+    const senderWindow = assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(LocalMappingPreviewIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     let session: Session
@@ -600,7 +749,7 @@ const registerIpc = (): void => {
     } catch (error) {
       return { ok: false as const, error: toPublicError(error) }
     }
-    const selected = await dialog.showOpenDialog(mainWindow!, {
+    const selected = await dialog.showOpenDialog(senderWindow, {
       title: "Select the local collection directory",
       properties: ["openDirectory"]
     })
@@ -802,11 +951,10 @@ const registerIpc = (): void => {
   })
 
   ipcMain.handle(IpcChannels.readerSelectExecutable, async (event, raw: unknown) => {
-    assertTrustedSender(event)
+    const senderWindow = assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(ReaderExecutableSelectIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
-    if (mainWindow === null) return { ok: false as const, error: opaqueError }
-    const picker = await dialog.showOpenDialog(mainWindow, {
+    const picker = await dialog.showOpenDialog(senderWindow, {
       title: "Choose a reader executable",
       properties: ["openFile"],
       filters: process.platform === "win32"
@@ -902,7 +1050,7 @@ const registerIpc = (): void => {
   })
 
   ipcMain.handle(IpcChannels.readerProfileTestTargetSelect, async (event, raw: unknown) => {
-    assertTrustedSender(event)
+    const senderWindow = assertTrustedSender(event)
     const decoded = Schema.decodeUnknownOption(ReaderProfileTestTargetSelectIpcRequest)(raw)
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     try {
@@ -916,9 +1064,7 @@ const registerIpc = (): void => {
       if (profile.revision !== decoded.value.expected_revision) {
         throw new ReaderProfileConflictError({ currentRevision: profile.revision })
       }
-      if (mainWindow === null) return { ok: false as const, error: opaqueError }
-
-      const picker = await dialog.showOpenDialog(mainWindow, {
+      const picker = await dialog.showOpenDialog(senderWindow, {
         title: "Choose a disposable reader test target",
         properties: profile.target_mode === "archive" ? ["openFile"] : ["openDirectory"],
         ...(profile.target_mode === "archive"
@@ -1032,6 +1178,43 @@ const registerIpc = (): void => {
         })
       )
     )
+  })
+
+  ipcMain.handle(IpcChannels.openBook, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(OpenBookIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    try {
+      const { session, offline } = requireOpenSession()
+      if (openCoordinator === null) return { ok: false as const, error: opaqueError }
+      return openCoordinator.open({
+        instanceId: session.instanceId,
+        epoch: session.epoch,
+        entryId: decoded.value.entry_id,
+        profileId: decoded.value.profile_id,
+        actionId: decoded.value.action_id,
+        offline
+      }).then((data) => ({ ok: true as const, data })).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+    } catch (error) {
+      return Promise.resolve({ ok: false as const, error: toPublicError(error) })
+    }
+  })
+
+  ipcMain.handle(IpcChannels.openBookStatus, (event, raw: unknown) => {
+    assertTrustedSender(event)
+    const decoded = Schema.decodeUnknownOption(OpenBookStatusIpcRequest)(raw)
+    if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
+    try {
+      if (openCoordinator === null) return { ok: true as const, data: null }
+      const instanceId = requireNamespace()
+      const request = decoded.value
+      return openCoordinator.status(
+        instanceId,
+        "entry_id" in request ? { entryId: request.entry_id } : { actionId: request.action_id }
+      ).then((data) => ({ ok: true as const, data })).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
+    } catch (error) {
+      return Promise.resolve({ ok: false as const, error: toPublicError(error) })
+    }
   })
 
   ipcMain.handle(IpcChannels.thumbnailGet, (event, raw: unknown) => {
@@ -1431,7 +1614,14 @@ const registerIpc = (): void => {
   })
 }
 
-const createWindow = (): void => {
+const createWindow = (initialScreen: "setup" | "library" = "setup"): void => {
+  const indexPath = path.join(app.getAppPath(), "dist", "index.html")
+  const query = {
+    ...(prototypeMode ? { mode: "prototype" } : {}),
+    ...(initialScreen === "library" ? { screen: "library" } : {})
+  }
+  const queryString = new URLSearchParams(query).toString()
+  const expectedUrl = `${pathToFileURL(indexPath).toString()}${queryString.length === 0 ? "" : `?${queryString}`}`
   const window = new BrowserWindow({
     width: 720,
     height: 560,
@@ -1449,12 +1639,37 @@ const createWindow = (): void => {
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }))
 
   window.on("closed", () => {
-    mainWindow = null
+    appWindows.delete(window)
+    trustedWindowUrls.delete(window)
+    if (mainWindow === window) {
+      mainWindow = appWindows.values().next().value ?? null
+    }
   })
+  appWindows.add(window)
+  trustedWindowUrls.set(window, expectedUrl)
   mainWindow = window
-  void window.loadFile(path.join(app.getAppPath(), "dist", "index.html"), {
-    query: prototypeMode ? { mode: "prototype" } : undefined
+  void window.loadFile(indexPath, {
+    query: Object.keys(query).length === 0 ? undefined : query
   })
+}
+
+const installApplicationMenu = (): void => {
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    ...(process.platform === "darwin" ? [{ role: "appMenu" as const }] : []),
+    {
+      label: "File",
+      submenu: [
+        {
+          id: "new-library-window",
+          label: "New Window",
+          accelerator: "CmdOrCtrl+N",
+          click: () => createWindow("library")
+        }
+      ]
+    },
+    { role: "editMenu" as const },
+    { role: "windowMenu" as const }
+  ]))
 }
 
 /**
@@ -1465,10 +1680,23 @@ const createWindow = (): void => {
 const shutdown = (): Promise<void> => {
   if (shutdownPromise !== null) return shutdownPromise
   shutdownPromise = (async () => {
+    const activeCoordinator = openCoordinator
+    if (activeCoordinator !== null) {
+      const coordinatorDeadline = Date.now() + SHUTDOWN_TIMEOUT_MS
+      activeCoordinator.closeAdmissions()
+      await Promise.race([
+        (async () => {
+          await activeCoordinator.waitForInFlight(Math.max(0, coordinatorDeadline - Date.now()))
+          await activeCoordinator.drainPendingAccepted(Math.max(0, coordinatorDeadline - Date.now()))
+        })(),
+        delay(SHUTDOWN_TIMEOUT_MS)
+      ])
+    }
     const activeRuntime = runtime
     runtime = null
     const activeConnection = connection
     connection = null
+    openCoordinator = null
     if (activeConnection !== null) await activeConnection.close()
     if (activeRuntime !== null) {
       await Promise.race([activeRuntime.dispose(), delay(SHUTDOWN_TIMEOUT_MS)])
@@ -1484,6 +1712,7 @@ const bootstrap = async (): Promise<void> => {
   const dbPath = process.env.HENSHIN_PROTOTYPE_DB ?? path.join(app.getPath("userData"), "prototype.db")
   const clientDbPath =
     process.env.HENSHIN_PROTOTYPE_CLIENT_DB ?? path.join(app.getPath("userData"), "prototype-client.db")
+  deviceId = await loadDeviceId(app.getPath("userData"))
   protectedWritablePaths = [
     app.getPath("userData"),
     app.getPath("sessionData"),
@@ -1501,7 +1730,8 @@ const bootstrap = async (): Promise<void> => {
       CommandAttemptStore.layerFromWorker,
       OpenJournalStore.layerFromWorker,
       LocalMappingStore.layerFromWorker,
-      ReaderProfileStore.layerFromWorker
+      ReaderProfileStore.layerFromWorker,
+      OpenResolutionCache.layerFromWorker
     ).pipe(Layer.provide(localWorker))
   )
 
@@ -1513,17 +1743,16 @@ const bootstrap = async (): Promise<void> => {
   })
   await connection.connect()
   void deliverPendingOpenEvents()
+  openCoordinator = createOpenCoordinator()
 
   registerIpc()
+  installApplicationMenu()
   createWindow()
 }
 
 app.disableHardwareAcceleration()
 
 app.whenReady().then(async () => {
-  rendererUrl = `${pathToFileURL(path.join(app.getAppPath(), "dist", "index.html")).toString()}${
-    prototypeMode ? "?mode=prototype" : ""
-  }`
   try {
     await bootstrap()
   } catch (error) {

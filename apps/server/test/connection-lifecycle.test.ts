@@ -292,7 +292,14 @@ describe("main-owned connection lifecycle", () => {
     await lifecycle.disconnect()
 
     fixture.rejectHandshake()
-    await expect(lifecycle.connect()).rejects.toThrow()
+    const reconnect = lifecycle.connect()
+    expect(lifecycle.getStatus()).toMatchObject({
+      state: "connecting",
+      instance_id: INSTANCE_ID,
+      epoch: null
+    })
+    expect(lifecycle.getNamespace()).toBe(INSTANCE_ID)
+    await expect(reconnect).rejects.toThrow()
 
     expect(lifecycle.getStatus()).toMatchObject({
       state: "blocked",
@@ -301,6 +308,7 @@ describe("main-owned connection lifecycle", () => {
       reason: "authentication_or_network_failure"
     })
     expect(lifecycle.getNamespace()).toBe(INSTANCE_ID)
+    expect(lifecycle.getCachedSession()).toEqual({ instanceId: INSTANCE_ID, epoch: EPOCH })
     expect(lifecycle.getSession()).toBeNull()
     await expect(
       lifecycle.run(

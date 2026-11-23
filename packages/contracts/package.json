@@ -10,8 +10,8 @@
     "./event": "./src/event.ts",
     "./ids": "./src/ids.ts",
     "./note": "./src/note.ts",
-    "./open-event-api": "./src/open-event-api.ts",
     "./root": "./src/root.ts",
+    "./open-event-api": "./src/open-event-api.ts",
     "./thumbnail": "./src/thumbnail.ts"
   },
   "scripts": {
