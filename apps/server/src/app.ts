@@ -26,6 +26,7 @@ import { NoteStore } from "./persistence/NoteStore"
 import { RootStore } from "./persistence/RootStore"
 import { BackupDestinationStore } from "./persistence/BackupDestinationStore"
 import { ScanStore } from "./persistence/ScanStore"
+import { runScheduledScanLoop } from "./scan/ScheduledScanScheduler"
 import { LibraryStore } from "./persistence/LibraryStore"
 import { OpenEventStore } from "./persistence/OpenEventStore"
 import { ServerOwnershipLayer, type ServerOwnershipError } from "./persistence/ServerOwnership"
@@ -242,6 +243,7 @@ export const makeAppLayer = (
       const state = yield* ServerState
       const scans = yield* ScanStore
       yield* scans.recoverInterrupted()
+      yield* runScheduledScanLoop().pipe(Effect.forkDetach)
       const address = httpServer.address
       const port =
         address._tag === "InetAddressV4" || address._tag === "InetAddressV6" ? address.port : 0
@@ -262,6 +264,7 @@ export const makeAppLayer = (
     Layer.provide(Layer.succeed(HttpIncomingMessage.MaxBodySize, ByteSize.mebibytes(1))),
     Layer.provide(ServerState.layer),
     Layer.provide(ScanStore.layer),
+    Layer.provide(RootStore.layer),
     Layer.provide(LibraryStore.layer),
     Layer.provide(OpenEventStore.layer),
     Layer.provide(AuthConfig.layer(options.auth)),

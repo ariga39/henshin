@@ -39,6 +39,10 @@ export const RootPolicyCommand = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("remove-exclusion"),
     exclusion: RootExclusion
+  }),
+  Schema.Struct({
+    type: Schema.Literal("set-schedule"),
+    enabled: Schema.Boolean
   })
 ])
 export type RootPolicyCommand = typeof RootPolicyCommand.Type
@@ -243,6 +247,7 @@ export const ServerRoot = Schema.Struct({
   mapping_revision: Revision,
   policy_revision: Revision,
   exclusions: RootExclusions,
+  schedule_enabled: Schema.Boolean,
   state: Schema.Literal("active")
 })
 export type ServerRoot = typeof ServerRoot.Type
@@ -252,7 +257,7 @@ export type ServerRootList = typeof ServerRootList.Type
 
 export const RootScanCommand = Schema.Struct({
   type: Schema.Literal("start-scan"),
-  mode: Schema.Literal("manual"),
+  mode: Schema.Literals(["manual", "scheduled"]),
   hold_new_discoveries: Schema.Boolean
 })
 export type RootScanCommand = typeof RootScanCommand.Type
@@ -290,8 +295,8 @@ export type ScanTaskStatus = typeof ScanTaskStatus.Type
 export const ScanTask = Schema.Struct({
   task_id: Uuid,
   root_id: Uuid,
-  kind: Schema.Literal("manual-scan"),
-  mode: Schema.Literal("manual"),
+  kind: Schema.Literals(["manual-scan", "scheduled-scan"]),
+  mode: Schema.Literals(["manual", "scheduled"]),
   hold_new_discoveries: Schema.Boolean,
   mapping_revision: Revision,
   status: ScanTaskStatus,

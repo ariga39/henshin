@@ -142,3 +142,33 @@ it("fences publication against a concurrent policy edit while preserving stale f
     await cleanupTempDb(dbPath)
   }
 })
+
+it("coalesces manual and scheduled normal scans into one active generation", async () => {
+  const dbPath = await makeTempDbPath()
+  const worker = DatabaseWorker.layer(dbPath, { workerUrl: new URL("../dist/worker.mjs", import.meta.url) })
+  const storage = Layer.merge(RootStore.layer, ScanStore.layer).pipe(Layer.provideMerge(worker))
+  try {
+    await Effect.runPromise(Effect.gen(function*() {
+      yield* (yield* DatabaseWorker).call({ op: "init" })
+      const roots = yield* RootStore
+      const registered = yield* roots.register({
+        operationId: randomUUID(), label: "Books", selectedPath: "/books", canonicalPath: "/books",
+        device: "1", inode: "1"
+      })
+      if (registered.kind !== "registered") throw new Error("expected a saved root")
+      const scans = yield* ScanStore
+      const common = {
+        taskId: randomUUID(), rootId: registered.root.rootId, epoch: randomUUID(),
+        expectedMappingRevision: registered.root.mappingRevision,
+        expectedPolicyRevision: registered.root.policyRevision,
+        holdNewDiscoveries: false
+      }
+      const scheduled = yield* scans.start({ ...common, operationId: randomUUID(), mode: "scheduled" })
+      if (scheduled.kind !== "created") throw new Error("expected a scheduled scan")
+      const manual = yield* scans.start({ ...common, operationId: randomUUID(), mode: "manual" })
+      expect(manual).toMatchObject({ kind: "active", task: { task_id: scheduled.task.task_id, mode: "scheduled" } })
+    }).pipe(Effect.provide(storage)))
+  } finally {
+    await cleanupTempDb(dbPath)
+  }
+})

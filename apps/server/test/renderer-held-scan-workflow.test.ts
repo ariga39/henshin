@@ -35,6 +35,7 @@ const root: ServerRoot = {
   mapping_revision: "3",
   policy_revision: "7",
   exclusions: [],
+  schedule_enabled: false,
   state: "active"
 }
 

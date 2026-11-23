@@ -137,6 +137,7 @@ const makeServices = async (
     mappingRevision: "1",
     policyRevision: "1",
     exclusions: [],
+    scheduleEnabled: false,
     state: "active"
   }
   const accepted = {

@@ -353,6 +353,7 @@ db.exec(`
     mapping_revision INTEGER NOT NULL,
     policy_revision INTEGER NOT NULL DEFAULT 0,
     exclusions TEXT NOT NULL DEFAULT '[]',
+    schedule_enabled INTEGER NOT NULL DEFAULT 0 CHECK (schedule_enabled IN (0, 1)),
     state TEXT NOT NULL CHECK (state = 'active')
   );
   CREATE TABLE IF NOT EXISTS backup_destinations (
@@ -403,6 +404,7 @@ db.exec(`
     epoch TEXT NOT NULL,
     root_id TEXT NOT NULL REFERENCES server_roots(root_id),
     mapping_revision INTEGER NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'manual' CHECK (mode IN ('manual', 'scheduled')),
     status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'completed_with_errors', 'failed', 'interrupted')),
     hold_new_discoveries INTEGER NOT NULL CHECK (hold_new_discoveries IN (0, 1)),
     directories_visited INTEGER NOT NULL,
@@ -554,6 +556,9 @@ if (!rootColumns.has("policy_revision")) {
 if (!rootColumns.has("exclusions")) {
   db.exec("ALTER TABLE server_roots ADD COLUMN exclusions TEXT NOT NULL DEFAULT '[]'")
 }
+if (!rootColumns.has("schedule_enabled")) {
+  db.exec("ALTER TABLE server_roots ADD COLUMN schedule_enabled INTEGER NOT NULL DEFAULT 0 CHECK (schedule_enabled IN (0, 1))")
+}
 
 const serverLibraryColumns = db.prepare("PRAGMA table_info(server_library)").all() as unknown as ReadonlyArray<{ name: string }>
 if (!serverLibraryColumns.some((column) => column.name === "change_revision")) {
@@ -601,7 +606,8 @@ const stagedDiscoveryTable = db.prepare(
 ).get() as { sql: string } | undefined
 const needsScanSchemaMigration =
   scanTaskTable?.sql.includes("hold_new_discoveries IN (0, 1)") !== true ||
-  stagedDiscoveryTable?.sql.includes("hold_state IN ('held', 'eligible')") !== true
+  stagedDiscoveryTable?.sql.includes("hold_state IN ('held', 'eligible')") !== true ||
+  scanTaskTable?.sql.includes("mode IN ('manual', 'scheduled')") !== true
 
 if (needsScanSchemaMigration) {
   db.exec("PRAGMA foreign_keys = OFF")
@@ -614,6 +620,7 @@ if (needsScanSchemaMigration) {
         epoch TEXT NOT NULL,
         root_id TEXT NOT NULL REFERENCES server_roots(root_id),
         mapping_revision INTEGER NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'manual' CHECK (mode IN ('manual', 'scheduled')),
         status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'completed_with_errors', 'failed', 'interrupted')),
         hold_new_discoveries INTEGER NOT NULL CHECK (hold_new_discoveries IN (0, 1)),
         directories_visited INTEGER NOT NULL,
@@ -646,7 +653,17 @@ if (needsScanSchemaMigration) {
         candidate_observation_json TEXT,
         UNIQUE (root_id, relative_path)
       );
-      INSERT INTO scan_tasks_v4 SELECT * FROM scan_tasks;
+      INSERT INTO scan_tasks_v4(
+        task_id, operation_id, epoch, root_id, mapping_revision, mode, status, hold_new_discoveries,
+        directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count,
+        review_needed_count, coverage_json, readiness_error_code, readiness_error_message,
+        error_code, error_message, command_payload, created_at_ms, updated_at_ms
+      )
+      SELECT task_id, operation_id, epoch, root_id, mapping_revision, 'manual', status, hold_new_discoveries,
+        directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count,
+        review_needed_count, coverage_json, readiness_error_code, readiness_error_message,
+        error_code, error_message, command_payload, created_at_ms, updated_at_ms
+      FROM scan_tasks;
       INSERT INTO staged_discoveries_v4 SELECT * FROM staged_discoveries;
       DROP TABLE staged_discoveries;
       DROP TABLE scan_tasks;
@@ -870,11 +887,11 @@ const compactOperations = db.prepare(`
   )
 `)
 const selectRoots = db.prepare(
-  "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, state FROM server_roots ORDER BY rowid ASC"
+  "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, schedule_enabled, state FROM server_roots ORDER BY rowid ASC"
 )
 selectRoots.setReadBigInts(true)
 const selectRoot = db.prepare(
-  "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, state FROM server_roots WHERE root_id = ?"
+  "SELECT library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, schedule_enabled, state FROM server_roots WHERE root_id = ?"
 )
 selectRoot.setReadBigInts(true)
 const selectBackupDestinations = db.prepare(
@@ -954,7 +971,7 @@ const selectLibrary = db.prepare("SELECT library_id FROM server_library WHERE id
 const selectLibraryState = db.prepare("SELECT library_id, change_revision FROM server_library WHERE id = 1")
 const selectRootOperation = db.prepare("SELECT payload, result FROM root_operations WHERE operation_id = ?")
 const insertRoot = db.prepare(
-  "INSERT INTO server_roots(library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')"
+  "INSERT INTO server_roots(library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, schedule_enabled, state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')"
 )
 const insertRootOperation = db.prepare(
   "INSERT INTO root_operations(operation_id, payload, result) VALUES(?, ?, ?)"
@@ -966,11 +983,11 @@ const selectScanOperation = db.prepare(
    WHERE a.epoch = ? AND a.operation_id = ?`
 )
 const selectScanTask = db.prepare(
-  "SELECT task_id, operation_id, epoch, root_id, mapping_revision, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, created_at_ms, updated_at_ms FROM scan_tasks WHERE task_id = ?"
+  "SELECT task_id, operation_id, epoch, root_id, mapping_revision, mode, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, created_at_ms, updated_at_ms FROM scan_tasks WHERE task_id = ?"
 )
 selectScanTask.setReadBigInts(true)
 const selectScanTasks = db.prepare(
-  "SELECT task_id, operation_id, epoch, root_id, mapping_revision, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, created_at_ms, updated_at_ms FROM scan_tasks ORDER BY created_at_ms ASC, rowid ASC"
+  "SELECT task_id, operation_id, epoch, root_id, mapping_revision, mode, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, created_at_ms, updated_at_ms FROM scan_tasks ORDER BY created_at_ms ASC, rowid ASC"
 )
 selectScanTasks.setReadBigInts(true)
 const selectStagedDiscoveries = db.prepare(
@@ -1149,7 +1166,7 @@ const selectIndexedRootSamples = db.prepare(
   "SELECT relative_path, kind, manifest_json FROM library_entries WHERE root_id = ? AND state = 'accepted' ORDER BY relative_path ASC LIMIT ?"
 )
 const insertScanTask = db.prepare(
-  "INSERT INTO scan_tasks(task_id, operation_id, epoch, root_id, mapping_revision, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, command_payload, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)"
+  "INSERT INTO scan_tasks(task_id, operation_id, epoch, root_id, mapping_revision, mode, status, hold_new_discoveries, directories_visited, candidates_discovered, candidates_analyzed, analysis_error_count, review_needed_count, coverage_json, readiness_error_code, readiness_error_message, error_code, error_message, command_payload, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)"
 )
 const updateScanRunning = db.prepare("UPDATE scan_tasks SET status = 'running', updated_at_ms = ? WHERE task_id = ? AND status = 'queued'")
 const updateScanTask = db.prepare(
@@ -1197,7 +1214,7 @@ const updateStagedHold = db.prepare(
   "UPDATE staged_discoveries SET candidate_version = ?, hold_state = 'eligible', updated_at_ms = ? WHERE candidate_id = ? AND root_id = ? AND candidate_version = ? AND hold_state = 'held'"
 )
 const updateRootPolicy = db.prepare(
-  "UPDATE server_roots SET policy_revision = ?, exclusions = ? WHERE root_id = ?"
+  "UPDATE server_roots SET policy_revision = ?, exclusions = ?, schedule_enabled = ? WHERE root_id = ?"
 )
 
 let closed = false
@@ -1221,6 +1238,7 @@ const rootRow = (row: {
   mapping_revision: bigint
   policy_revision: bigint
   exclusions: string
+  schedule_enabled: bigint
   state: "active"
 }): ServerRootRow => {
   const exclusions = Schema.decodeUnknownOption(RootExclusions)(JSON.parse(row.exclusions))
@@ -1236,6 +1254,7 @@ const rootRow = (row: {
     mappingRevision: row.mapping_revision.toString(),
     policyRevision: row.policy_revision.toString(),
     exclusions: exclusions.value,
+    scheduleEnabled: row.schedule_enabled === 1n,
     state: row.state
   }
 }
@@ -1252,6 +1271,7 @@ const rootRows = (): ReadonlyArray<ServerRootRow> =>
     mapping_revision: bigint
     policy_revision: bigint
     exclusions: string
+    schedule_enabled: bigint
     state: "active"
   }>).map(rootRow)
 
@@ -1268,6 +1288,7 @@ const rootById = (rootId: string): ServerRootRow | undefined => {
         mapping_revision: bigint
         policy_revision: bigint
         exclusions: string
+        schedule_enabled: bigint
         state: "active"
       }
     | undefined
@@ -1704,6 +1725,7 @@ const registerRoot = (
       mappingRevision: "1",
       policyRevision: "0",
       exclusions: [],
+      scheduleEnabled: false,
       state: "active"
     }
     insertRoot.run(
@@ -1716,7 +1738,8 @@ const registerRoot = (
       root.inode,
       BigInt(root.mappingRevision),
       BigInt(root.policyRevision),
-      JSON.stringify(root.exclusions)
+      JSON.stringify(root.exclusions),
+      root.scheduleEnabled ? 1 : 0
     )
     insertRootOperation.run(request.operationId, payload, JSON.stringify(root))
     db.exec("COMMIT")
@@ -1765,6 +1788,7 @@ const scanTaskRow = (row: {
   epoch: string
   root_id: string
   mapping_revision: bigint
+  mode: "manual" | "scheduled"
   status: "queued" | "running" | "succeeded" | "completed_with_errors" | "failed" | "interrupted"
   hold_new_discoveries: bigint
   directories_visited: bigint
@@ -1785,6 +1809,7 @@ const scanTaskRow = (row: {
   epoch: row.epoch,
   root_id: row.root_id,
   mapping_revision: row.mapping_revision.toString(),
+  mode: row.mode,
   status: row.status,
   hold_new_discoveries: row.hold_new_discoveries === 1n,
   directories_visited: Number(row.directories_visited),
@@ -1842,6 +1867,7 @@ const startManualScan = (
     root_id: request.rootId,
     expected_mapping_revision: request.expectedMappingRevision,
     expected_policy_revision: request.expectedPolicyRevision,
+    mode: request.mode,
     hold_new_discoveries: request.holdNewDiscoveries
   })
   db.exec("BEGIN IMMEDIATE")
@@ -1881,7 +1907,14 @@ const startManualScan = (
       "SELECT task_id, command_payload, json_extract(command_payload, '$.expected_policy_revision') AS policy_revision FROM scan_tasks WHERE root_id = ? AND mapping_revision = ? AND status IN ('queued', 'running') ORDER BY created_at_ms ASC, rowid ASC LIMIT 1"
     ).get(request.rootId, BigInt(request.expectedMappingRevision)) as { task_id: string; command_payload: string; policy_revision: string } | undefined
     if (active !== undefined) {
-      if (active.command_payload !== commandPayload) {
+      const activeCommand = JSON.parse(active.command_payload) as {
+        expected_policy_revision?: string
+        hold_new_discoveries?: boolean
+      }
+      if (
+        activeCommand.expected_policy_revision !== request.expectedPolicyRevision ||
+        activeCommand.hold_new_discoveries !== request.holdNewDiscoveries
+      ) {
         db.exec("ROLLBACK")
         return { kind: "active_scan_conflict", taskId: active.task_id, policyRevision: active.policy_revision }
       }
@@ -1902,6 +1935,7 @@ const startManualScan = (
       request.epoch,
       request.rootId,
       BigInt(request.expectedMappingRevision),
+      request.mode,
       request.holdNewDiscoveries ? 1 : 0,
       commandPayload,
       now,
@@ -1967,19 +2001,30 @@ const commitRootPolicy = (
       return { kind: "policy_revision_conflict", currentPolicyRevision: current.policyRevision }
     }
 
-    const hasExclusion = current.exclusions.some(
-      (exclusion) =>
-        exclusion.path === request.command.exclusion.path && exclusion.scope === request.command.exclusion.scope
-    )
-    const exclusions = request.command.type === "exclude"
-      ? hasExclusion ? current.exclusions : [...current.exclusions, request.command.exclusion]
-      : hasExclusion
-        ? current.exclusions.filter(
-            (exclusion) =>
-              exclusion.path !== request.command.exclusion.path || exclusion.scope !== request.command.exclusion.scope
-          )
-        : current.exclusions
-    const changed = exclusions.length !== current.exclusions.length
+    const command = request.command
+    let exclusions = current.exclusions
+    if (command.type === "exclude") {
+      const hasExclusion = current.exclusions.some(
+        (exclusion) =>
+          exclusion.path === command.exclusion.path && exclusion.scope === command.exclusion.scope
+      )
+      if (!hasExclusion) exclusions = [...current.exclusions, command.exclusion]
+    } else if (command.type === "remove-exclusion") {
+      const hasExclusion = current.exclusions.some(
+        (exclusion) =>
+          exclusion.path === command.exclusion.path && exclusion.scope === command.exclusion.scope
+      )
+      if (hasExclusion) {
+        exclusions = current.exclusions.filter(
+          (exclusion) =>
+            exclusion.path !== command.exclusion.path || exclusion.scope !== command.exclusion.scope
+        )
+      }
+    }
+    const scheduleEnabled = command.type === "set-schedule"
+      ? command.enabled
+      : current.scheduleEnabled
+    const changed = exclusions.length !== current.exclusions.length || scheduleEnabled !== current.scheduleEnabled
     if (exclusions.length > MAX_ROOT_EXCLUSIONS) {
       db.exec("ROLLBACK")
       return { kind: "exclusion_limit" }
@@ -1993,8 +2038,8 @@ const commitRootPolicy = (
       !changed
         ? current.policyRevision
         : (BigInt(current.policyRevision) + 1n).toString()
-    const root: ServerRootRow = { ...current, policyRevision: nextRevision, exclusions }
-    updateRootPolicy.run(BigInt(root.policyRevision), JSON.stringify(root.exclusions), root.rootId)
+    const root: ServerRootRow = { ...current, policyRevision: nextRevision, exclusions, scheduleEnabled }
+    updateRootPolicy.run(BigInt(root.policyRevision), JSON.stringify(root.exclusions), root.scheduleEnabled ? 1 : 0, root.rootId)
     insertRootPolicyOperation.run(
       request.epoch,
       request.operationId,

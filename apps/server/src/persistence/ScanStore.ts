@@ -19,13 +19,14 @@ import {
   type StagedDiscoveryRow as StagedDiscoveryRowType
 } from "./worker-protocol"
 
-export interface StartManualScanInput {
+export interface StartScanInput {
   readonly taskId: string
   readonly operationId: string
   readonly epoch: string
   readonly rootId: string
   readonly expectedMappingRevision: string
   readonly expectedPolicyRevision: string
+  readonly mode?: "manual" | "scheduled"
   readonly holdNewDiscoveries: boolean
 }
 
@@ -98,8 +99,8 @@ const taskView = (row: ScanTaskRowType): ScanTask => decodeOrThrow(
   {
     task_id: row.task_id,
     root_id: row.root_id,
-    kind: "manual-scan",
-    mode: "manual",
+    kind: row.mode === "scheduled" ? "scheduled-scan" : "manual-scan",
+    mode: row.mode,
     hold_new_discoveries: row.hold_new_discoveries,
     mapping_revision: row.mapping_revision,
     status: row.status,
@@ -150,7 +151,7 @@ const encoded = (value: unknown): string | null => value === null ? null : JSON.
 export class ScanStore extends Context.Service<
   ScanStore,
   {
-    readonly start: (input: StartManualScanInput) => Effect.Effect<ScanStartResult, DatabaseWorkerError>
+    readonly start: (input: StartScanInput) => Effect.Effect<ScanStartResult, DatabaseWorkerError>
     readonly listTasks: () => Effect.Effect<ReadonlyArray<ScanTask>, DatabaseWorkerError>
     readonly readTask: (taskId: string) => Effect.Effect<ScanTask | null, DatabaseWorkerError>
     readonly listStaged: () => Effect.Effect<ReadonlyArray<StagedDiscovery>, DatabaseWorkerError>
@@ -183,7 +184,11 @@ export class ScanStore extends Context.Service<
     Effect.gen(function*() {
       const worker = yield* DatabaseWorker
 
-      const start = (input: StartManualScanInput) => worker.call({ op: "startManualScan", ...input }).pipe(
+      const start = (input: StartScanInput) => worker.call({
+        op: "startManualScan",
+        ...input,
+        mode: input.mode ?? "manual"
+      }).pipe(
         Effect.flatMap((value) => {
           const decoded = decodeStart(value)
           if (Option.isNone(decoded)) return Effect.fail(new DatabaseWorkerError({ message: "invalid scan start result" }))

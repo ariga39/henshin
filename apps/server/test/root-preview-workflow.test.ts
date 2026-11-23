@@ -29,6 +29,7 @@ const savedRoot: ServerRoot = {
   mapping_revision: "1",
   policy_revision: "0",
   exclusions: [],
+  schedule_enabled: false,
   state: "active"
 }
 

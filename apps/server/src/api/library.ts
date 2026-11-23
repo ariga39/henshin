@@ -34,6 +34,7 @@ const rootView = (root: {
   mappingRevision: string
   policyRevision: string
   exclusions: ReadonlyArray<{ readonly path: string; readonly scope: "exact" | "subtree" }>
+  scheduleEnabled: boolean
   state: "active"
 }) => ({
   library_id: root.libraryId,
@@ -44,6 +45,7 @@ const rootView = (root: {
   mapping_revision: root.mappingRevision,
   policy_revision: root.policyRevision,
   exclusions: root.exclusions,
+  schedule_enabled: root.scheduleEnabled,
   state: root.state
 })
 

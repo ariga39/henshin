@@ -36,6 +36,7 @@ export const ServerRootRow = Schema.Struct({
   mappingRevision: Revision,
   policyRevision: Revision,
   exclusions: RootExclusions,
+  scheduleEnabled: Schema.Boolean,
   state: Schema.Literal("active")
 })
 export type ServerRootRow = typeof ServerRootRow.Type
@@ -196,6 +197,7 @@ export const ScanTaskRow = Schema.Struct({
   epoch: Uuid,
   root_id: Uuid,
   mapping_revision: Revision,
+  mode: Schema.Literals(["manual", "scheduled"]),
   status: ScanStatus,
   hold_new_discoveries: Schema.Boolean,
   directories_visited: Schema.Natural,
@@ -547,6 +549,7 @@ export const WorkerRequest = Schema.Union([
     rootId: Uuid,
     expectedMappingRevision: Revision,
     expectedPolicyRevision: Revision,
+    mode: Schema.Literals(["manual", "scheduled"]),
     holdNewDiscoveries: Schema.Boolean
   }),
   Schema.Struct({ op: Schema.Literal("listScanTasks") }),

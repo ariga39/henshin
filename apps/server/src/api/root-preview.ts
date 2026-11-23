@@ -45,6 +45,7 @@ const rootView = (root: {
   mappingRevision: string
   policyRevision: string
   exclusions: ReadonlyArray<{ readonly path: string; readonly scope: "exact" | "subtree" }>
+  scheduleEnabled: boolean
   libraryId: string
   state: "active"
 }) => ({
@@ -56,6 +57,7 @@ const rootView = (root: {
   mapping_revision: root.mappingRevision,
   policy_revision: root.policyRevision,
   exclusions: root.exclusions,
+  schedule_enabled: root.scheduleEnabled,
   state: root.state
 })
 
@@ -448,7 +450,7 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
             })
           }
 
-          if (payload.command.type === "exclude" || payload.command.type === "remove-exclusion") {
+          if (payload.command.type === "exclude" || payload.command.type === "remove-exclusion" || payload.command.type === "set-schedule") {
             const result = yield* roots.commitPolicy({
               rootId: params.id,
               operationId: payload.operation_id,
@@ -540,6 +542,7 @@ export const RootHandlers = (dataDirectory: string) => HttpApiBuilder.group(Serv
             rootId: root.rootId,
             expectedMappingRevision: scanPayload.expected_mapping_revision,
             expectedPolicyRevision: scanPayload.expected_policy_revision,
+            mode: scanPayload.command.mode,
             holdNewDiscoveries: scanPayload.command.hold_new_discoveries
           }).pipe(
             Effect.mapError(() => new InternalError({
