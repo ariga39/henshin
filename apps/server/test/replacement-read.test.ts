@@ -253,6 +253,50 @@ const seedLegacyStagedError = (
   db.close()
 }
 
+const downgradeLibraryEntriesToKeepV8Schema = (dbPath: string): void => {
+  const db = new DatabaseSync(dbPath)
+  db.exec("PRAGMA foreign_keys = OFF")
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    db.exec(`
+      CREATE TABLE library_entries_keep_v8 (
+        entry_id TEXT PRIMARY KEY,
+        library_id TEXT NOT NULL REFERENCES server_library(library_id),
+        root_id TEXT NOT NULL REFERENCES server_roots(root_id),
+        relative_path TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('archive', 'image-directory')),
+        title TEXT NOT NULL,
+        page_count INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('accepted', 'replacement-pending')),
+        content_version INTEGER NOT NULL,
+        location_revision INTEGER NOT NULL,
+        decision_version INTEGER NOT NULL DEFAULT 1,
+        manifest_json TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        accepted_observation_json TEXT,
+        UNIQUE (root_id, relative_path)
+      );
+      INSERT INTO library_entries_keep_v8
+        SELECT entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count,
+          state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms,
+          accepted_observation_json
+        FROM library_entries;
+      DROP TABLE library_entries;
+      ALTER TABLE library_entries_keep_v8 RENAME TO library_entries;
+      UPDATE server_state SET schema_version = 8 WHERE id = 1;
+    `)
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON")
+    db.close()
+  }
+}
+
 afterEach(async () => {
   for (const server of servers.splice(0)) await server.stop()
   for (const dbPath of dbPaths) await cleanupTempDb(dbPath)
@@ -642,7 +686,7 @@ describe("replacement comparison read model", () => {
       command: { type: "resolve-replacement" as const, entry_id: initial.entry_id, decision: "keep" as const }
     }
 
-    await writeFile(page, "Book C")
+    await writeFile(page, "Book C changed length")
     const stale = await withReviewClient(server, Effect.gen(function*() {
       return yield* (yield* ReviewHttpClient).command({
         params: { id: candidate.candidate_id },
@@ -703,7 +747,7 @@ describe("replacement comparison read model", () => {
     }))
     expect(historyReplay.data.results[0]?.outcome).toBe("already_accepted")
 
-    await writeFile(page, "Book D")
+    await writeFile(page, "Book D changed length")
     const replay = await withReviewClient(server, Effect.gen(function*() {
       return yield* (yield* ReviewHttpClient).command({
         params: { id: refreshedCandidate.candidate_id },
@@ -725,8 +769,8 @@ describe("replacement comparison read model", () => {
     })
   })
 
-  it("creates a distinct replacement entry, preserves history, and replays the result", async () => {
-    const { dbPath, server, fixture, root } = await makeScenario(
+  it("creates a distinct replacement entry, rescans its original observation, preserves history, and replays the result", async () => {
+    const { dbPath, server: initialServer, fixture, root } = await makeScenario(
       "henshin-replacement-replace-",
       "Replace replacement",
       async (fixture) => {
@@ -734,6 +778,7 @@ describe("replacement comparison read model", () => {
         await writeFile(path.join(fixture, "book", "001.jpg"), "Book A")
       }
     )
+    let server = initialServer
     const book = path.join(fixture, "book")
     const page = path.join(book, "001.jpg")
 
@@ -770,7 +815,7 @@ describe("replacement comparison read model", () => {
     }))).data[0]
     if (candidate === undefined) throw new Error("expected replacement candidate")
 
-    const command = {
+    let command = {
       root_id: root.root_id,
       instance_id: server.instanceId,
       epoch: server.epoch,
@@ -783,7 +828,7 @@ describe("replacement comparison read model", () => {
     }
 
     const beforeStale = readReplacementState(dbPath, root.root_id)
-    await writeFile(page, "Book C")
+    await writeFile(page, "Book C changed length")
     const stale = await withReviewClient(server, Effect.gen(function*() {
       return yield* (yield* ReviewHttpClient).command({
         params: { id: candidate.candidate_id },
@@ -796,10 +841,36 @@ describe("replacement comparison read model", () => {
 
     await writeFile(page, "Book B")
     expect((await scan(server, root)).readiness_error?.code).toBe("allocation_deferred")
-    const refreshedCandidate = (await withReviewClient(server, Effect.gen(function*() {
+    let refreshedCandidate = (await withReviewClient(server, Effect.gen(function*() {
       return yield* (yield* ReviewHttpClient).candidates()
     }))).data.find((item) => item.candidate_id === candidate.candidate_id)
     if (refreshedCandidate === undefined) throw new Error("expected refreshed replacement candidate")
+
+    await server.stop()
+    downgradeLibraryEntriesToKeepV8Schema(dbPath)
+    server = await startServer(dbPath)
+    servers.push(server)
+    const migratedEntries = await listLibrary(server)
+    expect(migratedEntries.entries[0]).toMatchObject({
+      entry_id: initial.entry_id,
+      state: "replacement-pending",
+      replacement: {
+        old_observation: { page_count: 1, entry_count: 1 },
+        candidate_observation: { page_count: 2, entry_count: 2 }
+      }
+    })
+    const migratedDb = new DatabaseSync(dbPath)
+    const migratedTable = migratedDb.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'library_entries'").get() as { sql: string } | undefined
+    const storedSummary = migratedDb.prepare("SELECT accepted_observation_json FROM library_entries WHERE entry_id = ?").get(initial.entry_id) as { accepted_observation_json: string | null } | undefined
+    migratedDb.close()
+    expect(migratedTable?.sql).toContain("detached")
+    expect(storedSummary?.accepted_observation_json).toEqual(expect.any(String))
+    const migratedCandidate = (await withReviewClient(server, Effect.gen(function*() {
+      return yield* (yield* ReviewHttpClient).candidates()
+    }))).data.find((item) => item.candidate_id === candidate.candidate_id)
+    if (migratedCandidate === undefined) throw new Error("expected migrated replacement candidate")
+    refreshedCandidate = migratedCandidate
+    command = { ...command, instance_id: server.instanceId, epoch: server.epoch }
 
     removeCandidateObservationTokens(dbPath, refreshedCandidate.candidate_id)
 
@@ -816,6 +887,23 @@ describe("replacement comparison read model", () => {
     expect(resolved.data.resolution).toMatchObject({
       entry: { entry_id: newEntryId, state: "accepted", content_version: "1" },
       detached_entry_id: initial.entry_id
+    })
+
+    const acceptedReplacement = await listLibrary(server)
+    expect(acceptedReplacement.entries).toHaveLength(1)
+    expect(acceptedReplacement.entries[0]).toMatchObject({ entry_id: newEntryId, state: "accepted", replacement: null })
+
+    await writeFile(path.join(book, "003.jpg"), "Book B third page")
+    expect((await scan(server, root)).readiness_error?.code).toBe("allocation_deferred")
+    const rescanned = await listLibrary(server)
+    expect(rescanned.entries).toHaveLength(1)
+    expect(rescanned.entries[0]).toMatchObject({
+      entry_id: newEntryId,
+      state: "replacement-pending",
+      replacement: {
+        old_observation: { page_count: 2, entry_count: 2 },
+        candidate_observation: { page_count: 3, entry_count: 3 }
+      }
     })
 
     const delayedEvent = await withOpenEventClient(server, Effect.gen(function*() {
@@ -836,7 +924,7 @@ describe("replacement comparison read model", () => {
     }))
     expect(delayedEvent.data.results[0]?.outcome).toBe("accepted")
 
-    await writeFile(page, "Book D")
+    await writeFile(page, "Book D changed length")
     const replay = await withReviewClient(server, Effect.gen(function*() {
       return yield* (yield* ReviewHttpClient).command({
         params: { id: refreshedCandidate.candidate_id },
@@ -844,10 +932,6 @@ describe("replacement comparison read model", () => {
       })
     }))
     expect(replay.data.resolution).toEqual(resolved.data.resolution)
-
-    const listed = await listLibrary(server)
-    expect(listed.entries).toHaveLength(1)
-    expect(listed.entries[0]).toMatchObject({ entry_id: newEntryId, state: "accepted" })
 
     const db = new DatabaseSync(dbPath)
     const oldRow = db.prepare("SELECT state FROM library_entries WHERE entry_id = ?").get(initial.entry_id) as { state: string } | undefined

@@ -554,7 +554,7 @@ if (libraryEntriesTable !== undefined && !libraryEntriesTable.sql.includes("deta
         manifest_json TEXT NOT NULL,
         created_at_ms INTEGER NOT NULL,
         updated_at_ms INTEGER NOT NULL,
-        accepted_observation_json TEXT,
+        accepted_observation_json TEXT
       );
       INSERT INTO library_entries_v7(
         entry_id, library_id, root_id, relative_path, source_path, kind, title, page_count,
