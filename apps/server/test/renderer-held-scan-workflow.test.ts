@@ -122,6 +122,7 @@ const pendingEntry = (candidateVersion: number): LibraryEntry => ({
   state: "replacement-pending",
   content_version: "1",
   location_revision: "1",
+  match_fields: [],
   cover: null,
   replacement: {
     candidate_id: candidate.candidate_id,
@@ -773,6 +774,7 @@ describe("held scan renderer workflows", () => {
       state: "accepted" as const,
       content_version: "1",
       location_revision: "1",
+      match_fields: [],
       replacement: null
     }
     const appended = {
@@ -1037,7 +1039,7 @@ describe("held scan renderer workflows", () => {
 
   it("refreshes pending replacements after terminal scan-result loading failure", async () => {
     const submitted = { ...task("succeeded"), hold_new_discoveries: false }
-    const searchInputs: Array<{ readonly state?: "replacement-pending" }> = []
+    const searchInputs: Array<{ readonly query?: string; readonly state?: "replacement-pending" }> = []
     const libraryClient = libraryClientWith({
       search: (input) => {
         searchInputs.push(input)
@@ -1063,7 +1065,7 @@ describe("held scan renderer workflows", () => {
     await run(startManualScan(root.root_id), rootClient, scanClient, libraryClient)
 
     expect(searchInputs).toEqual([
-      { page_size: 50 },
+      { query: "", page_size: 50 },
       { page_size: 50, state: "replacement-pending" }
     ])
     expect(viewStore.getState()).toMatchObject({
@@ -1087,6 +1089,7 @@ describe("held scan renderer workflows", () => {
       state: "accepted" as const,
       content_version: "1",
       location_revision: "1",
+      match_fields: [],
       replacement: null
     }
     const oldPending = {

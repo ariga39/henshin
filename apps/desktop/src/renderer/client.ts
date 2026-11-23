@@ -150,7 +150,12 @@ export interface ScanReviewBridge {
 }
 
 export interface LibraryBridge {
-  search(input: { readonly page_size?: number; readonly cursor?: string }): Promise<Result<LibraryEntryPage>>
+  search(input: {
+    readonly query?: string
+    readonly page_size?: number
+    readonly cursor?: string
+    readonly state?: "replacement-pending"
+  }): Promise<Result<LibraryEntryPage>>
   getThumbnail(key: ThumbnailKey): Promise<Result<Uint8Array>>
 }
 
@@ -312,6 +317,7 @@ export class LibraryClient extends Context.Service<
   LibraryClient,
   {
     readonly search: (input: {
+      readonly query?: string
       readonly page_size?: number
       readonly cursor?: string
       readonly state?: "replacement-pending"

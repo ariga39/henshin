@@ -142,6 +142,7 @@ export const LibraryEntryRow = Schema.Struct({
   state: Schema.Union([Schema.Literal("accepted"), Schema.Literal("replacement-pending")]),
   content_version: Revision,
   location_revision: Revision,
+  match_fields: Schema.Array(Schema.Literals(["title", "basename"])),
   cover: Schema.NullOr(ThumbnailReference),
   replacement: Schema.NullOr(ReplacementComparison)
 })
@@ -249,10 +250,16 @@ export type OpenEventBatchOutcome = typeof OpenEventBatchOutcome.Type
 export const LibraryEntryPageRow = Schema.Struct({
   entries: Schema.Array(LibraryEntryRow),
   has_more: Schema.Boolean,
-  next_cursor: Schema.NullOr(Uuid),
+  next_cursor: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8192))),
   library_change_revision: Revision
 })
 export type LibraryEntryPageRow = typeof LibraryEntryPageRow.Type
+
+export const LibraryEntryPageResult = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("page"), page: LibraryEntryPageRow }),
+  Schema.Struct({ kind: Schema.Literal("invalid_cursor") })
+])
+export type LibraryEntryPageResult = typeof LibraryEntryPageResult.Type
 
 export const IndexedRootSampleRow = Schema.Struct({
   relative_path: RootRelativePath,
@@ -433,8 +440,10 @@ export const WorkerRequest = Schema.Union([
   Schema.Struct({ op: Schema.Literal("readLibrary") }),
   Schema.Struct({
     op: Schema.Literal("listLibraryEntries"),
-    pageSize: Schema.Natural,
-    cursor: Schema.NullOr(Uuid),
+    pageSize: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(200)),
+    query: Schema.String.check(Schema.isMaxLength(1024)),
+    epoch: Uuid,
+    cursor: Schema.NullOr(Schema.String.check(Schema.isMaxLength(8192))),
     state: Schema.NullOr(Schema.Literal("replacement-pending"))
   }),
   Schema.Struct({

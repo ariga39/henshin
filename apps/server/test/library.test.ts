@@ -1417,3 +1417,127 @@ describe("normal library scan", () => {
     expect(smallSamples.data.samples).toHaveLength(1)
   })
 })
+
+describe("literal library search", () => {
+  it("normalizes stored book names, preserves literals and pages beyond the first result", async () => {
+    const server = await start()
+    await server.stop()
+
+    const db = new DatabaseSync(server.dbPath)
+    const library = db.prepare("SELECT library_id FROM server_library WHERE id = 1").get() as { library_id: string }
+    const rootId = randomUUID()
+    db.prepare(
+      "INSERT INTO server_roots(library_id, root_id, label, selected_path, canonical_path, device, inode, mapping_revision, policy_revision, exclusions, state) VALUES(?, ?, ?, ?, ?, ?, ?, 1, 0, '[]', 'active')"
+    ).run(library.library_id, rootId, "Search fixture", "/search", "/search", "device", "inode")
+
+    const fixtureEntries = [
+      { relativePath: "Book 0", title: "Book 0" },
+      { relativePath: "Book 1", title: "Book 1" },
+      { relativePath: "Book 2", title: "Book 2" },
+      { relativePath: "Book 3", title: "Book 3" },
+      { relativePath: "Archive.cbz", title: "Archive" },
+      { relativePath: "ＡＢＣ", title: "ＡＢＣ" },
+      { relativePath: "怪談", title: "怪談" },
+      { relativePath: "literal%_book", title: "literal%_book" },
+      { relativePath: "sharp-book", title: "Straße" },
+      { relativePath: "alpha", title: "Beta" }
+    ]
+    const insert = db.prepare(
+      "INSERT INTO library_entries(entry_id, library_id, root_id, relative_path, source_path, kind, title, title_search, basename_search, page_count, state, content_version, location_revision, decision_version, manifest_json, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'accepted', 1, 1, 1, '{}', 0, 0)"
+    )
+    for (const entry of fixtureEntries) {
+      const normalizedTitle = entry.title.normalize("NFKC").toLowerCase().normalize("NFC")
+      const normalizedBasename = entry.relativePath.normalize("NFKC").toLowerCase().normalize("NFC")
+      insert.run(
+        randomUUID(), library.library_id, rootId, entry.relativePath, `/search/${entry.relativePath}`,
+        entry.relativePath.endsWith(".cbz") ? "archive" : "image-directory", entry.title,
+        normalizedTitle, normalizedBasename
+      )
+    }
+    db.prepare("UPDATE server_library SET change_revision = change_revision + 1 WHERE id = 1").run()
+    db.close()
+
+    const restarted = await startServer(server.dbPath)
+    servers.push(restarted)
+    const client = <A, E>(program: Effect.Effect<A, E, LibraryHttpClient>) => withLibraryClient(restarted, program)
+
+    const empty = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { page_size: 200 } })
+    }))
+    expect(empty.data.entries).toHaveLength(fixtureEntries.length)
+
+    const searchAllPages = async (query: string) => {
+      const pages = []
+      let cursor: string | undefined
+      for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
+        const page = await client(Effect.gen(function*() {
+          return yield* (yield* LibraryHttpClient).search({
+            payload: { query, page_size: 1, ...(cursor === undefined ? {} : { cursor }) }
+          })
+        }))
+        pages.push(page.data)
+        if (!page.data.has_more) return pages
+        expect(page.data.next_cursor).not.toBeNull()
+        cursor = page.data.next_cursor ?? undefined
+      }
+      throw new Error("search did not finish within the page bound")
+    }
+
+    const bookPages = await searchAllPages("  ＢＯＯＫ  ")
+    const bookEntries = bookPages.flatMap((page) => page.entries)
+    expect(bookPages.length).toBe(6)
+    expect(new Set(bookEntries.map((entry) => entry.title))).toEqual(new Set([
+      "Book 0", "Book 1", "Book 2", "Book 3", "literal%_book", "Straße"
+    ]))
+    expect(Object.fromEntries(bookEntries.map((entry) => [entry.title, entry.match_fields]))).toEqual({
+      "Book 0": ["title", "basename"],
+      "Book 1": ["title", "basename"],
+      "Book 2": ["title", "basename"],
+      "Book 3": ["title", "basename"],
+      "literal%_book": ["title", "basename"],
+      "Straße": ["basename"]
+    })
+    expect(bookPages.at(-1)?.has_more).toBe(false)
+
+    const first = bookPages[0]
+    if (first === undefined || first.next_cursor === null) throw new Error("expected a paged search cursor")
+    const firstCursor = first.next_cursor
+
+    const fenced = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({
+        payload: { query: "archive", page_size: 1, cursor: firstCursor }
+      }).pipe(Effect.flip)
+    }))
+    expect(fenced._tag).toBe("InvalidRequest")
+
+    const punctuation = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "%_" } })
+    }))
+    expect(punctuation.data.entries.map((entry) => entry.title)).toEqual(["literal%_book"])
+
+    const archiveExtension = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "cbz" } })
+    }))
+    expect(archiveExtension.data.entries[0]).toMatchObject({ title: "Archive", match_fields: ["basename"] })
+
+    const cjk = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "怪" } })
+    }))
+    expect(cjk.data.entries.map((entry) => entry.title)).toEqual(["怪談"])
+
+    const width = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "abc" } })
+    }))
+    expect(width.data.entries.map((entry) => entry.title)).toEqual(["ＡＢＣ"])
+
+    const sharpS = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "strasse" } })
+    }))
+    expect(sharpS.data.entries).toHaveLength(0)
+
+    const boundary = await client(Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).search({ payload: { query: "alpha beta" } })
+    }))
+    expect(boundary.data.entries).toHaveLength(0)
+  })
+})
