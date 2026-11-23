@@ -1,11 +1,15 @@
 import { build } from "esbuild"
 import { DatabaseSync } from "node:sqlite"
+import { randomUUID } from "node:crypto"
 import { mkdir, mkdtemp, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { Effect } from "effect"
+import type { EntryResolution } from "@henshin/contracts"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import type { StoredReaderProfile } from "../src/main/persistence/ReaderProfileStore"
+import { resolveAcceptedTarget } from "../src/main/open-target"
 import {
   LocalMappingStore,
   type LocalMappingActivationInput
@@ -50,6 +54,45 @@ const activate = (
 const admittedIdentity = async (directory: string): Promise<string | null> => {
   const stats = await stat(directory, { bigint: true })
   return stats.dev === 0n || stats.ino === 0n ? null : `${stats.dev.toString()}:${stats.ino.toString()}`
+}
+
+const readerProfile: StoredReaderProfile = {
+  profile_id: randomUUID(),
+  revision: "1",
+  name: "Fixture archive reader",
+  launch_mode: "explicit-executable",
+  supported_formats: ["archive"],
+  target_mode: "archive",
+  executable_name: "fixture-reader",
+  argument_tokens: ["{target}"],
+  executablePath: process.execPath
+}
+
+const archiveResolution = async (root: string): Promise<EntryResolution> => {
+  const metadata = await stat(path.join(root, "book.cbz"))
+  return {
+    entry_id: randomUUID(),
+    root_id: rootA,
+    relative_path: "book.cbz",
+    kind: "archive",
+    decision_version: "1",
+    location_revision: "1",
+    content_version: "1",
+    status: "usable",
+    reason: null,
+    accepted_observation: {
+      kind: "archive",
+      bytes: metadata.size,
+      mtime_ms: metadata.mtimeMs,
+      entry_count: 1,
+      observation_token: "fixture"
+    },
+    first_page: null,
+    sibling_claims: [],
+    sibling_claims_truncated: false,
+    sibling_claims_next_cursor: null,
+    sibling_claims_revision: "1"
+  }
 }
 
 describe("local mapping store", () => {
@@ -425,6 +468,72 @@ describe("local mapping store", () => {
       })
     } finally {
       await rm(databaseDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it("requires remapping after a same-path directory replacement before resolving a book", async () => {
+    const databaseDirectory = await realpath(await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-reconfirm-db-")))
+    const fixtureDirectory = await realpath(await mkdtemp(path.join(os.tmpdir(), "henshin-local-mapping-reconfirm-fixture-")))
+    const mappedDirectory = path.join(fixtureDirectory, "library")
+    const replacementDirectory = path.join(fixtureDirectory, "replacement")
+    const databasePath = path.join(databaseDirectory, "client.db")
+    const book = Buffer.from("otherwise indistinguishable book")
+
+    try {
+      await mkdir(mappedDirectory)
+      await writeFile(path.join(mappedDirectory, "book.cbz"), book)
+      await mkdir(replacementDirectory)
+      await writeFile(path.join(replacementDirectory, "book.cbz"), book)
+
+      const initial = await Effect.runPromise(
+        Effect.gen(function*() {
+          const store = yield* LocalMappingStore
+          return yield* store.activate(activate(instanceA, rootA, mappedDirectory, mappedDirectory))
+        }).pipe(Effect.provide(LocalMappingStore.layer(databasePath, workerUrl)), Effect.scoped)
+      )
+      expect(initial.kind).toBe("activated")
+      if (initial.kind !== "activated") throw new Error("fixture mapping was not activated")
+
+      const persisted = await Effect.runPromise(
+        Effect.gen(function*() {
+          const store = yield* LocalMappingStore
+          return yield* store.load({ instanceId: instanceA, rootId: rootA })
+        }).pipe(Effect.provide(LocalMappingStore.layer(databasePath, workerUrl)), Effect.scoped)
+      )
+      expect(persisted).not.toBeUndefined()
+      if (persisted === undefined) throw new Error("fixture mapping was not persisted")
+      const originalResolution = await archiveResolution(mappedDirectory)
+      await expect(resolveAcceptedTarget(persisted, originalResolution, readerProfile)).resolves.toBe(
+        path.join(mappedDirectory, "book.cbz")
+      )
+
+      const originalIdentity = persisted.admittedRootIdentity
+      await rename(mappedDirectory, path.join(fixtureDirectory, "original"))
+      await rename(replacementDirectory, mappedDirectory)
+      expect(await admittedIdentity(mappedDirectory)).not.toBe(originalIdentity)
+
+      await expect(resolveAcceptedTarget(persisted, originalResolution, readerProfile)).rejects.toThrow(
+        "configured local mapping root changed"
+      )
+
+      const reconfirmed = await Effect.runPromise(
+        Effect.gen(function*() {
+          const store = yield* LocalMappingStore
+          return yield* store.activate(activate(instanceA, rootA, mappedDirectory, mappedDirectory, "1"))
+        }).pipe(Effect.provide(LocalMappingStore.layer(databasePath, workerUrl)), Effect.scoped)
+      )
+      expect(reconfirmed).toMatchObject({
+        kind: "activated",
+        mapping: { mappingRevision: "2" }
+      })
+      if (reconfirmed.kind !== "activated") throw new Error("replacement mapping was not activated")
+      const replacementResolution = await archiveResolution(mappedDirectory)
+      await expect(resolveAcceptedTarget(reconfirmed.mapping, replacementResolution, readerProfile)).resolves.toBe(
+        path.join(mappedDirectory, "book.cbz")
+      )
+    } finally {
+      await rm(databaseDirectory, { recursive: true, force: true })
+      await rm(fixtureDirectory, { recursive: true, force: true })
     }
   })
 })
