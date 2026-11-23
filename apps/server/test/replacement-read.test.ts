@@ -160,6 +160,33 @@ const downgradeLibraryEntriesToPreReplacementSchema = (dbPath: string): void => 
   }
 }
 
+const seedLegacyStagedError = (
+  dbPath: string,
+  taskId: string,
+  rootId: string,
+  code: string
+): void => {
+  const db = new DatabaseSync(dbPath)
+  db.prepare(`
+    INSERT INTO staged_discoveries(
+      candidate_id, task_id, root_id, relative_path, kind, candidate_version,
+      hold_state, analysis_status, manifest_json, analysis_error_json, updated_at_ms
+    ) VALUES(?, ?, ?, ?, 'image-directory', 1, 'eligible', 'error', NULL, ?, ?)
+  `).run(
+    randomUUID(),
+    taskId,
+    rootId,
+    "book",
+    JSON.stringify({
+      code,
+      message: "seeded classification case",
+      diagnostics: { supported_pages: 0, unsupported_pages: 0, ignored_entries: 0, directory_records: 0 }
+    }),
+    Date.now()
+  )
+  db.close()
+}
+
 afterEach(async () => {
   for (const server of servers.splice(0)) await server.stop()
   for (const dbPath of dbPaths) await cleanupTempDb(dbPath)
@@ -297,6 +324,43 @@ describe("replacement comparison read model", () => {
     const afterThirdBook = await listLibrary(restarted)
     expect(afterThirdBook.entries.map((entry) => entry.relative_path).sort()).toEqual(["book-a", "book-b"])
     expect(afterThirdBook.entries.find((entry) => entry.relative_path === "book-a")?.state).toBe("replacement-pending")
+  })
+
+  it.each([
+    { code: "cancelled", state: "accepted", reason: "insufficient-evidence" },
+    { code: "deadline-exceeded", state: "accepted", reason: "insufficient-evidence" },
+    { code: "directory-limit", state: "accepted", reason: "insufficient-evidence" },
+    { code: "future-scan-code", state: "accepted", reason: "insufficient-evidence" },
+    { code: "read-failure", state: "accepted", reason: null },
+    { code: "candidate-changed", state: "replacement-pending", reason: "known-change" },
+    { code: "structural-corruption", state: "replacement-pending", reason: "known-change" }
+  ] as const)("classifies legacy $code evidence without inventing replacement certainty", async ({ code, state, reason }) => {
+    const { dbPath, server, fixture, root } = await makeScenario(
+      `henshin-replacement-classification-${code}-`,
+      `Replacement classification ${code}`,
+      async (fixture) => {
+        await mkdir(path.join(fixture, "book"))
+        await writeFile(path.join(fixture, "book", "001.jpg"), "Book A")
+      }
+    )
+    const initial = await scan(server, root)
+    expect(initial.status).toBe("succeeded")
+    const accepted = await listLibrary(server)
+    const acceptedEntry = accepted.entries[0]
+    if (acceptedEntry === undefined) throw new Error("expected accepted entry")
+
+    await server.stop()
+    downgradeLibraryEntriesToPreReplacementSchema(dbPath)
+    seedLegacyStagedError(dbPath, initial.task_id, root.root_id, code)
+    const migrated = await startServer(dbPath)
+    servers.push(migrated)
+
+    const listed = await listLibrary(migrated)
+    expect(listed.entries[0]).toMatchObject({ entry_id: acceptedEntry.entry_id, state })
+    const resolution = await withLibraryClient(migrated, Effect.gen(function*() {
+      return yield* (yield* LibraryHttpClient).resolution({ params: { id: acceptedEntry.entry_id }, query: {} })
+    }))
+    expect(resolution.data).toMatchObject({ status: reason === null ? "usable" : "unresolved", reason })
   })
 
   it("advances the library revision when an already-pending candidate is re-staged", async () => {

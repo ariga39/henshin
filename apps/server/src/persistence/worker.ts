@@ -153,6 +153,58 @@ const manifestsEquivalent = (left: string, right: string): boolean => {
     observationsEquivalent(comparableLeft.afterToken, comparableRight.afterToken)
 }
 
+type ReplacementEvidence = "confirmed-change" | "recoverable" | "insufficient"
+
+const CONFIRMED_REPLACEMENT_ERROR_CODES = new Set([
+  "candidate-changed",
+  "source-changed",
+  "source-link",
+  "unsupported-source",
+  "unsupported-candidate",
+  "not-a-directory",
+  "unsafe-name",
+  "lossy-name-decoding",
+  "duplicate-name",
+  "unsupported-pages",
+  "encrypted",
+  "structural-corruption",
+  "zero-pages"
+])
+
+const RECOVERABLE_REPLACEMENT_ERROR_CODES = new Set([
+  "location-unavailable",
+  "missing-target",
+  "read-failure",
+  "root-changed",
+  "root-unavailable"
+])
+
+const classifyReplacement = (
+  acceptedKind: unknown,
+  candidateKind: unknown,
+  analysisStatus: unknown,
+  acceptedManifest: unknown,
+  candidateManifest: unknown,
+  analysisError: unknown
+): ReplacementEvidence => {
+  if (acceptedKind !== candidateKind) return "confirmed-change"
+  if (analysisStatus === "ready" && typeof acceptedManifest === "string" && typeof candidateManifest === "string") {
+    return manifestsEquivalent(acceptedManifest, candidateManifest) ? "recoverable" : "confirmed-change"
+  }
+  if (analysisStatus === "error" && typeof analysisError === "string") {
+    try {
+      const decoded = Schema.decodeUnknownOption(ScanAnalysisError)(JSON.parse(analysisError))
+      if (Option.isNone(decoded)) return "insufficient"
+      if (CONFIRMED_REPLACEMENT_ERROR_CODES.has(decoded.value.code)) return "confirmed-change"
+      if (RECOVERABLE_REPLACEMENT_ERROR_CODES.has(decoded.value.code)) return "recoverable"
+      return "insufficient"
+    } catch {
+      return "insufficient"
+    }
+  }
+  return "insufficient"
+}
+
 const confirmedReplacement = (
   acceptedKind: unknown,
   candidateKind: unknown,
@@ -160,23 +212,22 @@ const confirmedReplacement = (
   acceptedManifest: unknown,
   candidateManifest: unknown,
   analysisError: unknown
-): number => {
-  if (acceptedKind !== candidateKind) return 1
-  if (analysisStatus === "ready" && typeof acceptedManifest === "string" && typeof candidateManifest === "string") {
-    return manifestsEquivalent(acceptedManifest, candidateManifest) ? 0 : 1
-  }
-  if (analysisStatus === "error" && typeof analysisError === "string") {
-    try {
-      const decoded = Schema.decodeUnknownOption(ScanAnalysisError)(JSON.parse(analysisError))
-      if (Option.isNone(decoded)) return 0
-      return ["location-unavailable", "missing-target", "read-failure", "root-changed", "root-unavailable"].includes(decoded.value.code)
-        ? 0
-        : 1
-    } catch {
-      return 0
-    }
-  }
-  return 0
+): number => classifyReplacement(
+  acceptedKind,
+  candidateKind,
+  analysisStatus,
+  acceptedManifest,
+  candidateManifest,
+  analysisError
+) === "confirmed-change" ? 1 : 0
+
+const resolutionReplacementReason = (...args: Parameters<typeof classifyReplacement>): "known-change" | "insufficient-evidence" | null => {
+  const evidence = classifyReplacement(...args)
+  return evidence === "confirmed-change"
+    ? "known-change"
+    : evidence === "insufficient"
+      ? "insufficient-evidence"
+      : null
 }
 
 const resolutionParentKey = (relativePath: string): string => {
@@ -665,7 +716,7 @@ const selectEntryResolution = db.prepare(
 )
 selectEntryResolution.setReadBigInts(true)
 const selectStagedForResolution = db.prepare(
-  "SELECT analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
+  "SELECT kind, analysis_status, manifest_json, analysis_error_json FROM staged_discoveries WHERE root_id = ? AND relative_path = ?"
 )
 const selectResolutionSiblingClaims = db.prepare(
   "SELECT entry_id, relative_path FROM library_entries WHERE root_id = ? AND state IN ('accepted', 'replacement-pending') AND entry_id <> ? AND henshin_resolution_parent_key(relative_path) = ? ORDER BY relative_path ASC, entry_id ASC LIMIT ?"
@@ -1788,6 +1839,7 @@ const entryResolution = (
     : null
 
   const staged = selectStagedForResolution.get(row.root_id, row.relative_path) as {
+    kind: "archive" | "image-directory"
     analysis_status: "ready" | "error"
     manifest_json: string | null
     analysis_error_json: string | null
@@ -1796,22 +1848,14 @@ const entryResolution = (
   if (row.state === "replacement-pending") {
     reason = "known-change"
   } else if (staged !== undefined) {
-    if (staged.analysis_status === "ready" && staged.manifest_json !== null) {
-      reason = manifestsEquivalent(row.manifest_json, staged.manifest_json) ? null : "known-change"
-    } else {
-      const stagedError = staged.analysis_error_json === null
-        ? null
-        : Schema.decodeUnknownOption(ScanAnalysisError)(JSON.parse(staged.analysis_error_json))
-      if (stagedError !== null && !Option.isNone(stagedError) && stagedError.value.code === "candidate-changed") {
-        reason = "known-change"
-      } else if (
-        stagedError === null ||
-        Option.isNone(stagedError) ||
-        !["location-unavailable", "missing-target", "read-failure", "root-changed", "root-unavailable"].includes(stagedError.value.code)
-      ) {
-        reason = "insufficient-evidence"
-      }
-    }
+    reason = resolutionReplacementReason(
+      row.kind,
+      staged.kind,
+      staged.analysis_status,
+      row.manifest_json,
+      staged.manifest_json,
+      staged.analysis_error_json
+    )
   }
   if (manifest.value.pages[0] === undefined) {
     reason = reason ?? "insufficient-evidence"
