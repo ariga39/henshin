@@ -197,7 +197,7 @@ const main = async () => {
     for (let attempt = 0; attempt < 60; attempt += 1) {
       thumbnail = await request(server.baseUrl, token, `/api/v1/thumbnails/${encodeURIComponent(entry.cover.key)}`)
       if (thumbnail.response.status === 200) break
-      assert(thumbnail.response.status === 409, `thumbnail returned HTTP ${thumbnail.response.status}`)
+      assert(thumbnail.response.status === 503, `thumbnail returned HTTP ${thumbnail.response.status}`)
       await new Promise((resolve) => setTimeout(resolve, 100))
     }
     assert(thumbnail?.response.status === 200, "SMB cover was not ready before the deadline")
