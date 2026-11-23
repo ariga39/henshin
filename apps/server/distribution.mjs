@@ -53,19 +53,41 @@ const findPackageDirectories = async (directory) => {
 const collectNotices = async (nodeModulesDirectory) => {
   const virtualStore = path.join(nodeModulesDirectory, ".pnpm")
   const packages = new Map()
-  const storeEntries = await readdir(virtualStore, { withFileTypes: true })
-  for (const entry of storeEntries) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue
-    const packageRoots = await findPackageDirectories(
-      path.join(virtualStore, entry.name, "node_modules")
-    )
-    for (const packageDirectory of packageRoots) {
-      const packageJsonPath = path.join(packageDirectory, "package.json")
-      const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"))
-      if (packageJson.name === "@henshin/contracts") continue
-      const key = `${packageJson.name}@${packageJson.version}`
-      if (!packages.has(key)) packages.set(key, { packageDirectory, packageJson })
+  const packageDirectories = []
+  if (await exists(virtualStore)) {
+    const storeEntries = await readdir(virtualStore, { withFileTypes: true })
+    for (const entry of storeEntries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue
+      packageDirectories.push(...(await findPackageDirectories(
+        path.join(virtualStore, entry.name, "node_modules")
+      )))
     }
+  }
+  if (packageDirectories.length === 0) {
+    const topLevelEntries = await readdir(nodeModulesDirectory, { withFileTypes: true })
+    for (const entry of topLevelEntries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name === ".bin" || entry.name === ".pnpm") continue
+      const packageDirectory = path.join(nodeModulesDirectory, entry.name)
+      if (entry.name.startsWith("@")) {
+        const scopedEntries = await readdir(packageDirectory, { withFileTypes: true })
+        for (const scopedEntry of scopedEntries) {
+          if (!scopedEntry.isDirectory() || scopedEntry.isSymbolicLink()) continue
+          const scopedPackageDirectory = path.join(packageDirectory, scopedEntry.name)
+          if (await exists(path.join(scopedPackageDirectory, "package.json"))) {
+            packageDirectories.push(scopedPackageDirectory)
+          }
+        }
+      } else if (await exists(path.join(packageDirectory, "package.json"))) {
+        packageDirectories.push(packageDirectory)
+      }
+    }
+  }
+  for (const packageDirectory of packageDirectories) {
+    const packageJsonPath = path.join(packageDirectory, "package.json")
+    const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"))
+    if (packageJson.name === "@henshin/contracts") continue
+    const key = `${packageJson.name}@${packageJson.version}`
+    if (!packages.has(key)) packages.set(key, { packageDirectory, packageJson })
   }
 
   const lines = [
@@ -113,9 +135,75 @@ const removeWorkspacePackages = async (nodeModulesDirectory) => {
 }
 
 const pruneEffectSources = async (nodeModulesDirectory) => {
-  const effectDirectory = path.join(nodeModulesDirectory, ".pnpm", "effect@4.0.5", "node_modules", "effect")
-  await rm(path.join(effectDirectory, "src"), { recursive: true, force: true })
-  await rm(path.join(effectDirectory, "ai-docs"), { recursive: true, force: true })
+  const effectDirectories = [
+    path.join(nodeModulesDirectory, "effect"),
+    path.join(nodeModulesDirectory, ".pnpm", "effect@4.0.5", "node_modules", "effect")
+  ]
+  for (const effectDirectory of effectDirectories) {
+    if (!(await exists(effectDirectory))) continue
+    await rm(path.join(effectDirectory, "src"), { recursive: true, force: true })
+    await rm(path.join(effectDirectory, "ai-docs"), { recursive: true, force: true })
+  }
+}
+
+const removeBinaryDirectories = async (directory) => {
+  if (!(await exists(directory))) return
+  const entries = await readdir(directory, { withFileTypes: true })
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue
+    const child = path.join(directory, entry.name)
+    if (entry.isDirectory() && entry.name === ".bin") {
+      await rm(child, { recursive: true, force: true })
+      continue
+    }
+    if (entry.isDirectory()) await removeBinaryDirectories(child)
+  }
+}
+
+const assertNoSymbolicLinks = async (directory, links = []) => {
+  const entries = await readdir(directory, { withFileTypes: true })
+  for (const entry of entries) {
+    const child = path.join(directory, entry.name)
+    if (entry.isSymbolicLink()) {
+      links.push(child)
+      continue
+    }
+    if (entry.isDirectory()) await assertNoSymbolicLinks(child, links)
+  }
+  return links
+}
+
+const materializeDirectory = async (directory) => {
+  const materializedDirectory = `${directory}.materialized`
+  await rm(materializedDirectory, { recursive: true, force: true })
+  await cp(directory, materializedDirectory, { recursive: true, dereference: true })
+
+  const publicNodeModules = path.join(materializedDirectory, ".pnpm", "node_modules")
+  if (await exists(publicNodeModules)) {
+    for (const entry of await readdir(publicNodeModules, { withFileTypes: true })) {
+      if (entry.name === ".bin" || entry.isSymbolicLink()) continue
+      const source = path.join(publicNodeModules, entry.name)
+      const destination = path.join(materializedDirectory, entry.name)
+      if (entry.name.startsWith("@") && entry.isDirectory()) {
+        await mkdir(destination, { recursive: true })
+        for (const scopedEntry of await readdir(source, { withFileTypes: true })) {
+          if (scopedEntry.isSymbolicLink()) continue
+          const scopedDestination = path.join(destination, scopedEntry.name)
+          if (await exists(scopedDestination)) continue
+          await cp(
+            path.join(source, scopedEntry.name),
+            scopedDestination,
+            { recursive: true, dereference: true }
+          )
+        }
+      } else if (!(await exists(destination))) {
+        await cp(source, destination, { recursive: true, dereference: true })
+      }
+    }
+  }
+
+  await rm(directory, { recursive: true, force: true })
+  await rename(materializedDirectory, directory)
 }
 
 const prunePnpmMetadata = async (nodeModulesDirectory) => {
@@ -168,28 +256,44 @@ const build = async () => {
       stdio: "inherit"
     })
 
-    const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm"
+    const pnpmArguments = [
+      "--filter",
+      "@henshin/server",
+      "deploy",
+      "--prod",
+      "--prefer-offline",
+      "--frozen-lockfile",
+      "--trust-lockfile",
+      "--config.inject-workspace-packages=true",
+      "--config.node-linker=hoisted",
+      "--config.confirmModulesPurge=false",
+      deployDirectory
+    ]
+    const packageManagerEntrypoint = process.env.npm_execpath
+    if (packageManagerEntrypoint === undefined && process.platform === "win32") {
+      throw new Error("Windows distribution builds must be invoked through pnpm")
+    }
     execFileSync(
-      pnpm,
-      [
-        "--filter",
-        "@henshin/server",
-        "deploy",
-        "--prod",
-        "--legacy",
-        "--config.confirmModulesPurge=false",
-        deployDirectory
-      ], {
-      cwd: repositoryDir,
-      env: { ...process.env, CI: "true" },
-      stdio: "inherit"
-    })
+      packageManagerEntrypoint === undefined ? "pnpm" : process.execPath,
+      packageManagerEntrypoint === undefined ? pnpmArguments : [packageManagerEntrypoint, ...pnpmArguments],
+      {
+        cwd: repositoryDir,
+        env: { ...process.env, CI: "true" },
+        stdio: "inherit"
+      }
+    )
 
     await rename(path.join(deployDirectory, "node_modules"), path.join(bundleDirectory, "node_modules"))
     const nodeModulesDirectory = path.join(bundleDirectory, "node_modules")
     await removeWorkspacePackages(nodeModulesDirectory)
+    await removeBinaryDirectories(nodeModulesDirectory)
     await pruneEffectSources(nodeModulesDirectory)
     await prunePnpmMetadata(nodeModulesDirectory)
+    await materializeDirectory(nodeModulesDirectory)
+    const symbolicLinks = await assertNoSymbolicLinks(nodeModulesDirectory)
+    if (symbolicLinks.length > 0) {
+      throw new Error(`standalone runtime contains unsupported symbolic links: ${symbolicLinks.join(", ")}`)
+    }
 
     for (const entrypoint of entrypoints) {
       await cp(path.join(serverDir, "dist", entrypoint), path.join(bundleDirectory, entrypoint))

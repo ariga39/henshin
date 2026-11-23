@@ -5,7 +5,8 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const SERVER_PATH = fileURLToPath(new URL("../../dist/server.mjs", import.meta.url))
+const SERVER_PATH = process.env.HENSHIN_SERVER_ENTRYPOINT ?? fileURLToPath(new URL("../../dist/server.mjs", import.meta.url))
+const SERVER_CWD = process.env.HENSHIN_SERVER_CWD ?? process.cwd()
 const READY_TIMEOUT_MS = 20_000
 const STOP_TIMEOUT_MS = 5_000
 
@@ -52,7 +53,7 @@ export const makeTempDbPath = async (): Promise<string> => {
 export const cleanupTempDb = removeTempDbDirectory
 
 const spawnServerProcess = (): ChildProcessWithoutNullStreams =>
-  spawn(process.execPath, [SERVER_PATH], { stdio: ["pipe", "pipe", "pipe"] })
+  spawn(process.execPath, [SERVER_PATH], { cwd: SERVER_CWD, stdio: ["pipe", "pipe", "pipe"] })
 
 /**
  * Spawns the built independent server with the same private bootstrap channel

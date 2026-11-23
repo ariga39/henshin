@@ -2,13 +2,23 @@ import { createServer } from "node:http"
 import { access, readFile, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { promisify } from "node:util"
 import { afterEach, describe, expect, it } from "vitest"
 
-const SERVER_PATH = fileURLToPath(new URL("../dist/server.mjs", import.meta.url))
+const SERVER_PATH = process.env.HENSHIN_SERVER_ENTRYPOINT ?? fileURLToPath(new URL("../dist/server.mjs", import.meta.url))
+const SERVER_CWD = process.env.HENSHIN_SERVER_CWD ?? process.cwd()
 const READY_TIMEOUT_MS = 5_000
 const EXIT_TIMEOUT_MS = 5_000
+const execFileAsync = promisify(execFile)
+const WINDOWS_POWERSHELL_PATH = path.win32.resolve(
+  process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows",
+  "System32",
+  "WindowsPowerShell",
+  "v1.0",
+  "powershell.exe"
+)
 
 interface Attempt {
   readonly child: ChildProcessWithoutNullStreams
@@ -54,6 +64,7 @@ const waitForExit = (
 
 const launch = (args: ReadonlyArray<string>): Attempt => {
   const child = spawn(process.execPath, [SERVER_PATH, ...args], {
+    cwd: SERVER_CWD,
     stdio: ["pipe", "pipe", "pipe"]
   })
   let stdout = ""
@@ -148,8 +159,99 @@ const startServer = async (
 
 const stopServer = async (server: RunningServer): Promise<void> => {
   server.child.kill("SIGTERM")
-  // Effect's default teardown maps a signal interruption to exit code 130.
-  await expect(waitForExit(server.child, EXIT_TIMEOUT_MS)).resolves.toEqual({ code: 130, signal: null })
+  // POSIX runtimes report Effect's signal interruption as 130. Windows
+  // reports the supported child termination as SIGTERM.
+  await expect(waitForExit(server.child, EXIT_TIMEOUT_MS)).resolves.toEqual(
+    process.platform === "win32"
+      ? { code: null, signal: "SIGTERM" }
+      : { code: 130, signal: null }
+  )
+}
+
+interface WindowsAclRule {
+  readonly sid: string
+  readonly type: string
+  readonly rightsValue: number
+}
+
+interface WindowsAclSnapshot {
+  readonly ownerSid: string
+  readonly currentSid: string
+  readonly currentGroupSids: ReadonlyArray<string>
+  readonly accessRulesProtected: boolean
+  readonly rules: ReadonlyArray<WindowsAclRule>
+}
+
+const WINDOWS_ACL_SCRIPT = `$ErrorActionPreference = 'Stop'
+$sidType = [System.Security.Principal.SecurityIdentifier]
+$acl = [System.IO.File]::GetAccessControl($env:HENSHIN_AUTH_PATH)
+$ownerSid = $acl.GetOwner($sidType).Value
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$currentSid = $identity.User.Value
+$currentGroupSids = @($identity.Groups | ForEach-Object {
+  $_.Translate($sidType).Value
+})
+$rules = @($acl.GetAccessRules($true, $true, $sidType) | ForEach-Object {
+  [pscustomobject]@{
+    sid = $_.IdentityReference.Value
+    type = $_.AccessControlType.ToString()
+    rightsValue = [int64]$_.FileSystemRights
+  }
+})
+[pscustomobject]@{
+  ownerSid = $ownerSid
+  currentSid = $currentSid
+  currentGroupSids = $currentGroupSids
+  accessRulesProtected = $acl.AreAccessRulesProtected
+  rules = $rules
+} |
+  ConvertTo-Json -Compress -Depth 5`
+
+const expectProtectedOwnerState = async (authPath: string): Promise<void> => {
+  if (process.platform !== "win32") {
+    expect((await stat(authPath)).mode & 0o777).toBe(0o600)
+    return
+  }
+
+  const { stdout } = await execFileAsync(
+    WINDOWS_POWERSHELL_PATH,
+    ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_ACL_SCRIPT],
+    { windowsHide: true, env: { ...process.env, HENSHIN_AUTH_PATH: authPath } }
+  )
+  const snapshot = JSON.parse(stdout) as WindowsAclSnapshot
+  const readData = 1
+  const writeData = 2
+  const currentPrincipalSids = new Set([snapshot.currentSid, ...snapshot.currentGroupSids])
+  const hasReadWriteAllow = (sids: ReadonlySet<string>): boolean =>
+    snapshot.rules.some(
+      (rule) =>
+        sids.has(rule.sid) &&
+        rule.type === "Allow" &&
+        (rule.rightsValue & readData) !== 0 &&
+        (rule.rightsValue & writeData) !== 0
+    )
+
+  const principalDiagnostic = snapshot.rules
+    .filter((rule) => currentPrincipalSids.has(rule.sid) || rule.sid === snapshot.ownerSid)
+    .map(({ sid, type, rightsValue }) => ({ sid, type, rightsValue }))
+  expect(
+    snapshot.accessRulesProtected,
+    `Windows auth DACL was not protected: ${JSON.stringify(principalDiagnostic)}`
+  ).toBe(true)
+  expect(
+    hasReadWriteAllow(currentPrincipalSids),
+    `Windows auth DACL has no effective read/write Allow ACE: ${JSON.stringify(principalDiagnostic)}`
+  ).toBe(true)
+
+  const broadGroupSids = new Set([
+    "S-1-1-0", // Everyone
+    "S-1-5-11", // Authenticated Users
+    "S-1-5-32-545" // BUILTIN\\Users
+  ])
+  const broadAllows = snapshot.rules
+    .filter((rule) => rule.type === "Allow" && broadGroupSids.has(rule.sid))
+    .map(({ sid, rightsValue }) => ({ sid, rightsValue }))
+  expect(broadAllows, `Windows auth DACL broad Allow ACEs: ${JSON.stringify(broadAllows)}`).toEqual([])
 }
 
 const expectUsageFailure = async (args: ReadonlyArray<string>): Promise<void> => {
@@ -181,7 +283,7 @@ describe("independent foreground service", () => {
     const authPath = path.join(dataDir, ".henshin-server-auth.sqlite")
     const authState = await readFile(authPath)
     expect(authState.includes(Buffer.from(initialized.token))).toBe(false)
-    expect((await stat(authPath)).mode & 0o777).toBe(0o600)
+    await expectProtectedOwnerState(authPath)
 
     const first = await startServer(["--data-dir", dataDir], port)
     expect(first.stdout()).not.toContain(initialized.token)
@@ -192,6 +294,11 @@ describe("independent foreground service", () => {
       expect(unauthorized.status).toBe(401)
       expect(unauthorizedBody).not.toContain(first.instanceId)
       expect(unauthorizedBody).not.toContain(first.epoch)
+
+      const wrongBearer = await fetch(`${first.baseUrl}/prototype/v1/handshake`, {
+        headers: { authorization: "Bearer not-the-token" }
+      })
+      expect(wrongBearer.status).toBe(401)
 
       const authenticated = await fetch(`${first.baseUrl}/prototype/v1/handshake`, {
         headers: { authorization: `Bearer ${initialized.token}` }
