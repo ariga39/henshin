@@ -28,6 +28,9 @@ import {
   BackupArtifactCompletionOutcome,
   BackupArtifactReservationOutcome,
   BackupArtifactRow,
+  BackupDrillCompletionOutcome,
+  BackupDrillRunRow,
+  BackupDrillStartOutcome,
   RootRegistrationOutcome,
   RootReplayLookup,
   type WorkerRequest
@@ -368,6 +371,18 @@ db.exec(`
     completed_at_ms INTEGER,
     UNIQUE (destination_id, relative_path),
     UNIQUE (destination_id, publication_order)
+  );
+  CREATE TABLE IF NOT EXISTS backup_drill_runs (
+    run_id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL REFERENCES backup_artifacts(artifact_id),
+    manifest_digest TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'passed', 'failed', 'interrupted')),
+    started_at_ms INTEGER NOT NULL,
+    completed_at_ms INTEGER,
+    duration_ms INTEGER,
+    diagnostic_code TEXT,
+    diagnostic_message TEXT,
+    checks_json TEXT
   );
   CREATE TABLE IF NOT EXISTS root_operations (
     operation_id TEXT PRIMARY KEY,
@@ -861,6 +876,35 @@ const updateBackupArtifactCompleted = db.prepare(
    SET status = 'completed', manifest_digest = ?, size_bytes = ?, completed_at_ms = ?
    WHERE artifact_id = ? AND status = 'reserved'`
 )
+const selectBackupDrillRuns = db.prepare(
+  `SELECT run_id, artifact_id, manifest_digest, status, started_at_ms, completed_at_ms,
+          duration_ms, diagnostic_code, diagnostic_message, checks_json
+   FROM backup_drill_runs ORDER BY started_at_ms DESC, rowid DESC`
+)
+const selectBackupDrillRunById = db.prepare(
+  `SELECT run_id, artifact_id, manifest_digest, status, started_at_ms, completed_at_ms,
+          duration_ms, diagnostic_code, diagnostic_message, checks_json
+   FROM backup_drill_runs WHERE run_id = ?`
+)
+const insertBackupDrillRun = db.prepare(
+  `INSERT INTO backup_drill_runs(
+    run_id, artifact_id, manifest_digest, status, started_at_ms, completed_at_ms,
+    duration_ms, diagnostic_code, diagnostic_message, checks_json
+  ) VALUES (?, ?, ?, 'running', ?, NULL, NULL, NULL, NULL, NULL)`
+)
+const updateBackupDrillRun = db.prepare(
+  `UPDATE backup_drill_runs
+   SET status = ?, completed_at_ms = ?, duration_ms = ?,
+       diagnostic_code = ?, diagnostic_message = ?, checks_json = ?
+   WHERE run_id = ? AND status = 'running'`
+)
+const interruptRunningBackupDrills = db.prepare(
+  `UPDATE backup_drill_runs
+   SET status = 'interrupted', completed_at_ms = ?, duration_ms = ? - started_at_ms,
+       diagnostic_code = 'process-interrupted',
+       diagnostic_message = 'drill process ended before completion'
+   WHERE status = 'running'`
+)
 const selectLibrary = db.prepare("SELECT library_id FROM server_library WHERE id = 1")
 const selectLibraryState = db.prepare("SELECT library_id, change_revision FROM server_library WHERE id = 1")
 const selectRootOperation = db.prepare("SELECT payload, result FROM root_operations WHERE operation_id = ?")
@@ -1220,6 +1264,35 @@ const backupArtifactRows = (): ReadonlyArray<BackupArtifactRow> =>
     backupArtifactRow
   )
 
+const backupDrillRunRow = (row: {
+  run_id: string
+  artifact_id: string
+  manifest_digest: string
+  status: "running" | "passed" | "failed" | "interrupted"
+  started_at_ms: number
+  completed_at_ms: number | null
+  duration_ms: number | null
+  diagnostic_code: string | null
+  diagnostic_message: string | null
+  checks_json: string | null
+}): BackupDrillRunRow => ({
+  runId: row.run_id,
+  artifactId: row.artifact_id,
+  manifestDigest: row.manifest_digest,
+  status: row.status,
+  startedAtMs: row.started_at_ms,
+  completedAtMs: row.completed_at_ms,
+  durationMs: row.duration_ms,
+  diagnosticCode: row.diagnostic_code,
+  diagnosticMessage: row.diagnostic_message,
+  checksJson: row.checks_json
+})
+
+const backupDrillRunRows = (): ReadonlyArray<BackupDrillRunRow> =>
+  (selectBackupDrillRuns.all() as unknown as ReadonlyArray<Parameters<typeof backupDrillRunRow>[0]>).map(
+    backupDrillRunRow
+  )
+
 const backupDestinationById = (destinationId: string): BackupDestinationRow | undefined => {
   const row = selectBackupDestination.get(destinationId) as Parameters<typeof backupDestinationRow>[0] | undefined
   return row === undefined ? undefined : backupDestinationRow(row)
@@ -1415,6 +1488,96 @@ const completeBackupArtifact = (
     return {
       kind: "completed",
       artifact: backupArtifactRow(selectBackupArtifactById.get(request.artifactId) as Parameters<typeof backupArtifactRow>[0])
+    }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const startBackupDrill = (
+  request: Extract<WorkerRequest, { op: "startBackupDrill" }>
+): BackupDrillStartOutcome => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const existing = selectBackupDrillRunById.get(request.runId) as
+      | Parameters<typeof backupDrillRunRow>[0]
+      | undefined
+    if (existing !== undefined) {
+      const run = backupDrillRunRow(existing)
+      const same = run.artifactId === request.artifactId && run.manifestDigest === request.manifestDigest &&
+        run.startedAtMs === request.startedAtMs
+      db.exec(same ? "COMMIT" : "ROLLBACK")
+      return same ? { kind: "replayed", run } : { kind: "run_conflict" }
+    }
+
+    const artifact = selectBackupArtifactById.get(request.artifactId) as
+      | Parameters<typeof backupArtifactRow>[0]
+      | undefined
+    if (artifact === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "artifact_not_found" }
+    }
+    if (artifact.status !== "completed") {
+      db.exec("ROLLBACK")
+      return { kind: "artifact_not_completed" }
+    }
+    if (artifact.manifest_digest !== request.manifestDigest) {
+      db.exec("ROLLBACK")
+      return { kind: "manifest_conflict" }
+    }
+
+    insertBackupDrillRun.run(
+      request.runId,
+      request.artifactId,
+      request.manifestDigest,
+      request.startedAtMs
+    )
+    db.exec("COMMIT")
+    return {
+      kind: "started",
+      run: backupDrillRunRow(selectBackupDrillRunById.get(request.runId) as Parameters<typeof backupDrillRunRow>[0])
+    }
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
+const completeBackupDrill = (
+  request: Extract<WorkerRequest, { op: "completeBackupDrill" }>
+): BackupDrillCompletionOutcome => {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const existing = selectBackupDrillRunById.get(request.runId) as
+      | Parameters<typeof backupDrillRunRow>[0]
+      | undefined
+    if (existing === undefined) {
+      db.exec("ROLLBACK")
+      return { kind: "run_not_found" }
+    }
+    const run = backupDrillRunRow(existing)
+    const durationMs = Math.max(0, request.completedAtMs - run.startedAtMs)
+    if (run.status !== "running") {
+      const same = run.status === request.status && run.completedAtMs === request.completedAtMs &&
+        run.diagnosticCode === request.diagnosticCode && run.diagnosticMessage === request.diagnosticMessage &&
+        run.checksJson === request.checksJson
+      db.exec(same ? "COMMIT" : "ROLLBACK")
+      return same ? { kind: "replayed", run } : { kind: "run_conflict" }
+    }
+    updateBackupDrillRun.run(
+      request.status,
+      request.completedAtMs,
+      durationMs,
+      request.diagnosticCode,
+      request.diagnosticMessage,
+      request.checksJson,
+      request.runId
+    )
+    db.exec("COMMIT")
+    return {
+      kind: "completed",
+      run: backupDrillRunRow(selectBackupDrillRunById.get(request.runId) as Parameters<typeof backupDrillRunRow>[0])
     }
   } catch (error) {
     db.exec("ROLLBACK")
@@ -3088,6 +3251,8 @@ const handle = (request: WorkerRequest): unknown => {
       if (schemaVersion !== undefined && schemaVersion < CURRENT_SCHEMA_VERSION) {
         db.prepare("UPDATE server_state SET schema_version = ? WHERE id = 1").run(CURRENT_SCHEMA_VERSION)
       }
+      const interruptedAtMs = Date.now()
+      interruptRunningBackupDrills.run(interruptedAtMs, interruptedAtMs)
       db.exec(`
         INSERT OR IGNORE INTO entry_statistics(entry_id, open_count, last_opened_at_ms)
         SELECT entry_id, 0, NULL FROM library_entries
@@ -3106,6 +3271,8 @@ const handle = (request: WorkerRequest): unknown => {
       return backupDestinationRows()
     case "listBackupArtifacts":
       return backupArtifactRows()
+    case "listBackupDrillRuns":
+      return backupDrillRunRows()
     case "registerBackupDestination":
       return registerBackupDestination(request)
     case "replaceBackupDestination":
@@ -3114,6 +3281,10 @@ const handle = (request: WorkerRequest): unknown => {
       return reserveBackupArtifact(request)
     case "completeBackupArtifact":
       return completeBackupArtifact(request)
+    case "startBackupDrill":
+      return startBackupDrill(request)
+    case "completeBackupDrill":
+      return completeBackupDrill(request)
     case "lookupRootOperation":
       return lookupRootOperation(request)
     case "readOperation":
