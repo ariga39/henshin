@@ -163,10 +163,55 @@ describe("stopped desktop backup", () => {
       installationId: "11111111-1111-4111-8111-111111111111",
       label: null,
       beforePublish: async () => {
+        const stagingDirectories = (await readdir(dataDirectory)).filter((name) => name.startsWith(".desktop-backup-staging-"))
+        expect(stagingDirectories).toHaveLength(1)
+        expect((await stat(path.join(dataDirectory, stagingDirectories[0]))).mode & 0o777).toBe(0o700)
+        const temporaryArchives = (await readdir(outputDirectory)).filter((name) => name.endsWith(".tmp"))
+        expect(temporaryArchives).toHaveLength(1)
+        expect((await stat(path.join(outputDirectory, temporaryArchives[0]))).mode & 0o777).toBe(0o600)
         throw new Error("simulated publication failure")
       }
     })).rejects.toThrow("simulated publication failure")
     await expect(stat(destination)).rejects.toMatchObject({ code: "ENOENT" })
     expect((await readdir(outputDirectory)).filter((name) => name.endsWith(".tmp"))).toEqual([])
+    expect((await readdir(dataDirectory)).filter((name) => name.startsWith(".desktop-backup-staging-"))).toEqual([])
+  })
+
+  it("lets only one stopped installation publish a contested output", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "henshin-desktop-backup-race-"))
+    workspaces.push(workspace)
+    const firstDataDirectory = path.join(workspace, "desktop-data-one")
+    const secondDataDirectory = path.join(workspace, "desktop-data-two")
+    const outputDirectory = path.join(workspace, "backups")
+    const destination = path.join(outputDirectory, "same-name.henshin.zip")
+    await mkdir(firstDataDirectory)
+    await mkdir(secondDataDirectory)
+    await mkdir(outputDirectory)
+    await Promise.all([createDesktopStore(firstDataDirectory), createDesktopStore(secondDataDirectory)])
+
+    const results = await Promise.allSettled([
+      createDesktopBackupArchive({
+        dataDirectory: firstDataDirectory,
+        outputPath: destination,
+        installationId: "11111111-1111-4111-8111-111111111111",
+        label: "first"
+      }),
+      createDesktopBackupArchive({
+        dataDirectory: secondDataDirectory,
+        outputPath: destination,
+        installationId: "22222222-2222-4222-8222-222222222222",
+        label: "second"
+      })
+    ])
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1)
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1)
+    const rejected = results.find((result) => result.status === "rejected")
+    expect(rejected?.status === "rejected" ? rejected.reason : undefined).toMatchObject({
+      message: "desktop backup destination already exists"
+    })
+    expect((await stat(destination)).mode & 0o777).toBe(0o600)
+    expect((await readdir(outputDirectory)).filter((name) => name.endsWith(".tmp"))).toEqual([])
+    expect((await readdir(firstDataDirectory)).filter((name) => name.startsWith(".desktop-backup-staging-"))).toEqual([])
+    expect((await readdir(secondDataDirectory)).filter((name) => name.startsWith(".desktop-backup-staging-"))).toEqual([])
   })
 })

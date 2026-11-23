@@ -1,5 +1,5 @@
 import { backup, DatabaseSync } from "node:sqlite"
-import { chmod, lstat, mkdtemp, open, realpath, rename, rm, stat } from "node:fs/promises"
+import { chmod, lstat, link, mkdtemp, open, realpath, rm, stat, unlink } from "node:fs/promises"
 import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
 import {
@@ -43,6 +43,11 @@ export interface DesktopBackupArchiveResult {
 
 const isMissing = (error: unknown): boolean =>
   typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
+
+const errorCode = (error: unknown): string | undefined =>
+  typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+    ? error.code
+    : undefined
 
 const quoteIdentifier = (value: string): string => `"${value.replaceAll('"', '""')}"`
 
@@ -167,6 +172,39 @@ const writeAndVerify = async (
   ]))
 }
 
+const syncDirectory = async (directory: string): Promise<void> => {
+  const handle = await open(directory, "r")
+  try {
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+}
+
+const publishWithoutReplacement = async (
+  temporaryArchivePath: string,
+  outputPath: string
+): Promise<void> => {
+  try {
+    // Both paths are created in the same validated destination directory. A
+    // hard link is atomic and fails with EEXIST instead of replacing a prior
+    // verified recovery point, unlike rename(2).
+    await link(temporaryArchivePath, outputPath)
+  } catch (error) {
+    switch (errorCode(error)) {
+      case "EEXIST":
+        throw new Error("desktop backup destination already exists")
+      case "EXDEV":
+      case "EOPNOTSUPP":
+      case "ENOTSUP":
+      case "EPERM":
+        throw new Error("desktop backup publication is unsupported on this filesystem")
+      default:
+        throw error
+    }
+  }
+}
+
 export const createDesktopBackupArchive = async (
   context: DesktopBackupArchiveContext
 ): Promise<DesktopBackupArchiveResult> => {
@@ -262,20 +300,11 @@ export const createDesktopBackupArchive = async (
     if (context.beforePublish !== undefined) await context.beforePublish()
     const outputParent = await realpath(path.dirname(outputPath))
     if (outputParent !== path.dirname(outputPath)) throw new Error("desktop backup destination changed before publication")
-    try {
-      await lstat(outputPath)
-      throw new Error("desktop backup destination already exists")
-    } catch (error) {
-      if (!isMissing(error)) throw error
-    }
-    await rename(temporaryArchivePath, outputPath)
+    await publishWithoutReplacement(temporaryArchivePath, outputPath)
+    await syncDirectory(outputParent)
+    await unlink(temporaryArchivePath)
     temporaryArchivePath = undefined
-    const directoryHandle = await open(outputParent, "r")
-    try {
-      await directoryHandle.sync()
-    } finally {
-      await directoryHandle.close()
-    }
+    await syncDirectory(outputParent)
     await verifyArchive(outputPath, new Map([
       ["manifest.json", { size: manifestBytes.byteLength, sha256: digest(manifestBytes) }],
       ["state.sqlite", { size: stateSize, sha256: stateDigest }],
