@@ -150,7 +150,7 @@ test("opens an accepted Library entry through one native fixture handoff", async
     await expect.poll(async () => {
       try { return await readFile(markerPath, "utf8") } catch { return "" }
     }).toBe(`${expectedTarget}\n`)
-    const entryId = await acceptedEntry.locator("small").textContent()
+    const entryId = await acceptedEntry.getByTestId("library-entry-id").textContent()
     if (entryId === null) throw new Error("accepted entry id was not rendered")
 
     await app.evaluate(({ shell }) => {

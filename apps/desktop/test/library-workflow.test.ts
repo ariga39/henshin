@@ -31,6 +31,7 @@ const entry = (entryId: string, title: string): LibraryEntry => ({
   state: "accepted",
   replacement: null,
   match_fields: [],
+  availability: { status: "present", observed_at_ms: 1 },
   content_version: "1",
   location_revision: "1",
   cover: null
