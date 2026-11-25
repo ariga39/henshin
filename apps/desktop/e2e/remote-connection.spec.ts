@@ -466,6 +466,10 @@ test("connects the normal desktop to the correct TLS library and rejects redirec
     expect(profileText).not.toContain(remoteToken)
     if (sessionOnly) {
       expect(JSON.parse(profileText)).toEqual({ active: "managed", remote: null })
+    } else {
+      expect(JSON.parse(profileText)).toEqual({ version: 1, encrypted_payload: expect.any(String) })
+      expect(profileText).not.toContain(proxy.baseUrl)
+      expect(profileText).not.toContain(remote.instanceId)
     }
 
     let ownedLocal: RunningServer | null = null
@@ -489,6 +493,9 @@ test("connects the normal desktop to the correct TLS library and rejects redirec
     await expect(second.window.getByTestId("library-screen")).toBeVisible({ timeout: 30_000 })
     await expect(second.window.getByTestId("library-entry")).toContainText("remote-book")
 
+    const profileBeforeRejectedSwitch = !sessionOnly
+      ? await readFile(path.join(userData, "connection-profile.json"), "utf8")
+      : null
     await second.window.getByTestId("library-setup").click()
     await second.window.getByTestId("remote-base-url").fill(redirect.baseUrl)
     await second.window.getByTestId("remote-bearer-token").fill(remoteToken)
@@ -496,10 +503,9 @@ test("connects the normal desktop to the correct TLS library and rejects redirec
     await expect(second.window.getByRole("alert")).toContainText("Connection issue")
     expect(redirectTarget.requests).toBe(0)
     await expect(second.window.getByTestId("connection-target")).toContainText(proxy.baseUrl)
-    if (!sessionOnly) {
+    if (profileBeforeRejectedSwitch !== null) {
       const profileAfterRejectedSwitch = await readFile(path.join(userData, "connection-profile.json"), "utf8")
-      expect(profileAfterRejectedSwitch).toContain(proxy.baseUrl)
-      expect(profileAfterRejectedSwitch).not.toContain(redirect.baseUrl)
+      expect(profileAfterRejectedSwitch).toBe(profileBeforeRejectedSwitch)
     }
     if (ownedLocal !== null) expect(ownedLocal.child.exitCode).toBeNull()
     expect(remote.child.exitCode).toBeNull()

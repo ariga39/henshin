@@ -14,6 +14,11 @@ const controlledProtectedStore = (): CredentialStoreAdapter => ({
   decrypt: (value) => Buffer.from(value.slice("wrapped:".length), "base64url").toString("utf8")
 })
 
+const protectedRecord = (payload: unknown, version = 1): string => JSON.stringify({
+  version,
+  encrypted_payload: controlledProtectedStore().encrypt(JSON.stringify(payload))
+})
+
 describe("connection profile persistence", () => {
   it("round-trips through a controlled protected adapter without plaintext credentials", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "henshin-connection-profile-"))
@@ -28,7 +33,10 @@ describe("connection profile persistence", () => {
       expect(store.storageMode()).toBe("protected")
       await store.saveRemote(profile)
       const raw = await readFile(path.join(root, "connection-profile.json"), "utf8")
+      expect(raw).not.toContain(profile.baseUrl)
       expect(raw).not.toContain(profile.bearerToken)
+      expect(raw).not.toContain(profile.instanceId)
+      expect(JSON.parse(raw)).toEqual({ version: 1, encrypted_payload: expect.any(String) })
       expect(await store.load()).toEqual({ active: "remote", remote: profile })
     } finally {
       await rm(root, { recursive: true, force: true })
@@ -55,17 +63,13 @@ describe("connection profile persistence", () => {
     }
   })
 
-  it("does not decrypt an unused remote credential for a managed profile", async () => {
+  it("keeps the credential-free managed profile usable without decrypting", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "henshin-connection-profile-"))
     let decryptCalls = 0
     try {
       await writeFile(path.join(root, "connection-profile.json"), JSON.stringify({
         active: "managed",
-        remote: {
-          base_url: "https://unused.example.test",
-          encrypted_bearer_token: "protected-secret",
-          instance_id: "00000000-0000-4000-8000-000000000001"
-        }
+        remote: null
       }))
       const store = new ConnectionProfileStore(root, {
         isAvailable: () => true,
@@ -78,6 +82,88 @@ describe("connection profile persistence", () => {
 
       await expect(store.load()).resolves.toEqual({ active: "managed", remote: null })
       expect(decryptCalls).toBe(0)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("fails closed on legacy remote records without exposing their fields", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-connection-profile-"))
+    const endpoint = "https://legacy.example.test"
+    const instanceId = "00000000-0000-4000-8000-000000000001"
+    try {
+      await writeFile(path.join(root, "connection-profile.json"), JSON.stringify({
+        active: "remote",
+        remote: { base_url: endpoint, encrypted_bearer_token: "dummy-ciphertext", instance_id: instanceId }
+      }))
+
+      let diagnostic = ""
+      try {
+        await new ConnectionProfileStore(root, controlledProtectedStore()).load()
+      } catch (error) {
+        diagnostic = error instanceof Error ? error.message : String(error)
+      }
+      expect(diagnostic).toBe("saved connection profile is unreadable")
+      expect(diagnostic).not.toContain(endpoint)
+      expect(diagnostic).not.toContain(instanceId)
+      expect(diagnostic).not.toContain("dummy-ciphertext")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it.each([
+    { base_url: "", bearer_token: "dummy-token", instance_id: "00000000-0000-4000-8000-000000000001" },
+    { base_url: "https://malformed.example.test", bearer_token: "", instance_id: "00000000-0000-4000-8000-000000000001" },
+    { base_url: "https://malformed.example.test", bearer_token: "dummy-token", instance_id: "not-a-uuid" },
+    { base_url: "https://malformed.example.test", bearer_token: "dummy-token", instance_id: "00000000-0000-4000-8000-000000000001", active: "remote" }
+  ])("rejects malformed protected payloads without exposing decrypted values", async (payload) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-connection-profile-"))
+    const endpoint = "https://malformed.example.test"
+    try {
+      await writeFile(path.join(root, "connection-profile.json"), protectedRecord(payload))
+
+      let diagnostic = ""
+      try {
+        await new ConnectionProfileStore(root, controlledProtectedStore()).load()
+      } catch (error) {
+        diagnostic = error instanceof Error ? error.message : String(error)
+      }
+      expect(diagnostic).toBe("saved remote credential could not be recovered")
+      expect(diagnostic).not.toContain(endpoint)
+      expect(diagnostic).not.toContain("dummy-token")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it.each([
+    {
+      active: "managed",
+      remote: null,
+      base_url: "https://legacy.example.test",
+      instance_id: "00000000-0000-4000-8000-000000000001"
+    },
+    {
+      active: "managed",
+      remote: {
+        base_url: "https://legacy.example.test",
+        encrypted_bearer_token: "dummy-ciphertext",
+        instance_id: "00000000-0000-4000-8000-000000000001"
+      }
+    },
+    {
+      version: 1,
+      encrypted_payload: "dummy-ciphertext",
+      active: "managed",
+      remote: null
+    }
+  ])("rejects ambiguous outer profile records", async (record) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "henshin-connection-profile-"))
+    try {
+      await writeFile(path.join(root, "connection-profile.json"), JSON.stringify(record))
+      await expect(new ConnectionProfileStore(root, controlledProtectedStore()).load())
+        .rejects.toMatchObject({ message: "saved connection profile is unreadable" })
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -100,13 +186,10 @@ describe("connection profile persistence", () => {
   it("surfaces protected credential decrypt failures", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "henshin-connection-profile-"))
     try {
-      await writeFile(path.join(root, "connection-profile.json"), JSON.stringify({
-        active: "remote",
-        remote: {
-          base_url: "https://library.example.test",
-          encrypted_bearer_token: "protected-secret",
-          instance_id: "00000000-0000-4000-8000-000000000001"
-        }
+      await writeFile(path.join(root, "connection-profile.json"), protectedRecord({
+        base_url: "https://library.example.test",
+        bearer_token: "dummy-token",
+        instance_id: "00000000-0000-4000-8000-000000000001"
       }))
       const store = new ConnectionProfileStore(root, {
         isAvailable: () => true,

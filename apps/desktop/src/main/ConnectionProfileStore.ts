@@ -1,20 +1,38 @@
 import { safeStorage } from "electron"
+import { Uuid } from "@henshin/contracts"
 import { Option, Schema } from "effect"
 import { chmod, readFile, rename, writeFile } from "node:fs/promises"
 import path from "node:path"
 
+const RemoteProfilePayload = Schema.Struct({
+  base_url: Schema.NonEmptyString,
+  bearer_token: Schema.NonEmptyString,
+  instance_id: Uuid
+})
+
 const StoredRemoteProfile = Schema.Struct({
-  base_url: Schema.String,
-  encrypted_bearer_token: Schema.String,
-  instance_id: Schema.String
+  version: Schema.Literal(1),
+  encrypted_payload: Schema.String
 })
 
 const StoredConnectionState = Schema.Struct({
-  active: Schema.Union([Schema.Literal("managed"), Schema.Literal("remote")]),
-  remote: Schema.NullOr(StoredRemoteProfile)
+  active: Schema.Literal("managed"),
+  remote: Schema.Null
 })
 
-type StoredConnectionState = typeof StoredConnectionState.Type
+const StoredState = Schema.Union([StoredConnectionState, StoredRemoteProfile])
+
+type StoredState = typeof StoredState.Type
+
+const decodeStoredState = (value: unknown): StoredState | null => {
+  const decoded = Schema.decodeUnknownOption(StoredState)(value, { onExcessProperty: "error" })
+  return Option.isNone(decoded) ? null : decoded.value
+}
+
+const decodeRemotePayload = (value: unknown) => {
+  const decoded = Schema.decodeUnknownOption(RemoteProfilePayload)(value, { onExcessProperty: "error" })
+  return Option.isNone(decoded) ? null : decoded.value
+}
 
 export interface RemoteConnectionProfile {
   readonly baseUrl: string
@@ -56,12 +74,6 @@ const assertProtectedStorage = (credentialStore: CredentialStoreAdapter): void =
   }
 }
 
-const decodeStoredState = (value: unknown): StoredConnectionState | null => {
-  const decoded = Schema.decodeUnknownOption(StoredConnectionState)(value)
-  if (Option.isNone(decoded)) return null
-  return decoded.value.active === "remote" && decoded.value.remote === null ? null : decoded.value
-}
-
 export class ConnectionProfileStore {
   private readonly path: string
   private readonly credentialStore: CredentialStoreAdapter
@@ -76,7 +88,7 @@ export class ConnectionProfileStore {
   }
 
   async load(): Promise<{ readonly active: "managed" | "remote"; readonly remote: RemoteConnectionProfile | null }> {
-    let state: StoredConnectionState
+    let state: StoredState
     try {
       const decoded = decodeStoredState(JSON.parse(await readFile(this.path, "utf8")))
       if (decoded === null) throw new ConnectionProfileStoreError("saved connection profile is unreadable")
@@ -88,17 +100,19 @@ export class ConnectionProfileStore {
       throw new ConnectionProfileStoreError("saved connection profile is unreadable")
     }
 
-    if (state.active === "managed" || state.remote === null) return { active: state.active, remote: null }
+    if ("active" in state) return { active: "managed", remote: null }
     if (!this.credentialStore.isAvailable()) {
       throw new ConnectionProfileStoreError("platform-protected credential storage is unavailable; saved remote credential could not be recovered")
     }
     try {
+      const decoded = decodeRemotePayload(JSON.parse(this.credentialStore.decrypt(state.encrypted_payload)))
+      if (decoded === null) throw new Error("invalid protected payload")
       return {
-        active: state.active,
+        active: "remote",
         remote: {
-          baseUrl: state.remote.base_url,
-          bearerToken: this.credentialStore.decrypt(state.remote.encrypted_bearer_token),
-          instanceId: state.remote.instance_id
+          baseUrl: decoded.base_url,
+          bearerToken: decoded.bearer_token,
+          instanceId: decoded.instance_id
         }
       }
     } catch {
@@ -108,13 +122,13 @@ export class ConnectionProfileStore {
 
   async saveRemote(profile: RemoteConnectionProfile): Promise<void> {
     assertProtectedStorage(this.credentialStore)
-    const state: StoredConnectionState = {
-      active: "remote",
-      remote: {
+    const state: StoredState = {
+      version: 1,
+      encrypted_payload: this.credentialStore.encrypt(JSON.stringify({
         base_url: profile.baseUrl,
-        encrypted_bearer_token: this.credentialStore.encrypt(profile.bearerToken),
+        bearer_token: profile.bearerToken,
         instance_id: profile.instanceId
-      }
+      }))
     }
     await this.write(state)
   }
@@ -123,7 +137,7 @@ export class ConnectionProfileStore {
     await this.write({ active: "managed", remote: null })
   }
 
-  private async write(state: StoredConnectionState): Promise<void> {
+  private async write(state: StoredState): Promise<void> {
     const temporaryPath = `${this.path}.tmp`
     await writeFile(temporaryPath, JSON.stringify(state), { encoding: "utf8", mode: 0o600 })
     await chmod(temporaryPath, 0o600)
