@@ -545,6 +545,123 @@ test("refreshes a disconnected follower when a same-target lease is confirmed af
   }
 })
 
+test("opens setup when managed startup is locked, connects remotely, and retries managed startup", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "henshin-managed-startup-retry-"))
+  const serviceData = path.join(root, "service")
+  const remoteData = path.join(root, "remote")
+  const userData = path.join(root, "desktop")
+  const collection = path.join(root, "collection")
+  const tls = path.join(root, "tls")
+  temporaryRoots.push(root)
+  await Promise.all([mkdir(serviceData), mkdir(remoteData), mkdir(userData), mkdir(collection), mkdir(tls)])
+  await mkdir(path.join(collection, "remote-book"))
+  await writeFile(path.join(collection, "remote-book", "001.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"))
+  const keyPath = path.join(tls, "key.pem")
+  const certificatePath = path.join(tls, "cert.pem")
+  await execFileAsync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", keyPath, "-out", certificatePath, "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"])
+
+  const otherDatabase = path.join(serviceData, "independent.sqlite")
+  const ownerToken = await initializeOwner(["--database", otherDatabase])
+  const owner = await startServer(["--database", otherDatabase], ownerToken)
+  const remoteToken = await initializeOwner(["--data-dir", remoteData])
+  const remote = await startServer(["--data-dir", remoteData], remoteToken)
+  const proxy = await createTlsProxy(certificatePath, keyPath, remote.baseUrl)
+  await seedLibrary(remote, collection)
+
+  try {
+    const desktop = await launchDesktop(path.join(serviceData, "managed.sqlite"), userData, certificatePath)
+    await expect(desktop.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await expect(desktop.window.getByTestId("connection-status")).toHaveText("Connection: blocked")
+    await expect(desktop.window.getByText(/Connection issue: The managed local service could not start/))
+      .toContainText("Stop any other service using this data directory")
+
+    await desktop.window.getByTestId("remote-base-url").fill(proxy.baseUrl)
+    await desktop.window.getByTestId("remote-bearer-token").fill(remoteToken)
+    await desktop.window.getByTestId("remote-connect").click()
+    await desktop.window.getByTestId("remote-confirm").click()
+    await expect(desktop.window.getByTestId("library-entry")).toContainText("remote-book", { timeout: 30_000 })
+
+    const retryDesktop = await launchDesktop(path.join(serviceData, "managed.sqlite"), path.join(root, "retry-desktop"), certificatePath)
+    await expect(retryDesktop.window.getByRole("heading", { name: "Collection setup" })).toBeVisible()
+    await expect(retryDesktop.window.getByTestId("connection-status")).toHaveText("Connection: blocked")
+    await expect(retryDesktop.window.getByTestId("remote-base-url")).toBeVisible()
+    await expect(retryDesktop.window.getByTestId("remote-bearer-token")).toBeVisible()
+
+    owner.child.kill("SIGTERM")
+    await waitForExit(owner.child)
+    await retryDesktop.window.getByTestId("connection-reconnect").click()
+    await expect(retryDesktop.window.getByTestId("connection-target")).toContainText("managed local service")
+    await expect(retryDesktop.window.getByTestId("connection-status")).toHaveText("Connection: connected")
+  } finally {
+    await proxy.close().catch(() => undefined)
+  }
+})
+
+test("Reconnect refreshes every window after a same-instance epoch change", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "henshin-remote-reconnect-epoch-"))
+  const serviceData = path.join(root, "service")
+  const localData = path.join(root, "local")
+  const userData = path.join(root, "desktop")
+  const collection = path.join(root, "collection")
+  const tls = path.join(root, "tls")
+  temporaryRoots.push(root)
+  await Promise.all([mkdir(serviceData), mkdir(localData), mkdir(userData), mkdir(collection), mkdir(tls)])
+  await mkdir(path.join(collection, "remote-book"))
+  await writeFile(path.join(collection, "remote-book", "001.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"))
+  const keyPath = path.join(tls, "key.pem")
+  const certificatePath = path.join(tls, "cert.pem")
+  await execFileAsync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", keyPath, "-out", certificatePath, "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"])
+
+  const token = await initializeOwner(["--data-dir", serviceData])
+  let remote = await startServer(["--data-dir", serviceData], token)
+  const proxy = await createTlsProxy(certificatePath, keyPath, remote.baseUrl)
+  const seededRoot = await seedLibrary(remote, collection)
+
+  try {
+    const first = await launchDesktop(path.join(localData, "managed.sqlite"), userData, certificatePath)
+    await first.window.getByTestId("remote-base-url").fill(proxy.baseUrl)
+    await first.window.getByTestId("remote-bearer-token").fill(token)
+    await first.window.getByTestId("remote-connect").click()
+    await first.window.getByTestId("remote-confirm").click()
+    await expect(first.window.getByTestId("library-entry")).toContainText("remote-book", { timeout: 30_000 })
+
+    await first.app.evaluate(({ Menu, BrowserWindow }) => {
+      const item = Menu.getApplicationMenu()?.getMenuItemById("new-library-window")
+      if (item == null) throw new Error("New Window menu item was not installed")
+      item.click?.(item, BrowserWindow.getFocusedWindow())
+    })
+    await expect.poll(() => first.app.windows().length).toBe(2)
+    const follower = first.app.windows().find((candidate) => candidate !== first.window)
+    if (follower === undefined) throw new Error("second Library window was not created")
+    await expect(follower.getByTestId("library-entry")).toContainText("remote-book", { timeout: 30_000 })
+
+    await first.window.getByTestId("library-setup").click()
+    await follower.getByTestId("library-setup").click()
+    await first.window.getByTestId("connection-disconnect").click()
+    await expect(follower.getByTestId("connection-status")).toHaveText("Connection: disconnected")
+
+    await mkdir(path.join(collection, "after-restart-book"))
+    await writeFile(path.join(collection, "after-restart-book", "001.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"))
+    const oldEpoch = remote.epoch
+    const oldInstanceId = remote.instanceId
+    remote.child.kill("SIGTERM")
+    await waitForExit(remote.child)
+    remote = await startServer(["--data-dir", serviceData], token)
+    expect(remote.instanceId).toBe(oldInstanceId)
+    expect(remote.epoch).not.toBe(oldEpoch)
+    proxy.setUpstream(remote.baseUrl)
+    await scanRoot(remote, seededRoot)
+
+    await first.window.getByTestId("connection-reconnect").click()
+    await expect(first.window.getByTestId("library-entry").filter({ hasText: "after-restart-book" })).toBeVisible({ timeout: 30_000 })
+    // The follower stays on setup while disconnected; reconnecting the same
+    // target must invalidate its workspace and load the new scan automatically.
+    await expect(follower.getByTestId("library-entry").filter({ hasText: "after-restart-book" })).toBeVisible({ timeout: 30_000 })
+  } finally {
+    await proxy.close().catch(() => undefined)
+  }
+})
+
 test("shows actionable HTTP and handshake response diagnostics", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "henshin-remote-diagnostics-"))
   const localData = path.join(root, "local")

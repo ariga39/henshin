@@ -1073,10 +1073,13 @@ const taskError = (task: ScanTask): string | null => {
   }
 }
 
-const finishNormalScanFailure = (message: string) =>
+const finishNormalScanFailure = (message: string, connectionGeneration: number) =>
   Effect.gen(function*() {
+    if (!isCurrent(connectionGeneration)) return
     yield* loadLibrary()
+    if (!isCurrent(connectionGeneration)) return
     yield* loadPendingReplacements()
+    if (!isCurrent(connectionGeneration)) return
     yield* Effect.sync(() => viewStore.set({
       scan_start_status: "error",
       scan_start_error: message,
@@ -1090,6 +1093,8 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
   Effect.gen(function*() {
     const client = yield* RootPreviewClient
     const state = viewStore.getState()
+    const connectionGeneration = state.connection_generation
+    const isCurrentScan = (): boolean => isCurrent(connectionGeneration)
     const root = state.root_saved_roots.find((candidate) => candidate.root_id === rootId)
     const preview = state.root_preview
     if (root === undefined || !isSavedDiscovery(preview) || preview.root_id !== rootId) return
@@ -1111,12 +1116,16 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
       expected_policy_revision: preview.policy_revision,
       command: { type: "start-scan", mode: "manual", hold_new_discoveries: holdNewDiscoveries }
     })
+    if (!isCurrentScan()) return
     if (!result.ok) {
-      if (result.error.code === "revision_conflict") yield* loadRoots
+      if (result.error.code === "revision_conflict") {
+        yield* loadRoots
+        if (!isCurrentScan()) return
+      }
       if (holdNewDiscoveries) {
         yield* Effect.sync(() => viewStore.set({ scan_start_status: "error", scan_start_error: result.error.message }))
       } else {
-        yield* finishNormalScanFailure(result.error.message)
+        yield* finishNormalScanFailure(result.error.message, connectionGeneration)
       }
       return
     }
@@ -1125,7 +1134,7 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
       if (holdNewDiscoveries) {
         yield* Effect.sync(() => viewStore.set({ scan_start_status: "error", scan_start_error: message }))
       } else {
-        yield* finishNormalScanFailure(message)
+        yield* finishNormalScanFailure(message, connectionGeneration)
       }
       return
     }
@@ -1141,30 +1150,34 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
       })
     })
     yield* watchScanTask(submittedTask.task_id)
+    if (!isCurrentScan()) return
 
     const watchedState = viewStore.getState()
     const terminal = watchedState.scan_tasks.find((task) => task.task_id === submittedTask.task_id)
     if (holdNewDiscoveries) {
       yield* loadPendingReplacements()
+      if (!isCurrentScan()) return
       yield* Effect.sync(() => viewStore.set({ scan_start_status: "idle" }))
       return
     }
 
     if (watchedState.scan_status === "error") {
-      yield* finishNormalScanFailure(watchedState.scan_error ?? "could not load normal scan results")
+      yield* finishNormalScanFailure(watchedState.scan_error ?? "could not load normal scan results", connectionGeneration)
       return
     }
     if (terminal === undefined) {
-      yield* finishNormalScanFailure("submitted scan task was not found in scan results")
+      yield* finishNormalScanFailure("submitted scan task was not found in scan results", connectionGeneration)
       return
     }
     if (scanIsActive(terminal)) {
-      yield* finishNormalScanFailure("normal scan did not reach a terminal state")
+      yield* finishNormalScanFailure("normal scan did not reach a terminal state", connectionGeneration)
       return
     }
 
     yield* loadLibrary()
+    if (!isCurrentScan()) return
     yield* loadPendingReplacements()
+    if (!isCurrentScan()) return
     const error = taskError(terminal)
     yield* Effect.sync(() => viewStore.set({
       scan_start_status: terminal.status === "completed_with_errors" ? "idle" : error === null ? "idle" : "error",

@@ -494,6 +494,11 @@ const ensureManagedChild = async (): Promise<ServerChild> => {
   }
 }
 
+const managedStartupFailureReason = (error: unknown): string => {
+  const detail = error instanceof Error ? error.message : "startup failed"
+  return `The managed local service could not start (${detail}). Stop any other service using this data directory, then choose Reconnect to retry. You can also connect to an independent HTTPS server below.`
+}
+
 const serializeConnectionOperation = <A>(operation: () => Promise<A>): Promise<A> => {
   const result = connectionOperation.then(operation, operation)
   connectionOperation = result.then(() => undefined, () => undefined)
@@ -748,6 +753,11 @@ const notifyConnectionTargetChanged = (): void => {
   }
 }
 
+const invalidateConnectionWorkspace = (): void => {
+  localMappingPreviews.clear()
+  notifyConnectionTargetChanged()
+}
+
 const notifyConnectionStatusChanged = (status: ConnectionStatusView): void => {
   for (const window of appWindows) {
     if (!window.isDestroyed()) window.webContents.send(IpcChannels.connectionStatusChanged, status)
@@ -760,18 +770,19 @@ const notifyRemoteCandidateInvalidated = (candidateId: string): void => {
   }
 }
 
-const setConnectionTarget = (target: ConnectionTargetView): void => {
+const setConnectionTarget = (target: ConnectionTargetView): boolean => {
   if (
     connectionTarget.mode === target.mode &&
     connectionTarget.base_url === target.base_url &&
     connectionTarget.instance_id === target.instance_id
-  ) return
+  ) return false
   connectionTarget = target
-  notifyConnectionTargetChanged()
+  invalidateConnectionWorkspace()
+  return true
 }
 
-const updateTargetFromStatus = (status: ConnectionStatusView): void => {
-  setConnectionTarget({
+const updateTargetFromStatus = (status: ConnectionStatusView): boolean => {
+  return setConnectionTarget({
     ...connectionTarget,
     instance_id: status.instance_id
   })
@@ -798,14 +809,25 @@ const registerIpc = (): void => {
     if (Option.isNone(decoded)) return { ok: false as const, error: invalidRequestError }
     return serializeConnectionOperation(async () => {
       await discardPendingRemoteConnection()
-      return requireConnection()
-        .connect()
-        .then((status) => {
-          updateTargetFromStatus(status)
-          notifyConnectionStatusChanged(status)
-          openEventDeliveryScheduler.schedule()
-          return connectionStatusResult(status)
-        })
+      const activeConnection = requireConnection()
+      const previousSession = activeConnection.getCachedSession()
+      const managedNeedsStart = connectionTarget.mode === "managed" && serverChild === null
+      let reconnecting = activeConnection
+      if (managedNeedsStart) {
+        const child = await ensureManagedChild()
+        reconnecting = new ConnectionLifecycle({ baseUrl: child.baseUrl, bearerToken: child.bearerToken })
+        connection = reconnecting
+        await activeConnection.close().catch(() => undefined)
+      }
+      const status = await reconnecting.connect()
+      const targetChanged = updateTargetFromStatus(status)
+      const currentSession = reconnecting.getSession()
+      const sessionChanged = previousSession !== null && currentSession !== null &&
+        (previousSession.instanceId !== currentSession.instanceId || previousSession.epoch !== currentSession.epoch)
+      if (sessionChanged && !targetChanged) invalidateConnectionWorkspace()
+      notifyConnectionStatusChanged(status)
+      openEventDeliveryScheduler.schedule()
+      return connectionStatusResult(status)
     }).catch((error) => {
       notifyConnectionStatusChanged(requireConnection().getStatus())
       return { ok: false as const, error: toPublicError(error) }
@@ -891,10 +913,9 @@ const registerIpc = (): void => {
         base_url: pending.baseUrl,
         instance_id: pending.instanceId
       }
-      localMappingPreviews.clear()
       // Each lease replacement invalidates server workspace state exactly
       // once, including when the visible target is unchanged.
-      notifyConnectionTargetChanged()
+      invalidateConnectionWorkspace()
       // Lease replacement is committed before retiring the old runtime.
       // Cleanup failure must not revoke the freshly confirmed connection.
       await previous.close().catch(() => undefined)
@@ -2079,15 +2100,25 @@ const bootstrap = async (): Promise<void> => {
   // The owned child remains supervised independently. A remote session only
   // changes the authenticated HTTP target; it never grants main permission to
   // stop the independently running service.
-  const child = await ensureManagedChild()
-  connectionTarget = { mode: "managed", base_url: null, instance_id: null }
-  connection = new ConnectionLifecycle({
-    baseUrl: child.baseUrl,
-    bearerToken: child.bearerToken
-  })
-  await connection.connect()
-  updateTargetFromStatus(connection.getStatus())
-  openEventDeliveryScheduler.schedule()
+  try {
+    const child = await ensureManagedChild()
+    connectionTarget = { mode: "managed", base_url: null, instance_id: null }
+    connection = new ConnectionLifecycle({
+      baseUrl: child.baseUrl,
+      bearerToken: child.bearerToken
+    })
+    try {
+      await connection.connect()
+    } catch (error) {
+      console.error("managed service connection failed:", error instanceof Error ? error.message : error)
+    }
+    updateTargetFromStatus(connection.getStatus())
+    openEventDeliveryScheduler.schedule()
+  } catch (error) {
+    connectionTarget = { mode: "managed", base_url: null, instance_id: null }
+    connection = new ConnectionLifecycle({ baseUrl: "", bearerToken: "" })
+    connection.markBlocked(managedStartupFailureReason(error))
+  }
   openCoordinator = createOpenCoordinator()
   openEventDeliveryScheduler.schedule()
 

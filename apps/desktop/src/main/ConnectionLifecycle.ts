@@ -289,6 +289,15 @@ export class ConnectionLifecycle {
     return this.status
   }
 
+  markBlocked(reason: string): void {
+    this.status = {
+      state: "blocked",
+      instance_id: this.expectedInstanceId,
+      epoch: null,
+      reason
+    }
+  }
+
   getSession(): { readonly instanceId: string; readonly epoch: string } | null {
     if (this.lease === null) return null
     return { instanceId: this.lease.instanceId, epoch: this.lease.epoch }
