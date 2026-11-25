@@ -6,7 +6,7 @@ import { App } from "./App"
 import { LibraryScreen } from "./Library"
 import { runtime } from "./runtime"
 import { viewStore } from "./store"
-import { handleConnectionStatusChanged, handleConnectionTargetChanged, loadConnectionStatus, loadConnectionWorkspace } from "./workflows"
+import { handleConnectionStatusChanged, handleConnectionTargetChanged, handleRemoteCandidateInvalidated, loadConnectionStatus, loadConnectionWorkspace } from "./workflows"
 
 const container = document.getElementById("root")
 if (container === null) throw new Error("missing #root container")
@@ -31,6 +31,12 @@ const Root = () => {
     if (prototype) return
     return window.henshinConnection.onChanged((target) => {
       void runtime.runPromise(handleConnectionTargetChanged(target))
+    })
+  }, [])
+  useEffect(() => {
+    if (prototype) return
+    return window.henshinConnection.onRemoteCandidateInvalidated((candidateId) => {
+      void runtime.runPromise(handleRemoteCandidateInvalidated(candidateId))
     })
   }, [])
   return prototype ? <App /> : state.screen === "library" ? <LibraryScreen /> : <RootPreviewScreen />

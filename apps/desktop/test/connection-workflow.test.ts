@@ -2,7 +2,7 @@ import { Effect, Layer } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
 import type { RootPreviewResult, ServerRoot } from "@henshin/contracts"
 import { RootPreviewClient } from "../src/renderer/client"
-import { saveRoot } from "../src/renderer/workflows"
+import { handleRemoteCandidateInvalidated, saveRoot } from "../src/renderer/workflows"
 import { viewStore } from "../src/renderer/store"
 
 const instanceId = "11111111-1111-4111-8111-111111111111"
@@ -53,6 +53,17 @@ afterEach(() => {
 })
 
 describe("connection-scoped root workflow", () => {
+  it("clears only the pending candidate that was invalidated by another window", async () => {
+    const candidate = { candidate_id: "candidate-current", base_url: "https://same.example.test", instance_id: instanceId }
+    viewStore.set({ pending_remote_connection: candidate })
+
+    await Effect.runPromise(handleRemoteCandidateInvalidated("candidate-retired"))
+    expect(viewStore.getState().pending_remote_connection).toEqual(candidate)
+
+    await Effect.runPromise(handleRemoteCandidateInvalidated(candidate.candidate_id))
+    expect(viewStore.getState().pending_remote_connection).toBeNull()
+  })
+
   it("does not apply a root save response after the connection target changes", async () => {
     let resolveSave!: (result: { readonly ok: true; readonly data: ServerRoot }) => void
     let markSaveStarted!: () => void

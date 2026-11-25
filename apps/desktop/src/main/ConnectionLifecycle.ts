@@ -87,14 +87,14 @@ interface Candidate {
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 const tlsCauseCodes = new Set([
-  "CERT_HAS_EXPIRED",
   "DEPTH_ZERO_SELF_SIGNED_CERT",
-  "ERR_TLS_CERT_ALTNAME_INVALID",
   "SELF_SIGNED_CERT_IN_CHAIN",
-  "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"
 ])
 
-type TlsFailureKind = "expired" | "hostname" | "untrusted"
+type TlsFailureKind = "expired" | "not-yet-valid" | "revoked" | "hostname" | "untrusted" | "certificate"
 
 const tlsFailureKind = (cause: unknown): TlsFailureKind | null => {
   if (cause === null || typeof cause !== "object") return null
@@ -102,10 +102,16 @@ const tlsFailureKind = (cause: unknown): TlsFailureKind | null => {
   const message = "message" in cause && typeof cause.message === "string" ? cause.message : ""
   const details = `${code} ${message}`
   if (code === "CERT_HAS_EXPIRED" || /certificate has expired/iu.test(details)) return "expired"
+  if (code === "CERT_NOT_YET_VALID" || /certificate is not yet valid|notBefore/iu.test(details)) return "not-yet-valid"
+  if (code === "CERT_REVOKED" || /certificate.*revoked/iu.test(details)) return "revoked"
   if (code === "ERR_TLS_CERT_ALTNAME_INVALID" || /hostname|host name|altname|ip address.*(match|mismatch)/iu.test(details)) {
     return "hostname"
   }
-  if (tlsCauseCodes.has(code) || /certificate/iu.test(details)) return "untrusted"
+  if (
+    tlsCauseCodes.has(code) ||
+    /self[- ]signed certificate|unable to (get|verify).*issuer certificate|unable to verify (?:the )?(?:first )?certificate/iu.test(details)
+  ) return "untrusted"
+  if (/certificate|cert_/iu.test(details)) return "certificate"
   return null
 }
 
@@ -183,10 +189,31 @@ export const classifyConnectionFailure = (error: unknown): ConnectionFailureInfo
           retryable: false
         }
       }
+      if (kind === "not-yet-valid") {
+        return {
+          code: "connection_tls_failed",
+          message: "The server certificate is not valid yet. Check the server certificate's start date and the desktop's clock, then retry.",
+          retryable: false
+        }
+      }
+      if (kind === "revoked") {
+        return {
+          code: "connection_tls_failed",
+          message: "The server certificate has been revoked. Replace it with a valid certificate, then retry.",
+          retryable: false
+        }
+      }
       if (kind === "untrusted") {
         return {
           code: "connection_tls_untrusted",
           message: "The server certificate is not trusted. Configure the desktop's Node HTTPS trust store (for example with NODE_EXTRA_CA_CERTS), restart the desktop so Node loads it, then retry.",
+          retryable: false
+        }
+      }
+      if (kind === "certificate") {
+        return {
+          code: "connection_tls_failed",
+          message: "The server certificate failed TLS validation. Check its validity and signature, then configure a valid certificate before retrying.",
           retryable: false
         }
       }

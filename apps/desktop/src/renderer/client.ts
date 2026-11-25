@@ -96,6 +96,7 @@ export interface PrototypeBridge {
 export interface ConnectionBridge {
   onChanged(listener: (target: ConnectionTargetView) => void): () => void
   onStatusChanged(listener: (status: ConnectionStatusView) => void): () => void
+  onRemoteCandidateInvalidated(listener: (candidateId: string) => void): () => void
   status(): Promise<Result<ConnectionStatusView>>
   target(): Promise<Result<ConnectionTargetView>>
   reconnect(): Promise<Result<ConnectionStatusView>>
@@ -251,6 +252,7 @@ export class ConnectionClient extends Context.Service<
   ConnectionClient,
   {
     readonly onStatusChanged: (listener: (status: ConnectionStatusView) => void) => () => void
+    readonly onRemoteCandidateInvalidated: (listener: (candidateId: string) => void) => () => void
     readonly status: () => Effect.Effect<Result<ConnectionStatusView>>
     readonly target: () => Effect.Effect<Result<ConnectionTargetView>>
     readonly reconnect: () => Effect.Effect<Result<ConnectionStatusView>>
@@ -274,7 +276,8 @@ export class ConnectionClient extends Context.Service<
       cancelRemote: () => callIpc(() => window.henshinConnection.cancelRemote()),
       useManaged: () => callIpc(() => window.henshinConnection.useManaged()),
       onChanged: (listener) => window.henshinConnection.onChanged(listener),
-      onStatusChanged: (listener) => window.henshinConnection.onStatusChanged(listener)
+      onStatusChanged: (listener) => window.henshinConnection.onStatusChanged(listener),
+      onRemoteCandidateInvalidated: (listener) => window.henshinConnection.onRemoteCandidateInvalidated(listener)
     })
   )
 }

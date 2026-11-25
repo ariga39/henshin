@@ -170,6 +170,7 @@ const prototypeMode = process.env.HENSHIN_PROTOTYPE_MODE === "1"
 let protectedWritablePaths: ReadonlyArray<string> = []
 let deviceId = ""
 const localMappingPreviews = new Map<string, {
+  readonly connection: ConnectionLifecycle
   readonly epoch: string
   readonly previewToken: string
   readonly preview: LocalMappingPreview
@@ -502,13 +503,19 @@ const serializeConnectionOperation = <A>(operation: () => Promise<A>): Promise<A
 const discardPendingRemoteConnection = async (): Promise<void> => {
   const pending = pendingRemoteConnection
   pendingRemoteConnection = null
-  if (pending !== null) await pending.candidate.close()
+  if (pending !== null) {
+    notifyRemoteCandidateInvalidated(pending.candidateId)
+    await pending.candidate.close()
+  }
 }
 
 const setPendingRemoteConnection = async (pending: PendingRemoteConnection): Promise<void> => {
   const previous = pendingRemoteConnection
   pendingRemoteConnection = pending
-  if (previous !== null) await previous.candidate.close()
+  if (previous !== null) {
+    notifyRemoteCandidateInvalidated(previous.candidateId)
+    await previous.candidate.close()
+  }
 }
 
 const notifyOpenJournalChanged = (): void => {
@@ -747,6 +754,12 @@ const notifyConnectionStatusChanged = (status: ConnectionStatusView): void => {
   }
 }
 
+const notifyRemoteCandidateInvalidated = (candidateId: string): void => {
+  for (const window of appWindows) {
+    if (!window.isDestroyed()) window.webContents.send(IpcChannels.remoteCandidateInvalidated, candidateId)
+  }
+}
+
 const setConnectionTarget = (target: ConnectionTargetView): void => {
   if (
     connectionTarget.mode === target.mode &&
@@ -870,21 +883,25 @@ const registerIpc = (): void => {
         throw new ConnectionConfirmationError({ message: "remote server confirmation has expired" })
       }
       pendingRemoteConnection = null
-      try {
-        const previous = requireConnection()
-        connection = pending.candidate
-        setConnectionTarget({
-          mode: "remote",
-          base_url: pending.baseUrl,
-          instance_id: pending.instanceId
-        })
-        await previous.close()
-        openEventDeliveryScheduler.schedule()
-        return connectionStatusResult(pending.candidate.getStatus())
-      } catch (error) {
-        await pending.candidate.close()
-        throw error
+      notifyRemoteCandidateInvalidated(pending.candidateId)
+      const previous = requireConnection()
+      connection = pending.candidate
+      connectionTarget = {
+        mode: "remote",
+        base_url: pending.baseUrl,
+        instance_id: pending.instanceId
       }
+      localMappingPreviews.clear()
+      // Each lease replacement invalidates server workspace state exactly
+      // once, including when the visible target is unchanged.
+      notifyConnectionTargetChanged()
+      // Lease replacement is committed before retiring the old runtime.
+      // Cleanup failure must not revoke the freshly confirmed connection.
+      await previous.close().catch(() => undefined)
+      const status = pending.candidate.getStatus()
+      notifyConnectionStatusChanged(status)
+      openEventDeliveryScheduler.schedule()
+      return connectionStatusResult(status)
     }).catch((error) => ({ ok: false as const, error: toPublicError(error) }))
   })
 
@@ -1015,6 +1032,7 @@ const registerIpc = (): void => {
     } catch (error) {
       return { ok: false as const, error: toPublicError(error) }
     }
+    const activeConnection = requireConnection()
     const selected = await dialog.showOpenDialog(senderWindow, {
       title: "Select the local collection directory",
       properties: ["openDirectory"]
@@ -1047,6 +1065,9 @@ const registerIpc = (): void => {
     )
     .then((result) => {
       endLocalMappingCheck(mappingKey)
+      if (connection !== activeConnection) {
+        return { ok: false as const, error: toPublicError(new LocalMappingStaleError("the server session changed while checking the local directory")) }
+      }
       if (!result.ok) {
         localMappingPreviews.delete(mappingKey)
         return result
@@ -1054,6 +1075,7 @@ const registerIpc = (): void => {
       if (result.data === null) return result
       const previewToken = randomUUID()
       localMappingPreviews.set(mappingKey, {
+        connection: activeConnection,
         epoch: session.epoch,
         previewToken,
         preview: result.data
@@ -1097,7 +1119,7 @@ const registerIpc = (): void => {
         return { ok: false as const, error: toPublicError(new LocalMappingStaleError("the local directory is still being checked")) }
       }
       const evidence = localMappingPreviews.get(mappingKey)
-      if (evidence === undefined || evidence.epoch !== session.epoch || evidence.previewToken !== request.preview_token) {
+      if (evidence === undefined || evidence.connection !== requireConnection() || evidence.epoch !== session.epoch || evidence.previewToken !== request.preview_token) {
         return { ok: false as const, error: toPublicError(new LocalMappingStaleError()) }
       }
 

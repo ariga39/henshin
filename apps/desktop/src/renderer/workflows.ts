@@ -946,6 +946,13 @@ export const handleConnectionTargetChanged = (target: ConnectionTargetView) =>
 export const handleConnectionStatusChanged = (status: ConnectionStatusView) =>
   Effect.sync(() => viewStore.set({ connection: status }))
 
+export const handleRemoteCandidateInvalidated = (candidateId: string) =>
+  Effect.sync(() => {
+    if (viewStore.getState().pending_remote_connection?.candidate_id === candidateId) {
+      viewStore.set({ pending_remote_connection: null })
+    }
+  })
+
 const watchScanTask = (taskId: string) =>
   Effect.gen(function*() {
     const result = yield* waitForScanTask(taskId)

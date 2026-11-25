@@ -44,8 +44,12 @@ describe("remote connection endpoint validation", () => {
 describe("remote connection failure diagnostics", () => {
   it.each([
     ["CERT_HAS_EXPIRED", "certificate has expired", "connection_tls_expired", "Renew the certificate on the server"],
+    ["CERT_NOT_YET_VALID", "certificate is not yet valid", "connection_tls_failed", "start date"],
+    ["CERT_REVOKED", "certificate revoked", "connection_tls_failed", "has been revoked"],
     ["ERR_TLS_CERT_ALTNAME_INVALID", "Hostname/IP does not match certificate's altnames", "connection_tls_hostname", "Use the hostname covered by the certificate"],
     ["SELF_SIGNED_CERT_IN_CHAIN", "self-signed certificate in certificate chain", "connection_tls_untrusted", "NODE_EXTRA_CA_CERTS"],
+    ["", "unable to verify the first certificate", "connection_tls_untrusted", "NODE_EXTRA_CA_CERTS"],
+    ["ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED", "certificate signature algorithm unsupported", "connection_tls_failed", "failed TLS validation"],
   ] as const)("distinguishes Node TLS failure %s", (code, detail, expectedCode, expectedMessage) => {
     const actual = classifyConnectionFailure(transportFailure(code, detail))
     expect(actual.code).toBe(expectedCode)

@@ -104,6 +104,11 @@ contextBridge.exposeInMainWorld("henshinConnection", {
     const handler = (_event: Electron.IpcRendererEvent, status: ConnectionStatusView) => listener(status)
     ipcRenderer.on(IpcChannels.connectionStatusChanged, handler)
     return () => ipcRenderer.removeListener(IpcChannels.connectionStatusChanged, handler)
+  },
+  onRemoteCandidateInvalidated: (listener: (candidateId: string) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, candidateId: string) => listener(candidateId)
+    ipcRenderer.on(IpcChannels.remoteCandidateInvalidated, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.remoteCandidateInvalidated, handler)
   }
 })
 

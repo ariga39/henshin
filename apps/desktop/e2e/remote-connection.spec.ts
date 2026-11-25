@@ -68,6 +68,14 @@ const initializeOwner = async (selection: ReadonlyArray<string>): Promise<string
   return token
 }
 
+const rotateOwner = async (selection: ReadonlyArray<string>): Promise<string> => {
+  const attempt = launchServer([...selection, "--rotate-owner"])
+  await waitForExit(attempt.child)
+  const token = /^owner_token=([^\n]+)$/mu.exec(attempt.stdout())?.[1]
+  if (token === undefined) throw new Error(`fixture owner rotation failed: ${attempt.stderr()}`)
+  return token
+}
+
 const startServer = async (selection: ReadonlyArray<string>, token: string): Promise<RunningServer> => {
   const port = await freePort()
   const attempt = launchServer([...selection, "--port", String(port)])
@@ -122,7 +130,39 @@ interface FixtureScanTask {
   readonly readiness_error: { readonly code: string; readonly message: string } | null
 }
 
-const seedLibrary = async (server: RunningServer, fixturePath: string): Promise<void> => {
+interface SeededRoot {
+  readonly rootId: string
+  readonly mappingRevision: string
+  readonly policyRevision: string
+}
+
+const scanRoot = async (server: RunningServer, root: SeededRoot): Promise<void> => {
+  const task = await api<{ readonly task: { readonly task_id: string } }>(server.baseUrl, server.token, `/api/v1/roots/${root.rootId}/commands`, {
+    method: "POST",
+    body: JSON.stringify({
+      operation_id: crypto.randomUUID(),
+      instance_id: server.instanceId,
+      epoch: server.epoch,
+      expected_mapping_revision: root.mappingRevision,
+      expected_policy_revision: root.policyRevision,
+      command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
+    })
+  })
+  let last: FixtureScanTask | null = null
+  for (let attempt = 0; attempt < 160; attempt += 1) {
+    const current = await api<FixtureScanTask>(server.baseUrl, server.token, `/api/v1/tasks/${task.task.task_id}`)
+    last = current
+    if (current.status === "queued" || current.status === "running") {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      continue
+    }
+    if (current.status === "succeeded" || current.status === "completed_with_errors") return
+    throw new Error(`fixture scan reached terminal state ${current.status}: ${JSON.stringify(current.error ?? current.readiness_error)}`)
+  }
+  throw new Error(`fixture scan did not reach a terminal state: ${JSON.stringify(last)}`)
+}
+
+const seedLibrary = async (server: RunningServer, fixturePath: string): Promise<SeededRoot> => {
   const preview = await api<{
     readonly selected_server_path: string
     readonly instance_id: string
@@ -148,33 +188,18 @@ const seedLibrary = async (server: RunningServer, fixturePath: string): Promise<
       })
     }
   )
-  const task = await api<{ readonly task: { readonly task_id: string } }>(server.baseUrl, server.token, `/api/v1/roots/${root.root_id}/commands`, {
-    method: "POST",
-    body: JSON.stringify({
-      operation_id: crypto.randomUUID(),
-      instance_id: server.instanceId,
-      epoch: server.epoch,
-      expected_mapping_revision: root.mapping_revision,
-      expected_policy_revision: root.policy_revision,
-      command: { type: "start-scan", mode: "manual", hold_new_discoveries: false }
-    })
-  })
-  let last: FixtureScanTask | null = null
-  for (let attempt = 0; attempt < 160; attempt += 1) {
-    const current = await api<FixtureScanTask>(server.baseUrl, server.token, `/api/v1/tasks/${task.task.task_id}`)
-    last = current
-    if (current.status === "queued" || current.status === "running") {
-      await new Promise((resolve) => setTimeout(resolve, 100))
-      continue
-    }
-    if (current.status === "succeeded" || current.status === "completed_with_errors") return
-    throw new Error(`fixture scan reached terminal state ${current.status}: ${JSON.stringify(current.error ?? current.readiness_error)}`)
+  const seededRoot = {
+    rootId: root.root_id,
+    mappingRevision: root.mapping_revision,
+    policyRevision: root.policy_revision
   }
-  throw new Error(`fixture scan did not reach a terminal state: ${JSON.stringify(last)}`)
+  await scanRoot(server, seededRoot)
+  return seededRoot
 }
 
 const createTlsProxy = async (certificate: string, key: string, upstream: string, redirectTo?: string) => {
   let requests = 0
+  let currentUpstream = upstream
   const server = createHttpsServer({ cert: await readFile(certificate), key: await readFile(key) }, (request, response) => {
     requests += 1
     if (redirectTo !== undefined) {
@@ -182,7 +207,7 @@ const createTlsProxy = async (certificate: string, key: string, upstream: string
       response.end()
       return
     }
-    const target = new URL(request.url ?? "/", upstream)
+    const target = new URL(request.url ?? "/", currentUpstream)
     const headers = { ...request.headers }
     delete headers.host
     const forward = httpRequest({
@@ -204,6 +229,7 @@ const createTlsProxy = async (certificate: string, key: string, upstream: string
   return {
     baseUrl: `https://localhost:${address.port}`,
     get requests() { return requests },
+    setUpstream: (nextUpstream: string) => { currentUpstream = nextUpstream },
     close: () => new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)))
   }
 }
@@ -391,6 +417,22 @@ test("connects a normal desktop for one session, requires re-entry, and rejects 
     await follower.getByTestId("open-library").click()
     await expect(follower.getByTestId("library-entry")).toContainText("remote-book", { timeout: 30_000 })
 
+    // A new candidate replaces the one dialoged in the other window while
+    // the live connection status and target remain identical.
+    await first.window.getByTestId("library-setup").click()
+    await first.window.getByTestId("remote-base-url").fill(proxy.baseUrl)
+    await first.window.getByTestId("remote-bearer-token").fill(remoteToken)
+    await first.window.getByTestId("remote-connect").click()
+    await expect(first.window.getByTestId("remote-confirmation")).toBeVisible()
+    await follower.getByTestId("library-setup").click()
+    await follower.getByTestId("remote-base-url").fill(proxy.baseUrl)
+    await follower.getByTestId("remote-bearer-token").fill(remoteToken)
+    await follower.getByTestId("remote-connect").click()
+    await expect(follower.getByTestId("remote-confirmation")).toBeVisible()
+    await expect(first.window.getByTestId("remote-confirmation")).toHaveCount(0)
+    await follower.getByTestId("remote-confirm").click()
+    await expect(follower.getByTestId("library-entry")).toContainText("remote-book", { timeout: 30_000 })
+
     await first.window.getByTestId("library-setup").click()
     await follower.getByTestId("library-setup").click()
     await first.window.getByTestId("connection-disconnect").click()
@@ -433,6 +475,73 @@ test("connects a normal desktop for one session, requires re-entry, and rejects 
     await redirect.close().catch(() => undefined)
     await redirectTarget.close().catch(() => undefined)
     await incompatible.close().catch(() => undefined)
+  }
+})
+
+test("refreshes a disconnected follower when a same-target lease is confirmed after token rotation", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "henshin-remote-reconfirm-"))
+  const serviceData = path.join(root, "service")
+  const localData = path.join(root, "local")
+  const userData = path.join(root, "desktop")
+  const collection = path.join(root, "collection")
+  const tls = path.join(root, "tls")
+  temporaryRoots.push(root)
+  await Promise.all([mkdir(serviceData), mkdir(localData), mkdir(userData), mkdir(collection), mkdir(tls)])
+  await mkdir(path.join(collection, "remote-book"))
+  await writeFile(path.join(collection, "remote-book", "001.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"))
+  const keyPath = path.join(tls, "key.pem")
+  const certificatePath = path.join(tls, "cert.pem")
+  await execFileAsync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", keyPath, "-out", certificatePath, "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"])
+
+  let token = await initializeOwner(["--data-dir", serviceData])
+  let remote = await startServer(["--data-dir", serviceData], token)
+  const proxy = await createTlsProxy(certificatePath, keyPath, remote.baseUrl)
+  const seededRoot = await seedLibrary(remote, collection)
+
+  try {
+    const first = await launchDesktop(path.join(localData, "managed.sqlite"), userData, certificatePath)
+    await first.window.getByTestId("remote-base-url").fill(proxy.baseUrl)
+    await first.window.getByTestId("remote-bearer-token").fill(token)
+    await first.window.getByTestId("remote-connect").click()
+    await first.window.getByTestId("remote-confirm").click()
+    await expect(first.window.getByTestId("library-entry")).toContainText("remote-book", { timeout: 30_000 })
+
+    await first.app.evaluate(({ Menu, BrowserWindow }) => {
+      const item = Menu.getApplicationMenu()?.getMenuItemById("new-library-window")
+      if (item == null) throw new Error("New Window menu item was not installed")
+      item.click?.(item, BrowserWindow.getFocusedWindow())
+    })
+    await expect.poll(() => first.app.windows().length).toBe(2)
+    const follower = first.app.windows().find((candidate) => candidate !== first.window)
+    if (follower === undefined) throw new Error("second Library window was not created")
+    await expect(follower.getByTestId("library-entry")).toContainText("remote-book", { timeout: 30_000 })
+
+    await first.window.getByTestId("library-setup").click()
+    await follower.getByTestId("library-setup").click()
+    await first.window.getByTestId("connection-disconnect").click()
+    await expect(follower.getByTestId("connection-status")).toHaveText("Connection: disconnected")
+
+    await mkdir(path.join(collection, "rotated-book"))
+    await writeFile(path.join(collection, "rotated-book", "001.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"))
+    const oldInstanceId = remote.instanceId
+    remote.child.kill("SIGTERM")
+    await waitForExit(remote.child)
+    token = await rotateOwner(["--data-dir", serviceData])
+    remote = await startServer(["--data-dir", serviceData], token)
+    expect(remote.instanceId).toBe(oldInstanceId)
+    proxy.setUpstream(remote.baseUrl)
+    await scanRoot(remote, seededRoot)
+
+    await first.window.getByTestId("remote-base-url").fill(proxy.baseUrl)
+    await first.window.getByTestId("remote-bearer-token").fill(token)
+    await first.window.getByTestId("remote-connect").click()
+    await first.window.getByTestId("remote-confirm").click()
+    await expect(first.window.getByTestId("library-entry").filter({ hasText: "rotated-book" })).toBeVisible({ timeout: 30_000 })
+    // The follower stays on its connection screen until the lease-change
+    // event resets it, then the refreshed server workspace opens automatically.
+    await expect(follower.getByTestId("library-entry").filter({ hasText: "rotated-book" })).toBeVisible({ timeout: 30_000 })
+  } finally {
+    await proxy.close().catch(() => undefined)
   }
 })
 
