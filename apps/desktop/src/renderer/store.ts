@@ -117,6 +117,7 @@ export interface ViewState {
   readonly connection: ConnectionStatusView
   readonly connection_target: ConnectionTargetView
   readonly pending_remote_connection: RemoteConnectionCandidateView | null
+  readonly remote_probe_status: "idle" | "loading"
   readonly connection_generation: number
   readonly reader_profiles: ReadonlyArray<ReaderProfile>
   readonly reader_profiles_status: "idle" | "loading" | "ready" | "error"
@@ -235,6 +236,7 @@ const initialState: ViewState = {
   connection: { state: "disconnected", instance_id: null, epoch: null, reason: null },
   connection_target: { mode: "managed", base_url: null, instance_id: null },
   pending_remote_connection: null,
+  remote_probe_status: "idle",
   connection_generation: 0,
   reader_profiles: [],
   reader_profiles_status: "idle",
@@ -376,6 +378,7 @@ const createViewStore = () => {
         connection: { state: "connecting", instance_id: target.instance_id, epoch: null, reason: null },
         connection_target: target,
         pending_remote_connection: null,
+        remote_probe_status: "idle",
         connection_generation: connectionGeneration,
         library_entries: [],
         library_query: "",
@@ -388,8 +391,11 @@ const createViewStore = () => {
         library_note_server_text: null,
         library_cursor: null,
         library_has_more: false,
+        library_view: "normal",
         library_status: "idle",
         library_error: null,
+        library_command_status: "idle",
+        library_command_error: null,
         library_request_generation: state.library_request_generation + 1,
         library_cover_generation: state.library_cover_generation + 1,
         pending_replacement_entries: [],
@@ -431,6 +437,7 @@ const createViewStore = () => {
               ? "idle"
               : "ready"
             : state.status,
+        remote_probe_status: "idle",
         connection_generation: state.connection_generation + 1
       }
       for (const listener of listeners) listener()

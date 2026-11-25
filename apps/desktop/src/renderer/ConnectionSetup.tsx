@@ -14,7 +14,7 @@ export const ConnectionSetup = () => {
   const state = useSyncExternalStore(viewStore.subscribe, viewStore.getState)
   const [baseUrl, setBaseUrl] = useState("")
   const [bearerToken, setBearerToken] = useState("")
-  const transitioning = state.connection.state === "connecting"
+  const transitioning = state.connection.state === "connecting" || state.remote_probe_status === "loading"
   const pending = state.pending_remote_connection
 
   return (
