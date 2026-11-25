@@ -2,8 +2,9 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { randomUUID } from "node:crypto"
 import { Deferred, Effect, ManagedRuntime } from "effect"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { PrototypeHttpClient } from "@henshin/contracts"
+import { HANDSHAKE_API_VERSION, HANDSHAKE_CAPABILITY, PrototypeHttpClient } from "@henshin/contracts"
 import {
+  ConnectionCompatibilityError,
   ConnectionLifecycle,
   ConnectionPausedError
 } from "../../desktop/src/main/ConnectionLifecycle"
@@ -31,6 +32,7 @@ interface Fixture {
   readonly handshakeReceived: Promise<void>
   readonly blockNextHandshake: () => Promise<void>
   readonly setHandshakeInstance: (instanceId: string) => void
+  readonly setHandshake: (apiVersion: string, capabilities: ReadonlyArray<string>) => void
   readonly rejectHandshake: () => void
   readonly allowHandshake: () => void
   readonly releaseHandshake: () => void
@@ -65,6 +67,8 @@ const startFixture = async (holdNote: boolean): Promise<Fixture> => {
   })
   let blockHandshake = false
   let handshakeInstance = INSTANCE_ID
+  let handshakeApiVersion = HANDSHAKE_API_VERSION
+  let handshakeCapabilities: ReadonlyArray<string> = [HANDSHAKE_CAPABILITY.prototypeNoteEdit, HANDSHAKE_CAPABILITY.libraryBrowse]
   let rejectHandshake = false
   let releaseHandshake!: () => void
   const handshakeGate = new Promise<void>((resolve) => {
@@ -92,7 +96,7 @@ const startFixture = async (holdNote: boolean): Promise<Fixture> => {
         epoch: EPOCH,
         request_id: randomUUID(),
         server_time: Date.now(),
-        data: { api_version: "prototype/1", capabilities: ["prototype-note-edit"] }
+        data: { api_version: handshakeApiVersion, capabilities: handshakeCapabilities }
       })
       return
     }
@@ -133,6 +137,10 @@ const startFixture = async (holdNote: boolean): Promise<Fixture> => {
     },
     setHandshakeInstance: (instanceId) => {
       handshakeInstance = instanceId
+    },
+    setHandshake: (apiVersion, capabilities) => {
+      handshakeApiVersion = apiVersion
+      handshakeCapabilities = capabilities
     },
     rejectHandshake: () => {
       rejectHandshake = true
@@ -218,6 +226,25 @@ describe("main-owned connection lifecycle", () => {
     ).rejects.toBeInstanceOf(ConnectionPausedError)
   })
 
+  it("blocks an incompatible handshake before activating a lease", async () => {
+    const fixture = await startFixture(false)
+    fixtures.push(fixture)
+    const lifecycle = new ConnectionLifecycle({ baseUrl: fixture.baseUrl, bearerToken: "test-token" })
+    lifecycles.push(lifecycle)
+    fixture.setHandshake("prototype/2", [HANDSHAKE_CAPABILITY.prototypeNoteEdit])
+
+    await expect(lifecycle.connect()).rejects.toBeInstanceOf(ConnectionCompatibilityError)
+    expect(lifecycle.getStatus()).toMatchObject({
+      state: "blocked",
+      instance_id: null,
+      reason: "The server does not support the desktop Library API; use a compatible Henshin server."
+    })
+    expect(lifecycle.getSession()).toBeNull()
+
+    fixture.setHandshake(HANDSHAKE_API_VERSION, [HANDSHAKE_CAPABILITY.libraryBrowse])
+    await expect(lifecycle.connect()).resolves.toMatchObject({ state: "connected" })
+  })
+
   it("keeps a newer candidate while an older lease cleanup is still held", async () => {
     const fixture = await startFixture(false)
     fixtures.push(fixture)
@@ -279,7 +306,7 @@ describe("main-owned connection lifecycle", () => {
     expect(lifecycle.getStatus()).toMatchObject({
       state: "blocked",
       instance_id: INSTANCE_ID,
-      reason: "authentication_or_network_failure"
+      reason: "The server rejected the owner credential. Verify the token and try again."
     })
   })
 
@@ -305,7 +332,7 @@ describe("main-owned connection lifecycle", () => {
       state: "blocked",
       instance_id: INSTANCE_ID,
       epoch: null,
-      reason: "authentication_or_network_failure"
+      reason: "The server rejected the owner credential. Verify the token and try again."
     })
     expect(lifecycle.getNamespace()).toBe(INSTANCE_ID)
     expect(lifecycle.getCachedSession()).toEqual({ instanceId: INSTANCE_ID, epoch: EPOCH })
@@ -368,12 +395,11 @@ describe("main-owned connection lifecycle", () => {
         handshakeError = error
       }
 
-      expect(handshakeError).toMatchObject({ _tag: "HttpClientError" })
-      expect(String(handshakeError)).toContain("401")
+      expect(handshakeError).toMatchObject({ _tag: "ConnectionFailureError", code: "connection_authentication_failed" })
       expect(handshakeError).not.toBe(disposeError)
       expect(lifecycle.getStatus()).toMatchObject({
         state: "blocked",
-        reason: "authentication_or_network_failure"
+        reason: "The server rejected the owner credential. Verify the token and try again."
       })
 
       fixture.allowHandshake()

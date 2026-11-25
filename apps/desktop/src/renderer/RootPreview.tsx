@@ -17,6 +17,7 @@ import {
 import { HeldScanControls, HeldScanReview } from "./HeldScanReview"
 import { ReaderProfiles } from "./ReaderProfiles"
 import { OpenJournalDiagnostics } from "./OpenJournalDiagnostics"
+import { ConnectionSetup } from "./ConnectionSetup"
 
 const isSavedDiscovery = (preview: RootPreviewResult | null): preview is Extract<RootPreviewResult, { kind: "saved-root-discovery" }> =>
   preview !== null && "kind" in preview
@@ -142,6 +143,7 @@ export const RootPreviewScreen = () => {
     <main className="collection">
       <h1>Collection setup</h1>
       <button data-testid="open-library" onClick={() => void runtime.runPromise(showLibrary)}>Library</button>
+      <ConnectionSetup />
       <p>Enter the full path to your collection as it appears on the server.</p>
       <form onSubmit={(event) => {
         event.preventDefault()

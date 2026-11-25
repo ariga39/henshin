@@ -3,6 +3,7 @@ import { localMappingPreviewCanActivate } from "@henshin/contracts"
 import type {
   ConnectionStatusView,
   LibraryEntry,
+  ConnectionTargetView,
   RootPreviewRequest,
   RootPreviewResult,
   ScanTask,
@@ -13,6 +14,7 @@ import type {
 } from "@henshin/contracts"
 import {
   LibraryClient,
+  ConnectionClient,
   OpenJournalClient,
   LocalMappingClient,
   PrototypeClient,
@@ -80,6 +82,7 @@ export const previewRoot = (selection: RootPreviewRequest | string) =>
 export const previewLocalMapping = (rootId: string) =>
   Effect.gen(function*() {
     const client = yield* LocalMappingClient
+    const connectionGeneration = viewStore.getState().connection_generation
     yield* Effect.sync(() => viewStore.set({
       local_mapping_root_id: rootId,
       local_mapping_status: "loading",
@@ -88,6 +91,7 @@ export const previewLocalMapping = (rootId: string) =>
       local_mapping_activation_error: null
     }))
     const result = yield* client.preview(rootId)
+    if (!isCurrent(connectionGeneration)) return
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({
         local_mapping_status: "error",
@@ -121,11 +125,13 @@ export const previewLocalMapping = (rootId: string) =>
 
 export const loadLocalMappings = Effect.gen(function*() {
   const client = yield* LocalMappingClient
+  const connectionGeneration = viewStore.getState().connection_generation
   yield* Effect.sync(() => viewStore.set({
     local_mapping_list_status: "loading",
     local_mapping_list_error: null
   }))
   const result = yield* client.list()
+  if (!isCurrent(connectionGeneration)) return false
   if (result.ok) {
     yield* Effect.sync(() => viewStore.set({
       local_mappings: result.data,
@@ -155,8 +161,10 @@ const localMappingEvidenceCanActivate = (rootId: string): boolean => {
 export const activateLocalMapping = (rootId: string) =>
   Effect.gen(function*() {
     const client = yield* LocalMappingClient
+    const connectionGeneration = viewStore.getState().connection_generation
     if (viewStore.getState().local_mapping_list_status !== "ready") {
       const loaded = yield* loadLocalMappings
+      if (!isCurrent(connectionGeneration)) return
       if (!loaded) {
         yield* Effect.sync(() => viewStore.set({
           local_mapping_activation_status: "error",
@@ -178,6 +186,7 @@ export const activateLocalMapping = (rootId: string) =>
       expected_mapping_revision: current?.mapping_revision ?? "0",
       preview_token: state.local_mapping_preview_token
     })
+    if (!isCurrent(connectionGeneration)) return
     if (result.ok) {
       yield* Effect.sync(() => {
         const mappings = viewStore.getState().local_mappings
@@ -195,7 +204,10 @@ export const activateLocalMapping = (rootId: string) =>
       local_mapping_activation_status: "error",
       local_mapping_activation_error: result.error.message
     }))
-    if (result.error.code === "local_mapping_revision_conflict") yield* loadLocalMappings
+    if (result.error.code === "local_mapping_revision_conflict") {
+      yield* loadLocalMappings
+      if (!isCurrent(connectionGeneration)) return
+    }
   })
 
 export const loadReaderProfiles = Effect.gen(function*() {
@@ -358,8 +370,10 @@ export const saveReaderProfile = (input: ReaderProfileSaveIpcRequest) =>
 
 export const loadRoots = Effect.gen(function*() {
   const client = yield* RootPreviewClient
+  const connectionGeneration = viewStore.getState().connection_generation
   yield* Effect.sync(() => viewStore.set({ root_roots_status: "loading", root_roots_error: null }))
   const result = yield* client.list()
+  if (!isCurrent(connectionGeneration)) return false
   if (result.ok) {
     yield* Effect.sync(() => viewStore.set({ root_saved_roots: result.data, root_roots_status: "ready" }))
   } else {
@@ -377,8 +391,11 @@ const releaseErrorMessage = (error: { readonly code: string; readonly message: s
     : error.message
 
 const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(function*() {
+  const connectionGeneration = viewStore.getState().connection_generation
+  const isCurrentScanRequest = (): boolean => isCurrent(connectionGeneration)
   yield* Effect.sync(() => viewStore.set({ scan_status: "loading", scan_error: null }))
   const tasks = yield* client.listTasks()
+  if (!isCurrentScanRequest()) return false
   if (!tasks.ok) {
     yield* Effect.sync(() => viewStore.set({ scan_status: "error", scan_error: tasks.error.message }))
     return false
@@ -386,6 +403,7 @@ const loadScanResultsFor = (client: ScanReviewClient["Service"]) => Effect.gen(f
   yield* Effect.sync(() => viewStore.set({ scan_tasks: tasks.data }))
 
   const candidates = yield* client.candidates()
+  if (!isCurrentScanRequest()) return false
   if (!candidates.ok) {
     yield* Effect.sync(() => viewStore.set({ scan_status: "error", scan_error: candidates.error.message }))
     return false
@@ -543,10 +561,13 @@ const replacementEvidenceKey = (
 
 export const refreshReplacementReview = Effect.gen(function*() {
   const initialState = viewStore.getState()
+  const connectionGeneration = initialState.connection_generation
   const entryId = initialState.scan_resolution_entry_id
   const beforeEvidence = entryId === null ? null : replacementEvidenceKey(initialState, entryId)
   const stagedLoaded = yield* loadScanResults
+  if (!isCurrent(connectionGeneration)) return { matched: false, changed: false }
   const pendingLoaded = yield* loadPendingReplacements(false, true)
+  if (!isCurrent(connectionGeneration)) return { matched: false, changed: false }
   const state = viewStore.getState()
   const refreshedEntryId = state.scan_resolution_entry_id === null
     ? undefined
@@ -569,6 +590,7 @@ export const releaseHeldDiscovery = (candidateId: string) =>
   Effect.gen(function*() {
     const client = yield* ScanReviewClient
     const state = viewStore.getState()
+    const connectionGeneration = state.connection_generation
     const candidate = state.staged_discoveries.find((item) => item.candidate_id === candidateId)
     const root = candidate === undefined
       ? undefined
@@ -602,10 +624,13 @@ export const releaseHeldDiscovery = (candidateId: string) =>
       expected_policy_revision: root.policy_revision,
       command: { type: "release-hold" }
     })
+    if (!isCurrent(connectionGeneration)) return
     if (!result.ok) {
       if (result.error.code === "revision_conflict" || result.error.code === "not_found") {
         yield* loadRoots
+        if (!isCurrent(connectionGeneration)) return
         yield* loadScanResults
+        if (!isCurrent(connectionGeneration)) return
       }
       const definiteFailure = result.error.code === "invalid_request" ||
         result.error.code === "not_found" ||
@@ -657,6 +682,7 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
   Effect.gen(function*() {
     const client = yield* ScanReviewClient
     const state = viewStore.getState()
+    const connectionGeneration = state.connection_generation
     const candidate = state.staged_discoveries.find((item) => item.candidate_id === candidateId)
     const entry = state.pending_replacement_entries.find((item) => item.entry_id === entryId)
     const root = candidate === undefined
@@ -722,11 +748,14 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
       expected_location_revision: entry.location_revision,
       command: { type: "resolve-replacement", entry_id: entry.entry_id, decision }
     })
+    if (!isCurrent(connectionGeneration)) return
     if (!result.ok) {
       let refreshed = false
       if (result.error.code === "revision_conflict" || result.error.code === "not_found") {
         yield* loadRoots
+        if (!isCurrent(connectionGeneration)) return
         const refreshedReview = yield* refreshReplacementReview
+        if (!isCurrent(connectionGeneration)) return
         refreshed = refreshedReview.matched && refreshedReview.changed
       }
       if (refreshed) return
@@ -757,7 +786,9 @@ export const resolveReplacement = (candidateId: string, entryId: string, decisio
     }
 
     yield* loadScanResults
+    if (!isCurrent(connectionGeneration)) return
     yield* loadPendingReplacements(false, true)
+    if (!isCurrent(connectionGeneration)) return
     const resolution = result.data.resolution
     if (resolution !== undefined) {
       yield* Effect.sync(() => {
@@ -897,16 +928,58 @@ export const retryScanResults = Effect.gen(function*() {
 })
 
 export const loadRootWorkspace = Effect.gen(function*() {
+  const connectionGeneration = viewStore.getState().connection_generation
   yield* loadRoots
+  if (!isCurrent(connectionGeneration)) return false
   yield* loadLocalMappings
+  if (!isCurrent(connectionGeneration)) return false
   const loaded = yield* loadScanResults
+  if (!isCurrent(connectionGeneration)) return false
   yield* loadLibrary()
+  if (!isCurrent(connectionGeneration)) return false
   yield* loadPendingReplacements()
+  if (!isCurrent(connectionGeneration)) return false
   if (loaded && viewStore.getState().scan_tasks.some(scanIsActive)) {
     yield* watchHeldScans
+    if (!isCurrent(connectionGeneration)) return false
     yield* loadPendingReplacements()
+    if (!isCurrent(connectionGeneration)) return false
+  }
+  return true
+})
+
+export const loadConnectionWorkspace = Effect.gen(function*() {
+  const connectionClient = yield* ConnectionClient
+  const generation = viewStore.getState().connection_generation
+  const target = yield* connectionClient.target()
+  if (!isCurrent(generation)) return
+  if (target.ok) yield* Effect.sync(() => viewStore.set({ connection_target: target.data }))
+  const status = yield* connectionClient.status()
+  if (!isCurrent(generation)) return
+  if (status.ok) yield* Effect.sync(() => viewStore.publishConnection(status.data, generation))
+  yield* loadRootWorkspace
+  if (!isCurrent(generation)) return
+  if (target.ok && target.data.mode === "remote" && status.ok && status.data.state === "connected") {
+    yield* Effect.sync(() => viewStore.set({ screen: "library" }))
   }
 })
+
+export const handleConnectionTargetChanged = (target: ConnectionTargetView) =>
+  Effect.gen(function*() {
+    viewStore.resetConnectionTarget(target)
+    yield* failScanWaiters("connection target changed")
+    yield* loadConnectionWorkspace
+  })
+
+export const handleConnectionStatusChanged = (status: ConnectionStatusView) =>
+  Effect.sync(() => viewStore.set({ connection: status }))
+
+export const handleRemoteCandidateInvalidated = (candidateId: string) =>
+  Effect.sync(() => {
+    if (viewStore.getState().pending_remote_connection?.candidate_id === candidateId) {
+      viewStore.set({ pending_remote_connection: null })
+    }
+  })
 
 const watchScanTask = (taskId: string) =>
   Effect.gen(function*() {
@@ -916,13 +989,16 @@ const watchScanTask = (taskId: string) =>
 
 export const refreshRootPolicy = Effect.gen(function*() {
   const initialState = viewStore.getState()
+  const connectionGeneration = initialState.connection_generation
   const request = initialState.root_preview_request
   const expectedGeneration = request === null
     ? initialState.root_preview_generation
     : initialState.root_preview_generation + 1
   yield* Effect.sync(() => viewStore.set({ root_policy_status: "loading", root_policy_error: null }))
   if (request !== null) yield* previewRoot(request)
+  if (!isCurrent(connectionGeneration)) return
   yield* loadRoots
+  if (!isCurrent(connectionGeneration)) return
   const current = viewStore.getState()
   if (
     current.root_preview_generation === expectedGeneration &&
@@ -944,6 +1020,8 @@ const updateRootExclusion = (input: {
   Effect.gen(function*() {
     const client = yield* RootPreviewClient
     const initialState = viewStore.getState()
+    const connectionGeneration = initialState.connection_generation
+    const isCurrentRequest = (): boolean => isCurrent(connectionGeneration)
     const previewGeneration = initialState.root_preview_generation
     const currentPreview = initialState.root_preview
     let preview = isSavedDiscovery(currentPreview) && currentPreview.root_id === input.rootId
@@ -953,6 +1031,7 @@ const updateRootExclusion = (input: {
     yield* Effect.sync(() => viewStore.set({ root_policy_status: "loading", root_policy_error: null }))
     if (preview === null) {
       const fresh = yield* client.preview({ kind: "saved-root", root_id: input.rootId })
+      if (!isCurrentRequest()) return
       if (!fresh.ok || !isSavedDiscovery(fresh.data) || fresh.data.root_id !== input.rootId) {
         if (viewStore.getState().root_preview_generation === previewGeneration) {
           yield* Effect.sync(() => viewStore.set({
@@ -973,6 +1052,7 @@ const updateRootExclusion = (input: {
       expected_policy_revision: input.expectedPolicyRevision,
       command: { type, exclusion: { path: input.path, scope: input.scope } }
     })
+    if (!isCurrentRequest()) return
     if (!result.ok) {
       if (viewStore.getState().root_preview_generation === previewGeneration) {
         yield* Effect.sync(() => viewStore.set({ root_policy_status: "error", root_policy_error: result.error.message }))
@@ -1028,10 +1108,13 @@ const taskError = (task: ScanTask): string | null => {
   }
 }
 
-const finishNormalScanFailure = (message: string) =>
+const finishNormalScanFailure = (message: string, connectionGeneration: number) =>
   Effect.gen(function*() {
+    if (!isCurrent(connectionGeneration)) return
     yield* loadLibrary()
+    if (!isCurrent(connectionGeneration)) return
     yield* loadPendingReplacements()
+    if (!isCurrent(connectionGeneration)) return
     yield* Effect.sync(() => viewStore.set({
       scan_start_status: "error",
       scan_start_error: message,
@@ -1045,6 +1128,8 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
   Effect.gen(function*() {
     const client = yield* RootPreviewClient
     const state = viewStore.getState()
+    const connectionGeneration = state.connection_generation
+    const isCurrentScan = (): boolean => isCurrent(connectionGeneration)
     const root = state.root_saved_roots.find((candidate) => candidate.root_id === rootId)
     const preview = state.root_preview
     if (root === undefined || !isSavedDiscovery(preview) || preview.root_id !== rootId) return
@@ -1066,12 +1151,16 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
       expected_policy_revision: preview.policy_revision,
       command: { type: "start-scan", mode: "manual", hold_new_discoveries: holdNewDiscoveries }
     })
+    if (!isCurrentScan()) return
     if (!result.ok) {
-      if (result.error.code === "revision_conflict") yield* loadRoots
+      if (result.error.code === "revision_conflict") {
+        yield* loadRoots
+        if (!isCurrentScan()) return
+      }
       if (holdNewDiscoveries) {
         yield* Effect.sync(() => viewStore.set({ scan_start_status: "error", scan_start_error: result.error.message }))
       } else {
-        yield* finishNormalScanFailure(result.error.message)
+        yield* finishNormalScanFailure(result.error.message, connectionGeneration)
       }
       return
     }
@@ -1080,7 +1169,7 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
       if (holdNewDiscoveries) {
         yield* Effect.sync(() => viewStore.set({ scan_start_status: "error", scan_start_error: message }))
       } else {
-        yield* finishNormalScanFailure(message)
+        yield* finishNormalScanFailure(message, connectionGeneration)
       }
       return
     }
@@ -1096,30 +1185,34 @@ const startManualScanFor = (rootId: string, holdNewDiscoveries: boolean) =>
       })
     })
     yield* watchScanTask(submittedTask.task_id)
+    if (!isCurrentScan()) return
 
     const watchedState = viewStore.getState()
     const terminal = watchedState.scan_tasks.find((task) => task.task_id === submittedTask.task_id)
     if (holdNewDiscoveries) {
       yield* loadPendingReplacements()
+      if (!isCurrentScan()) return
       yield* Effect.sync(() => viewStore.set({ scan_start_status: "idle" }))
       return
     }
 
     if (watchedState.scan_status === "error") {
-      yield* finishNormalScanFailure(watchedState.scan_error ?? "could not load normal scan results")
+      yield* finishNormalScanFailure(watchedState.scan_error ?? "could not load normal scan results", connectionGeneration)
       return
     }
     if (terminal === undefined) {
-      yield* finishNormalScanFailure("submitted scan task was not found in scan results")
+      yield* finishNormalScanFailure("submitted scan task was not found in scan results", connectionGeneration)
       return
     }
     if (scanIsActive(terminal)) {
-      yield* finishNormalScanFailure("normal scan did not reach a terminal state")
+      yield* finishNormalScanFailure("normal scan did not reach a terminal state", connectionGeneration)
       return
     }
 
     yield* loadLibrary()
+    if (!isCurrentScan()) return
     yield* loadPendingReplacements()
+    if (!isCurrentScan()) return
     const error = taskError(terminal)
     yield* Effect.sync(() => viewStore.set({
       scan_start_status: terminal.status === "completed_with_errors" ? "idle" : error === null ? "idle" : "error",
@@ -1256,6 +1349,7 @@ const replaceLibraryOpenState = (
 export const loadLibraryEntry = (entryId: string) =>
   Effect.gen(function*() {
     const client = yield* LibraryClient
+    const connectionGeneration = viewStore.getState().connection_generation
     yield* Effect.sync(() => viewStore.set({
       library_entry_status: "loading",
       library_entry_error: null,
@@ -1264,7 +1358,7 @@ export const loadLibraryEntry = (entryId: string) =>
       library_note_server_text: null
     }))
     const result = yield* client.entry({ entry_id: entryId })
-    if (viewStore.getState().library_selected_entry_id !== entryId) return
+    if (!isCurrent(connectionGeneration) || viewStore.getState().library_selected_entry_id !== entryId) return
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({
         library_entry_status: "error",
@@ -1313,6 +1407,7 @@ export const updateLibraryNote = (text: string) =>
     const entry = state.library_entry
     const entryId = state.library_selected_entry_id
     if (entry === null || entryId === null) return
+    const connectionGeneration = state.connection_generation
     const expectedDecisionVersion = entry.decision_version
     yield* Effect.sync(() => viewStore.set({ library_note_status: "loading", library_note_error: null }))
     const result = yield* client.note({
@@ -1321,10 +1416,11 @@ export const updateLibraryNote = (text: string) =>
       expected_decision_version: expectedDecisionVersion
     })
     const current = viewStore.getState()
-    if (current.library_selected_entry_id !== entryId || current.library_entry?.decision_version !== expectedDecisionVersion) return
+    if (!isCurrent(connectionGeneration) || current.library_selected_entry_id !== entryId || current.library_entry?.decision_version !== expectedDecisionVersion) return
     if (!result.ok) {
       if (result.error.code === "revision_conflict") {
         const refreshed = yield* client.entry({ entry_id: entryId })
+        if (!isCurrent(connectionGeneration)) return
         if (refreshed.ok && viewStore.getState().library_selected_entry_id === entryId) {
           yield* Effect.sync(() => viewStore.set({
             library_entry: refreshed.data,
@@ -1480,6 +1576,130 @@ export const openSelectedLibraryEntry = Effect.gen(function*() {
     })
   }))
 })
+export const connectRemote = (baseUrl: string, bearerToken: string) =>
+  Effect.gen(function*() {
+    const client = yield* ConnectionClient
+    const initial = viewStore.getState()
+    if (initial.remote_probe_status === "loading" || initial.connection.state === "connecting" || initial.pending_remote_connection !== null) return false
+    const generation = initial.connection_generation
+    yield* Effect.sync(() => viewStore.set({ remote_probe_status: "loading" }))
+    const result = yield* client.connectRemote({ base_url: baseUrl, bearer_token: bearerToken })
+    if (!isCurrent(generation)) return false
+    if (!result.ok) {
+      yield* Effect.sync(() => viewStore.set({ remote_probe_status: "idle", outcome: { kind: "error", message: result.error.message } }))
+      return false
+    }
+    yield* Effect.sync(() => viewStore.set({ remote_probe_status: "idle", pending_remote_connection: result.data, outcome: null }))
+    return true
+  })
+
+export const confirmRemote = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const pending = viewStore.getState().pending_remote_connection
+  if (pending === null) return false
+  const previousConnection = viewStore.getState().connection
+  const generation = viewStore.beginConnectionTransition("connecting")
+  const result = yield* client.confirmRemote({ candidate_id: pending.candidate_id })
+  if (!isCurrent(generation)) return false
+  if (!result.ok) {
+    const status = yield* client.status()
+    if (!isCurrent(generation)) return false
+    yield* Effect.sync(() => {
+      if (status.ok) viewStore.publishConnection(status.data, generation)
+      else if (viewStore.getState().connection.state === "connecting") viewStore.set({ connection: previousConnection })
+      viewStore.set({ pending_remote_connection: null, outcome: { kind: "error", message: result.error.message } })
+    })
+    return false
+  }
+  yield* Effect.sync(() => viewStore.set({ pending_remote_connection: null, outcome: null }))
+  yield* Effect.sync(() => viewStore.publishConnection(result.data, generation))
+  const target = yield* client.target()
+  if (!isCurrent(generation)) return false
+  if (target.ok) yield* Effect.sync(() => viewStore.set({ connection_target: target.data }))
+  const loaded = yield* loadRootWorkspace
+  if (!isCurrent(generation) || !loaded) return false
+  yield* Effect.sync(() => viewStore.set({ screen: "library" }))
+  return true
+})
+
+export const cancelRemote = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const generation = viewStore.getState().connection_generation
+  const result = yield* client.cancelRemote()
+  if (!isCurrent(generation)) return
+  if (!result.ok) {
+    yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+    return
+  }
+  yield* Effect.sync(() => {
+    viewStore.set({ pending_remote_connection: null, outcome: null })
+    viewStore.publishConnection(result.data, generation)
+  })
+})
+
+export const useManagedConnection = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const previousConnection = viewStore.getState().connection
+  const generation = viewStore.beginConnectionTransition("connecting")
+  const result = yield* client.useManaged()
+  if (!isCurrent(generation)) return false
+  if (!result.ok) {
+    const status = yield* client.status()
+    if (!isCurrent(generation)) return false
+    yield* Effect.sync(() => {
+      if (status.ok) viewStore.publishConnection(status.data, generation)
+      else if (viewStore.getState().connection.state === "connecting") viewStore.set({ connection: previousConnection })
+      viewStore.set({ pending_remote_connection: null, outcome: { kind: "error", message: result.error.message } })
+    })
+    return false
+  }
+  yield* Effect.sync(() => viewStore.set({ pending_remote_connection: null, outcome: null }))
+  yield* Effect.sync(() => viewStore.publishConnection(result.data, generation))
+  const target = yield* client.target()
+  if (!isCurrent(generation)) return false
+  if (target.ok) yield* Effect.sync(() => viewStore.set({ connection_target: target.data }))
+  const loaded = yield* loadRootWorkspace
+  return isCurrent(generation) && loaded
+})
+
+export const disconnectNormal = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const generation = viewStore.beginConnectionTransition("disconnected")
+  const result = yield* client.disconnect()
+  if (result.ok && isCurrent(generation)) yield* Effect.sync(() => {
+    viewStore.set({ pending_remote_connection: null, outcome: null })
+    viewStore.publishConnection(result.data, generation)
+  })
+  if (!result.ok && isCurrent(generation)) {
+    yield* Effect.sync(() => viewStore.set({ outcome: { kind: "error", message: result.error.message } }))
+  }
+})
+
+export const reconnectNormal = Effect.gen(function*() {
+  const client = yield* ConnectionClient
+  const previousConnection = viewStore.getState().connection
+  const generation = viewStore.beginConnectionTransition("connecting")
+  const result = yield* client.reconnect()
+  if (!isCurrent(generation)) return
+  if (!result.ok) {
+    const status = yield* client.status()
+    if (!isCurrent(generation)) return
+    yield* Effect.sync(() => {
+      if (status.ok) viewStore.publishConnection(status.data, generation)
+      else if (viewStore.getState().connection.state === "connecting") viewStore.set({ connection: previousConnection })
+      viewStore.set({ pending_remote_connection: null, outcome: { kind: "error", message: result.error.message } })
+    })
+    return
+  }
+  yield* Effect.sync(() => viewStore.set({ pending_remote_connection: null, outcome: null }))
+  yield* Effect.sync(() => viewStore.publishConnection(result.data, generation))
+  const target = yield* client.target()
+  if (!isCurrent(generation)) return
+  if (target.ok) yield* Effect.sync(() => viewStore.set({ connection_target: target.data }))
+  const loaded = yield* loadRootWorkspace
+  if (!isCurrent(generation) || !loaded) return
+  yield* Effect.sync(() => viewStore.set({ screen: "library" }))
+})
 
 export const loadLibrary = (append = false, query = viewStore.getState().library_query) =>
   Effect.gen(function*() {
@@ -1559,6 +1779,7 @@ export const detachMissingEntry = (entry: LibraryEntry) =>
   Effect.gen(function*() {
     if (entry.state === "detached" || entry.availability.status !== "missing" || entry.decision_version === undefined) return
     const client = yield* LibraryClient
+    const connectionGeneration = viewStore.getState().connection_generation
     yield* Effect.sync(() => viewStore.set({ library_command_status: "loading", library_command_error: null }))
     const result = yield* client.command({
       entry_id: entry.entry_id,
@@ -1567,6 +1788,7 @@ export const detachMissingEntry = (entry: LibraryEntry) =>
       expected_location_revision: entry.location_revision,
       command: { type: "detach-missing" }
     })
+    if (!isCurrent(connectionGeneration)) return
     if (!result.ok) {
       yield* Effect.sync(() => viewStore.set({ library_command_status: "idle", library_command_error: result.error.message }))
       return
@@ -1578,6 +1800,7 @@ export const detachMissingEntry = (entry: LibraryEntry) =>
 export const saveRoot = Effect.gen(function*() {
   const client = yield* RootPreviewClient
   const state = viewStore.getState()
+  const connectionGeneration = state.connection_generation
   const preview = state.root_preview
   if (!preview || !("children" in preview) || !canSaveRoot(state)) return
 
@@ -1601,6 +1824,7 @@ export const saveRoot = Effect.gen(function*() {
     path: preview.selected_server_path,
     preview_identity: preview.preview_identity
   })
+  if (!isCurrent(connectionGeneration)) return
   if (result.ok) {
     yield* Effect.sync(() => {
       const roots = viewStore.getState().root_saved_roots
@@ -1616,6 +1840,7 @@ export const saveRoot = Effect.gen(function*() {
     })
   } else {
     const listed = yield* client.list()
+    if (!isCurrent(connectionGeneration)) return
     const existing = listed.ok
       ? listed.data.find((root) => root.canonical_server_path === preview.preview_identity.canonical_server_path)
       : undefined
@@ -1710,6 +1935,7 @@ export const loadConnectionStatus = Effect.gen(function*() {
   const client = yield* PrototypeClient
   const connectionGeneration = viewStore.getState().connection_generation
   const result = yield* client.connectionStatus()
+  if (!isCurrent(connectionGeneration)) return
   if (result.ok) {
     yield* Effect.sync(() => viewStore.publishConnection(result.data, connectionGeneration))
     yield* loadOpenJournal
@@ -1738,11 +1964,13 @@ const mutateOpenJournal = (
 ) =>
   Effect.gen(function*() {
     const client = yield* OpenJournalClient
+    const connectionGeneration = viewStore.getState().connection_generation
     const result = yield* client.recover({
       instance_id: row.instanceId,
       action_id: row.actionId,
       command
     })
+    if (!isCurrent(connectionGeneration)) return
     if (result.ok) {
       yield* loadOpenJournal
     } else {

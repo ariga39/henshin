@@ -3,6 +3,8 @@ import type {
   CommandAttempt,
   CommandReconciliation,
   ConnectionStatusView,
+  ConnectionTargetView,
+  RemoteConnectionCandidateView,
   DeviceRootMapping,
   DiscardedDraft,
   HandshakeView,
@@ -91,6 +93,20 @@ export interface PrototypeBridge {
   dismissCommand(operationId: string): Promise<Result<CommandAttempt>>
 }
 
+export interface ConnectionBridge {
+  onChanged(listener: (target: ConnectionTargetView) => void): () => void
+  onStatusChanged(listener: (status: ConnectionStatusView) => void): () => void
+  onRemoteCandidateInvalidated(listener: (candidateId: string) => void): () => void
+  status(): Promise<Result<ConnectionStatusView>>
+  target(): Promise<Result<ConnectionTargetView>>
+  reconnect(): Promise<Result<ConnectionStatusView>>
+  disconnect(): Promise<Result<ConnectionStatusView>>
+  connectRemote(input: { readonly base_url: string; readonly bearer_token: string }): Promise<Result<RemoteConnectionCandidateView>>
+  confirmRemote(input: { readonly candidate_id: string }): Promise<Result<ConnectionStatusView>>
+  cancelRemote(): Promise<Result<ConnectionStatusView>>
+  useManaged(): Promise<Result<ConnectionStatusView>>
+}
+
 export interface OpenJournalBridge {
   onChanged(listener: () => void): () => void
   list(): Promise<Result<ReadonlyArray<OpenJournalView>>>
@@ -120,6 +136,7 @@ export interface DiscardDraftInput {
 declare global {
   interface Window {
     readonly henshinPrototype: PrototypeBridge
+    readonly henshinConnection: ConnectionBridge
     readonly henshinOpenJournal: OpenJournalBridge
     readonly henshinRootPreview: RootPreviewBridge
     readonly henshinLocalMapping: LocalMappingBridge
@@ -227,6 +244,40 @@ export class PrototypeClient extends Context.Service<
       listCommandAttempts: () => callIpc(() => window.henshinPrototype.listCommandAttempts()),
       reconcileCommand: (operationId) => callIpc(() => window.henshinPrototype.reconcileCommand(operationId)),
       dismissCommand: (operationId) => callIpc(() => window.henshinPrototype.dismissCommand(operationId))
+    })
+  )
+}
+
+export class ConnectionClient extends Context.Service<
+  ConnectionClient,
+  {
+    readonly onStatusChanged: (listener: (status: ConnectionStatusView) => void) => () => void
+    readonly onRemoteCandidateInvalidated: (listener: (candidateId: string) => void) => () => void
+    readonly status: () => Effect.Effect<Result<ConnectionStatusView>>
+    readonly target: () => Effect.Effect<Result<ConnectionTargetView>>
+    readonly reconnect: () => Effect.Effect<Result<ConnectionStatusView>>
+    readonly disconnect: () => Effect.Effect<Result<ConnectionStatusView>>
+    readonly connectRemote: (input: { readonly base_url: string; readonly bearer_token: string }) => Effect.Effect<Result<RemoteConnectionCandidateView>>
+    readonly confirmRemote: (input: { readonly candidate_id: string }) => Effect.Effect<Result<ConnectionStatusView>>
+    readonly cancelRemote: () => Effect.Effect<Result<ConnectionStatusView>>
+    readonly useManaged: () => Effect.Effect<Result<ConnectionStatusView>>
+    readonly onChanged: (listener: (target: ConnectionTargetView) => void) => () => void
+  }
+>()("henshin/desktop/renderer/ConnectionClient") {
+  static readonly layer = Layer.succeed(
+    ConnectionClient,
+    ConnectionClient.of({
+      status: () => callIpc(() => window.henshinConnection.status()),
+      target: () => callIpc(() => window.henshinConnection.target()),
+      reconnect: () => callIpc(() => window.henshinConnection.reconnect()),
+      disconnect: () => callIpc(() => window.henshinConnection.disconnect()),
+      connectRemote: (input) => callIpc(() => window.henshinConnection.connectRemote(input)),
+      confirmRemote: (input) => callIpc(() => window.henshinConnection.confirmRemote(input)),
+      cancelRemote: () => callIpc(() => window.henshinConnection.cancelRemote()),
+      useManaged: () => callIpc(() => window.henshinConnection.useManaged()),
+      onChanged: (listener) => window.henshinConnection.onChanged(listener),
+      onStatusChanged: (listener) => window.henshinConnection.onStatusChanged(listener),
+      onRemoteCandidateInvalidated: (listener) => window.henshinConnection.onRemoteCandidateInvalidated(listener)
     })
   )
 }

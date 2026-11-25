@@ -10,7 +10,9 @@ import {
   PrototypeApi,
   RequestContext,
   RevisionConflict,
-  StorageFull
+  StorageFull,
+  HANDSHAKE_API_VERSION,
+  HANDSHAKE_CAPABILITY
 } from "@henshin/contracts"
 import { ServerState } from "../identity"
 import { NoteStore } from "../persistence/NoteStore"
@@ -57,8 +59,8 @@ export const PrototypeHandlers = HttpApiBuilder.group(PrototypeApi, "prototype",
         Effect.gen(function*() {
           const ctx = yield* RequestContext
           return envelope(ctx.request_id, {
-            api_version: "prototype/1",
-            capabilities: ["prototype-note-edit"]
+            api_version: HANDSHAKE_API_VERSION,
+            capabilities: [HANDSHAKE_CAPABILITY.prototypeNoteEdit, HANDSHAKE_CAPABILITY.libraryBrowse]
           })
         })
       )
