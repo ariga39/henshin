@@ -24,6 +24,9 @@ pub fn create(data_dir: &Path, output: &Path) -> io::Result<()> {
         .unwrap_or(Path::new("."));
     let canonical_parent = fs::canonicalize(parent)?;
     let destination = canonical_parent.join(name);
+    let destination_text = destination
+        .to_str()
+        .ok_or_else(|| invalid("backup output path must be valid UTF-8"))?;
     if fs::symlink_metadata(&destination).is_ok() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -57,6 +60,10 @@ pub fn create(data_dir: &Path, output: &Path) -> io::Result<()> {
             ));
         }
     }
+    let covers_dir = resolve_path(&data_dir.join("covers"))?;
+    if destination.starts_with(covers_dir) {
+        return Err(invalid("backup output cannot be inside the cover cache"));
+    }
     drop(roots);
 
     // Reserve the destination atomically without overwriting existing output.
@@ -66,10 +73,7 @@ pub fn create(data_dir: &Path, output: &Path) -> io::Result<()> {
         .open(&destination)?;
     drop(reservation);
     let result = connection
-        .execute(
-            "VACUUM INTO ?1",
-            params![destination.to_string_lossy().as_ref()],
-        )
+        .execute("VACUUM INTO ?1", params![destination_text])
         .map_err(sql_error);
     if let Err(error) = result {
         let _ = fs::remove_file(&destination);
@@ -79,16 +83,21 @@ pub fn create(data_dir: &Path, output: &Path) -> io::Result<()> {
 }
 
 pub fn restore(data_dir: &Path, input: &Path) -> io::Result<()> {
+    let input_location = resolve_entry_path(input)?;
     let input = fs::canonicalize(input)?;
     if !fs::metadata(&input)?.is_file() {
         return Err(invalid("backup input is not a regular file"));
     }
     let roots = collection_roots(&input)?;
     let requested_data_dir = resolve_path(data_dir)?;
+    let covers_dir = resolve_path(&requested_data_dir.join("covers"))?;
+    if input.starts_with(&covers_dir) || input_location.starts_with(&covers_dir) {
+        return Err(invalid("restore input cannot be inside the cover cache"));
+    }
     for root in roots {
-        if requested_data_dir.starts_with(&root) {
+        if requested_data_dir.starts_with(&root) || root.starts_with(&requested_data_dir) {
             return Err(invalid(
-                "restore data directory cannot be inside a collection root recorded in the backup",
+                "restore data directory cannot overlap a collection root recorded in the backup",
             ));
         }
     }
@@ -163,6 +172,17 @@ pub fn restore(data_dir: &Path, input: &Path) -> io::Result<()> {
     clear_covers(&data_dir.join("covers"))?;
     drop(lock);
     Ok(())
+}
+
+fn resolve_entry_path(path: &Path) -> io::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("path must name a file"))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    Ok(fs::canonicalize(parent)?.join(name))
 }
 
 fn collection_roots(input: &Path) -> io::Result<Vec<PathBuf>> {
@@ -347,6 +367,9 @@ mod tests {
             io::ErrorKind::AlreadyExists
         );
         assert_eq!(fs::read(existing).unwrap(), b"keep me");
+        let cached_backup = state.covers_dir.join("requested.sqlite");
+        assert!(create(&data, &cached_backup).is_err());
+        assert!(!cached_backup.exists());
 
         state
             .db
@@ -560,5 +583,122 @@ mod tests {
         for suffix in ["-wal", "-shm"] {
             assert!(!sidecar(&archive, suffix).exists());
         }
+    }
+
+    #[test]
+    fn restore_rejects_an_input_in_covers_without_removing_the_backup_or_live_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let state = AppState::open(data.clone(), Some("target-secret".into())).unwrap();
+        add_entry(&state.db.lock().unwrap(), "keep");
+        fs::write(state.covers_dir.join("sentinel.jpg"), b"cache sentinel").unwrap();
+        let source = temp.path().join("source");
+        let source_state = AppState::open(source.clone(), Some("source-secret".into())).unwrap();
+        add_entry(&source_state.db.lock().unwrap(), "restored");
+        let archive = temp.path().join("archive.sqlite");
+        create(&source, &archive).unwrap();
+        let cached_input = state.covers_dir.join("input.sqlite");
+        fs::copy(&archive, &cached_input).unwrap();
+        let archive_before = fs::read(&cached_input).unwrap();
+
+        assert!(restore(&data, &cached_input).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let cached_link = state.covers_dir.join("archive-link.sqlite");
+            symlink(&archive, &cached_link).unwrap();
+            assert!(restore(&data, &cached_link).is_err());
+            assert!(cached_link.exists());
+        }
+        assert_eq!(fs::read(&cached_input).unwrap(), archive_before);
+        assert_eq!(
+            state
+                .db
+                .lock()
+                .unwrap()
+                .query_row("SELECT title FROM entries WHERE id='entry'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read(state.covers_dir.join("sentinel.jpg")).unwrap(),
+            b"cache sentinel"
+        );
+        drop(source_state);
+        drop(state);
+    }
+
+    #[test]
+    fn restore_rejects_roots_overlapping_data_dir_and_preserves_both_sides() {
+        for root_is_inside_data in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let data = if root_is_inside_data {
+                temp.path().join("data")
+            } else {
+                temp.path().join("collection/data")
+            };
+            let target = AppState::open(data.clone(), Some("target-secret".into())).unwrap();
+            add_entry(&target.db.lock().unwrap(), "keep");
+            let root = if root_is_inside_data {
+                target.covers_dir.join("collection")
+            } else {
+                temp.path().join("collection")
+            };
+            fs::create_dir_all(&root).unwrap();
+            let sentinel = root.join("preserve.txt");
+            fs::write(&sentinel, b"collection sentinel").unwrap();
+
+            let source = temp.path().join("source");
+            let source_state =
+                AppState::open(source.clone(), Some("source-secret".into())).unwrap();
+            source_state
+                .db
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO roots VALUES('root','Library',?1,'[]',1)",
+                    [root.to_string_lossy().as_ref()],
+                )
+                .unwrap();
+            let archive = temp.path().join("archive.sqlite");
+            create(&source, &archive).unwrap();
+            let archive_before = fs::read(&archive).unwrap();
+
+            assert!(restore(&data, &archive).is_err());
+            assert_eq!(fs::read(&archive).unwrap(), archive_before);
+            assert_eq!(fs::read(&sentinel).unwrap(), b"collection sentinel");
+            assert_eq!(
+                target
+                    .db
+                    .lock()
+                    .unwrap()
+                    .query_row("SELECT title FROM entries WHERE id='entry'", [], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .unwrap(),
+                "keep"
+            );
+            drop(source_state);
+            drop(target);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_rejects_non_utf8_output_without_reserving_a_file() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let _state = AppState::open(data.clone(), Some("secret".into())).unwrap();
+        let output = temp.path().join(std::ffi::OsString::from_vec(
+            b"archive-\xff.sqlite".to_vec(),
+        ));
+
+        assert!(create(&data, &output).is_err());
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 }
