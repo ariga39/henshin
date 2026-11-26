@@ -26,30 +26,7 @@ pub fn extract(
 ) -> Result<Cover, String> {
     let file = fs::File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
-    let mut images = Vec::new();
-    for i in 0..archive.len() {
-        let file = archive.by_index(i).map_err(|e| e.to_string())?;
-        let name = file.name().to_owned();
-        if file.is_dir()
-            || name
-                .split('/')
-                .any(|part| part == "__MACOSX" || part.starts_with("._"))
-        {
-            continue;
-        }
-        let ext = name
-            .rsplit('/')
-            .next()
-            .unwrap_or_default()
-            .rsplit_once('.')
-            .map(|x| x.1.to_ascii_lowercase());
-        if matches!(ext.as_deref(), Some("jpg" | "jpeg" | "png" | "webp")) {
-            images.push((name, i));
-        }
-    }
-    images.sort_by(|(a_name, a_index), (b_name, b_index)| {
-        natural_cmp(a_name, b_name).then_with(|| a_index.cmp(b_index))
-    });
+    let images = ordered_images(&mut archive)?;
     let first_index = images
         .first()
         .map(|(_, index)| *index)
@@ -96,6 +73,75 @@ pub fn extract(
         sha1: digest,
         key,
     })
+}
+
+fn image_order(name: &str) -> u8 {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("cover")
+        && !["back", "end", "rear", "recover", "discover"]
+            .iter()
+            .any(|part| lower.contains(part))
+    {
+        0
+    } else if lower.starts_with("end_card_save_file")
+        || lower.starts_with("artist_info")
+        || lower.contains("credit")
+        || lower.starts_with("999")
+        || lower
+            .rsplit('/')
+            .next()
+            .is_some_and(|file| file.starts_with("note.") || file.starts_with("notes."))
+    {
+        2
+    } else {
+        1
+    }
+}
+
+fn ordered_images(archive: &mut ZipArchive<fs::File>) -> Result<Vec<(String, usize)>, String> {
+    let mut images = Vec::new();
+    for i in 0..archive.len() {
+        let file = archive.by_index(i).map_err(|e| e.to_string())?;
+        let name = file.name().to_owned();
+        if file.is_dir()
+            || name
+                .split('/')
+                .any(|part| part == "__MACOSX" || part.starts_with("._"))
+        {
+            continue;
+        }
+        let ext = name
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .rsplit_once('.')
+            .map(|x| x.1.to_ascii_lowercase());
+        if matches!(ext.as_deref(), Some("jpg" | "jpeg" | "png" | "webp")) {
+            images.push((name, i));
+        }
+    }
+    images.sort_by(|(a, ai), (b, bi)| natural_cmp(a, b).then_with(|| ai.cmp(bi)));
+    images.sort_by_key(|(name, _)| image_order(name));
+    Ok(images)
+}
+
+pub fn raw_first_sha1(zip_path: &Path) -> Result<String, String> {
+    let file = fs::File::open(zip_path).map_err(|e| e.to_string())?;
+    let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let images = ordered_images(&mut archive)?;
+    let (_, index) = images
+        .first()
+        .ok_or_else(|| "archive contains no supported images".to_string())?;
+    let mut page = archive.by_index(*index).map_err(|e| e.to_string())?;
+    let mut raw = Vec::new();
+    page.by_ref()
+        .take(MAX_COVER_RAW_BYTES + 1)
+        .read_to_end(&mut raw)
+        .map_err(|e| e.to_string())?;
+    if raw.len() as u64 > MAX_COVER_RAW_BYTES {
+        return Err("cover image exceeds the 64 MiB raw-byte limit".into());
+    }
+    Ok(hex::encode(Sha1::digest(&raw)))
 }
 
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
@@ -168,6 +214,24 @@ mod tests {
         let mut names = vec!["10.JPG", "2.jpg", "01.jpg", "a.jpg"];
         names.sort_by(|a, b| natural_cmp(a, b));
         assert_eq!(names, vec!["01.jpg", "2.jpg", "10.JPG", "a.jpg"]);
+    }
+
+    #[test]
+    fn cover_pages_move_first_and_credit_pages_move_last_for_cached_sha() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("ordered.zip");
+        write_zip(
+            &archive_path,
+            &[
+                ("001-credit.png", [1, 2, 3]),
+                ("02.png", [4, 5, 6]),
+                ("cover-front.png", [7, 8, 9]),
+            ],
+        );
+        let expected = hex::encode(Sha1::digest(png_bytes([7, 8, 9])));
+        assert_eq!(raw_first_sha1(&archive_path).unwrap(), expected);
+        let cover = extract(&archive_path, temp.path(), "ordered", 1, 1).unwrap();
+        assert_eq!(cover.sha1, expected);
     }
 
     #[test]

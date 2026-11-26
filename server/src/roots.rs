@@ -36,6 +36,24 @@ pub fn validate(
     Ok(root)
 }
 
+pub fn validate_snapshot(
+    path: &str,
+    data_dir: &Path,
+    existing_roots: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(path).map_err(|_| "root directory is unavailable".to_string())?;
+    if !root.is_dir() || fs::read_dir(&root).is_err() {
+        return Err("root must be a readable directory".into());
+    }
+    if overlaps(&root, data_dir) {
+        return Err("root overlaps the application data directory".into());
+    }
+    if existing_roots.iter().any(|other| overlaps(&root, other)) {
+        return Err("root overlaps another configured root".into());
+    }
+    Ok(root)
+}
+
 fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }

@@ -26,7 +26,7 @@ const ENTRY_COLUMNS: &str = concat!(
     "id,root_id,relative_path,status,title,custom_title,note,",
     "page_count,file_size,file_mtime,cover_key,cover_sha1,eh_gid,eh_token,",
     "eh_domain,eh_title,eh_title_jpn,eh_refreshed_at,eh_error,",
-    "open_count,last_opened_at,created_at,updated_at",
+    "open_count,last_opened_at,created_at,updated_at,eh_bind_source",
 );
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -92,8 +92,11 @@ async fn get_eh_settings(State(s): State<Arc<AppState>>) -> Response {
         Ok(settings) => settings,
         Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "settings unavailable"),
     };
-    Json(json!({"site":settings.site,"credentialsConfigured":settings.cookie_header.is_some()}))
-        .into_response()
+    eh_settings_response(&settings)
+}
+
+fn eh_settings_response(settings: &crate::app::EhSettings) -> Response {
+    Json(json!({"site":settings.site,"credentialsConfigured":settings.cookie_header.is_some(),"sendCookiesToEHentai":settings.send_cookies_to_e_hentai,"language":settings.language,"useThumbnails":settings.use_thumbnails,"searchGid":settings.search_gid,"preferOriginalTitle":settings.prefer_original_title,"additionalTags":settings.additional_tags,"includeExpunged":settings.include_expunged,"interval":settings.interval})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -102,6 +105,14 @@ struct EhSettingsInput {
     site: Option<String>,
     cookie_header: Option<String>,
     clear_credentials: Option<bool>,
+    send_cookies_to_e_hentai: Option<bool>,
+    language: Option<String>,
+    use_thumbnails: Option<bool>,
+    search_gid: Option<bool>,
+    prefer_original_title: Option<bool>,
+    additional_tags: Option<bool>,
+    include_expunged: Option<bool>,
+    interval: Option<u8>,
 }
 
 async fn put_eh_settings(
@@ -122,10 +133,10 @@ async fn put_eh_settings(
         if cookie.is_empty()
             || cookie.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
             || cookie.split(';').any(|part| {
-                let Some((name, _)) = part.trim().split_once('=') else {
+                let Some((name, value)) = part.trim().split_once('=') else {
                     return true;
                 };
-                name.trim().is_empty()
+                name.trim().is_empty() || value.trim().is_empty()
             })
         {
             return err(
@@ -133,6 +144,12 @@ async fn put_eh_settings(
                 "Enter a valid Cookie header using name=value pairs",
             );
         }
+    }
+    if input.interval.is_some_and(|interval| interval > 20) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "interval must be between 0 and 20 seconds",
+        );
     }
     let mut settings = match s.eh_settings.lock() {
         Ok(settings) => settings,
@@ -147,6 +164,18 @@ async fn put_eh_settings(
                 .cookie_header
                 .or_else(|| settings.cookie_header.clone())
         },
+        send_cookies_to_e_hentai: input
+            .send_cookies_to_e_hentai
+            .unwrap_or(settings.send_cookies_to_e_hentai),
+        language: input.language.unwrap_or_else(|| settings.language.clone()),
+        use_thumbnails: input.use_thumbnails.unwrap_or(settings.use_thumbnails),
+        search_gid: input.search_gid.unwrap_or(settings.search_gid),
+        prefer_original_title: input
+            .prefer_original_title
+            .unwrap_or(settings.prefer_original_title),
+        additional_tags: input.additional_tags.unwrap_or(settings.additional_tags),
+        include_expunged: input.include_expunged.unwrap_or(settings.include_expunged),
+        interval: input.interval.unwrap_or(settings.interval),
     };
     if let Err(e) = crate::app::save_eh_settings(&s.data_dir, &next) {
         return err(
@@ -155,8 +184,9 @@ async fn put_eh_settings(
         );
     }
     *settings = next;
-    Json(json!({"site":settings.site,"credentialsConfigured":settings.cookie_header.is_some()}))
-        .into_response()
+    let response = eh_settings_response(&settings);
+    drop(settings);
+    response
 }
 
 #[derive(Deserialize)]
@@ -383,7 +413,15 @@ async fn list_entries(State(s): State<Arc<AppState>>, RawQuery(raw): RawQuery) -
     let order = match sort.as_str() {
         "added" => "created_at DESC,id ASC",
         "title" => {
-            "norm_text(COALESCE(NULLIF(custom_title,''),NULLIF(eh_title_jpn,''),NULLIF(eh_title,''),title)) ASC,id ASC"
+            if s.eh_settings
+                .lock()
+                .map(|settings| settings.prefer_original_title)
+                .unwrap_or(false)
+            {
+                "norm_text(COALESCE(NULLIF(custom_title,''),NULLIF(eh_title_jpn,''),NULLIF(eh_title,''),title)) ASC,id ASC"
+            } else {
+                "norm_text(COALESCE(NULLIF(custom_title,''),NULLIF(eh_title,''),NULLIF(eh_title_jpn,''),title)) ASC,id ASC"
+            }
         }
         "openCount" => "open_count DESC,id ASC",
         "lastOpened" => {
@@ -405,6 +443,16 @@ async fn list_entries(State(s): State<Arc<AppState>>, RawQuery(raw): RawQuery) -
         .collect::<String>()
         .to_lowercase();
     let root = one("rootId").filter(|v| !v.is_empty());
+    let bind_source = one("ehBindSource");
+    if bind_source
+        .as_deref()
+        .is_some_and(|source| !matches!(source, "auto" | "manual"))
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "ehBindSource must be auto or manual",
+        );
+    }
     let mut include = Vec::new();
     let mut exclude = Vec::new();
     for (key, value) in pairs
@@ -430,6 +478,10 @@ async fn list_entries(State(s): State<Arc<AppState>>, RawQuery(raw): RawQuery) -
         values.push(SqlValue::Text(root));
         clauses.push(format!("root_id=?{}", values.len()));
     }
+    if let Some(source) = bind_source {
+        values.push(SqlValue::Text(source));
+        clauses.push(format!("eh_bind_source=?{}", values.len()));
+    }
     if !q.is_empty() {
         values.push(SqlValue::Text(q));
         let n = values.len();
@@ -438,12 +490,12 @@ async fn list_entries(State(s): State<Arc<AppState>>, RawQuery(raw): RawQuery) -
     for tag in include {
         values.push(SqlValue::Text(tag));
         let n = values.len();
-        clauses.push(format!("EXISTS(SELECT 1 FROM entry_tags t WHERE t.entry_id=entries.id AND t.tag=?{n} AND t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=entries.id AND h.tag=t.tag AND h.origin='hidden'))"));
+        clauses.push(format!("EXISTS(SELECT 1 FROM entry_tags t WHERE t.entry_id=entries.id AND norm_text(t.tag)=norm_text(?{n}) AND t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=entries.id AND norm_text(h.tag)=norm_text(t.tag) AND h.origin='hidden'))"));
     }
     for tag in exclude {
         values.push(SqlValue::Text(tag));
         let n = values.len();
-        clauses.push(format!("NOT EXISTS(SELECT 1 FROM entry_tags t WHERE t.entry_id=entries.id AND t.tag=?{n} AND t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=entries.id AND h.tag=t.tag AND h.origin='hidden'))"));
+        clauses.push(format!("NOT EXISTS(SELECT 1 FROM entry_tags t WHERE t.entry_id=entries.id AND norm_text(t.tag)=norm_text(?{n}) AND t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=entries.id AND norm_text(h.tag)=norm_text(t.tag) AND h.origin='hidden'))"));
     }
     let where_sql = clauses.join(" AND ");
     let conn = match s.db.lock() {
@@ -479,6 +531,7 @@ async fn list_entries(State(s): State<Arc<AppState>>, RawQuery(raw): RawQuery) -
         if let Err(e) = attach_tags(&conn, entry) {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
+        apply_eh_title_preference(&s, entry);
     }
     Json(json!({"entries":entries,"total":total,"limit":limit,"offset":offset})).into_response()
 }
@@ -494,7 +547,7 @@ async fn list_tags(State(s): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> R
         Ok(c) => c,
         Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
     };
-    match conn.prepare("SELECT DISTINCT t.tag FROM entry_tags t WHERE t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=t.entry_id AND h.tag=t.tag AND h.origin='hidden') AND instr(norm_text(t.tag),?1)>0 ORDER BY t.tag ASC").and_then(|mut st|st.query_map([q],|r|r.get::<_,String>(0)).and_then(|r|r.collect::<rusqlite::Result<Vec<_>>>())) {
+    match conn.prepare("SELECT DISTINCT t.tag FROM entry_tags t WHERE t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=t.entry_id AND norm_text(h.tag)=norm_text(t.tag) AND h.origin='hidden') AND instr(norm_text(t.tag),?1)>0 ORDER BY t.tag ASC").and_then(|mut st|st.query_map([q],|r|r.get::<_,String>(0)).and_then(|r|r.collect::<rusqlite::Result<Vec<_>>>())) {
         Ok(tags)=>Json(json!({"tags":tags})).into_response(),Err(e)=>err(StatusCode::INTERNAL_SERVER_ERROR,e.to_string())
     }
 }
@@ -510,7 +563,10 @@ async fn get_entry(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> Re
         entry_from_row,
     ) {
         Ok(mut entry) => match attach_tags(&conn, &mut entry) {
-            Ok(()) => Json(entry).into_response(),
+            Ok(()) => {
+                apply_eh_title_preference(&s, &mut entry);
+                Json(entry).into_response()
+            }
             Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         },
         Err(rusqlite::Error::QueryReturnedNoRows) => err(StatusCode::NOT_FOUND, "entry not found"),
@@ -536,7 +592,12 @@ fn attach_tags(conn: &rusqlite::Connection, entry: &mut Entry) -> rusqlite::Resu
         .eh_tags
         .iter()
         .chain(entry.local_tags.iter())
-        .filter(|tag| !entry.hidden_tags.contains(tag))
+        .filter(|tag| {
+            !entry
+                .hidden_tags
+                .iter()
+                .any(|hidden| crate::db::normalize_text(hidden) == crate::db::normalize_text(tag))
+        })
         .cloned()
         .collect();
     entry.tags.sort();
@@ -545,11 +606,41 @@ fn attach_tags(conn: &rusqlite::Connection, entry: &mut Entry) -> rusqlite::Resu
         .custom_title
         .as_deref()
         .filter(|v| !v.is_empty())
-        .or(entry.eh_title_jpn.as_deref().filter(|v| !v.is_empty()))
-        .or(entry.eh_title.as_deref().filter(|v| !v.is_empty()))
         .unwrap_or(&entry.title)
         .to_owned();
     Ok(())
+}
+
+fn apply_eh_title_preference(state: &AppState, entry: &mut Entry) {
+    let prefer_original = state
+        .eh_settings
+        .lock()
+        .map(|settings| settings.prefer_original_title)
+        .unwrap_or(false);
+    entry.eh_display_title = if prefer_original {
+        entry
+            .eh_title_jpn
+            .as_ref()
+            .filter(|title| !title.is_empty())
+            .or(entry.eh_title.as_ref().filter(|title| !title.is_empty()))
+    } else {
+        entry
+            .eh_title
+            .as_ref()
+            .filter(|title| !title.is_empty())
+            .or(entry
+                .eh_title_jpn
+                .as_ref()
+                .filter(|title| !title.is_empty()))
+    }
+    .cloned();
+    if entry.custom_title.as_deref().is_none_or(str::is_empty) {
+        entry.effective_title = entry
+            .eh_display_title
+            .as_deref()
+            .unwrap_or(&entry.title)
+            .to_owned();
+    }
 }
 
 async fn patch_entry(
@@ -678,7 +769,10 @@ async fn patch_entry(
         entry_from_row,
     ) {
         Ok(mut entry) => match attach_tags(&conn, &mut entry) {
-            Ok(()) => Json(entry).into_response(),
+            Ok(()) => {
+                apply_eh_title_preference(&s, &mut entry);
+                Json(entry).into_response()
+            }
             Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         },
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -705,6 +799,8 @@ struct Entry {
     eh_domain: Option<String>,
     eh_title: Option<String>,
     eh_title_jpn: Option<String>,
+    eh_display_title: Option<String>,
+    eh_bind_source: Option<String>,
     eh_refreshed_at: Option<i64>,
     eh_error: Option<String>,
     open_count: i64,
@@ -737,6 +833,8 @@ fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         eh_domain: row.get(14)?,
         eh_title: row.get(15)?,
         eh_title_jpn: row.get(16)?,
+        eh_display_title: None,
+        eh_bind_source: row.get(23)?,
         eh_refreshed_at: row.get(17)?,
         eh_error: row.get(18)?,
         open_count: row.get(19)?,
@@ -832,6 +930,7 @@ struct EhLookupInput {
     query: Option<String>,
     include_expunged: Option<bool>,
     site: Option<String>,
+    auto_bind: Option<bool>,
 }
 
 async fn eh_lookup(
@@ -840,7 +939,7 @@ async fn eh_lookup(
     Json(input): Json<EhLookupInput>,
 ) -> Response {
     let mode = input.mode.as_deref().unwrap_or("title");
-    let (site, cookie) = {
+    let settings_snapshot = {
         let settings = match s.eh_settings.lock() {
             Ok(v) => v,
             Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "settings unavailable"),
@@ -852,34 +951,221 @@ async fn eh_lookup(
                 "site must be e-hentai.org or exhentai.org",
             );
         }
-        if site == "exhentai.org" && settings.cookie_header.is_none() {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "ExHentai credentials are not configured. Configure them in Settings or use e-hentai.org.",
-            );
-        }
-        (site.to_owned(), settings.cookie_header.clone())
+        let mut copy = settings.clone();
+        copy.site = site.to_owned();
+        copy
     };
-    if !matches!(mode, "title" | "cover") {
-        return err(StatusCode::BAD_REQUEST, "mode must be title or cover");
+    let site = settings_snapshot.site.clone();
+    let cookie = settings_snapshot.cookie_header.clone();
+    if !matches!(mode, "title" | "cover" | "auto") {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "mode must be title, cover, or auto",
+        );
     }
-    let (title, cover_sha1) = {
+    let (
+        title,
+        mut cover_sha1,
+        hash_version,
+        cached_size,
+        cached_mtime,
+        artist,
+        root_path,
+        other_roots,
+        relative_path,
+        existing_binding,
+    ) = {
         let conn = match s.db.lock() {
             Ok(c) => c,
             Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
         };
         match conn.query_row(
-            "SELECT title,cover_sha1 FROM entries WHERE id=?1",
+            "SELECT e.title,e.cover_sha1,e.cover_hash_version,e.file_size,e.file_mtime,e.root_id,e.relative_path,e.eh_gid,e.eh_token,e.eh_domain FROM entries e WHERE e.id=?1",
             [&id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<u64>>(3)?, r.get::<_, Option<i64>>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?, r.get::<_, Option<String>>(7)?, r.get::<_, Option<String>>(8)?, r.get::<_, Option<String>>(9)?)),
         ) {
-            Ok(values) => values,
+            Ok((title, hash, hash_version, cached_size, cached_mtime, root_id, relative, gid, token, domain)) => {
+                let artist = conn.query_row("SELECT tag FROM entry_tags WHERE entry_id=?1 AND origin IN ('eh','local') AND lower(tag) LIKE 'artist:%' ORDER BY origin='eh' DESC LIMIT 1", [&id], |r| r.get::<_,String>(0)).optional().ok().flatten();
+                let root_path = match conn.query_row("SELECT server_path FROM roots WHERE id=?1",[&root_id],|r|r.get::<_,String>(0)) { Ok(path) => path, Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR,error.to_string()) };
+                let mut roots_statement = match conn.prepare("SELECT server_path FROM roots WHERE id<>?1") { Ok(statement) => statement, Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR,error.to_string()) };
+                let other_roots = match roots_statement.query_map([&root_id],|r|r.get::<_,String>(0)).and_then(|rows|rows.collect::<rusqlite::Result<Vec<_>>>()) { Ok(paths) => paths.into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>(), Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR,error.to_string()) };
+                let binding = gid.zip(token).zip(domain).map(|((gid,token),domain)| GalleryRef { gid,token,domain });
+                (title, hash, hash_version, cached_size, cached_mtime, artist, root_path, other_roots, relative, binding)
+            },
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 return err(StatusCode::NOT_FOUND, "entry not found");
             }
             Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         }
     };
+    if mode == "auto" && input.auto_bind.unwrap_or(true) {
+        if let Some(gallery) = existing_binding {
+            let result =
+                s.eh.gdata_with_options(
+                    std::slice::from_ref(&gallery),
+                    settings_snapshot.additional_tags,
+                )
+                .await
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| Err("No metadata returned".into()));
+            if let Err(error) = save_eh_result_data(&s, &id, &gallery, result, true) {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, error);
+            }
+            let entry = match entry_value(&s, &id) {
+                Ok(entry) => entry,
+                Err(error) => return entry_value_error_response(error),
+            };
+            return Json(json!({"mode":"auto","entry":entry,"candidates":[],"autoBound":false,"refreshedBinding":true})).into_response();
+        }
+    }
+    if mode == "cover" || (mode == "auto" && settings_snapshot.use_thumbnails) {
+        let data_dir = s.data_dir.clone();
+        cover_sha1 = tokio::task::spawn_blocking(move || {
+            cached_lookup_cover_sha1(
+                &root_path,
+                &relative_path,
+                &data_dir,
+                &other_roots,
+                hash_version,
+                cached_size,
+                cached_mtime,
+                cover_sha1,
+            )
+        })
+        .await
+        .ok()
+        .flatten();
+    }
+    if mode == "auto" {
+        let mut queries: Vec<(&str, String, bool)> = Vec::new();
+        if settings_snapshot.use_thumbnails {
+            if let Some(hash) = cover_sha1 {
+                queries.push(("cover", hash, false));
+            }
+        }
+        if settings_snapshot.search_gid {
+            if let Some(gid) = eh::first_numeric_bracket(&title) {
+                queries.push(("gid", gid, false));
+            }
+        }
+        let mut title_query = format!("\"{title}\"");
+        if let Some(artist) = artist
+            .and_then(|tag| tag.strip_prefix("artist:").map(str::to_owned))
+            .filter(|artist| artist.is_ascii())
+        {
+            title_query.push_str(&format!(" artist:{artist}"));
+        }
+        if !settings_snapshot.language.is_empty() {
+            title_query.push_str(&format!(" language:{}", settings_snapshot.language));
+        }
+        queries.push((
+            "auto-title",
+            title_query,
+            settings_snapshot.include_expunged,
+        ));
+        for (search_mode, query, expunged) in queries {
+            match s
+                .eh
+                .lookup(
+                    &site,
+                    cookie.as_deref(),
+                    search_mode,
+                    &query,
+                    expunged,
+                    settings_snapshot.send_cookies_to_e_hentai,
+                )
+                .await
+            {
+                Ok(candidates) if !candidates.is_empty() => {
+                    if !input.auto_bind.unwrap_or(true) {
+                        let entry = match entry_value(&s, &id) {
+                            Ok(entry) => entry,
+                            Err(error) => return entry_value_error_response(error),
+                        };
+                        return Json(json!({"mode":"auto","matchedBy":search_mode,"query":query,"entry":entry,"candidates":candidates,"autoBound":false})).into_response();
+                    }
+                    let Some(candidate) = candidates.first() else {
+                        unreachable!()
+                    };
+                    let gallery = GalleryRef {
+                        gid: candidate.gid.clone(),
+                        token: candidate.token.clone(),
+                        domain: candidate.domain.clone(),
+                    };
+                    let changed = {
+                        let mut conn = match s.db.lock() {
+                            Ok(conn) => conn,
+                            Err(_) => {
+                                return err(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "database unavailable",
+                                );
+                            }
+                        };
+                        let tx = match conn.transaction() {
+                            Ok(tx) => tx,
+                            Err(error) => {
+                                return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+                            }
+                        };
+                        let changed = match tx.execute("UPDATE entries SET eh_gid=?2,eh_token=?3,eh_domain=?4,eh_bind_source='auto',eh_title=NULL,eh_title_jpn=NULL,eh_refreshed_at=NULL,eh_error=NULL,updated_at=?5 WHERE id=?1 AND eh_gid IS NULL AND eh_bind_source IS NULL",params![id,gallery.gid,gallery.token,gallery.domain,now()]) { Ok(changed) => changed, Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR,error.to_string()) };
+                        if changed > 0 {
+                            if let Err(error) = tx.execute(
+                                "DELETE FROM entry_tags WHERE entry_id=?1 AND origin='eh'",
+                                [&id],
+                            ) {
+                                return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+                            }
+                        }
+                        if let Err(error) = tx.commit() {
+                            return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+                        }
+                        changed
+                    };
+                    if changed == 0 {
+                        let entry = match entry_value(&s, &id) {
+                            Ok(entry) => entry,
+                            Err(error) => return entry_value_error_response(error),
+                        };
+                        return Json(json!({"mode":"auto","matchedBy":search_mode,"query":query,"entry":entry,"candidates":candidates,"autoBound":false,"bindingChanged":true})).into_response();
+                    }
+                    let result =
+                        s.eh.gdata_with_options(
+                            std::slice::from_ref(&gallery),
+                            settings_snapshot.additional_tags,
+                        )
+                        .await
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| Err("No metadata returned".into()));
+                    if let Err(error) = save_eh_result_data(&s, &id, &gallery, result, true) {
+                        return err(StatusCode::INTERNAL_SERVER_ERROR, error);
+                    }
+                    let entry = match entry_value(&s, &id) {
+                        Ok(entry) => entry,
+                        Err(error) => return entry_value_error_response(error),
+                    };
+                    return Json(json!({"mode":"auto","matchedBy":search_mode,"query":query,"entry":entry,"candidates":candidates,"autoBound":true})).into_response();
+                }
+                Ok(_) => {}
+                Err((status, message)) => {
+                    return err(
+                        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                        message,
+                    );
+                }
+            }
+        }
+        let entry = match entry_value(&s, &id) {
+            Ok(entry) => entry,
+            Err(error) => return entry_value_error_response(error),
+        };
+        return Json(
+            json!({"mode":"auto","query":title,"entry":entry,"candidates":[],"autoBound":false}),
+        )
+        .into_response();
+    }
     let query = if mode == "cover" {
         let Some(hash) = cover_sha1 else {
             return err(StatusCode::BAD_REQUEST, "entry has no cover SHA-1");
@@ -899,6 +1185,7 @@ async fn eh_lookup(
             mode,
             &query,
             input.include_expunged.unwrap_or(false),
+            settings_snapshot.send_cookies_to_e_hentai,
         )
         .await
     {
@@ -990,7 +1277,7 @@ async fn eh_bind(
                 Some(&gallery.domain),
             )
         {
-            if let Err(e) = tx.execute("UPDATE entries SET eh_gid=?2,eh_token=?3,eh_domain=?4,eh_title=NULL,eh_title_jpn=NULL,eh_refreshed_at=NULL,eh_error=NULL,updated_at=?5 WHERE id=?1", params![id,gallery.gid,gallery.token,gallery.domain,now()]) { return err(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()); }
+            if let Err(e) = tx.execute("UPDATE entries SET eh_gid=?2,eh_token=?3,eh_domain=?4,eh_title=NULL,eh_title_jpn=NULL,eh_refreshed_at=NULL,eh_error=NULL,eh_bind_source='manual',updated_at=?5 WHERE id=?1", params![id,gallery.gid,gallery.token,gallery.domain,now()]) { return err(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()); }
             if let Err(e) = tx.execute(
                 "DELETE FROM entry_tags WHERE entry_id=?1 AND origin='eh'",
                 [&id],
@@ -998,12 +1285,23 @@ async fn eh_bind(
                 return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
             }
         }
+        if let Err(e) = tx.execute(
+            "UPDATE entries SET eh_bind_source='manual',updated_at=?2 WHERE id=?1",
+            params![id, now()],
+        ) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
         if let Err(e) = tx.commit() {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
     }
+    let eh_options = s
+        .eh_settings
+        .lock()
+        .map(|settings| settings.clone())
+        .unwrap_or_else(|_| crate::app::EhSettings::default());
     let result =
-        s.eh.gdata(std::slice::from_ref(&gallery))
+        s.eh.gdata_with_options(std::slice::from_ref(&gallery), eh_options.additional_tags)
             .await
             .into_iter()
             .next()
@@ -1016,8 +1314,13 @@ async fn eh_refresh(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> R
         Ok(g) => g,
         Err(r) => return r,
     };
+    let eh_options = s
+        .eh_settings
+        .lock()
+        .map(|settings| settings.clone())
+        .unwrap_or_else(|_| crate::app::EhSettings::default());
     let result =
-        s.eh.gdata(std::slice::from_ref(&gallery))
+        s.eh.gdata_with_options(std::slice::from_ref(&gallery), eh_options.additional_tags)
             .await
             .into_iter()
             .next()
@@ -1055,29 +1358,21 @@ async fn eh_refresh_batch(
         }
     };
     let total = galleries.len();
-    let mut results: Vec<Option<Result<eh::Metadata, String>>> =
-        std::iter::repeat_with(|| None).take(total).collect();
-    for domain in ["e-hentai.org", "exhentai.org"] {
-        let indexed: Vec<_> = galleries
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, gallery))| gallery.domain == domain)
-            .collect();
-        let refs: Vec<_> = indexed
-            .iter()
-            .map(|(_, (_, gallery))| (*gallery).clone())
-            .collect();
-        for ((index, _), result) in indexed.into_iter().zip(s.eh.gdata(&refs).await) {
-            results[index] = Some(result);
-        }
-    }
+    let eh_options = s
+        .eh_settings
+        .lock()
+        .map(|settings| settings.clone())
+        .unwrap_or_else(|_| crate::app::EhSettings::default());
     let mut refreshed = 0;
     let mut failed = 0;
     let mut errors = Vec::new();
     for (index, (id, gallery)) in galleries.iter().enumerate() {
-        let result = results[index]
-            .take()
-            .unwrap_or_else(|| Err("No metadata returned".into()));
+        let result =
+            s.eh.gdata_with_options(std::slice::from_ref(gallery), eh_options.additional_tags)
+                .await
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| Err("No metadata returned".into()));
         match save_eh_result_data(&s, id, gallery, result, true) {
             Ok(Some(message)) => {
                 failed += 1;
@@ -1089,15 +1384,60 @@ async fn eh_refresh_batch(
                 errors.push(json!({"entryId":id,"error":message}));
             }
         }
+        wait_after_batch_book(
+            std::time::Duration::from_secs(eh_options.interval as u64),
+            index + 1 < total,
+        )
+        .await;
     }
     Json(json!({"total":total,"refreshed":refreshed,"failed":failed,"errors":errors}))
         .into_response()
+}
+
+async fn wait_after_batch_book(interval: std::time::Duration, has_next: bool) {
+    if has_next && !interval.is_zero() {
+        tokio::time::sleep(interval).await;
+    }
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EhBatchInput {
     entry_ids: Option<Vec<String>>,
+}
+
+fn cached_lookup_cover_sha1(
+    root_path: &str,
+    relative_path: &str,
+    data_dir: &std::path::Path,
+    other_roots: &[std::path::PathBuf],
+    hash_version: i64,
+    cached_size: Option<u64>,
+    cached_mtime: Option<i64>,
+    cached_hash: Option<String>,
+) -> Option<String> {
+    let canonical_root = crate::roots::validate_snapshot(root_path, data_dir, other_roots).ok()?;
+    if canonical_root != std::path::PathBuf::from(root_path) {
+        return None;
+    }
+    let archive_path = std::fs::canonicalize(canonical_root.join(relative_path)).ok()?;
+    crate::scanner::relative_path(&canonical_root, &archive_path).ok()?;
+    let metadata = std::fs::metadata(&archive_path).ok()?;
+    let current_mtime = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    if hash_version == 1
+        && cached_hash.is_some()
+        && cached_size == Some(metadata.len())
+        && cached_mtime == Some(current_mtime)
+    {
+        cached_hash
+    } else {
+        crate::cover::raw_first_sha1(&archive_path).ok()
+    }
 }
 
 fn bound_gallery(s: &AppState, id: &str) -> Result<GalleryRef, Response> {
@@ -1184,21 +1524,44 @@ fn save_eh_result_data(
     }
 }
 
-fn get_entry_response(s: &AppState, id: &str) -> Response {
+enum EntryValueError {
+    NotFound,
+    Internal(String),
+}
+
+fn entry_value(s: &AppState, id: &str) -> Result<Value, EntryValueError> {
     let conn = match s.db.lock() {
         Ok(c) => c,
-        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
+        Err(_) => return Err(EntryValueError::Internal("database unavailable".into())),
     };
     match conn.query_row(
         &format!("SELECT {ENTRY_COLUMNS} FROM entries WHERE id=?1"),
         [id],
         entry_from_row,
     ) {
-        Ok(mut entry) => match attach_tags(&conn, &mut entry) {
-            Ok(()) => Json(entry).into_response(),
-            Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        },
-        Err(e) => err(StatusCode::NOT_FOUND, e.to_string()),
+        Ok(mut entry) => {
+            attach_tags(&conn, &mut entry)
+                .map_err(|error| EntryValueError::Internal(error.to_string()))?;
+            apply_eh_title_preference(s, &mut entry);
+            serde_json::to_value(entry)
+                .map_err(|error| EntryValueError::Internal(error.to_string()))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(EntryValueError::NotFound),
+        Err(error) => Err(EntryValueError::Internal(error.to_string())),
+    }
+}
+
+fn entry_value_error_response(error: EntryValueError) -> Response {
+    match error {
+        EntryValueError::NotFound => err(StatusCode::NOT_FOUND, "entry not found"),
+        EntryValueError::Internal(message) => err(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+fn get_entry_response(s: &AppState, id: &str) -> Response {
+    match entry_value(s, id) {
+        Ok(entry) => Json(entry).into_response(),
+        Err(error) => entry_value_error_response(error),
     }
 }
 async fn get_cover(State(s): State<Arc<AppState>>, Path(key): Path<String>) -> Response {
@@ -1320,6 +1683,10 @@ mod tests {
     }
 
     fn make_archive_with_width(path: &std::path::Path, width: u32) {
+        make_archive_with_pages(path, width, 1);
+    }
+
+    fn make_archive_with_pages(path: &std::path::Path, width: u32, pages: usize) {
         let file = fs::File::create(path).unwrap();
         let mut archive = ZipWriter::new(file);
         let image = image::DynamicImage::ImageRgb8(ImageBuffer::from_pixel(
@@ -1334,10 +1701,12 @@ mod tests {
                 image::ImageFormat::Png,
             )
             .unwrap();
-        archive
-            .start_file("page.png", SimpleFileOptions::default())
-            .unwrap();
-        archive.write_all(&bytes).unwrap();
+        for page in 0..pages {
+            archive
+                .start_file(format!("page-{page:02}.png"), SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(&bytes).unwrap();
+        }
         archive.finish().unwrap();
     }
 
@@ -1373,6 +1742,65 @@ mod tests {
             }
         });
         format!("http://{address}")
+    }
+
+    async fn mock_auto_lookup(
+        gdata_body: String,
+        request_count: usize,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 2048];
+                loop {
+                    let count = stream.read(&mut chunk).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    let Some(header_end) = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|pos| pos + 4)
+                    else {
+                        continue;
+                    };
+                    let headers =
+                        String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length: ")
+                                .and_then(|length| length.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).into_owned();
+                let (content_type, body) = if request.starts_with("POST ") {
+                    ("application/json", gdata_body.clone())
+                } else {
+                    (
+                        "text/html",
+                        "<div class='itg'><a href='https://e-hentai.org/g/9/deadbeef00/'><div class='glink'>Candidate</div></a></div>".to_owned(),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                requests.push(request);
+            }
+            requests
+        });
+        (format!("http://{address}"), server)
     }
 
     async fn post_open(app: Router, body: &str) -> (StatusCode, Value) {
@@ -1423,6 +1851,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_waits_after_each_completed_book_even_when_metadata_fails() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let mock = tokio::spawn(async move {
+            let mut previous_complete = None;
+            let mut next_start_delay = None;
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request_started = std::time::Instant::now();
+                if let Some(completed) = previous_complete {
+                    next_start_delay = Some(request_started.duration_since(completed));
+                }
+                let mut request = Vec::new();
+                let mut chunk = [0; 2048];
+                loop {
+                    let count = stream.read(&mut chunk).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|pos| pos + 4)
+                    {
+                        let header = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let length = header
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("content-length: ")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + length {
+                            break;
+                        }
+                    }
+                }
+                let body = if index == 0 {
+                    r#"{"error":"fictional upstream error"}"#.to_owned()
+                } else {
+                    let raw = String::from_utf8_lossy(&request);
+                    let body_at = raw.find("\r\n\r\n").unwrap() + 4;
+                    let input: Value = serde_json::from_str(&raw[body_at..]).unwrap();
+                    let item = &input["gidlist"][0];
+                    format!(
+                        r#"{{"gmetadata":[{{"gid":{},"token":"{}","title":"Book"}}]}}"#,
+                        item[0],
+                        item[1].as_str().unwrap()
+                    )
+                };
+                if index == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                previous_complete = Some(std::time::Instant::now());
+            }
+            next_start_delay.unwrap()
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::open(temp.path().join("data"), Some("secret".into())).unwrap();
+        state.eh = EhClient::new(&base, &base).unwrap();
+        state.eh_settings.lock().unwrap().interval = 1;
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+                .unwrap();
+            conn.execute("INSERT INTO entries(id,root_id,relative_path,title,eh_gid,eh_token,eh_domain,eh_bind_source,status,created_at,updated_at) VALUES('one','root','one.zip','One','1','aa','e-hentai.org','manual','active',0,0),('two','root','two.zip','Two','2','bb','e-hentai.org','auto','active',0,0)",[]).unwrap();
+        }
+        let (status, result) = api(
+            router(Arc::new(state)),
+            "POST",
+            "/api/eh/refresh",
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["failed"], 1);
+        assert_eq!(result["refreshed"], 1);
+        assert!(mock.await.unwrap() >= std::time::Duration::from_millis(900));
+    }
+
+    #[tokio::test]
+    async fn batch_interval_starts_after_the_delayed_book_finishes() {
+        let response_started = std::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let completed = std::time::Instant::now();
+        assert!(
+            completed.duration_since(response_started) >= std::time::Duration::from_millis(100)
+        );
+        wait_after_batch_book(std::time::Duration::from_millis(90), true).await;
+        let next_book_started = std::time::Instant::now();
+        assert!(
+            next_book_started.duration_since(completed) >= std::time::Duration::from_millis(80)
+        );
+        let completed_last = std::time::Instant::now();
+        wait_after_batch_book(std::time::Duration::from_millis(90), false).await;
+        assert!(
+            std::time::Instant::now().duration_since(completed_last)
+                < std::time::Duration::from_millis(40)
+        );
+    }
+
+    #[tokio::test]
     async fn bind_refresh_and_failed_rebind_keep_personal_overrides_consistent() {
         let temp = tempfile::tempdir().unwrap();
         let api_base = mock_eh(vec![
@@ -1432,8 +1969,7 @@ mod tests {
             r#"{"gmetadata":[{"gid":2,"error":"gallery unavailable"}]}"#.into(),
         ]).await;
         let mut state = AppState::open(temp.path().join("data"), Some("secret".into())).unwrap();
-        state.eh =
-            EhClient::new("https://e-hentai.org", &api_base, std::time::Duration::ZERO).unwrap();
+        state.eh = EhClient::new("https://e-hentai.org", &api_base).unwrap();
         {
             let conn = state.db.lock().unwrap();
             conn.execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
@@ -1504,6 +2040,304 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn automatic_lookup_falls_through_binds_first_result_and_manual_confirmation_changes_source()
+     {
+        use tokio::net::TcpListener;
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("library");
+        let data = temp.path().join("data");
+        std::fs::create_dir_all(&library).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_server = observed.clone();
+        tokio::spawn(async move {
+            for _ in 0..9 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0; 2048];
+                loop {
+                    let count = stream.read(&mut buf).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..count]);
+                    let Some(header_end) = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|pos| pos + 4)
+                    else {
+                        continue;
+                    };
+                    let headers =
+                        String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length: ")
+                                .and_then(|n| n.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+                let request_text = String::from_utf8_lossy(&request).into_owned();
+                observed_server.lock().unwrap().push(request_text.clone());
+                let is_post = request_text.starts_with("POST ");
+                let (content_type, body) = if is_post {
+                    let body_at = request_text.find("\r\n\r\n").unwrap() + 4;
+                    let payload: Value = serde_json::from_str(&request_text[body_at..]).unwrap();
+                    let item = &payload["gidlist"][0];
+                    let gid = item[0].as_u64().unwrap();
+                    let token = item[1].as_str().unwrap();
+                    (
+                        "application/json",
+                        format!(
+                            r#"{{"gmetadata":[{{"gid":{gid},"token":"{token}","title":"English {gid}","title_jpn":"日本語 {gid}","category":"Manga","tags":["artist:Test"]}}]}}"#
+                        ),
+                    )
+                } else if request_text.contains("gid%3A123") {
+                    ("text/html", "<a href='https://e-hentai.org/g/999/unrelated/'>unrelated</a><div class='itg'><a href='https://e-hentai.org/g/123/aa/'><div class='glink'>First actual result</div></a><a href='https://e-hentai.org/g/124/bb/'><div class='glink'>Second result</div></a></div>".into())
+                } else {
+                    ("text/html", "<div class='itg'><a href='https://e-hentai.org/g/456/cc/'><div class='glink'>Title result</div></a></div>".into())
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let mut state = AppState::open(data, Some("secret".into())).unwrap();
+        state.eh = EhClient::new(&base, &base).unwrap();
+        {
+            let mut settings = state.eh_settings.lock().unwrap();
+            settings.use_thumbnails = true;
+            settings.search_gid = true;
+            settings.interval = 0;
+        }
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO roots VALUES('root','root',?1,'[]',0)",
+                [library.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO entries(id,root_id,relative_path,title,created_at,updated_at) VALUES('gid','root','missing.zip','[circle] Work [123]',0,0),('title','root','missing2.zip','Plain title',0,0),('preview','root','missing3.zip','Preview',0,0)",[]).unwrap();
+        }
+        let app = router(Arc::new(state));
+        let (status, gid_match) = api(
+            app.clone(),
+            "POST",
+            "/api/entries/gid/eh-lookup",
+            Some(r#"{"mode":"auto"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(gid_match["matchedBy"], "gid");
+        assert_eq!(gid_match["entry"]["ehGid"], "123");
+        assert_eq!(gid_match["entry"]["ehBindSource"], "auto");
+        assert_eq!(gid_match["candidates"].as_array().unwrap().len(), 2);
+        assert_eq!(gid_match["autoBound"], true);
+
+        let (status, title_match) = api(
+            app.clone(),
+            "POST",
+            "/api/entries/title/eh-lookup",
+            Some(r#"{"mode":"auto"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(title_match["matchedBy"], "auto-title");
+        assert_eq!(title_match["entry"]["ehGid"], "456");
+        assert_eq!(title_match["entry"]["ehBindSource"], "auto");
+
+        let (status, preview) = api(
+            app.clone(),
+            "POST",
+            "/api/entries/preview/eh-lookup",
+            Some(r#"{"mode":"auto","autoBind":false}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(preview["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(preview["autoBound"], false);
+        assert_eq!(preview["entry"]["ehGid"], Value::Null);
+
+        let (status, manual_same) = api(
+            app.clone(),
+            "POST",
+            "/api/entries/gid/eh-bind",
+            Some(r#"{"url":"https://e-hentai.org/g/123/aa/"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(manual_same["ehBindSource"], "manual");
+        let (status, manual_pick) = api(
+            app.clone(),
+            "POST",
+            "/api/entries/preview/eh-bind",
+            Some(r#"{"url":"https://e-hentai.org/g/456/cc/"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(manual_pick["ehBindSource"], "manual");
+
+        let (status, autos) = api(app.clone(), "GET", "/api/entries?ehBindSource=auto", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(autos["total"], 1);
+        assert_eq!(autos["entries"][0]["id"], "title");
+        let (status, manuals) = api(app, "GET", "/api/entries?ehBindSource=manual", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(manuals["total"], 2);
+        let requests = observed.lock().unwrap();
+        assert!(requests.iter().any(|request| request.contains("gid%3A123")));
+        assert!(
+            requests.iter().all(|request| !request.contains("f_shash")),
+            "unavailable covers must fall through to later searches"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST "))
+                .count(),
+            4
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_bind_rolls_back_if_old_eh_tags_cannot_be_deleted() {
+        let (base, mock) = mock_auto_lookup(r#"{"gmetadata":[]}"#.into(), 1).await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::open(temp.path().join("data"), Some("secret".into())).unwrap();
+        state.eh = EhClient::new(&base, &base).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+                .unwrap();
+            conn.execute("INSERT INTO entries(id,root_id,relative_path,title,created_at,updated_at) VALUES('entry','root','book.zip','Book',0,0)",[]).unwrap();
+            conn.execute(
+                "INSERT INTO entry_tags VALUES('entry','artist:old','eh')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch("CREATE TRIGGER refuse_eh_tag_delete BEFORE DELETE ON entry_tags WHEN OLD.entry_id='entry' AND OLD.origin='eh' BEGIN SELECT RAISE(ABORT,'tag delete blocked'); END;").unwrap();
+        }
+        let state = Arc::new(state);
+
+        let (status, _) = api(
+            router(state.clone()),
+            "POST",
+            "/api/entries/entry/eh-lookup",
+            Some(r#"{"mode":"auto"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let request = mock.await.unwrap();
+        assert_eq!(request.len(), 1);
+        assert!(request[0].starts_with("GET "));
+        let conn = state.db.lock().unwrap();
+        let (gid, source, old_tag): (Option<String>, Option<String>, String) = conn
+            .query_row(
+                "SELECT e.eh_gid,e.eh_bind_source,t.tag FROM entries e JOIN entry_tags t ON t.entry_id=e.id WHERE e.id='entry'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(gid, None);
+        assert_eq!(source, None);
+        assert_eq!(old_tag, "artist:old");
+    }
+
+    #[tokio::test]
+    async fn automatic_bound_refresh_reports_metadata_write_failure() {
+        let metadata = r#"{"gmetadata":[{"gid":9,"token":"deadbeef00","title":"New title","title_jpn":"新しい","tags":[]}] }"#;
+        let (base, mock) = mock_auto_lookup(metadata.into(), 1).await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::open(temp.path().join("data"), Some("secret".into())).unwrap();
+        state.eh = EhClient::new(&base, &base).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+                .unwrap();
+            conn.execute("INSERT INTO entries(id,root_id,relative_path,title,eh_gid,eh_token,eh_domain,eh_bind_source,eh_title,eh_title_jpn,created_at,updated_at) VALUES('entry','root','book.zip','Book','9','deadbeef00','e-hentai.org','manual','Old title','旧',0,0)",[]).unwrap();
+            conn.execute(
+                "INSERT INTO entry_tags VALUES('entry','artist:old','eh')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch("CREATE TRIGGER refuse_eh_title_update BEFORE UPDATE OF eh_title ON entries WHEN OLD.id='entry' BEGIN SELECT RAISE(ABORT,'metadata write blocked'); END;").unwrap();
+        }
+        let state = Arc::new(state);
+
+        let (status, _) = api(
+            router(state.clone()),
+            "POST",
+            "/api/entries/entry/eh-lookup",
+            Some(r#"{"mode":"auto"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let requests = mock.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST "));
+        assert!(requests[0].contains(r#""gidlist":[[9,"deadbeef00"]]"#));
+        let conn = state.db.lock().unwrap();
+        let (title, title_jpn, tag): (Option<String>, Option<String>, String) = conn
+            .query_row(
+                "SELECT e.eh_title,e.eh_title_jpn,t.tag FROM entries e JOIN entry_tags t ON t.entry_id=e.id WHERE e.id='entry'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(title.as_deref(), Some("Old title"));
+        assert_eq!(title_jpn.as_deref(), Some("旧"));
+        assert_eq!(tag, "artist:old");
+    }
+
+    #[tokio::test]
+    async fn automatic_bind_keeps_selected_gallery_when_gdata_fails() {
+        let body = r#"{"gmetadata":[{"gid":9,"error":"fixture metadata failure"}]}"#;
+        let (base, mock) = mock_auto_lookup(body.into(), 2).await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::open(temp.path().join("data"), Some("secret".into())).unwrap();
+        state.eh = EhClient::new(&base, &base).unwrap();
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+            .unwrap();
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO entries(id,root_id,relative_path,title,created_at,updated_at) VALUES('entry','root','book.zip','Book',0,0)",[])
+            .unwrap();
+        let state = Arc::new(state);
+
+        let (status, result) = api(
+            router(state.clone()),
+            "POST",
+            "/api/entries/entry/eh-lookup",
+            Some(r#"{"mode":"auto"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["autoBound"], true);
+        assert_eq!(result["entry"]["ehGid"], "9");
+        assert_eq!(result["entry"]["ehBindSource"], "auto");
+        assert_eq!(result["entry"]["ehError"], "fixture metadata failure");
+        let requests = mock.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET "));
+        assert!(requests[1].starts_with("POST "));
+        assert!(requests[1].contains(r#""gidlist":[[9,"deadbeef00"]]"#));
+    }
+
+    #[tokio::test]
     async fn api_requires_the_persisted_bearer_token() {
         let temp = tempfile::tempdir().unwrap();
         let state =
@@ -1534,6 +2368,39 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    #[test]
+    fn entry_response_distinguishes_missing_rows_from_tag_database_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path().join("data"), Some("secret".into())).unwrap();
+        let missing = get_entry_response(&state, "missing");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+            .unwrap();
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO entries(id,root_id,relative_path,title,created_at,updated_at) VALUES('entry','root','book.zip','Book',0,0)",
+                [],
+            )
+            .unwrap();
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE entry_tags")
+            .unwrap();
+
+        let tag_error = get_entry_response(&state, "entry");
+        assert_eq!(tag_error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     #[tokio::test]
     async fn eh_settings_are_write_only_persisted_separately_and_clearable() {
         let temp = tempfile::tempdir().unwrap();
@@ -1544,7 +2411,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             initial,
-            json!({"site":"e-hentai.org","credentialsConfigured":false})
+            json!({"site":"e-hentai.org","credentialsConfigured":false,"sendCookiesToEHentai":false,"language":"","useThumbnails":false,"searchGid":false,"preferOriginalTitle":false,"additionalTags":false,"includeExpunged":false,"interval":4})
         );
 
         let (status, saved) = api(app.clone(), "PUT", "/api/settings/eh", Some(
@@ -1553,14 +2420,14 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             saved,
-            json!({"site":"exhentai.org","credentialsConfigured":true})
+            json!({"site":"exhentai.org","credentialsConfigured":true,"sendCookiesToEHentai":false,"language":"","useThumbnails":false,"searchGid":false,"preferOriginalTitle":false,"additionalTags":false,"includeExpunged":false,"interval":4})
         );
         assert!(!saved.to_string().contains("synthetic-test-value"));
         let (status, readback) = api(app.clone(), "GET", "/api/settings/eh", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             readback,
-            json!({"site":"exhentai.org","credentialsConfigured":true})
+            json!({"site":"exhentai.org","credentialsConfigured":true,"sendCookiesToEHentai":false,"language":"","useThumbnails":false,"searchGid":false,"preferOriginalTitle":false,"additionalTags":false,"includeExpunged":false,"interval":4})
         );
         let settings_file = std::fs::read_to_string(data_dir.join("eh-settings.json")).unwrap();
         assert!(settings_file.contains("synthetic-test-value"));
@@ -1593,7 +2460,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             kept,
-            json!({"site":"e-hentai.org","credentialsConfigured":true})
+            json!({"site":"e-hentai.org","credentialsConfigured":true,"sendCookiesToEHentai":false,"language":"","useThumbnails":false,"searchGid":false,"preferOriginalTitle":false,"additionalTags":false,"includeExpunged":false,"interval":4})
         );
         let (status, invalid) = api(
             app.clone(),
@@ -1614,22 +2481,29 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             cleared,
-            json!({"site":"e-hentai.org","credentialsConfigured":false})
+            json!({"site":"e-hentai.org","credentialsConfigured":false,"sendCookiesToEHentai":false,"language":"","useThumbnails":false,"searchGid":false,"preferOriginalTitle":false,"additionalTags":false,"includeExpunged":false,"interval":4})
         );
-        let (status, missing) = api(
+        let (status, options) = api(app.clone(), "PUT", "/api/settings/eh", Some(r#"{"sendCookiesToEHentai":true,"language":"English","useThumbnails":true,"searchGid":true,"preferOriginalTitle":true,"additionalTags":true,"includeExpunged":true,"interval":0}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(options["sendCookiesToEHentai"], true);
+        assert_eq!(options["interval"], 0);
+        assert_eq!(options["preferOriginalTitle"], true);
+        let (status, _) = api(
+            app.clone(),
+            "PUT",
+            "/api/settings/eh",
+            Some(r#"{"interval":21}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _missing) = api(
             app,
             "POST",
             "/api/entries/missing/eh-lookup",
             Some(r#"{"site":"exhentai.org","mode":"title","query":"fictional title"}"#),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(
-            missing["error"]
-                .as_str()
-                .unwrap()
-                .contains("credentials are not configured")
-        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1759,6 +2633,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_cached_cover_lookup_uses_transient_hash_until_rescan_commits_scan_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let root = temp.path().join("library");
+        fs::create_dir(&root).unwrap();
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        let source = root.join("book.zip");
+        make_archive_with_pages(&source, 2, 1);
+        let mut state = AppState::open(data, Some("secret".into())).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = requests.clone();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 2048];
+                loop {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                observed
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&request).into_owned());
+                let body = "<html><div class='nohits'>No hits found</div></html>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        state.eh = EhClient::new(&base, &base).unwrap();
+        state.eh_settings.lock().unwrap().use_thumbnails = true;
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO roots VALUES('root','Library',?1,'[]',1)",
+                [canonical_root.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        let state = Arc::new(state);
+        let scan = crate::scanner::start(state.clone(), "root".into()).unwrap();
+        wait_for_scan(&state, &scan.id).await;
+        let (entry_id, cached): (String, (i64, u64, i64, String, i64)) = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id,page_count,file_size,file_mtime,cover_sha1,cover_hash_version FROM entries",
+                [],
+                |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))),
+            )
+            .unwrap();
+
+        make_archive_with_pages(&source, 16, 2);
+        let new_hash = crate::cover::raw_first_sha1(&source).unwrap();
+        let new_size = fs::metadata(&source).unwrap().len();
+        let (status, lookup) = api(
+            router(state.clone()),
+            "POST",
+            &format!("/api/entries/{entry_id}/eh-lookup"),
+            Some(r#"{"mode":"auto"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(lookup["candidates"], json!([]));
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests[0].contains(&format!("f_shash={new_hash}")),
+            "first lookup request did not use current raw hash {new_hash}: {:?}",
+            *requests
+        );
+        assert!(requests[1].contains("f_search=%22book%22"));
+        drop(requests);
+        let unchanged = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT page_count,file_size,file_mtime,cover_sha1,cover_hash_version FROM entries WHERE id=?1",
+                [&entry_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(unchanged, cached);
+
+        let rescan = crate::scanner::start(state.clone(), "root".into()).unwrap();
+        wait_for_scan(&state, &rescan.id).await;
+        let refreshed = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT page_count,file_size,cover_sha1,cover_hash_version FROM entries WHERE id=?1",
+                [&entry_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?)),
+            )
+            .unwrap();
+        assert_eq!(refreshed, (2, new_size, new_hash, 1));
+    }
+
+    #[tokio::test]
     async fn open_accepts_both_field_spellings_and_keeps_latest_timestamp() {
         let temp = tempfile::tempdir().unwrap();
         let state =
@@ -1882,7 +2869,7 @@ mod tests {
             conn.execute("INSERT INTO entries(id,root_id,relative_path,title,eh_title,eh_title_jpn,open_count,last_opened_at,created_at,updated_at) VALUES(?1,'root',?2,?3,?4,?5,?6,?7,?8,?8)", params!["a", "parent/ＡＢＣ.zip", "stored", "猫 EN", "猫の本", 4, 10, 1]).unwrap();
             conn.execute("INSERT INTO entries(id,root_id,relative_path,title,eh_title,eh_title_jpn,open_count,created_at,updated_at) VALUES(?1,'root',?2,?3,'English','',?4,?5,?5)", params!["b", "other/同人作品.zip", "同人作品", 4, 1]).unwrap();
             conn.execute("INSERT INTO entries(id,root_id,relative_path,title,open_count,last_opened_at,created_at,updated_at) VALUES(?1,'root',?2,?3,?4,?5,?6,?6)", params!["c", "artist/under_%'\".zip", "ｶﾞ作品", 9, 20, 3]).unwrap();
-            conn.execute("INSERT INTO entry_tags VALUES('a','artist:alice','eh'),('a','language:japanese','local'),('a','female:sole female','eh'),('b','artist:alice','eh')", []).unwrap();
+            conn.execute("INSERT INTO entry_tags VALUES('a','artist:alice','eh'),('a','language:japanese','local'),('a','female:sole female','eh'),('b','artist:alice','eh'),('b','uploader:MixedCase','eh')", []).unwrap();
             conn.execute(
                 "INSERT INTO entry_tags VALUES('a','female:sole female','hidden')",
                 [],
@@ -1921,6 +2908,16 @@ mod tests {
             value["entries"][0]["tags"],
             json!(["artist:alice", "language:japanese"])
         );
+        let (status, mixed_case_tag) = api(
+            app.clone(),
+            "GET",
+            "/api/entries?includeTags=uploader%3Amixedcase",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(mixed_case_tag["total"], 1);
+        assert_eq!(mixed_case_tag["entries"][0]["id"], "b");
         let (status, value) = api(
             app.clone(),
             "GET",
@@ -1932,7 +2929,10 @@ mod tests {
         assert_eq!(value["total"], 0);
         let (status, value) = api(app.clone(), "GET", "/api/tags", None).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["tags"], json!(["artist:alice", "language:japanese"]));
+        assert_eq!(
+            value["tags"],
+            json!(["artist:alice", "language:japanese", "uploader:MixedCase"])
+        );
         let (status, detail) = api(app.clone(), "GET", "/api/entries/b", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(detail["effectiveTitle"], "English");
@@ -2018,6 +3018,15 @@ mod tests {
         assert_eq!(first_desktop["note"], "Desktop A note");
         assert_eq!(second_desktop["note"], "Desktop A note");
         assert_eq!(second_desktop["customTitle"], "Desktop B title");
+        let (status, preference) = api(
+            app.clone(),
+            "PUT",
+            "/api/settings/eh",
+            Some(r#"{"preferOriginalTitle":true}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(preference["preferOriginalTitle"], true);
         let (status, value) = api(
             app.clone(),
             "PATCH",
@@ -2028,6 +3037,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["customTitle"], Value::Null);
         assert_eq!(value["effectiveTitle"], "猫の本");
+        assert_eq!(value["ehTitle"], "猫 EN");
+        assert_eq!(value["ehDisplayTitle"], "猫の本");
         assert_eq!(value["tags"], json!(["artist:alice", "female:sole female"]));
         let (status, _) = api(
             app.clone(),

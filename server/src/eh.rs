@@ -1,7 +1,6 @@
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GalleryRef {
@@ -34,24 +33,17 @@ pub struct EhClient {
     site_base: String,
     exhentai_base: String,
     api_base: String,
-    interval: Duration,
-    last_request: std::sync::Arc<Mutex<Option<Instant>>>,
 }
 
 impl EhClient {
-    pub fn new(
-        site_base: &str,
-        api_base: &str,
-        interval: Duration,
-    ) -> Result<Self, reqwest::Error> {
-        Self::with_bases(site_base, "https://exhentai.org", api_base, interval)
+    pub fn new(site_base: &str, api_base: &str) -> Result<Self, reqwest::Error> {
+        Self::with_bases(site_base, "https://exhentai.org", api_base)
     }
 
     fn with_bases(
         site_base: &str,
         exhentai_base: &str,
         api_base: &str,
-        interval: Duration,
     ) -> Result<Self, reqwest::Error> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -71,17 +63,7 @@ impl EhClient {
             site_base: site_base.trim_end_matches('/').to_owned(),
             exhentai_base: exhentai_base.trim_end_matches('/').to_owned(),
             api_base: api_base.to_owned(),
-            interval,
-            last_request: Default::default(),
         })
-    }
-
-    async fn pace(&self) {
-        let mut last = self.last_request.lock().await;
-        if let Some(previous) = *last {
-            tokio::time::sleep(self.interval.saturating_sub(previous.elapsed())).await;
-        }
-        *last = Some(Instant::now());
     }
 
     pub async fn lookup(
@@ -91,6 +73,7 @@ impl EhClient {
         mode: &str,
         query: &str,
         include_expunged: bool,
+        send_cookies_to_e_hentai: bool,
     ) -> Result<Vec<Candidate>, (u16, String)> {
         let site_base = if site == "exhentai.org" {
             self.exhentai_base.as_str()
@@ -104,13 +87,20 @@ impl EhClient {
                 ("fs_similar", "on".into()),
                 ("fs_covers", "on".into()),
             ]
+        } else if mode == "gid" {
+            vec![("f_search", format!("gid:{query}"))]
         } else {
+            let search = if mode == "auto-title" {
+                query.to_owned()
+            } else {
+                format!("\"{query}\"")
+            };
             vec![
                 ("advsearch", "1".into()),
                 ("f_sfu", "on".into()),
                 ("f_sft", "on".into()),
                 ("f_sfl", "on".into()),
-                ("f_search", format!("\"{query}\"")),
+                ("f_search", search),
             ]
         };
         url.push_str(
@@ -121,14 +111,19 @@ impl EhClient {
         if include_expunged {
             url.push_str("&f_sh=on");
         }
-        self.pace().await;
         let client = if site == "exhentai.org" {
             &self.credentialed_http
         } else {
             &self.http
         };
+        let cookie = lookup_cookie(site, cookie_header, send_cookies_to_e_hentai);
+        let client = if cookie.is_some() {
+            &self.credentialed_http
+        } else {
+            client
+        };
         let mut request = client.get(url);
-        if let Some(cookie) = lookup_cookie(site, cookie_header) {
+        if let Some(cookie) = cookie {
             request = request.header(reqwest::header::COOKIE, cookie);
         }
         let response = request
@@ -156,30 +151,56 @@ impl EhClient {
             .await
             .map_err(|e| (502, format!("Could not read E-Hentai response: {e}")))?;
         let lower = html.to_ascii_lowercase();
-        if [
-            "rate limit",
-            "temporarily banned",
-            "ip address has been banned",
-            "too many requests",
-        ]
-        .iter()
-        .any(|s| lower.contains(s))
-        {
+        if lower.contains("your ip address has been") {
             return Err((
                 429,
-                "E-Hentai is rate limiting requests; try again later".into(),
+                "E-Hentai temporarily banned this IP for excessive requests".into(),
             ));
         }
         if html.trim().is_empty() {
             return Err((502, "E-Hentai returned an empty response".into()));
         }
-        parse_candidates(&html, site_base)
+        let rate_limited = ["rate limit", "too many requests"]
+            .iter()
+            .any(|marker| lower.contains(marker));
+        let candidates = match parse_candidates(&html, site_base) {
+            Ok(candidates) => candidates,
+            Err(_) if rate_limited => {
+                return Err((
+                    429,
+                    "E-Hentai is rate limiting requests; try again later".into(),
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        if candidates.is_empty() && rate_limited {
+            return Err((
+                429,
+                "E-Hentai is rate limiting requests; try again later".into(),
+            ));
+        }
+        if should_wait_after_matched_warning(&lower, !candidates.is_empty()) {
+            let jitter = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+                % 36;
+            tokio::time::sleep(Duration::from_secs(15 + jitter as u64)).await;
+        }
+        Ok(candidates)
     }
 
     pub async fn gdata(&self, galleries: &[GalleryRef]) -> Vec<Result<Metadata, String>> {
+        self.gdata_with_options(galleries, false).await
+    }
+
+    pub async fn gdata_with_options(
+        &self,
+        galleries: &[GalleryRef],
+        additional_tags: bool,
+    ) -> Vec<Result<Metadata, String>> {
         let mut output = Vec::with_capacity(galleries.len());
-        for chunk in galleries.chunks(25) {
-            self.pace().await;
+        for chunk in galleries.chunks(1) {
             let gidlist: Vec<(u64, &str)> = chunk
                 .iter()
                 .filter_map(|g| g.gid.parse::<u64>().ok().map(|id| (id, g.token.as_str())))
@@ -264,7 +285,7 @@ impl EhClient {
                 });
                 output.push(
                     result
-                        .map(parse_metadata)
+                        .map(|record| parse_metadata(record, additional_tags))
                         .unwrap_or_else(|| Err("E-Hentai omitted this gallery".into())),
                 );
             }
@@ -273,21 +294,47 @@ impl EhClient {
     }
 }
 
-fn lookup_cookie(site: &str, cookie_header: Option<&str>) -> Option<String> {
-    if site != "exhentai.org" {
+fn lookup_cookie(
+    site: &str,
+    cookie_header: Option<&str>,
+    send_cookies_to_e_hentai: bool,
+) -> Option<String> {
+    let cookie = cookie_header?;
+    if site == "exhentai.org" {
+        let has_nw = cookie.split(';').any(|part| {
+            part.trim()
+                .split_once('=')
+                .is_some_and(|(name, _)| name.trim() == "nw")
+        });
+        return Some(if has_nw {
+            cookie.to_owned()
+        } else {
+            format!("{cookie}; nw=1")
+        });
+    }
+    if site != "e-hentai.org" || !send_cookies_to_e_hentai {
         return None;
     }
-    let cookie = cookie_header?;
-    let has_nw = cookie.split(';').any(|part| {
-        part.trim()
-            .split_once('=')
-            .is_some_and(|(name, _)| name.trim() == "nw")
-    });
-    Some(if has_nw {
-        cookie.to_owned()
-    } else {
-        format!("{cookie}; nw=1")
-    })
+    let mut fields = Vec::new();
+    for part in cookie.split(';') {
+        let Some((name, value)) = part.trim().split_once('=') else {
+            continue;
+        };
+        if matches!(
+            name.trim(),
+            "ipb_member_id" | "ipb_pass_hash" | "star" | "igneous" | "nw"
+        ) {
+            fields.push(format!("{}={}", name.trim(), value.trim()));
+        }
+    }
+    if !fields.iter().any(|field| field.starts_with("nw=")) {
+        fields.push("nw=1".into());
+    }
+    (!fields.is_empty()).then(|| fields.join("; "))
+}
+
+fn should_wait_after_matched_warning(lower: &str, has_candidates: bool) -> bool {
+    lower.contains("you are opening") && has_candidates
 }
 
 pub fn parse_gallery_url(raw: &str) -> Result<GalleryRef, String> {
@@ -341,11 +388,18 @@ pub fn parse_gallery_url(raw: &str) -> Result<GalleryRef, String> {
 fn parse_candidates(html: &str, site_base: &str) -> Result<Vec<Candidate>, (u16, String)> {
     use scraper::{Html, Selector};
     let doc = Html::parse_document(html);
-    let links = Selector::parse("a[href]").unwrap();
-    let title_selector = Selector::parse(".glink").unwrap();
+    let glinks = Selector::parse(".glink").unwrap();
     let mut candidates = Vec::new();
-    for link in doc.select(&links) {
-        let Some(href) = link.value().attr("href") else {
+    for glink in doc.select(&glinks) {
+        let link = glink
+            .parent()
+            .and_then(scraper::ElementRef::wrap)
+            .unwrap_or(glink);
+        let Some(href) = link
+            .value()
+            .attr("href")
+            .or_else(|| glink.value().attr("href"))
+        else {
             continue;
         };
         let absolute =
@@ -362,13 +416,7 @@ fn parse_candidates(html: &str, site_base: &str) -> Result<Vec<Candidate>, (u16,
         {
             continue;
         }
-        let title = link
-            .select(&title_selector)
-            .next()
-            .map(|n| n.text().collect::<String>().trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .or_else(|| link.value().attr("title").map(str::to_owned))
-            .unwrap_or_else(|| link.text().collect::<String>().trim().to_owned());
+        let title = glink.text().collect::<String>().trim().to_owned();
         if title.is_empty() {
             continue;
         }
@@ -409,11 +457,23 @@ pub(crate) fn normalize_gid(raw: &str) -> Option<String> {
     (id > 0).then(|| id.to_string())
 }
 
-fn parse_metadata(record: &Value) -> Result<Metadata, String> {
+pub(crate) fn first_numeric_bracket(title: &str) -> Option<String> {
+    let mut rest = title;
+    while let Some((_, after_open)) = rest.split_once('[') {
+        let (candidate, after_close) = after_open.split_once(']')?;
+        if !candidate.is_empty() && candidate.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Some(candidate.to_owned());
+        }
+        rest = after_close;
+    }
+    None
+}
+
+fn parse_metadata(record: &Value, additional_tags: bool) -> Result<Metadata, String> {
     if let Some(error) = record.get("error").and_then(Value::as_str) {
         return Err(error.to_owned());
     }
-    let title = record
+    let title_en = record
         .get("title")
         .and_then(Value::as_str)
         .map(html_escape::decode_html_entities)
@@ -423,6 +483,7 @@ fn parse_metadata(record: &Value) -> Result<Metadata, String> {
         .and_then(Value::as_str)
         .map(html_escape::decode_html_entities)
         .map(|s| s.into_owned());
+    let title = title_en;
     let mut tags: Vec<String> = record
         .get("tags")
         .and_then(Value::as_array)
@@ -433,6 +494,23 @@ fn parse_metadata(record: &Value) -> Result<Metadata, String> {
         .collect();
     if let Some(category) = record.get("category").and_then(Value::as_str) {
         tags.push(format!("category:{}", category.to_ascii_lowercase()));
+    }
+    if additional_tags {
+        if let Some(uploader) = record
+            .get("uploader")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+        {
+            tags.push(format!("uploader:{uploader}"));
+        }
+        if let Some(posted) = record.get("posted").and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| value.as_i64().map(|n| n.to_string()))
+        }) {
+            tags.push(format!("timestamp:{posted}"));
+        }
     }
     tags.sort();
     tags.dedup();
@@ -452,6 +530,10 @@ mod tests {
     };
 
     async fn mock_response(status: &str, content_type: &str, body: &str) -> String {
+        mock_responses(status, content_type, body, 1).await
+    }
+
+    async fn mock_responses(status: &str, content_type: &str, body: &str, count: usize) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let response = format!(
@@ -459,10 +541,12 @@ mod tests {
             body.len()
         );
         tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0; 8192];
-            let _ = stream.read(&mut request).await.unwrap();
-            stream.write_all(response.as_bytes()).await.unwrap();
+            for _ in 0..count {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 8192];
+                let _ = stream.read(&mut request).await.unwrap();
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
         });
         format!("http://{address}")
     }
@@ -549,7 +633,7 @@ mod tests {
     }
     #[test]
     fn parses_multiple_distinct_candidates_and_metadata() {
-        let html = r#"<html><div class='itg'><a href='https://e-hentai.org/g/1/a1/'><div class='glink'>One &amp; Only</div></a><a href='https://e-hentai.org/g/2/b2/' title='Second'></a><a href='https://e-hentai.org/g/1/a1/'>duplicate</a></div></html>"#;
+        let html = r#"<html><a href='https://e-hentai.org/g/99/unrelated/'>unrelated</a><div class='itg'><a href='https://e-hentai.org/g/1/a1/'><div class='glink'>One &amp; Only</div></a><a href='https://e-hentai.org/g/2/b2/'><div class='glink'>Second</div></a><a href='https://e-hentai.org/g/1/a1/'><div class='glink'>duplicate</div></a></div></html>"#;
         let candidates = parse_candidates(html, "https://e-hentai.org").unwrap();
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].title, "One & Only");
@@ -569,19 +653,24 @@ mod tests {
             .unwrap()
             .is_empty()
         );
-        let metadata = parse_metadata(&json!({"title":"A &amp; B", "title_jpn":"猫&#039;本", "category":"Non-H", "tags":["artist:Foo"]})).unwrap();
+        let metadata = parse_metadata(&json!({"title":"A &amp; B", "title_jpn":"猫&#039;本", "category":"Non-H", "tags":["artist:Foo"]}), false).unwrap();
         assert_eq!(metadata.title.as_deref(), Some("A & B"));
         assert_eq!(metadata.title_jpn.as_deref(), Some("猫'本"));
         assert!(metadata.tags.contains(&"category:non-h".into()));
         assert!(metadata.tags.contains(&"artist:foo".into()));
+        let extra = parse_metadata(&json!({"title":"English","title_jpn":"日本語","uploader":"UploaderCase","posted":"1615623691","tags":[]}),true).unwrap();
+        assert_eq!(extra.title.as_deref(), Some("English"));
+        assert_eq!(extra.title_jpn.as_deref(), Some("日本語"));
+        assert!(extra.tags.contains(&"uploader:UploaderCase".into()));
+        assert!(extra.tags.contains(&"timestamp:1615623691".into()));
     }
 
     #[tokio::test]
     async fn lookup_returns_all_candidates_and_distinguishes_empty_and_upstream_errors() {
-        let base = mock_response("200 OK", "text/html", "<div class='itg'><a href='https://e-hentai.org/g/10/aa/'><div class='glink'>First</div></a><a href='https://e-hentai.org/g/11/bb/' title='Second'></a></div>").await;
-        let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
+        let base = mock_response("200 OK", "text/html", "<div class='itg'><a href='https://e-hentai.org/g/10/aa/'><div class='glink'>First</div></a><a href='https://e-hentai.org/g/11/bb/'><div class='glink'>Second</div></a></div>").await;
+        let client = EhClient::new(&base, &base).unwrap();
         let candidates = client
-            .lookup("e-hentai.org", None, "title", "sample", false)
+            .lookup("e-hentai.org", None, "title", "sample", false, false)
             .await
             .unwrap();
         assert_eq!(
@@ -598,20 +687,20 @@ mod tests {
             "<div class='itg'>No hits found</div>",
         )
         .await;
-        let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
+        let client = EhClient::new(&base, &base).unwrap();
         assert!(
             client
-                .lookup("e-hentai.org", None, "title", "absent", false)
+                .lookup("e-hentai.org", None, "title", "absent", false, false)
                 .await
                 .unwrap()
                 .is_empty()
         );
 
         let base = mock_response("200 OK", "application/json", "{}").await;
-        let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
+        let client = EhClient::new(&base, &base).unwrap();
         assert_eq!(
             client
-                .lookup("e-hentai.org", None, "title", "sample", false)
+                .lookup("e-hentai.org", None, "title", "sample", false, false)
                 .await
                 .unwrap_err()
                 .0,
@@ -619,22 +708,44 @@ mod tests {
         );
 
         let base = mock_response("429 Too Many Requests", "text/html", "wait").await;
-        let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
+        let client = EhClient::new(&base, &base).unwrap();
         assert_eq!(
             client
-                .lookup("e-hentai.org", None, "title", "sample", false)
+                .lookup("e-hentai.org", None, "title", "sample", false, false)
                 .await
                 .unwrap_err()
                 .0,
             429
         );
+
+        let base = mock_response("200 OK", "text/html", "<p>Too many requests</p>").await;
+        let client = EhClient::new(&base, &base).unwrap();
+        let error = client
+            .lookup("e-hentai.org", None, "title", "sample", false, false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, 429);
+
+        let base = mock_response(
+            "200 OK",
+            "text/html",
+            "Your IP address has been temporarily banned",
+        )
+        .await;
+        let client = EhClient::new(&base, &base).unwrap();
+        let error = client
+            .lookup("e-hentai.org", None, "title", "sample", false, false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, 429);
+        assert!(error.1.contains("banned"));
     }
 
     #[tokio::test]
     async fn gdata_maps_success_and_per_gallery_errors_to_the_requested_id() {
         let body = r#"{"gmetadata":[{"gid":1,"token":"aa","title":"A &amp; B","title_jpn":"猫&#039;本","category":"Non-H","tags":["artist:Foo"]},{"gid":2,"error":"gallery unavailable"}]}"#;
-        let base = mock_response("200 OK", "application/json", body).await;
-        let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
+        let base = mock_responses("200 OK", "application/json", body, 2).await;
+        let client = EhClient::new(&base, &base).unwrap();
         let results = client
             .gdata(&[
                 GalleryRef {
@@ -659,8 +770,8 @@ mod tests {
     #[tokio::test]
     async fn gdata_matches_shared_gallery_ids_by_token_and_keeps_tokenless_errors() {
         let body = r#"{"gmetadata":[{"gid":618395,"token":"0439fa3666","title":"Correct gallery","title_jpn":"正しい","category":"Non-H","tags":[]},{"gid":618395,"error":"invalid gallery token"}]}"#;
-        let base = mock_response("200 OK", "application/json", body).await;
-        let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
+        let base = mock_responses("200 OK", "application/json", body, 2).await;
+        let client = EhClient::new(&base, &base).unwrap();
         let results = client
             .gdata(&[
                 GalleryRef {
@@ -683,14 +794,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gdata_splits_requests_at_twenty_five_galleries() {
+    async fn gdata_sends_one_gallery_per_request() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            for _ in 0..2 {
+        let mock = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..26 {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = [0; 8192];
-                let _ = stream.read(&mut request).await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 2048];
+                loop {
+                    let count = stream.read(&mut chunk).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    let Some(header_end) = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|pos| pos + 4)
+                    else {
+                        continue;
+                    };
+                    let headers =
+                        String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length: ")
+                                .and_then(|length| length.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap()
+                    + 4;
+                requests.push(serde_json::from_slice::<Value>(&request[header_end..]).unwrap());
                 let body = r#"{"gmetadata":[]}"#;
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -698,10 +842,10 @@ mod tests {
                 );
                 stream.write_all(response.as_bytes()).await.unwrap();
             }
-            2
+            requests
         });
         let base = format!("http://{address}");
-        let client = EhClient::new("https://e-hentai.org", &base, Duration::ZERO).unwrap();
+        let client = EhClient::new("https://e-hentai.org", &base).unwrap();
         let galleries = (1..=26)
             .map(|gid| GalleryRef {
                 gid: gid.to_string(),
@@ -712,50 +856,54 @@ mod tests {
         let results = client.gdata(&galleries).await;
         assert_eq!(results.len(), 26);
         assert!(results.iter().all(Result::is_err));
-        assert_eq!(server.await.unwrap(), 2);
-    }
-
-    #[tokio::test]
-    async fn lookup_paces_consecutive_upstream_requests() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = [0; 8192];
-                let _ = stream.read(&mut request).await.unwrap();
-                let body = "<div class='itg'>No hits found</div>";
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-        let base = format!("http://{address}");
-        let client = EhClient::new(&base, &base, Duration::from_millis(50)).unwrap();
-        let start = Instant::now();
-        client
-            .lookup("e-hentai.org", None, "title", "one", false)
-            .await
-            .unwrap();
-        client
-            .lookup("e-hentai.org", None, "title", "two", false)
-            .await
-            .unwrap();
-        assert!(start.elapsed() >= Duration::from_millis(45));
-        server.await.unwrap();
+        let requests = mock.await.unwrap();
+        assert_eq!(requests.len(), 26);
+        for (request, expected_gid) in requests.iter().zip(1..=26) {
+            let gidlist = request["gidlist"].as_array().unwrap();
+            assert_eq!(gidlist.len(), 1);
+            assert_eq!(gidlist[0][0], expected_gid);
+        }
     }
 
     #[test]
-    fn cookies_are_added_only_for_exhentai_and_keep_user_nw_value() {
-        assert_eq!(lookup_cookie("e-hentai.org", Some("session=fixture")), None);
+    fn matched_opening_warning_keeps_results_and_requests_a_wait() {
+        assert!(should_wait_after_matched_warning(
+            "you are opening too many requests",
+            true
+        ));
+        assert!(!should_wait_after_matched_warning(
+            "you are opening too many requests",
+            false
+        ));
+        let html = "<div>You are opening too many requests</div><div class='itg'><a href='https://e-hentai.org/g/8/aa/'><div class='glink'>Matched</div></a></div>";
+        let candidates = parse_candidates(html, "https://e-hentai.org").unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert!(should_wait_after_matched_warning(
+            &html.to_ascii_lowercase(),
+            !candidates.is_empty()
+        ));
+    }
+
+    #[test]
+    fn cookies_are_host_opted_in_and_public_site_only_receives_known_fields() {
         assert_eq!(
-            lookup_cookie("exhentai.org", Some("session=fixture")),
+            lookup_cookie("e-hentai.org", Some("session=fixture"), false),
+            None
+        );
+        assert_eq!(
+            lookup_cookie("e-hentai.org", Some("ipb_member_id=1; arbitrary=x"), true),
+            Some("ipb_member_id=1; nw=1".into())
+        );
+        assert_eq!(
+            first_numeric_bracket("[circle] Work [123]"),
+            Some("123".into())
+        );
+        assert_eq!(
+            lookup_cookie("exhentai.org", Some("session=fixture"), false),
             Some("session=fixture; nw=1".into())
         );
         assert_eq!(
-            lookup_cookie("exhentai.org", Some("session=fixture; nw=0")),
+            lookup_cookie("exhentai.org", Some("session=fixture; nw=0"), false),
             Some("session=fixture; nw=0".into())
         );
     }
@@ -764,16 +912,16 @@ mod tests {
     async fn search_sends_cookies_only_to_exhentai() {
         let (eh_base, eh_server) = mock_request().await;
         let (exhentai_base, exhentai_server) = mock_request().await;
-        let client =
-            EhClient::with_bases(&eh_base, &exhentai_base, &eh_base, Duration::ZERO).unwrap();
+        let client = EhClient::with_bases(&eh_base, &exhentai_base, &eh_base).unwrap();
 
         client
             .lookup(
                 "e-hentai.org",
-                Some("session=fictional-cookie"),
+                Some("ipb_member_id=fictional-id; arbitrary=never"),
                 "title",
                 "sample",
                 false,
+                true,
             )
             .await
             .unwrap();
@@ -784,14 +932,17 @@ mod tests {
                 "title",
                 "sample",
                 false,
+                false,
             )
             .await
             .unwrap();
 
         let eh_request = eh_server.await.unwrap().to_ascii_lowercase();
         let exhentai_request = exhentai_server.await.unwrap().to_ascii_lowercase();
-        assert!(!eh_request.contains("cookie:"));
+        assert!(eh_request.contains("cookie: ipb_member_id=fictional-id; nw=1"));
+        assert!(!eh_request.contains("arbitrary=never"));
         assert!(exhentai_request.contains("cookie: session=fictional-cookie; nw=1"));
+        assert!(!eh_request.contains("fictional-cookie"));
     }
 
     #[tokio::test]
@@ -802,7 +953,6 @@ mod tests {
             "https://e-hentai.org",
             &exhentai_base,
             "https://api.e-hentai.org/api.php",
-            Duration::ZERO,
         )
         .unwrap();
 
@@ -812,6 +962,7 @@ mod tests {
                 Some("session=fictional-cookie"),
                 "title",
                 "sample",
+                false,
                 false,
             )
             .await

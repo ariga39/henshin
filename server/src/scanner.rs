@@ -210,7 +210,7 @@ fn process_archives(
     Ok((archives.len(), indexed, errors))
 }
 
-fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
+pub(crate) fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
     path.strip_prefix(root)
         .map_err(|e| e.to_string())?
         .components()
@@ -246,8 +246,8 @@ fn process_one(
         .to_owned();
     let (id, old_cover, skip) = {
         let conn = state.db.lock().map_err(|_| "database lock poisoned")?;
-        let old=conn.query_row("SELECT id,cover_key,status,file_size,file_mtime FROM entries WHERE root_id=?1 AND relative_path=?2",params![root_id,relative],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<u64>>(3)?,r.get::<_,Option<i64>>(4)?))).optional().map_err(|e|e.to_string())?;
-        if let Some((id, key, status, old_size, old_time)) = old {
+        let old=conn.query_row("SELECT id,cover_key,status,file_size,file_mtime,cover_hash_version FROM entries WHERE root_id=?1 AND relative_path=?2",params![root_id,relative],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<u64>>(3)?,r.get::<_,Option<i64>>(4)?,r.get::<_,i64>(5)?))).optional().map_err(|e|e.to_string())?;
+        if let Some((id, key, status, old_size, old_time, hash_version)) = old {
             let intact = key
                 .as_ref()
                 .is_some_and(|k| state.covers_dir.join(k).is_file());
@@ -257,6 +257,7 @@ fn process_one(
                 status == "active"
                     && old_size == Some(size)
                     && old_time == Some(modified)
+                    && hash_version == 1
                     && intact,
             )
         } else {
@@ -269,7 +270,7 @@ fn process_one(
     let cover = cover::extract(path, &state.covers_dir, &id, modified, size)?;
     let now = unix_now();
     let conn = state.db.lock().map_err(|_| "database lock poisoned")?;
-    conn.execute("INSERT INTO entries(id,root_id,relative_path,status,title,page_count,file_size,file_mtime,cover_key,cover_sha1,created_at,updated_at) VALUES(?1,?2,?3,'active',?4,?5,?6,?7,?8,?9,?10,?10) ON CONFLICT(root_id,relative_path) DO UPDATE SET status='active',title=excluded.title,page_count=excluded.page_count,file_size=excluded.file_size,file_mtime=excluded.file_mtime,cover_key=excluded.cover_key,cover_sha1=excluded.cover_sha1,updated_at=excluded.updated_at",params![id,root_id,relative,title,cover.pages as i64,size,modified,cover.key,cover.sha1,now]).map_err(|e|e.to_string())?;
+    conn.execute("INSERT INTO entries(id,root_id,relative_path,status,title,page_count,file_size,file_mtime,cover_key,cover_sha1,cover_hash_version,created_at,updated_at) VALUES(?1,?2,?3,'active',?4,?5,?6,?7,?8,?9,1,?10,?10) ON CONFLICT(root_id,relative_path) DO UPDATE SET status='active',title=excluded.title,page_count=excluded.page_count,file_size=excluded.file_size,file_mtime=excluded.file_mtime,cover_key=excluded.cover_key,cover_sha1=excluded.cover_sha1,cover_hash_version=1,updated_at=excluded.updated_at",params![id,root_id,relative,title,cover.pages as i64,size,modified,cover.key,cover.sha1,now]).map_err(|e|e.to_string())?;
     drop(conn);
     if let Some(old) = old_cover {
         if old != cover.key {
