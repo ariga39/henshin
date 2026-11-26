@@ -203,12 +203,13 @@ impl EhClient {
                 .cloned()
                 .unwrap_or_default();
             for gallery in chunk {
+                let expected_gid = normalize_gid(&gallery.gid);
                 let record = records.iter().find(|r| {
                     r.get("gid")
                         .and_then(Value::as_u64)
                         .map(|n| n.to_string())
                         .as_deref()
-                        == Some(gallery.gid.as_str())
+                        == expected_gid.as_deref()
                 });
                 output.push(
                     record
@@ -237,12 +238,13 @@ pub fn parse_gallery_url(raw: &str) -> Result<GalleryRef, String> {
         .flatten()
         .map(str::to_owned)
         .collect();
+    let gid = parts
+        .get(1)
+        .and_then(|raw| normalize_gid(raw))
+        .ok_or_else(|| "Gallery URL must contain /g/<id>/<hex-token>/".to_owned())?;
     if parts.len() < 3
         || parts[0] != "g"
-        || parts[1].is_empty()
         || parts[2].is_empty()
-        || !parts[1].bytes().all(|c| c.is_ascii_digit())
-        || parts[1].parse::<u64>().unwrap_or(0) == 0
         || !parts[2].bytes().all(|c| c.is_ascii_hexdigit())
     {
         return Err("Gallery URL must contain /g/<id>/<hex-token>/".into());
@@ -254,7 +256,7 @@ pub fn parse_gallery_url(raw: &str) -> Result<GalleryRef, String> {
             .map_err(|_| "Invalid gallery host".to_owned())?;
     }
     Ok(GalleryRef {
-        gid: parts[1].to_owned(),
+        gid,
         token: parts[2].to_ascii_lowercase(),
         domain: "e-hentai.org".into(),
     })
@@ -307,17 +309,28 @@ fn parse_candidates(html: &str, site_base: &str) -> Result<Vec<Candidate>, (u16,
             title,
         });
     }
-    if candidates.is_empty()
-        && !html.to_ascii_lowercase().contains("galleries")
-        && !html.contains("No hits found")
-        && !html.contains("No results")
-    {
+    let listing = Selector::parse("#galleries, .itg").unwrap();
+    let no_results_marker = Selector::parse("#nohits, .nohits").unwrap();
+    let body_text = doc
+        .root_element()
+        .text()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let has_no_results_marker = doc.select(&no_results_marker).next().is_some()
+        || body_text.contains("no hits found")
+        || body_text.contains("no results found");
+    if candidates.is_empty() && !has_no_results_marker && doc.select(&listing).next().is_none() {
         return Err((
             502,
             "E-Hentai returned an unexpected page; no search results were parsed".into(),
         ));
     }
     Ok(candidates)
+}
+
+pub(crate) fn normalize_gid(raw: &str) -> Option<String> {
+    let id = raw.parse::<u64>().ok()?;
+    (id > 0).then(|| id.to_string())
 }
 
 fn parse_metadata(record: &Value) -> Result<Metadata, String> {
@@ -388,6 +401,12 @@ mod tests {
                 domain: "e-hentai.org".into()
             }
         );
+        assert_eq!(
+            parse_gallery_url("https://e-hentai.org/g/000123/ABcd/")
+                .unwrap()
+                .gid,
+            "123"
+        );
         assert!(parse_gallery_url("https://exhentai.org/g/1/abc/").is_err());
         assert!(parse_gallery_url("https://e-hentai.org/g/0/no/").is_err());
         assert!(parse_gallery_url("https://e-hentai.org/g/1/xyz!/").is_err());
@@ -399,6 +418,21 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].title, "One & Only");
         assert_eq!(candidates[1].title, "Second");
+        assert!(
+            parse_candidates(
+                "<html><body>Galleries are temporarily unavailable</body></html>",
+                "https://e-hentai.org"
+            )
+            .is_err()
+        );
+        assert!(
+            parse_candidates(
+                "<html><body><p>No hits found</p></body></html>",
+                "https://e-hentai.org"
+            )
+            .unwrap()
+            .is_empty()
+        );
         let metadata = parse_metadata(&json!({"title":"A &amp; B", "title_jpn":"猫&#039;本", "category":"Non-H", "tags":["artist:Foo"]})).unwrap();
         assert_eq!(metadata.title.as_deref(), Some("A & B"));
         assert_eq!(metadata.title_jpn.as_deref(), Some("猫'本"));
@@ -457,7 +491,7 @@ mod tests {
         let results = client
             .gdata(&[
                 GalleryRef {
-                    gid: "1".into(),
+                    gid: "0001".into(),
                     token: "aa".into(),
                     domain: "e-hentai.org".into(),
                 },

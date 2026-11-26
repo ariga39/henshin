@@ -835,9 +835,10 @@ async fn eh_bind(
                 "Provide a gallery URL or gid and token",
             );
         };
-        if !gid.bytes().all(|b| b.is_ascii_digit())
-            || gid.parse::<u64>().unwrap_or(0) == 0
-            || token.is_empty()
+        let Some(gid) = eh::normalize_gid(&gid) else {
+            return err(StatusCode::BAD_REQUEST, "Invalid E-Hentai gallery identity");
+        };
+        if token.is_empty()
             || !token.bytes().all(|b| b.is_ascii_hexdigit())
             || input.domain.as_deref().unwrap_or("e-hentai.org") != "e-hentai.org"
         {
