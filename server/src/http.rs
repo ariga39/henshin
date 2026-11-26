@@ -1209,7 +1209,7 @@ async fn get_cover(State(s): State<Arc<AppState>>, Path(key): Path<String>) -> R
     match fs::read(&cover_path) {
         Ok(bytes) => ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let _permit = match s.scan_gate.acquire().await {
+            let permit = match Arc::clone(&s.scan_gate).acquire_owned().await {
                 Ok(permit) => permit,
                 Err(_) => {
                     return err(
@@ -1279,6 +1279,7 @@ async fn get_cover(State(s): State<Arc<AppState>>, Path(key): Path<String>) -> R
             }
             let covers_dir = s.covers_dir.clone();
             let generated = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 crate::cover::extract(
                     &source_path,
                     &covers_dir,

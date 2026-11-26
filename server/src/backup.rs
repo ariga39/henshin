@@ -33,12 +33,13 @@ pub fn create(data_dir: &Path, output: &Path) -> io::Result<()> {
             "backup output already exists",
         ));
     }
-    for suffix in ["", "-wal", "-shm"] {
-        if destination == PathBuf::from(format!("{}{}", database.display(), suffix)) {
-            return Err(invalid(
-                "backup output cannot replace the live database or its sidecars",
-            ));
-        }
+    if destination == database
+        || destination == sidecar(&database, "-wal")
+        || destination == sidecar(&database, "-shm")
+    {
+        return Err(invalid(
+            "backup output cannot replace the live database or its sidecars",
+        ));
     }
 
     let connection = Connection::open(&database).map_err(sql_error)?;
@@ -307,7 +308,9 @@ fn remove_staged_sidecars(path: &Path) {
 }
 
 fn sidecar(database: &Path, suffix: &str) -> PathBuf {
-    PathBuf::from(format!("{}{}", database.display(), suffix))
+    let mut path = database.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
 }
 
 fn sql_error(error: rusqlite::Error) -> io::Error {
@@ -514,6 +517,67 @@ mod tests {
                 assert!(!target.join(format!("henshin.sqlite{suffix}")).exists());
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restore_archives_sidecars_with_a_non_utf8_data_dir() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let source_state = AppState::open(source.clone(), Some("source-secret".into())).unwrap();
+        let archive = temp.path().join("archive.sqlite");
+        create(&source, &archive).unwrap();
+        drop(source_state);
+
+        let data = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"data-\xff".to_vec()));
+        let target_state = AppState::open(data.clone(), Some("target-secret".into())).unwrap();
+        drop(target_state);
+        fs::write(data.join("henshin.sqlite"), b"damaged database").unwrap();
+        for (suffix, contents) in [("-wal", b"stale wal"), ("-shm", b"stale shm")] {
+            fs::write(sidecar(&data.join("henshin.sqlite"), suffix), contents).unwrap();
+        }
+
+        restore(&data, &archive).unwrap();
+
+        let archived_dir = fs::read_dir(&data)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("pre-restore-")
+            })
+            .unwrap();
+        for (suffix, contents) in [("-wal", b"stale wal"), ("-shm", b"stale shm")] {
+            let live_sidecar = sidecar(&data.join("henshin.sqlite"), suffix);
+            let archived_sidecar = sidecar(&archived_dir.join("henshin.sqlite"), suffix);
+            assert!(!live_sidecar.exists());
+            assert_eq!(fs::read(archived_sidecar).unwrap(), contents);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_suffix_preserves_non_utf8_path_bytes() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let database = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/tmp/data-\xff/henshin.sqlite".to_vec(),
+        ));
+        assert_eq!(
+            sidecar(&database, "-wal").as_os_str().as_bytes(),
+            b"/tmp/data-\xff/henshin.sqlite-wal"
+        );
+        assert_eq!(
+            sidecar(&database, "-shm").as_os_str().as_bytes(),
+            b"/tmp/data-\xff/henshin.sqlite-shm"
+        );
     }
 
     #[cfg(unix)]
