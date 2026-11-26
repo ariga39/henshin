@@ -81,7 +81,7 @@ test('API bridge gives readable errors for common statuses and unreachable serve
   const original = globalThis.fetch;
   try {
     for (const [status, message] of [
-      [401, /rejected/],
+      [401, /HTTP 401:.*rejected/],
       [404, /not found/],
       [409, /conflict/],
       [503, /HTTP 503/],
@@ -92,6 +92,12 @@ test('API bridge gives readable errors for common statuses and unreachable serve
         message,
       );
     }
+
+    globalThis.fetch = (async () => Response.json({ error: 'Bearer token expired.' }, { status: 401 })) as typeof fetch;
+    await assert.rejects(
+      request({ url: 'http://server', token: 'test-token' }, '/api/test'),
+      /HTTP 401: Bearer token expired\./,
+    );
 
     globalThis.fetch = (async () => {
       throw new Error('private transport detail');

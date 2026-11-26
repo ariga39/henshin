@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehBatchResultMessage, ehLookupBody, ehLookupMessage, ehSettingsUpdateBody, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, rebaseEhSettingsDraft, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft } from './libraryState.js';
+import { clampLibraryOffset, effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehBatchResultMessage, ehLookupBody, ehLookupMessage, ehSettingsUpdateBody, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, rebaseEhSettingsDraft, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft } from './libraryState.js';
 import type { EhSettingsValues } from './libraryState.js';
 
 test('library query preserves repeated tag filters and all list controls', () => {
@@ -24,6 +24,11 @@ test('library query can restrict results to auto-matched galleries', () => {
     limit: 100, offset: 0, ehBindSource: 'auto',
   }));
   assert.equal(query.get('ehBindSource'), 'auto');
+});
+
+test('library offset stays on a populated page and clamps when the last page empties', () => {
+  assert.equal(clampLibraryOffset(100, 200, 100), 100);
+  assert.equal(clampLibraryOffset(100, 100, 100), 0);
 });
 
 test('ordinary lookup uses server preferences and bound entries request alternatives', () => {
@@ -187,6 +192,21 @@ test('batch stops immediately on an explicit upstream access or rate block', asy
   );
   assert.deepEqual(events, ['lookup:first']);
   assert.deepEqual(results, ['failed:true']);
+  assert.deepEqual(summary, { processed: 1, cancelled: false, blocked: true });
+});
+
+test('batch stops when the desktop server rejects its bearer token', async () => {
+  const calls: string[] = [];
+  const summary = await runEhLookupBatch(
+    ['first', 'second'],
+    4,
+    async (item) => { calls.push(item); throw new Error('HTTP 401: The server rejected the bearer token.'); },
+    async () => assert.fail('unauthorized response must not wait'),
+    () => false,
+    () => undefined,
+    () => undefined,
+  );
+  assert.deepEqual(calls, ['first']);
   assert.deepEqual(summary, { processed: 1, cancelled: false, blocked: true });
 });
 

@@ -24,6 +24,11 @@ export function libraryQuery(filters: LibraryFilters): string {
   return params.toString();
 }
 
+export function clampLibraryOffset(offset: number, total: number, pageSize: number): number {
+  const lastPageOffset = Math.max(0, Math.ceil(total / pageSize) - 1) * pageSize;
+  return Math.min(offset, lastPageOffset);
+}
+
 export type EntryPersonalFields = {
   customTitle: string;
   note: string;

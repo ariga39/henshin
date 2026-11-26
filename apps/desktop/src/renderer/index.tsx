@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehBatchResultMessage, ehLookupBody, ehLookupMessage, ehSettingsUpdateBody, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, rebaseEhSettingsDraft, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft, type EhBatchResult, type EntryDraft, type EhSettingsValues } from './libraryState.js';
+import { clampLibraryOffset, effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehBatchResultMessage, ehLookupBody, ehLookupMessage, ehSettingsUpdateBody, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, rebaseEhSettingsDraft, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft, type EhBatchResult, type EntryDraft, type EhSettingsValues } from './libraryState.js';
 
 declare global {
   interface Window {
@@ -673,9 +673,10 @@ function App() {
       const removedFromAutoFilter = shouldRemoveFromAutoFilter(ehBindSource, entries.map((item) => item.id), entryId, updated.ehBindSource);
       setSelected(updated);
       if (removedFromAutoFilter) {
-        setEntries((items) => items.filter((item) => item.id !== entryId));
-        setTotal((current) => Math.max(0, current - 1));
         setBatchSelectedIds((ids) => ids.filter((id) => id !== entryId));
+        const nextOffset = clampLibraryOffset(offset, Math.max(0, total - 1), 100);
+        if (nextOffset === offset) await refresh(rootId, nextOffset);
+        else setOffset(nextOffset);
       } else {
         setEntries((items) => items.map((item) => item.id === entryId ? updated : item));
       }
