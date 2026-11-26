@@ -1,4 +1,4 @@
-use crate::{db, scanner};
+use crate::{db, eh, scanner};
 use rusqlite::Connection;
 use std::{
     collections::HashMap,
@@ -16,6 +16,7 @@ pub struct AppState {
     pub db: Mutex<Connection>,
     pub scans: Mutex<HashMap<String, scanner::ScanState>>,
     pub scan_gate: Arc<Semaphore>,
+    pub eh: eh::EhClient,
     _lock: fs::File,
 }
 
@@ -74,6 +75,11 @@ impl AppState {
             db: Mutex::new(connection),
             scans: Mutex::new(HashMap::new()),
             scan_gate: Arc::new(Semaphore::new(1)),
+            eh: eh::EhClient::new(
+                "https://e-hentai.org",
+                "https://api.e-hentai.org/api.php",
+                std::time::Duration::from_secs(4),
+            )?,
             _lock: lock,
         })
     }

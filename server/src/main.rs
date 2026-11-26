@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 mod app;
 mod cover;
 mod db;
+mod eh;
 mod http;
 mod roots;
 mod scanner;
