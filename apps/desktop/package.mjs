@@ -177,7 +177,10 @@ function reportMacSigning(appPath) {
 }
 
 function reportWindowsSigning(executable) {
-  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$signature = Get-AuthenticodeSignature -LiteralPath '${executable}'; if ($signature.SignerCertificate) { "$($signature.Status): $($signature.SignerCertificate.Subject)" } else { "$($signature.Status): no signer certificate" }`], { encoding: 'utf8' });
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$signature = Get-AuthenticodeSignature -LiteralPath $env:HENSHIN_SIGNING_PATH; if ($signature.SignerCertificate) { "$($signature.Status): $($signature.SignerCertificate.Subject)" } else { "$($signature.Status): no signer certificate" }'], {
+    encoding: 'utf8',
+    env: { ...process.env, HENSHIN_SIGNING_PATH: executable },
+  });
   if (result.status !== 0) throw new Error(`Authenticode inspection failed: ${result.stderr}`);
   const status = `Windows Authenticode status: ${result.stdout.trim()} (inspected with Get-AuthenticodeSignature).`;
   process.stdout.write(`Signing status: ${status}\n`);

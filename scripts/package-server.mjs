@@ -37,7 +37,7 @@ try {
   await copyFile(binary, path.join(staging, binaryName));
   await copyFile(readme, path.join(staging, 'README.md'));
   if (platform === 'windows') {
-    run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Compress-Archive -LiteralPath '${path.join(staging, binaryName)}','${path.join(staging, 'README.md')}' -DestinationPath '${archive}' -Force`]);
+    run('tar.exe', ['-a', '-c', '-f', archive, '-C', staging, binaryName, 'README.md']);
   } else {
     run('tar', ['-czf', archive, '-C', staging, binaryName, 'README.md']);
   }
