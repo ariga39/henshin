@@ -1,8 +1,7 @@
 node_modules/
 dist/
+target/
 *.tsbuildinfo
 *.log
-test-results/
-playwright-report/
 .tmp/
 .henshin-server-data/

@@ -1,14 +1,8 @@
 packages:
-  - "apps/*"
-  - "packages/*"
+  - "apps/desktop"
 
 # Required native/binary build scripts. Explicit booleans for the pinned pnpm 11
 # `allowBuilds` form; electron downloads its runtime, esbuild links its binary.
 allowBuilds:
   electron: true
-  # Windows packaging is not part of the Linux AppImage build.
-  electron-winstaller: false
   esbuild: true
-  # sharp@0.34.5 selects the pinned @img/sharp-* prebuild for supported
-  # platforms; its install hook is not required for this workspace.
-  sharp: false
