@@ -105,7 +105,7 @@ test('API bridge gives readable errors for common statuses and unreachable serve
   }
 });
 
-test('API bridge maps snake_case open stats to the desktop response shape', async () => {
+test('generic API requests leave response fields unchanged', async () => {
   const original = globalThis.fetch;
   try {
     globalThis.fetch = (async (_input, init) => {
@@ -113,13 +113,13 @@ test('API bridge maps snake_case open stats to the desktop response shape', asyn
       return Response.json({ open_count: 7, last_opened_at: 1_795_697_000 });
     }) as typeof fetch;
 
-    const stats = await request<{ openCount: number; lastOpenedAt: number }>(
+    const stats = await request<{ open_count: number; last_opened_at: number }>(
       { url: 'http://127.0.0.1:4317', token: 'local-test' },
       '/api/entries/book-id/open',
       { method: 'POST', body: '{}' },
     );
 
-    assert.deepEqual(stats, { openCount: 7, lastOpenedAt: 1_795_697_000 });
+    assert.deepEqual(stats, { open_count: 7, last_opened_at: 1_795_697_000 });
   } finally {
     globalThis.fetch = original;
   }

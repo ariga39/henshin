@@ -43,8 +43,26 @@ app.whenReady().then(async () => {
     const file = await resolveLocalPath(config.mappings, entry.rootId, entry.relativePath);
     await launchReader(reader, file, filePath => shell.openPath(filePath));
     try {
-      const stats = await request<{ openCount: number; lastOpenedAt: number }>(config.connection, `/api/entries/${encodeURIComponent(entry.id)}/open`, { method: 'POST', body: JSON.stringify({ eventId: randomUUID(), openedAt: Math.floor(Date.now() / 1000) }) });
-      return { stats };
+      const stats = await request<{
+        open_count: number;
+        last_opened_at: number | null;
+      }>(
+        config.connection,
+        `/api/entries/${encodeURIComponent(entry.id)}/open`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            event_id: randomUUID(),
+            opened_at: Math.floor(Date.now() / 1000),
+          }),
+        },
+      );
+      return {
+        stats: {
+          openCount: stats.open_count,
+          lastOpenedAt: stats.last_opened_at,
+        },
+      };
     } catch (error) { return { warning: `Reader opened, but the server did not record this open: ${(error as Error).message}` }; }
   });
   createWindow();

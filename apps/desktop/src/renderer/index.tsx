@@ -51,7 +51,7 @@ type Entry = {
   pageCount: number;
   coverKey?: string;
   openCount: number;
-  lastOpenedAt?: number;
+  lastOpenedAt?: number | null;
 };
 type Reader = {
   id: string;
@@ -78,7 +78,7 @@ type Scan = {
 const effectiveTitle = (entry: Entry) =>
   entry.customTitle || entry.ehTitleJpn || entry.ehTitle || entry.title;
 
-const formatTimestamp = (seconds?: number) =>
+const formatTimestamp = (seconds?: number | null) =>
   seconds ? new Date(seconds * 1000).toLocaleString() : 'Never';
 
 const scanErrorCount = (errors: Scan['errors']) =>
@@ -269,11 +269,15 @@ function App() {
       }
 
       setNotice('Reader launched. Open count updated.');
-      await refresh();
-      const refreshedEntry = await call<Entry>(
-        `/api/entries/${encodeURIComponent(entry.id)}`,
-      );
-      setSelected(refreshedEntry);
+      if (result.stats) {
+        const openedEntry = { ...entry, ...result.stats };
+        setEntries((currentEntries) =>
+          currentEntries.map((currentEntry) =>
+            currentEntry.id === entry.id ? openedEntry : currentEntry,
+          ),
+        );
+        setSelected(openedEntry);
+      }
     } catch (caught) {
       setError((caught as Error).message);
     }

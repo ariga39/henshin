@@ -26,22 +26,6 @@ export function serverApiUrl(serverUrl: string, endpoint: string): URL {
   return url;
 }
 
-function normalizeResponse<T>(endpoint: string, method: string | undefined, value: unknown): T {
-  const pathname = new URL(endpoint, 'http://henshin.invalid').pathname;
-  const isOpenStatsPost =
-    method?.toUpperCase() === 'POST' && /^\/api\/entries\/[^/]+\/open$/.test(pathname);
-  if (!isOpenStatsPost || !value || typeof value !== 'object') return value as T;
-
-  const stats = value as Record<string, unknown>;
-  if ('open_count' in stats || 'last_opened_at' in stats) {
-    return {
-      openCount: stats.openCount ?? stats.open_count,
-      lastOpenedAt: stats.lastOpenedAt ?? stats.last_opened_at,
-    } as T;
-  }
-  return value as T;
-}
-
 export async function request<T>(connection: Connection, endpoint: string, init: RequestInit = {}): Promise<T> {
   if (!connection.url || !connection.token) throw new ApiError('Set the server URL and bearer token in Settings first.');
   const url = serverApiUrl(connection.url, endpoint);
@@ -66,6 +50,5 @@ export async function request<T>(connection: Connection, endpoint: string, init:
     throw new ApiError(message, response.status);
   }
   if (response.status === 204) return undefined as T;
-  const value: unknown = await response.json();
-  return normalizeResponse<T>(endpoint, init.method, value);
+  return await response.json() as T;
 }
