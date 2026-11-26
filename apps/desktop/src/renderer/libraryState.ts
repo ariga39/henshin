@@ -22,12 +22,16 @@ export function libraryQuery(filters: LibraryFilters): string {
   return params.toString();
 }
 
-export type EntryDraft = {
-  entryId: string;
+export type EntryPersonalFields = {
   customTitle: string;
   note: string;
   localTags: string[];
   hiddenTags: string[];
+};
+
+export type EntryDraft = EntryPersonalFields & {
+  entryId: string;
+  baseline: EntryPersonalFields;
   dirty: boolean;
 };
 
@@ -44,19 +48,25 @@ export function entryPath(entryId: string): string {
   return `/api/entries/${encodeURIComponent(entryId)}`;
 }
 
-export function mergeRefreshedEntry<T extends {
-  customTitle?: string;
-  note?: string;
-  localTags?: string[];
-  hiddenTags?: string[];
-}>(current: T, refreshed: T): T {
-  return {
-    ...refreshed,
-    customTitle: current.customTitle,
-    note: current.note,
-    localTags: current.localTags,
-    hiddenTags: current.hiddenTags,
-  };
+const sameTags = (left: string[], right: string[]) =>
+  left.length === right.length && left.every((tag, index) => tag === right[index]);
+
+export function updateEntryDraft(draft: EntryDraft, changes: Partial<EntryPersonalFields>): EntryDraft {
+  const updated = { ...draft, ...changes };
+  updated.dirty = updated.customTitle !== updated.baseline.customTitle
+    || updated.note !== updated.baseline.note
+    || !sameTags(updated.localTags, updated.baseline.localTags)
+    || !sameTags(updated.hiddenTags, updated.baseline.hiddenTags);
+  return updated;
+}
+
+export function entryPatch(draft: EntryDraft): Partial<EntryPersonalFields> {
+  const patch: Partial<EntryPersonalFields> = {};
+  if (draft.customTitle !== draft.baseline.customTitle) patch.customTitle = draft.customTitle;
+  if (draft.note !== draft.baseline.note) patch.note = draft.note;
+  if (!sameTags(draft.localTags, draft.baseline.localTags)) patch.localTags = draft.localTags;
+  if (!sameTags(draft.hiddenTags, draft.baseline.hiddenTags)) patch.hiddenTags = draft.hiddenTags;
+  return patch;
 }
 
 export function entryDraft(entry: {
@@ -66,14 +76,30 @@ export function entryDraft(entry: {
   localTags?: string[];
   hiddenTags?: string[];
 }): EntryDraft {
-  return {
-    entryId: entry.id,
+  const fields: EntryPersonalFields = {
     customTitle: entry.customTitle ?? '',
     note: entry.note ?? '',
-    localTags: entry.localTags ?? [],
-    hiddenTags: entry.hiddenTags ?? [],
+    localTags: [...(entry.localTags ?? [])],
+    hiddenTags: [...(entry.hiddenTags ?? [])],
+  };
+  return {
+    ...fields,
+    entryId: entry.id,
+    baseline: {
+      ...fields,
+      localTags: [...fields.localTags],
+      hiddenTags: [...fields.hiddenTags],
+    },
     dirty: false,
   };
+}
+
+export function refreshEntryDraft(
+  draft: EntryDraft | null,
+  refreshed: Parameters<typeof entryDraft>[0],
+): EntryDraft | null {
+  if (!draft || draft.entryId !== refreshed.id || draft.dirty) return draft;
+  return entryDraft(refreshed);
 }
 
 export function effectiveTitle(entry: {

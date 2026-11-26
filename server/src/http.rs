@@ -974,7 +974,7 @@ mod tests {
             ("%E5%90%8C%E4%BA%BA", "b"),
             ("ABC", "a"),
             ("%E3%82%AC", "c"),
-            ("猫%20EN", "a"),
+            ("%E7%8C%AB%20EN", "a"),
             ("English", "b"),
             ("under", "c"),
             ("%5F", "c"),
@@ -1078,6 +1078,25 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["total"], 1);
         assert_eq!(value["entries"][0]["id"], "a");
+        let (status, first_desktop) = api(
+            app.clone(),
+            "PATCH",
+            "/api/entries/a",
+            Some(r#"{"note":"Desktop A note"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, second_desktop) = api(
+            app.clone(),
+            "PATCH",
+            "/api/entries/a",
+            Some(r#"{"customTitle":"Desktop B title"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first_desktop["note"], "Desktop A note");
+        assert_eq!(second_desktop["note"], "Desktop A note");
+        assert_eq!(second_desktop["customTitle"], "Desktop B title");
         let (status, value) = api(
             app.clone(),
             "PATCH",

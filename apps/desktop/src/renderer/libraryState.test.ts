@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveTagOrigins, effectiveTitle, entryDraft, entryPath, isCurrentSelection, libraryQuery, mergeRefreshedEntry } from './libraryState.js';
+import { effectiveTagOrigins, effectiveTitle, entryDraft, entryPatch, entryPath, isCurrentSelection, libraryQuery, refreshEntryDraft, updateEntryDraft } from './libraryState.js';
 
 test('library query preserves repeated tag filters and all list controls', () => {
   const query = new URLSearchParams(libraryQuery({
@@ -18,10 +18,10 @@ test('library query preserves repeated tag filters and all list controls', () =>
 });
 
 test('entry draft starts isolated from subsequent server snapshots', () => {
-  const draft = entryDraft({ id: 'entry', customTitle: 'Personal', note: 'Note', localTags: ['local:x'] });
-  draft.customTitle = 'Unsaved';
-  draft.note = 'Unsaved note';
-  draft.dirty = true;
+  const draft = updateEntryDraft(
+    entryDraft({ id: 'entry', customTitle: 'Personal', note: 'Note', localTags: ['local:x'] }),
+    { customTitle: 'Unsaved', note: 'Unsaved note' },
+  );
   const refreshed = { id: 'entry', customTitle: 'Server value', note: '', openCount: 9 };
   assert.equal(refreshed.openCount, 9);
   assert.equal(draft.customTitle, 'Unsaved');
@@ -43,18 +43,33 @@ test('late selection and save responses are ignored after another entry is selec
 });
 
 test('refresh updates selected entry facts without replacing its personal draft fields', () => {
-  const selected = {
-    id: 'B', title: 'Original title', customTitle: 'Personal title', note: 'Unsaved note',
-    localTags: ['local:keep'], hiddenTags: ['artist:hide'], openCount: 2,
-  };
   const refreshed = {
     id: 'B', title: 'Updated source title', customTitle: 'Older saved title', note: 'Older saved note',
     localTags: ['local:old'], hiddenTags: [], openCount: 3,
   };
+  const cleanDraft = entryDraft({ id: 'B', customTitle: 'Personal title', note: 'Old note' });
+  const dirtyDraft = updateEntryDraft(cleanDraft, { note: 'Unsaved note' });
 
-  assert.deepEqual(mergeRefreshedEntry(selected, refreshed), {
-    ...refreshed, customTitle: 'Personal title', note: 'Unsaved note',
-    localTags: ['local:keep'], hiddenTags: ['artist:hide'],
+  assert.equal(refreshEntryDraft(cleanDraft, refreshed)?.customTitle, 'Older saved title');
+  assert.equal(refreshEntryDraft(cleanDraft, refreshed)?.note, 'Older saved note');
+  assert.equal(refreshEntryDraft(dirtyDraft, refreshed), dirtyDraft);
+  assert.equal(dirtyDraft.note, 'Unsaved note');
+});
+
+test('two desktop edits to different personal fields produce non-overlapping patches', () => {
+  const initial = { id: 'B', customTitle: 'Old title', note: 'Old note', localTags: ['local:a'], hiddenTags: [] };
+  const firstPatch = entryPatch(updateEntryDraft(entryDraft(initial), { note: 'Note from desktop A' }));
+  assert.deepEqual(firstPatch, { note: 'Note from desktop A' });
+  assert.deepEqual(entryPatch(updateEntryDraft(
+    updateEntryDraft(entryDraft(initial), { note: 'Temporary edit' }),
+    { note: 'Old note' },
+  )), {});
+
+  const afterDesktopA = { ...initial, ...firstPatch };
+  const secondPatch = entryPatch(updateEntryDraft(entryDraft(afterDesktopA), { customTitle: 'Title from desktop B' }));
+  assert.deepEqual(secondPatch, { customTitle: 'Title from desktop B' });
+  assert.deepEqual({ ...afterDesktopA, ...secondPatch }, {
+    ...initial, note: 'Note from desktop A', customTitle: 'Title from desktop B',
   });
 });
 
