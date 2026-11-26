@@ -239,7 +239,7 @@ Plain `.zip` archives carry no embedded gallery metadata, so candidate lookup ag
   - Original comic files on the NAS (protected externally by NAS snapshots/backups).
   - Server secrets (`token` and any optional ExHentai credential file in `<data-dir>`): when restoring into a fresh `<data-dir>`, re-initialize/re-enter server credentials as needed.
   - Per-desktop `desktop-config.json` (connection URL/token, local path mappings, reader profiles): stays on each desktop and continues working if the server URL/token and root IDs remain the same, or is reconfigured locally on a new machine.
-  - Cover cache (`<data-dir>/covers/`): derived cache, regenerated on demand.
+  - Cover cache (`<data-dir>/covers/`): derived cache, cleared after restore and regenerated on a cover request when the source archive still matches its stored size and modification time, or during a root scan. A changed, missing, or unavailable source is not used to recreate an old cover key.
 - **Backup / long-term archive command**:
   ```sh
   henshin-server backup --data-dir <dir> --out <output-file.sqlite>

@@ -31,3 +31,21 @@ pnpm --filter @henshin/desktop start
 ```
 
 In Settings, enter the running server’s HTTP address and bearer token. Map a library root to its folder on this device and select a local reader to open books.
+
+## Backup and restore
+
+Use the server CLI to back up the application database while the server is running or stopped:
+
+```sh
+henshin-server backup --data-dir /path/to/henshin-data --out /path/to/archive.sqlite
+```
+
+The output must not already exist or be inside a configured collection root. Restore only while the server is stopped:
+
+```sh
+henshin-server restore --data-dir /path/to/henshin-data --in /path/to/archive.sqlite
+```
+
+Restore validates the backup before changing the data directory. It moves the previous database and any SQLite WAL/SHM sidecars into a `pre-restore-*` folder, then clears the derived cover cache.
+
+The backup contains `henshin.sqlite`: configured roots, indexed entries, E-Hentai metadata and tags, personal titles, notes and tag overrides, and open history. It does not contain original comic files (use NAS backup tools), server secrets such as the bearer token or ExHentai credentials, each desktop's `desktop-config.json`, or the regenerable cover cache. Missing covers are recreated when requested or during a root scan.
