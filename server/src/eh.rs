@@ -160,12 +160,20 @@ impl EhClient {
         if html.trim().is_empty() {
             return Err((502, "E-Hentai returned an empty response".into()));
         }
-        let candidates = parse_candidates(&html, site_base)?;
-        if candidates.is_empty()
-            && ["rate limit", "too many requests"]
-                .iter()
-                .any(|marker| lower.contains(marker))
-        {
+        let rate_limited = ["rate limit", "too many requests"]
+            .iter()
+            .any(|marker| lower.contains(marker));
+        let candidates = match parse_candidates(&html, site_base) {
+            Ok(candidates) => candidates,
+            Err(_) if rate_limited => {
+                return Err((
+                    429,
+                    "E-Hentai is rate limiting requests; try again later".into(),
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        if candidates.is_empty() && rate_limited {
             return Err((
                 429,
                 "E-Hentai is rate limiting requests; try again later".into(),
@@ -709,6 +717,14 @@ mod tests {
                 .0,
             429
         );
+
+        let base = mock_response("200 OK", "text/html", "<p>Too many requests</p>").await;
+        let client = EhClient::new(&base, &base).unwrap();
+        let error = client
+            .lookup("e-hentai.org", None, "title", "sample", false, false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, 429);
 
         let base = mock_response(
             "200 OK",
