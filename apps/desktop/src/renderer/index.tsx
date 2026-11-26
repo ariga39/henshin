@@ -72,7 +72,7 @@ type Scan = {
   status: string;
   found: number;
   indexed: number;
-  errors: number;
+  errors: number | string[];
 };
 
 const effectiveTitle = (entry: Entry) =>
@@ -80,6 +80,9 @@ const effectiveTitle = (entry: Entry) =>
 
 const formatTimestamp = (seconds?: number) =>
   seconds ? new Date(seconds * 1000).toLocaleString() : 'Never';
+
+const scanErrorCount = (errors: Scan['errors']) =>
+  typeof errors === 'number' ? errors : errors.length;
 
 const emptyConfig: Config = {
   connection: { url: '', tokenConfigured: false },
@@ -165,7 +168,10 @@ function App() {
       const defaultReader =
         savedConfig.readers.find((candidate) => candidate.isDefault) ??
         savedConfig.readers[0];
-      if (defaultReader) setReader(defaultReader);
+      if (defaultReader) {
+        setReader(defaultReader);
+        setReaderArgs(defaultReader.args.join('\n'));
+      }
     });
   }, []);
 
@@ -551,9 +557,9 @@ function App() {
                   <span className="status">{scanItem.status}</span>
                   <div className="muted">
                     Found {scanItem.found} · Indexed {scanItem.indexed} · Errors{' '}
-                    {scanItem.errors}
+                    {scanErrorCount(scanItem.errors)}
                   </div>
-                  {scanItem.errors > 0 && (
+                  {scanErrorCount(scanItem.errors) > 0 && (
                     <div className="muted">
                       Some files could not be indexed; see server logs for details.
                     </div>
@@ -689,15 +695,15 @@ function App() {
             {reader.mode === 'executable' && (
               <>
                 <div className="row">
-                  <div className="field">
-                    <label>Executable path</label>
+                  <label className="field">
+                    <span>Executable path</span>
                     <input
                       value={reader.executable || ''}
                       onChange={(event) =>
                         setReader({ ...reader, executable: event.target.value })
                       }
                     />
-                  </div>
+                  </label>
                   <button
                     onClick={async () => {
                       const executable = await window.henshin.chooseExecutable();
