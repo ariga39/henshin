@@ -69,7 +69,9 @@ try {
   await smoke(executable, userData, unpack, platform);
   process.stdout.write(`Desktop artifact: ${artifact}\nChecksum: ${artifact}.sha256\nNative runtime smoke: passed (${platform}-${arch})\n`);
 } finally {
-  await rm(unpack, { recursive: true, force: true });
+  await rm(unpack, platform === 'win'
+    ? { recursive: true, force: true, maxRetries: 8, retryDelay: 250 }
+    : { recursive: true, force: true });
 }
 
 async function findServerFiles(dir) {
@@ -128,12 +130,31 @@ async function smoke(executable, userDataDir, cwd, targetPlatform) {
       throw new Error(`Packaged Electron app exited during startup with ${termination}`);
     }
   } finally {
-    child.kill('SIGTERM');
-    await new Promise(resolve => {
-      if (child.exitCode !== null) return resolve();
-      child.once('exit', resolve);
-      setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 3000).unref();
-    });
+    if (targetPlatform === 'win') {
+      if (child.pid !== undefined) {
+        const result = spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+        if (result.error) throw result.error;
+        if (result.status !== 0 && child.exitCode === null && child.signalCode === null) {
+          throw new Error(`Could not stop packaged Electron process tree (taskkill exited ${result.status})`);
+        }
+        if (child.exitCode === null && child.signalCode === null) {
+          await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('Timed out waiting for packaged Electron process tree to exit')), 5000);
+            child.once('exit', () => {
+              clearTimeout(timeout);
+              resolve();
+            });
+          });
+        }
+      }
+    } else {
+      child.kill('SIGTERM');
+      await new Promise((resolve, reject) => {
+        if (child.exitCode !== null || child.signalCode !== null) return resolve();
+        child.once('exit', resolve);
+        setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 3000).unref();
+      });
+    }
   }
 }
 
