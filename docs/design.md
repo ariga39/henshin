@@ -172,7 +172,7 @@ CREATE INDEX idx_open_events_entry ON open_events(entry_id, opened_at DESC);
 
 ### 4.1 Read-Only Scanning and Cover Generation
 
-- **Root registration**: The user enters a directory path visible to the server plus a label (and optional excluded subdirectories such as NAS system folders like `@eaDir` or `#recycle`). The server verifies the directory exists, is readable, does not overlap `<data-dir>`, and does not nest inside or enclose another configured root.
+- **Root registration and removal**: The user enters a directory path visible to the server plus a label (and optional excluded subdirectories such as NAS system folders like `@eaDir` or `#recycle`). The server verifies the directory exists, is readable, does not overlap `<data-dir>`, and does not nest inside or enclose another configured root. A root can be removed only when it has no indexed entries; deleting a non-empty root returns `409 Conflict` so library history cannot be erased accidentally. Root removal never touches files on disk.
 - **Server-owned scanning**: `POST /api/roots/:id/scan` starts a background scan task on the server (one active scan per root) and returns immediately. Closing a desktop window or disconnecting never cancels the scan; reconnecting simply queries `GET /api/scans` and `GET /api/entries`.
 - **Format scope**: Henshin indexes plain `.zip` archives directly (matching standard EH archive downloads). Additional formats (such as `.cbz` or loose image directories) are out of the initial schema and can be added later if needed.
 - **Image ordering and cover extraction**: Inside each `.zip`, filter supported image entries (`JPEG`, `PNG`, `WebP`, ignoring OS metadata entries like `__MACOSX`), count pages, sort by natural filename order, compute the SHA-1 hex digest (`cover_sha1`) of the raw first-page image bytes before resizing (for EH `f_shash` reverse lookup without a second archive read), and decode the first image into a resized JPEG thumbnail (e.g., max width 400px, quality 82) stored in `<data-dir>/covers/<entry-id>-<mtime>-<size>.jpg`. Corrupt or encrypted archives are logged and skipped without aborting the rest of the scan.
@@ -180,6 +180,7 @@ CREATE INDEX idx_open_events_entry ON open_events(entry_id, opened_at DESC);
   - Unchanged `(file_size, file_mtime)` entries are skipped quickly.
   - **Replacing a `.zip` at the same `(root_id, relative_path)` is treated as the same book**: the rescan refreshes file facts (`page_count`, `file_size`, `file_mtime`, `cover_key`, `cover_sha1`) while keeping the existing entry `id`, `custom_title`, `note`, EH binding/metadata, personal tag overrides, and `open_count` / `last_opened_at`. The user can trigger EH refresh or rebind manually if needed.
   - Files absent during a completed scan are marked `status = 'missing'` (never auto-deleted), preserving their EH metadata, notes, and open history. If a file reappears at the same path (including a replacement `.zip`), it returns to `active` as the same book and updates its file facts and cover.
+  - A traversal error below the root is reported while readable paths continue to index. Entries under an unreadable path keep their prior status; other absent entries can be marked `missing`. If the root itself is unavailable, the scan fails without changing missing status.
 
 ### 4.2 E-Hentai / ExHentai Lookup, Metadata, and Tag Sync
 
@@ -222,7 +223,7 @@ Plain `.zip` archives carry no embedded gallery metadata, so candidate lookup ag
   - **System association mode**: Electron `shell.openPath(resolvedPath)`.
 - **Open counting**:
   - Once the OS accepts the launch, the desktop generates a UUID `event_id` and sends `POST /api/entries/:id/open` with `{ event_id, opened_at }`.
-  - In a single SQLite transaction, the server executes `INSERT OR IGNORE INTO open_events (...)` and, if inserted, increments `entries.open_count` and updates `entries.last_opened_at`, returning the updated stats so the UI refreshes immediately.
+  - The request uses `{ event_id, opened_at }`; the server also accepts the earlier camelCase spelling `{ eventId, openedAt }`. In a single SQLite transaction, it executes `INSERT OR IGNORE INTO open_events (...)` and, if inserted, increments `entries.open_count` and sets `entries.last_opened_at` to the newer of its current value and `opened_at`. The response is `{ open_count, last_opened_at }` so the UI refreshes immediately.
   - If the server request fails due to a transient error, the UI shows a brief non-blocking notice and does not relaunch the reader.
 
 ### 4.5 Multi-Desktop Sync
@@ -266,7 +267,7 @@ All `/api/*` routes require `Authorization: Bearer <token>` and return JSON (exc
 | `GET /api/roots` | List configured storage roots |
 | `POST /api/roots` | Register a new server root (validates readability and path separation) |
 | `PATCH /api/roots/:id` | Update root label or exclusions |
-| `DELETE /api/roots/:id` | Remove a root configuration (does not touch files on disk) |
+| `DELETE /api/roots/:id` | Remove an empty root configuration (non-empty roots return `409`; files on disk are never touched) |
 | `POST /api/roots/:id/scan` | Start an independent background scan for a root |
 | `GET /api/scans` | Read current/recent scan progress and errors |
 | `GET /api/entries` | Search (`q`), filter (`includeTags`, `excludeTags`, `rootId`, `status`), sort, and paginate |
