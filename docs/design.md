@@ -11,7 +11,7 @@ Henshin is a personal, single-user desktop application for managing E-Hentai / E
 - **Independent client/server architecture**: A cross-platform desktop client (**Electron + React + TypeScript**) connects over the LAN (or `localhost` when run on the same machine) to an independently running Rust server (`henshin-server`) hosted on an always-on machine (e.g., a Mac mini or home server). Server and desktop are packaged and run separately.
 - **Storage decoupled from server placement**: Collection files stay on a NAS (or any externally managed folder). The server reads them through its own path (e.g., `/mnt/nas/books`), while each desktop accesses the exact same files through its own native mount or network path (e.g., `Z:\Books` on Windows, `/Volumes/Books` on macOS).
 - **Strictly read-only collection access**: Henshin never creates, modifies, renames, deletes, repacks, or writes temporary/cache files inside any collection directory.
-- **Core workflow**: Index plain `.zip` archives (matching standard EH archive downloads), generate cover thumbnails, look up and sync titles and namespaced tags from both **E-Hentai and ExHentai** with explicit user confirmation while keeping personal edits, search by title/filename (including short CJK text) and tags, open books in a local external reader, and share library metadata and open counts across desktops.
+- **Core workflow**: Index plain `.zip` archives (matching standard EH archive downloads), generate cover thumbnails, look up and sync titles and namespaced tags from both **E-Hentai and ExHentai** while keeping personal edits, search by title/filename (including short CJK text) and tags, open books in a local external reader, and share library metadata and open counts across desktops.
 - **Application database backup and archiving**: Create consistent single-file SQLite snapshots for routine backup and long-term archiving, and restore them cleanly. Original comic files are protected by external NAS backup tools.
 
 ### Explicit Non-Goals
@@ -22,7 +22,7 @@ Henshin is a personal, single-user desktop application for managing E-Hentai / E
 - No multi-user accounts, roles, or public-internet hostile-network threat model.
 - No mandatory HTTPS/CA reverse-proxy setup on a home LAN (plain `http://<lan-ip>:<port>` with a shared token is first-class; HTTPS works transparently if the user puts a proxy in front).
 - No offline browsing cache, client-side SQLite database, or offline event/draft recovery queue.
-- No automatic source-file organization, renaming, deletion, or silent binding of EH search results.
+- No automatic source-file organization, renaming, or deletion; EH lookup never runs during a collection scan.
 
 ---
 
@@ -123,9 +123,11 @@ CREATE TABLE entries (
   file_mtime INTEGER,
   cover_key TEXT,                   -- Filename in <data-dir>/covers/
   cover_sha1 TEXT,                  -- SHA-1 hex digest of raw first-page image bytes (for EH f_shash lookup)
+  cover_hash_version INTEGER NOT NULL DEFAULT 0, -- Version of the cover hash calculation; current version is 1
   eh_gid TEXT,
   eh_token TEXT,
   eh_domain TEXT,                   -- 'e-hentai.org' | 'exhentai.org'
+  eh_bind_source TEXT CHECK (eh_bind_source IN ('auto', 'manual')), -- NULL until a gallery is bound
   eh_title TEXT,
   eh_title_jpn TEXT,
   eh_refreshed_at INTEGER,
@@ -163,7 +165,8 @@ CREATE INDEX idx_open_events_entry ON open_events(entry_id, opened_at DESC);
 2. **EH source metadata**: `eh_title`, `eh_title_jpn`, and `entry_tags` with `origin = 'eh'`.
 3. **Personal overrides**: `custom_title`, `note`, and `entry_tags` with `origin = 'local'` or `origin = 'hidden'`.
 
-- **Effective display title**: `custom_title` if set, else `eh_title_jpn` (if non-empty), else `eh_title` (if non-empty), else `title`.
+- **Effective display title**: `custom_title` if set, else the preference-derived EH title, else the filename `title`. With `preferOriginalTitle` enabled, the EH title prefers non-empty `eh_title_jpn` then `eh_title`; by default, it prefers non-empty `eh_title` then `eh_title_jpn`.
+- Entry responses expose the preference-derived EH source title as `ehDisplayTitle` and the final personal/source/filename title as `effectiveTitle`. The desktop uses those fields in entry details and library cards.
 - **Effective tags**: `(eh tags ∪ local tags) \ hidden tags`.
 
 ---
@@ -175,7 +178,7 @@ CREATE INDEX idx_open_events_entry ON open_events(entry_id, opened_at DESC);
 - **Root registration and removal**: The user enters a directory path visible to the server plus a label (and optional excluded subdirectories such as NAS system folders like `@eaDir` or `#recycle`). The server verifies the directory exists, is readable, does not overlap `<data-dir>`, and does not nest inside or enclose another configured root. A root can be removed only when it has no indexed entries; deleting a non-empty root returns `409 Conflict` so library history cannot be erased accidentally. Root removal never touches files on disk.
 - **Server-owned scanning**: `POST /api/roots/:id/scan` starts a background scan task on the server (one active scan per root) and returns immediately. Closing a desktop window or disconnecting never cancels the scan; reconnecting simply queries `GET /api/scans` and `GET /api/entries`.
 - **Format scope**: Henshin indexes plain `.zip` archives directly (matching standard EH archive downloads). Additional formats (such as `.cbz` or loose image directories) are out of the initial schema and can be added later if needed.
-- **Image ordering and cover extraction**: Inside each `.zip`, filter supported image entries (`JPEG`, `PNG`, `WebP`, ignoring OS metadata entries like `__MACOSX`), count pages, sort by natural filename order, compute the SHA-1 hex digest (`cover_sha1`) of the raw first-page image bytes before resizing (for EH `f_shash` reverse lookup without a second archive read), and decode the first image into a resized JPEG thumbnail (e.g., max width 400px, quality 82) stored in `<data-dir>/covers/<entry-id>-<mtime>-<size>.jpg`. Corrupt or encrypted archives are logged and skipped without aborting the rest of the scan.
+- **Image ordering and cover extraction**: Inside each `.zip`, filter supported image entries (`JPEG`, `PNG`, `WebP`, ignoring OS metadata entries like `__MACOSX`). Order cover-named images first, ordinary images by natural filename order, and known credit/backmatter images last; natural filename order breaks ties within each group. Count pages, compute the SHA-1 hex digest (`cover_sha1`) of the raw first ordered image bytes before resizing (for EH `f_shash` reverse lookup without a second archive read), and decode that image into a resized JPEG thumbnail (e.g., max width 400px, quality 82) stored in `<data-dir>/covers/<entry-id>-<mtime>-<size>.jpg`. Corrupt or encrypted archives are logged and skipped without aborting the rest of the scan.
 - **Incremental rescans and same-path replacement**:
   - Unchanged `(file_size, file_mtime)` entries are skipped quickly.
   - **Replacing a `.zip` at the same `(root_id, relative_path)` is treated as the same book**: the rescan refreshes file facts (`page_count`, `file_size`, `file_mtime`, `cover_key`, `cover_sha1`) while keeping the existing entry `id`, `custom_title`, `note`, EH binding/metadata, personal tag overrides, and `open_count` / `last_opened_at`. The user can trigger EH refresh or rebind manually if needed.
@@ -186,21 +189,27 @@ CREATE INDEX idx_open_events_entry ON open_events(entry_id, opened_at DESC);
 
 Plain `.zip` archives carry no embedded gallery metadata, so candidate lookup against E-Hentai / ExHentai is a core workflow alongside direct gallery URL binding.
 
-- **Candidate lookup and manual confirmation**:
-  1. **Title / filename search (default starting point)**: Look up candidates from the filename-derived title (allowing the user to edit the query freely; upstream LANraragi's default quoted-title search with default filters disabled is a proven starting point, with optional expunged/language options). Filename lookup is sufficient to start without extra setup. Guessing gallery IDs from bracketed filename numbers (e.g., `[12345]`) is not enabled by default because plain filenames commonly contain non-gID numbers such as years or volume numbers.
-  2. **Cover image SHA-1 reverse lookup (`f_shash`, optional)**: Offer cover-based candidate lookup using the raw first-page image SHA-1 computed during scanning (as used by LANraragi's `f_shash` search with cover/similarity options) to return candidates for user inspection when filename lookup is insufficient.
-  3. **Direct gallery URL bind / correction**: At any time, the user can paste a valid gallery URL (`/g/<gid>/<token>/` on `e-hentai.org` or `exhentai.org`) to bind directly or rebind/correct an entry without searching.
+- **Candidate lookup and binding**:
+  1. **Community lookup preferences**: The server stores the preferred site and language, whether to try cover search first with title search as fallback, whether bracketed filename IDs may be used as gallery IDs, whether to include expunged galleries, whether to prefer the original title, and whether uploader and upload time are included. These settings are editable in desktop Settings. Each completed book lookup in a batch waits the configured 0–20 seconds before starting the next book; the default is 4 seconds. A zero-second interval disables the wait.
+  2. **Normal entry lookup**: The preference-based `auto` action omits a site override and uses the server's saved community preferences, including its preferred site. Cover-first lookup falls back to title/filename search when it finds no candidates. It binds the first candidate on an unbound entry and returns the updated entry plus all candidates.
+  3. **Explicit title and cover previews**: These actions return candidate previews only; they never bind automatically. Explicit title lookup sends the saved `includeExpunged` preference. Cover lookup has no expunged flag. A chosen one-shot site override applies to the explicit action once, then resets; it does not carry to another entry or the preference-based action.
+  4. **Cover image SHA-1 reverse lookup (`f_shash`, optional)**: Cover-based lookup uses the raw first-page image SHA-1 computed during scanning (as used by LANraragi's `f_shash` search with cover/similarity options) and returns preview candidates for user inspection.
+  5. **Bracketed gallery ID**: When enabled, a bracketed filename ID can be used as a gallery ID. This is a user-controlled option because bracketed numbers can also be years or volume numbers.
+  6. **Direct gallery URL bind / correction**: At any time, the user can paste a valid gallery URL (`/g/<gid>/<token>/` on `e-hentai.org` or `exhentai.org`) to bind directly or rebind/correct an entry without searching.
 - **Candidate parsing, rate pacing, and safety**:
-  - Parse gallery candidates and titles from the search results page rather than taking only the first entry and binding it silently.
-  - **Always require explicit user confirmation** before binding a search candidate — Henshin never silently auto-binds search results, even when a query returns a single row.
-  - Enforce polite server-side request pacing between upstream HTML search requests and surface rate-limit or temporary IP-ban responses as clear, non-blocking errors (rather than sleeping synchronously inside request handlers).
+  - Parse and return the candidate list. An ordinary `mode:auto` lookup binds the first candidate automatically, returns the updated entry and all candidates, and marks the binding source `auto` so the desktop can label it **Auto-matched**. Explicit `title` and `cover` lookups are previews and do not bind.
+  - The user can confirm the auto-match directly from the entry details, choose a different candidate, or bind a direct gallery URL. These choices set the binding source to `manual`; a refresh keeps the existing source. A lookup for an already bound entry uses `autoBind: false` to show alternatives without replacing its binding.
+  - Store `eh_bind_source` as `auto`, `manual`, or `NULL` when no gallery is bound. `ehBindSource=auto` filters the library to auto-matched entries; confirming or correcting a match removes the entry from that filtered list. Never run lookup during scans.
+  - Enforce the server-saved 0–20 second interval after each completed book lookup in a batch (default 4 seconds), and surface rate-limit or temporary IP-ban responses as clear, non-blocking errors (rather than sleeping synchronously inside request handlers).
+  - If E-Hentai returns its “You are opening” warning with candidates, wait 15–50 seconds and then return those results. This warning is distinct from an IP-ban or rate-limit response, which is reported as an error.
+  - The desktop batch action selects entries on the current library page and sends sequential `mode:auto`, `autoBind:true` requests. It reports per-book failures and no-match results, waits the saved interval after each nonterminal book only when another is selected, and can be cancelled to stop future requests and a pending wait. It stops on explicit access or rate-limit blocks. Bound entries refresh through the same action while retaining their binding provenance.
 - **Dual-site (`e-hentai.org` and `exhentai.org`) core support and credentials**:
-  - Both `e-hentai.org` and `exhentai.org` are core supported sites. `e-hentai.org` works without login credentials; `exhentai.org` uses a user-provided Cookie request header stored outside `henshin.sqlite` in `<data-dir>/eh-settings.json` with `0600` permissions on Unix. Settings expose only the selected default site and whether credentials are configured. The desktop input is write-only; raw cookies are never logged or returned by the API. Cookies are attached only to ExHentai HTML lookup requests, and those requests do not follow redirects.
+  - Both `e-hentai.org` and `exhentai.org` are core supported sites. `e-hentai.org` works without login credentials; `exhentai.org` uses user-provided named login cookies stored outside `henshin.sqlite` in `<data-dir>/eh-settings.json` with `0600` permissions on Unix. Settings expose the saved lookup preferences and whether credentials are configured, never raw cookies. The desktop cookie input is write-only. Sending configured cookies to public `e-hentai.org` searches requires a separate opt-in, disabled by default; that option does not change the preferred search site. Cookies are attached only to opted-in E-Hentai lookup requests or ExHentai HTML lookup requests, and those requests do not follow redirects.
   - Non-HTML, access-denied, login-wall, or unexpected upstream responses are surfaced as explicit **access/upstream errors** distinct from "no search results" (without claiming a single error page uniquely proves cookie expiry), and never disrupt `e-hentai.org` or local library browsing.
   - Upstream HTML search parsing and ExHentai access must be live-verified against authorized galleries during implementation before marking those capabilities complete.
 - **Metadata fetch (`gdata`) and self-consistent bind / refresh / rebind**:
-  - Once `(gid, token)` is confirmed by the user or pasted as a URL, the server fetches titles and namespaced tags via the EH `gdata` JSON API (`namespace: 1`, batched up to 25 galleries per request with polite pacing), checking both top-level and per-gallery errors, HTML-unescaping `title` and `title_jpn`, and storing `category:<lowercase>` alongside namespaced tags as `origin = 'eh'` (optional `uploader:` / `timestamp:` tags stay off by default).
-  - **First bind**: Save `(eh_gid, eh_token, eh_domain)` and fetch via `gdata`. On success, store `eh_title`, `eh_title_jpn`, `eh_refreshed_at`, and `origin = 'eh'` tags. On failure, `eh_*` source fields stay empty and `eh_error` records the failure so the user can retry.
+  - For each selected or manually bound `(gid, token)`, the server fetches titles and namespaced tags through the EH `gdata` JSON API with one gallery pair per request. This applies to first-result auto-binding, manual confirmation or selection, direct URL binding, and refresh; batch refresh sends one request per book. Check top-level and per-gallery errors, HTML-unescape `title` and `title_jpn`, and store `category:<lowercase>` with namespaced tags as `origin = 'eh'` (optional `uploader:` / `timestamp:` tags stay off by default).
+  - **First bind**: Save `(eh_gid, eh_token, eh_domain)` and its `eh_bind_source` (`auto` for the first lookup result, `manual` for a user-confirmed choice or direct URL), then fetch via `gdata`. On success, store `eh_title`, `eh_title_jpn`, `eh_refreshed_at`, and `origin = 'eh'` tags. On failure, keep the binding and source classification, leave `eh_*` metadata empty, and record `eh_error` so the user can retry.
   - **Refresh (same bound gallery)**: On success, replace `eh_*` fields and `origin = 'eh'` tags while preserving `custom_title`, `note`, and `local`/`hidden` tag overrides. On failure, keep the last-known metadata and record `eh_error`.
   - **Rebind (different gallery URL or candidate)**: In one transaction, save the new `(eh_gid, eh_token, eh_domain)` and immediately clear the previous gallery's `eh_title`, `eh_title_jpn`, `eh_refreshed_at`, and `origin = 'eh'` tags (preserving `custom_title`, `note`, and `local`/`hidden` tag overrides), then fetch the new gallery. If that fetch fails, the entry shows the new binding with empty source metadata and `eh_error` — never the previous gallery's tags.
   - Optional Chinese tag translation aliases (e.g., from EhTagTranslation) can be layered later as read-only display and search aliases without altering canonical `namespace:tag` storage.
@@ -270,15 +279,15 @@ All `/api/*` routes require `Authorization: Bearer <token>` and return JSON (exc
 | `DELETE /api/roots/:id` | Remove an empty root configuration (non-empty roots return `409`; files on disk are never touched) |
 | `POST /api/roots/:id/scan` | Start an independent background scan for a root |
 | `GET /api/scans` | Read current/recent scan progress and errors |
-| `GET /api/entries` | Search (`q`), filter (`includeTags`, `excludeTags`, `rootId`, `status`), sort, and paginate |
+| `GET /api/entries` | Search (`q`), filter (`includeTags`, `excludeTags`, `rootId`, `status`, `ehBindSource`), sort, and paginate |
 | `GET /api/entries/:id` | Get full entry details including effective tags and overrides |
 | `PATCH /api/entries/:id` | Update `custom_title`, `note`, or local/hidden tags |
 | `POST /api/entries/:id/open` | Record a deduplicated open event and return updated `{ open_count, last_opened_at }` |
-| `POST /api/entries/:id/eh-bind` | Bind or rebind an EH/ExHentai gallery URL or user-confirmed candidate and fetch metadata via `gdata` |
-| `POST /api/entries/:id/eh-lookup` | Run filename/title or optional cover-hash (`f_shash`) candidate lookup and return candidates for user confirmation |
+| `POST /api/entries/:id/eh-bind` | Manually confirm or choose an EH/ExHentai gallery URL or candidate and fetch metadata via `gdata` |
+| `POST /api/entries/:id/eh-lookup` | `mode:auto` uses saved preferences and binds the first result by default; `title` and `cover` return preview candidates only; `autoBind:false` returns auto-mode alternatives without replacing an existing binding |
 | `POST /api/entries/:id/eh-refresh` | Refresh EH source metadata for one entry (or batch via `POST /api/eh/refresh`) |
-| `GET /api/settings/eh` | Read configured site preference and credential status (never returns raw cookies) |
-| `PUT /api/settings/eh` | Save or clear E-Hentai / ExHentai site preference and server-side cookies (`0600` file in `<data-dir>`) |
+| `GET /api/settings/eh` | Read server-saved EH lookup preferences and credential status (never returns raw cookies) |
+| `PUT /api/settings/eh` | Save EH lookup preferences or clear server-side cookies (`0600` file in `<data-dir>`) |
 | `GET /api/tags` | List distinct effective tags (for filter autocomplete) |
 | `GET /api/covers/:key` | Serve cached JPEG cover thumbnail |
 
@@ -289,14 +298,14 @@ All `/api/*` routes require `Authorization: Bearer <token>` and return JSON (exc
 Keep the desktop interface clean and focused on three views:
 
 1. **Library (Default View)**
-   - **Top bar**: Search input (literal title/filename), include/exclude tag chips with autocomplete, root & status (`active` / `missing`) filters, sort selector, and Refresh button.
-   - **Main grid / list**: Responsive cover cards showing cover image, effective title, key tags, and open count.
-   - **Detail drawer / panel**: Clicking an entry opens details showing cover, effective title, EH titles, filename, page count, effective tags with add/hide controls, personal title and note fields, EH/ExHentai candidate lookup & picker + direct gallery URL bind/rebind and refresh actions (with clear error display on failed fetch), open count and last opened time, reader selector, and primary **Open** button.
+   - **Top bar**: Search input (literal title/filename), include/exclude tag chips with autocomplete, root & status (`active` / `missing`) filters, sort selector, and Refresh button. Batch controls select all entries on the current page, unbound entries on that page, or clear selection; lookup runs sequentially and can be cancelled.
+   - **Main grid / list**: Responsive cover cards showing cover image, server `effectiveTitle`, an **Auto-matched** label for automatic bindings, key tags, and open count. The binding-source filter can show only auto-matched entries.
+   - **Detail drawer / panel**: Clicking an entry opens details showing cover, server `effectiveTitle` and preference-derived `ehDisplayTitle`, EH titles, filename, page count, effective tags with add/hide controls, personal title and note fields, EH/ExHentai preview candidates and direct gallery URL bind/rebind and refresh actions. Show whether the binding is **Auto-matched** or **Manual match**. The user can confirm an auto-match or choose another candidate; errors stay visible. Include open count and last opened time, reader selector, and primary **Open** button.
 2. **Roots & Scans**
    - List of server roots, add/edit exclusions, "Scan now" trigger, and live server scan status/errors.
 3. **Settings**
    - **This device**: Server URL + bearer token (LAN host or `localhost`), per-root local folder mapping (native directory picker), and local external reader profiles (executable picker or OS association).
-   - **Server**: E-Hentai / ExHentai site preference and write-only cookie settings (status display only, never echoing raw cookies), plus backup/archive CLI summary.
+   - **Server**: EH lookup preferences (site, language, search behavior, title preference, optional uploader/time, and 0–20 second batch interval) and write-only cookie settings with a separate opt-in for sending named login cookies to public E-Hentai searches (status display only, never echoing raw cookies), plus backup/archive CLI summary.
 
 ---
 
@@ -310,7 +319,7 @@ Keep the desktop interface clean and focused on three views:
 ### Delivery Sequence
 
 1. **Baseline Reset & Core Browse/Open Loop**: Archive v0 and reset baseline; build standalone Rust `henshin-server` (read-only `.zip` scan, `cover_sha1`, JPEG covers, same-path replacement, open counting) and thin Electron/React desktop client (URL+token connection, local path mapping, external reader launch).
-2. **Search, Personal Editing & Dual-Site EH/ExHentai**: Literal CJK + effective-tag search and personal title/note/tag overrides; live-verified E-Hentai and ExHentai candidate lookup (filename/title + optional `f_shash` with explicit user confirmation), direct URL bind/rebind, `gdata` metadata sync, and dual-site cookie settings.
+2. **Search, Personal Editing & Dual-Site EH/ExHentai**: Literal CJK + effective-tag search and personal title/note/tag overrides; E-Hentai and ExHentai candidate lookup (filename/title + optional `f_shash`) with marked first-result auto-binding, manual confirmation/reselection, direct URL bind/rebind, `gdata` metadata sync, and dual-site cookie settings.
 3. **Multi-Desktop LAN Sharing, Database Backup/Restore & Separate Packaging**: Two-desktop LAN verification and scan continuity, SQLite `backup` / `restore` CLI, and separate server/desktop packaging with lean CI. Optional Chinese tag translation aliases can be layered afterward as read-only display/search aliases.
 
 ### Ongoing Code Hygiene
