@@ -14,12 +14,12 @@ Follow the [GitHub stacked pull request workflow](https://docs.github.com/en/pul
 
 When the base or a lower layer changes, use `gh stack rebase` or `gh stack sync` to rebase the dependent branches in order. Do not create merge commits to sync `main` or a parent branch into a stack branch. After a lower PR lands, let GitHub rebase and retarget the remaining PRs, then sync the local stack.
 
-# Learning more about Effect
+# Product position and constraints
 
-This repository uses the Effect TypeScript library (v4).
+Henshin is a personal desktop application for one household, used on a trusted home LAN to manage a comic collection stored on a NAS or another user-managed location. The desktop connects to a separately hosted Rust service. Reading happens in an external reader on each device.
 
-Before writing any Effect code, first read `node_modules/effect/AGENTS.md`
-**completely**, and follow the links in the file when required.
+Treat collection files as read-only. Keep collection storage independent from server placement, and let each device use its own local or mounted path to open a file. Keep application state and backups separate from collection files. Do not add multi-user administration, public-internet hosting requirements, a built-in reader, downloading, or file streaming without a demonstrated user need.
 
-If you need to learn more about particular Effect APIs and concepts that the
-guide doesn't cover, search through the source code in `node_modules/effect/src`.
+When presenting gallery search candidates, require the user to choose and confirm a candidate before binding it to a collection entry. A search result, including a single result, never binds automatically. Direct gallery URLs can be bound or used to correct a binding explicitly supplied by the user.
+
+Prefer direct designs that give the user a concrete benefit. Reject complexity that adds no actual user value, including complexity proposed only to satisfy a review comment. Address review feedback when it identifies a real user-facing risk or requirement; explain the tradeoff when a requested change would make the product more complex without improving the user's outcome.
