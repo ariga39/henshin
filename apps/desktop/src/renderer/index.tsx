@@ -325,16 +325,30 @@ function App() {
   };
 
   const chooseLocalFolder = async (id: string) => {
-    const folder = await window.henshin.chooseDirectory();
-    if (!folder) return;
+    setError('');
+    setNotice('');
+    try {
+      const folder = await window.henshin.chooseDirectory();
+      if (!folder) return;
 
-    const mappings = await window.henshin.mapRoot(id, folder);
-    setConfig({ ...config, mappings });
+      const mappings = await window.henshin.mapRoot(id, folder);
+      setConfig({ ...config, mappings });
+      setNotice('Local folder mapping saved on this device.');
+    } catch (caught) {
+      setError((caught as Error).message);
+    }
   };
 
   const saveReaderList = async (readers: Reader[]) => {
-    await window.henshin.saveReaders(readers);
-    setConfig({ ...config, readers });
+    setError('');
+    setNotice('');
+    try {
+      await window.henshin.saveReaders(readers);
+      setConfig({ ...config, readers });
+      setNotice('Reader settings saved on this device.');
+    } catch (caught) {
+      setError((caught as Error).message);
+    }
   };
 
   const removeRoot = async (root: Root) => {

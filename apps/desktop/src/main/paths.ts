@@ -1,12 +1,40 @@
 import { realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 
+export function relativePathParts(
+  relativePath: string,
+  platform = process.platform,
+): string[] {
+  const windows = platform === 'win32';
+  if (
+    !relativePath ||
+    relativePath.includes('\0') ||
+    path.posix.isAbsolute(relativePath) ||
+    (windows &&
+      (relativePath.includes('\\') || path.win32.isAbsolute(relativePath)))
+  ) {
+    throw new Error('The server returned an unsafe relative file path.');
+  }
+
+  const pieces = relativePath.split('/');
+  if (
+    pieces.some(
+      (part) =>
+        !part ||
+        part === '.' ||
+        part === '..' ||
+        (windows && /^[a-zA-Z]:/.test(part)),
+    )
+  ) {
+    throw new Error('The server returned an unsafe relative file path.');
+  }
+  return pieces;
+}
+
 export async function resolveLocalPath(mappings: Record<string, string>, rootId: string, relativePath: string): Promise<string> {
   const root = mappings[rootId];
   if (!root) throw new Error('This server root has no local folder mapping. Configure it in Settings.');
-  if (!relativePath || relativePath.includes('\0') || relativePath.includes('\\') || path.posix.isAbsolute(relativePath) || path.win32.isAbsolute(relativePath) || /^[a-zA-Z]:/.test(relativePath)) throw new Error('The server returned an unsafe relative file path.');
-  const pieces = relativePath.split('/');
-  if (pieces.some(part => !part || part === '.' || part === '..')) throw new Error('The server returned an unsafe relative file path.');
+  const pieces = relativePathParts(relativePath);
   const resolvedRoot = await realpath(root);
   const candidate = await realpath(path.join(resolvedRoot, ...pieces));
   const rel = path.relative(resolvedRoot, candidate);
