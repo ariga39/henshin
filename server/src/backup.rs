@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -83,6 +83,16 @@ pub fn restore(data_dir: &Path, input: &Path) -> io::Result<()> {
     if !fs::metadata(&input)?.is_file() {
         return Err(invalid("backup input is not a regular file"));
     }
+    let roots = collection_roots(&input)?;
+    let requested_data_dir = resolve_path(data_dir)?;
+    for root in roots {
+        if requested_data_dir.starts_with(&root) {
+            return Err(invalid(
+                "restore data directory cannot be inside a collection root recorded in the backup",
+            ));
+        }
+    }
+
     fs::create_dir_all(data_dir)?;
     let data_dir = fs::canonicalize(data_dir)?;
     let lock = crate::app::acquire_data_dir_lock(&data_dir).map_err(|error| {
@@ -99,7 +109,7 @@ pub fn restore(data_dir: &Path, input: &Path) -> io::Result<()> {
 
     let stage = data_dir.join(format!(".restore-{}.sqlite", uuid::Uuid::new_v4()));
     fs::copy(&input, &stage)?;
-    let validation = validate_backup(&stage);
+    let validation = validate_backup(&stage).and_then(|()| initialize_database(&stage));
     if let Err(error) = validation {
         remove_staged(&stage);
         return Err(error);
@@ -150,26 +160,91 @@ pub fn restore(data_dir: &Path, input: &Path) -> io::Result<()> {
         remove_staged(&stage);
         error
     })?;
-    let initialized = (|| -> rusqlite::Result<()> {
-        let connection = Connection::open(&database)?;
-        crate::db::initialize(&connection)?;
-        Ok(())
-    })();
-    initialized.map_err(sql_error)?;
-
-    let covers = data_dir.join("covers");
-    fs::create_dir_all(&covers)?;
-    for item in fs::read_dir(&covers)? {
-        let path = item?.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            fs::remove_dir_all(path)?;
-        } else {
-            fs::remove_file(path)?;
-        }
-    }
+    clear_covers(&data_dir.join("covers"))?;
     drop(lock);
     Ok(())
+}
+
+fn collection_roots(input: &Path) -> io::Result<Vec<PathBuf>> {
+    let connection =
+        Connection::open_with_flags(input, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_error)?;
+    let mut statement = connection
+        .prepare("SELECT server_path FROM roots")
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(sql_error)?;
+    rows.map(|row| resolve_path(Path::new(&row.map_err(sql_error)?)))
+        .collect()
+}
+
+fn resolve_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
+            std::path::Component::RootDir => resolved.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+                if let Ok(canonical) = fs::canonicalize(&resolved) {
+                    resolved = canonical;
+                }
+            }
+            std::path::Component::Normal(name) => {
+                resolved.push(name);
+                if let Ok(canonical) = fs::canonicalize(&resolved) {
+                    resolved = canonical;
+                }
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn initialize_database(path: &Path) -> io::Result<()> {
+    let connection = Connection::open(path).map_err(sql_error)?;
+    crate::db::initialize(&connection).map_err(sql_error)?;
+    drop(connection);
+    remove_staged_sidecars(path);
+    Ok(())
+}
+
+fn clear_covers(covers: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(covers) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            remove_symlink_or_file(covers)?;
+            fs::create_dir(covers)?;
+        }
+        Ok(_) => {
+            for item in fs::read_dir(covers)? {
+                let path = item?.path();
+                let metadata = fs::symlink_metadata(&path)?;
+                if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                    fs::remove_dir_all(path)?;
+                } else if metadata.file_type().is_symlink() {
+                    remove_symlink_or_file(&path)?;
+                } else {
+                    fs::remove_file(path)?;
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(covers)?,
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+fn remove_symlink_or_file(path: &Path) -> io::Result<()> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(directory_error) => fs::remove_file(path).or(Err(directory_error)),
+    }
 }
 
 fn validate_backup(path: &Path) -> io::Result<()> {
@@ -324,8 +399,10 @@ mod tests {
             "keep"
         );
         assert_eq!(fs::read(data.join("covers/old.jpg")).unwrap(), b"cover");
+        let valid = temp.path().join("valid.sqlite");
+        create(&data, &valid).unwrap();
         assert!(
-            restore(&data, &bad)
+            restore(&data, &valid)
                 .unwrap_err()
                 .to_string()
                 .contains("stop it before restoring")
@@ -413,6 +490,75 @@ mod tests {
             if archived.join(format!("henshin.sqlite{suffix}")).exists() {
                 assert!(!target.join(format!("henshin.sqlite{suffix}")).exists());
             }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_removes_a_covers_symlink_without_touching_its_collection_sentinel() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let state = AppState::open(source.clone(), Some("source-secret".into())).unwrap();
+        let archive = temp.path().join("archive.sqlite");
+        create(&source, &archive).unwrap();
+        drop(state);
+        for suffix in ["-wal", "-shm"] {
+            assert!(!sidecar(&archive, suffix).exists());
+        }
+
+        let collection = temp.path().join("collection");
+        fs::create_dir(&collection).unwrap();
+        let sentinel = collection.join("preserve.txt");
+        fs::write(&sentinel, b"collection sentinel").unwrap();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        symlink(&collection, target.join("covers")).unwrap();
+
+        restore(&target, &archive).unwrap();
+        assert_eq!(fs::read(&sentinel).unwrap(), b"collection sentinel");
+        assert!(
+            !fs::symlink_metadata(target.join("covers"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(target.join("covers").is_dir());
+        for suffix in ["-wal", "-shm"] {
+            assert!(!sidecar(&archive, suffix).exists());
+        }
+    }
+
+    #[test]
+    fn restore_rejects_a_data_dir_inside_an_input_collection_root_before_creating_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("collection");
+        fs::create_dir(&library).unwrap();
+        let sentinel = library.join("preserve.txt");
+        fs::write(&sentinel, b"collection sentinel").unwrap();
+        let source = temp.path().join("source");
+        let state = AppState::open(source.clone(), Some("source-secret".into())).unwrap();
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO roots VALUES('root','Library',?1,'[]',1)",
+                [library.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        let archive = temp.path().join("archive.sqlite");
+        create(&source, &archive).unwrap();
+        drop(state);
+        let data_dir = library.join("not-created/nested");
+
+        assert!(restore(&data_dir, &archive).is_err());
+        assert!(!library.join("not-created").exists());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"collection sentinel");
+        assert!(!library.join("server.lock").exists());
+        for suffix in ["-wal", "-shm"] {
+            assert!(!sidecar(&archive, suffix).exists());
         }
     }
 }
