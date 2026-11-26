@@ -34,5 +34,35 @@ pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS entry_tags (entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE, tag TEXT NOT NULL, origin TEXT NOT NULL CHECK(origin IN ('eh','local','hidden')), PRIMARY KEY(entry_id,tag,origin));
         CREATE INDEX IF NOT EXISTS idx_entry_tags_tag ON entry_tags(tag,origin,entry_id);
         CREATE TABLE IF NOT EXISTS open_events (id TEXT PRIMARY KEY, entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE, opened_at INTEGER NOT NULL);
-        CREATE INDEX IF NOT EXISTS idx_open_events_entry ON open_events(entry_id,opened_at DESC);")
+        CREATE INDEX IF NOT EXISTS idx_open_events_entry ON open_events(entry_id,opened_at DESC);")?;
+    let has_hash_version = {
+        let mut statement = conn.prepare("PRAGMA table_info(entries)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        columns
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|name| name == "cover_hash_version")
+    };
+    if !has_hash_version {
+        conn.execute(
+            "ALTER TABLE entries ADD COLUMN cover_hash_version INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    let has_bind_source = {
+        let mut statement = conn.prepare("PRAGMA table_info(entries)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        columns
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|name| name == "eh_bind_source")
+    };
+    if !has_bind_source {
+        conn.execute("ALTER TABLE entries ADD COLUMN eh_bind_source TEXT CHECK(eh_bind_source IN ('auto','manual'))", [])?;
+        conn.execute(
+            "UPDATE entries SET eh_bind_source='manual' WHERE eh_gid IS NOT NULL",
+            [],
+        )?;
+    }
+    Ok(())
 }

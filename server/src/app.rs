@@ -22,18 +22,54 @@ pub struct AppState {
     _lock: fs::File,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EhSettings {
+    #[serde(default = "default_eh_site")]
     pub site: String,
+    #[serde(default)]
     pub cookie_header: Option<String>,
+    #[serde(default)]
+    pub send_cookies_to_e_hentai: bool,
+    #[serde(default)]
+    pub language: String,
+    #[serde(default)]
+    pub use_thumbnails: bool,
+    #[serde(default)]
+    pub search_gid: bool,
+    #[serde(default)]
+    pub prefer_original_title: bool,
+    #[serde(default)]
+    pub additional_tags: bool,
+    #[serde(default)]
+    pub include_expunged: bool,
+    #[serde(default = "default_eh_interval")]
+    pub interval: u8,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PersistedEhSettings<'a> {
-    site: &'a str,
-    cookie_header: Option<&'a str>,
+impl Default for EhSettings {
+    fn default() -> Self {
+        Self {
+            site: default_eh_site(),
+            cookie_header: None,
+            send_cookies_to_e_hentai: false,
+            language: String::new(),
+            use_thumbnails: false,
+            search_gid: false,
+            prefer_original_title: false,
+            additional_tags: false,
+            include_expunged: false,
+            interval: default_eh_interval(),
+        }
+    }
+}
+
+pub fn default_eh_site() -> String {
+    "e-hentai.org".into()
+}
+
+pub fn default_eh_interval() -> u8 {
+    4
 }
 
 impl AppState {
@@ -82,8 +118,16 @@ impl AppState {
             serde_json::from_slice(&fs::read(&settings_path)?)?
         } else {
             EhSettings {
-                site: "e-hentai.org".into(),
+                site: default_eh_site(),
                 cookie_header: None,
+                send_cookies_to_e_hentai: false,
+                language: String::new(),
+                use_thumbnails: false,
+                search_gid: false,
+                prefer_original_title: false,
+                additional_tags: false,
+                include_expunged: false,
+                interval: default_eh_interval(),
             }
         };
         Ok(Self {
@@ -94,11 +138,7 @@ impl AppState {
             db: Mutex::new(connection),
             scans: Mutex::new(HashMap::new()),
             scan_gate: Arc::new(Semaphore::new(1)),
-            eh: eh::EhClient::new(
-                "https://e-hentai.org",
-                "https://api.e-hentai.org/api.php",
-                std::time::Duration::from_secs(4),
-            )?,
+            eh: eh::EhClient::new("https://e-hentai.org", "https://api.e-hentai.org/api.php")?,
             eh_settings: Mutex::new(eh_settings),
             _lock: lock,
         })
@@ -111,11 +151,7 @@ pub fn save_eh_settings(data_dir: &Path, settings: &EhSettings) -> std::io::Resu
     use std::os::unix::fs::OpenOptionsExt;
     let path = data_dir.join("eh-settings.json");
     let temp = data_dir.join(format!(".eh-settings-{}.tmp", uuid::Uuid::new_v4()));
-    let bytes = serde_json::to_vec(&PersistedEhSettings {
-        site: &settings.site,
-        cookie_header: settings.cookie_header.as_deref(),
-    })
-    .map_err(std::io::Error::other)?;
+    let bytes = serde_json::to_vec(settings).map_err(std::io::Error::other)?;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -136,11 +172,7 @@ pub fn save_eh_settings(data_dir: &Path, settings: &EhSettings) -> std::io::Resu
     use std::io::Write;
     let path = data_dir.join("eh-settings.json");
     let temp = data_dir.join(format!(".eh-settings-{}.tmp", uuid::Uuid::new_v4()));
-    let bytes = serde_json::to_vec(&PersistedEhSettings {
-        site: &settings.site,
-        cookie_header: settings.cookie_header.as_deref(),
-    })
-    .map_err(std::io::Error::other)?;
+    let bytes = serde_json::to_vec(settings).map_err(std::io::Error::other)?;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
