@@ -466,6 +466,7 @@ function App() {
     selectedEntryIdRef.current = entry.id;
     setSelected(null);
     setDraft(null);
+    setEhBusy(false);
     setEhCandidates([]); setEhMessage(''); setEhUrl(''); setEhQuery(entry.title);
     setSavingEntryId(null);
     try {
