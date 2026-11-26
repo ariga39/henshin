@@ -224,7 +224,7 @@ function App() {
       setHealth(`Connected to ${result.serverId} · v${result.version}`);
       setNotice('Connection tested successfully.');
       setConfig(savedConfig);
-      await refresh('');
+      await refresh('', 0);
     } catch (caught) {
       setHealth('');
       setError((caught as Error).message);
@@ -437,7 +437,9 @@ function App() {
             </div>
           ) : entries.length === 0 ? (
             <div className="empty">
-              No entries found. Add a root and scan it under Roots &amp; Scans.
+              {offset > 0
+                ? 'No books on this page.'
+                : 'No entries found. Add a root and scan it under Roots & Scans.'}
             </div>
           ) : (
             <div className="grid">
@@ -469,11 +471,13 @@ function App() {
             </div>
           )}
 
-          {entries.length > 0 && (
+          {(entries.length > 0 || offset > 0) && (
             <div className="row">
-              <span className="muted">
-                Books {offset + 1}–{offset + entries.length}
-              </span>
+              {entries.length > 0 && (
+                <span className="muted">
+                  Books {offset + 1}–{offset + entries.length}
+                </span>
+              )}
               <button
                 disabled={offset === 0}
                 onClick={() => {

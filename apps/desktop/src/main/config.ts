@@ -4,6 +4,7 @@ import path from 'node:path';
 export type ReaderProfile = { id: string; name: string; mode: 'executable' | 'system'; executable?: string; args: string[]; isDefault: boolean };
 export type DesktopConfig = { connection: { url: string; token: string }; mappings: Record<string, string>; readers: ReaderProfile[] };
 export const emptyConfig = (): DesktopConfig => ({ connection: { url: '', token: '' }, mappings: {}, readers: [] });
+let configWriteQueue: Promise<void> = Promise.resolve();
 
 export function connectionForSave(
   current: DesktopConfig['connection'],
@@ -36,12 +37,17 @@ export async function readConfig(userData: string): Promise<DesktopConfig> {
   }
 }
 
-export async function writeConfig(userData: string, config: DesktopConfig): Promise<void> {
-  await mkdir(userData, { recursive: true });
+export function writeConfig(userData: string, config: DesktopConfig): Promise<void> {
   const target = path.join(userData, 'desktop-config.json');
   const temporary = `${target}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  if (process.platform !== 'win32') await chmod(temporary, 0o600);
-  await rename(temporary, target);
-  if (process.platform !== 'win32') await chmod(target, 0o600);
+  const content = `${JSON.stringify(config, null, 2)}\n`;
+  const write = configWriteQueue.then(async () => {
+    await mkdir(userData, { recursive: true });
+    await writeFile(temporary, content, { mode: 0o600 });
+    if (process.platform !== 'win32') await chmod(temporary, 0o600);
+    await rename(temporary, target);
+    if (process.platform !== 'win32') await chmod(target, 0o600);
+  });
+  configWriteQueue = write.catch(() => undefined);
+  return write;
 }

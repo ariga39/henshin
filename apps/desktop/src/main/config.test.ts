@@ -29,6 +29,28 @@ test('config persists token, mappings, and readers with private Unix permissions
     if(process.platform!=='win32') assert.equal((await stat(path.join(dir,'desktop-config.json'))).mode & 0o777,0o600);
   } finally { await rm(dir,{recursive:true,force:true}); }
 });
+
+test('parallel config writes serialize and preserve the last requested settings', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'henshin-config-'));
+  try {
+    const first = {
+      connection: { url: 'http://first.local', token: 'first-token' },
+      mappings: { first: '/first' },
+      readers: [],
+    };
+    const last = {
+      connection: { url: 'http://last.local', token: 'last-token' },
+      mappings: { last: '/last' },
+      readers: [],
+    };
+
+    await Promise.all([writeConfig(dir, first), writeConfig(dir, last)]);
+
+    assert.deepEqual(await readConfig(dir), last);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 test('missing config falls back cleanly and malformed config reports an error', async()=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),'henshin-config-'));
   try { assert.deepEqual(await readConfig(dir),{connection:{url:'',token:''},mappings:{},readers:[]}); await writeFile(path.join(dir,'desktop-config.json'),'{'); await assert.rejects(readConfig(dir),/Could not read desktop-config/); } finally { await rm(dir,{recursive:true,force:true}); }
