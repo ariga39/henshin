@@ -39,6 +39,6 @@
     "nodeGypRebuild": false,
     "mac": { "identity": "-", "target": ["zip"], "artifactName": "Henshin-${version}-darwin-${arch}.${ext}" },
     "win": { "target": ["zip"], "artifactName": "Henshin-${version}-windows-${arch}.${ext}" },
-    "linux": { "target": ["AppImage"], "artifactName": "Henshin-${version}-linux-${arch}.${ext}" }
+    "linux": { "target": ["AppImage"], "executableName": "henshin", "artifactName": "Henshin-${version}-linux-x64.${ext}" }
   }
 }

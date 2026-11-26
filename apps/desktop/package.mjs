@@ -48,7 +48,7 @@ try {
     appPath = path.join(unpack, 'Henshin.app');
     signingStatus = reportMacSigning(appPath);
   } else if (platform === 'win') {
-    run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Expand-Archive -LiteralPath '${artifact}' -DestinationPath '${unpack}' -Force`]);
+    run('tar.exe', ['-xf', artifact, '-C', unpack]);
     appPath = await findNamedFile(unpack, 'Henshin.exe');
     if (!appPath) throw new Error('Windows archive did not contain Henshin.exe');
     signingStatus = reportWindowsSigning(appPath);

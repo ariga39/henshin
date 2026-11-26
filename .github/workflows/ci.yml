@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             target: darwin-arm64
           - os: ubuntu-latest
             target: linux-x64
@@ -41,7 +41,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: henshin-server-${{ matrix.target }}
-          path: dist/release/henshin-server-*
+          path: |
+            dist/release/henshin-server-*-${{ matrix.target }}.tar.gz
+            dist/release/henshin-server-*-${{ matrix.target }}.tar.gz.sha256
+            dist/release/henshin-server-*-${{ matrix.target }}.zip
+            dist/release/henshin-server-*-${{ matrix.target }}.zip.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -52,7 +56,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             target: darwin-arm64
           - os: ubuntu-latest
             target: linux-x64
@@ -90,9 +94,11 @@ jobs:
         with:
           name: henshin-desktop-${{ matrix.target }}
           path: |
-            dist/release/Henshin-*.zip
-            dist/release/Henshin-*.AppImage
-            dist/release/Henshin-*.sha256
-            dist/release/Henshin-*.signing-status.txt
+            dist/release/Henshin-*-${{ matrix.target }}.zip
+            dist/release/Henshin-*-${{ matrix.target }}.zip.sha256
+            dist/release/Henshin-*-${{ matrix.target }}.zip.signing-status.txt
+            dist/release/Henshin-*-${{ matrix.target }}.AppImage
+            dist/release/Henshin-*-${{ matrix.target }}.AppImage.sha256
+            dist/release/Henshin-*-${{ matrix.target }}.AppImage.signing-status.txt
           if-no-files-found: error
           retention-days: 7

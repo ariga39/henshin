@@ -48,7 +48,7 @@ try {
   const extracted = await mkdtemp(path.join(tmpdir(), 'henshin-server-smoke-'));
   try {
     if (platform === 'windows') {
-      run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Expand-Archive -LiteralPath '${archive}' -DestinationPath '${extracted}' -Force`]);
+      run('tar.exe', ['-xf', archive, '-C', extracted]);
     } else {
       run('tar', ['-xzf', archive, '-C', extracted]);
     }
