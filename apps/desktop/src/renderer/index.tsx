@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { effectiveTagOrigins, effectiveTitle, entryDraft, entryPatch, entryPath, isCurrentSelection, libraryQuery, refreshEntryDraft, updateEntryDraft, type EntryDraft } from './libraryState.js';
+import { effectiveTagOrigins, effectiveTitle, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, sameServerOrigin, updateEntryDraft, type EntryDraft } from './libraryState.js';
 
 declare global {
   interface Window {
@@ -163,19 +163,21 @@ function App() {
       ...nextConfig,
       connection: { ...nextConfig.connection, token: nextToken },
     });
-    refreshGeneration.current += 1;
-    selectionGeneration.current += 1;
-    selectedEntryIdRef.current = null;
-    setRoots([]);
-    setScans([]);
-    setEntries([]);
-    setSelected(null);
-    setRootId('');
-    setOffset(0);
-    setTotal(0);
-    setDraft(null);
-    setTagSuggestions([]);
-    setHealth('');
+    if (!sameServerOrigin(config.connection.url, saved.connection.url)) {
+      refreshGeneration.current += 1;
+      selectionGeneration.current += 1;
+      selectedEntryIdRef.current = null;
+      setRoots([]);
+      setScans([]);
+      setEntries([]);
+      setSelected(null);
+      setRootId('');
+      setOffset(0);
+      setTotal(0);
+      setDraft(null);
+      setTagSuggestions([]);
+      setHealth('');
+    }
     setConfig(saved);
     setConnectionUrl(saved.connection.url);
     setToken('');
@@ -199,7 +201,21 @@ function App() {
       setScans(scanResult.scans);
       const selectedId = selectedEntryIdRef.current;
       if (selectedId) {
-        const refreshedEntry = entryResult.entries.find((entry) => entry.id === selectedId);
+        const selectionVersion = selectionGeneration.current;
+        let refreshedEntry = entryResult.entries.find((entry) => entry.id === selectedId);
+        if (!refreshedEntry) {
+          try {
+            refreshedEntry = await call<Entry>(entryPath(selectedId));
+          } catch (caught) {
+            if (generation === refreshGeneration.current
+              && isCurrentSelection(selectedId, selectedEntryIdRef.current, selectionVersion, selectionGeneration.current)) {
+              setError((caught as Error).message);
+            }
+            return;
+          }
+          if (generation !== refreshGeneration.current
+            || !isCurrentSelection(selectedId, selectedEntryIdRef.current, selectionVersion, selectionGeneration.current)) return;
+        }
         if (refreshedEntry) {
           setSelected((current) => current?.id === selectedId ? refreshedEntry : current);
           setDraft((current) => refreshEntryDraft(current, refreshedEntry));
@@ -255,6 +271,8 @@ function App() {
 
   const testConnection = async () => {
     setError('');
+    const sameServer = sameServerOrigin(config.connection.url, connectionUrl);
+    if (!sameServer && !confirmDraftDiscard()) return;
     try {
       const savedConfig = await saveConnection(
         { ...config, connection: { ...config.connection, url: connectionUrl } },
@@ -266,7 +284,8 @@ function App() {
       setHealth(`Connected to ${result.serverId} · v${result.version}`);
       setNotice('Connection tested successfully.');
       setConfig(savedConfig);
-      await refresh('', 0);
+      if (sameServer) await refreshCurrentRef.current();
+      else await refresh('', 0);
     } catch (caught) {
       setHealth('');
       setError((caught as Error).message);
@@ -525,7 +544,7 @@ function App() {
                 <option value="include">Include all</option><option value="exclude">Exclude</option>
               </select>
               <input list="tag-suggestions" aria-label="Filter by tag" placeholder="Type a tag and press Enter" value={tagInput}
-                onChange={(event) => setTagInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addFilterTag(); } }} />
+                onChange={(event) => setTagInput(event.target.value)} onKeyDown={(event) => { if (isComposingEnter(event.key, event.nativeEvent.isComposing, event.nativeEvent.keyCode)) return; if (event.key === 'Enter') { event.preventDefault(); addFilterTag(); } }} />
               <datalist id="tag-suggestions">{tagSuggestions.map((tag) => <option key={tag} value={tag} />)}</datalist>
               <button onClick={addFilterTag}>Add tag</button>
             </div>
@@ -625,7 +644,7 @@ function App() {
                     {effectiveTagOrigins({ ehTags: selected.ehTags || [], localTags: draft.localTags, hiddenTags: draft.hiddenTags }).local.map((tag) => <span className="tag-chip" key={`local:${tag}`}>{tag}<button aria-label={`Remove ${tag}`} disabled={savingEntryId === draft.entryId} onClick={() => setDraft(updateEntryDraft(draft, { localTags: draft.localTags.filter((item) => item !== tag) }))}>×</button></span>)}
                     {draft.hiddenTags.map((tag) => <span className="tag-chip hidden-tag" key={`hidden:${tag}`}>{tag}<button disabled={savingEntryId === draft.entryId} onClick={() => setDraft(updateEntryDraft(draft, { hiddenTags: draft.hiddenTags.filter((item) => item !== tag) }))}>Restore</button></span>)}
                   </div></div>
-                  <div className="row"><input list="tag-suggestions" aria-label="Add personal tag" placeholder="Add personal tag" value={editTag} disabled={savingEntryId === draft.entryId} onChange={(event) => setEditTag(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && editTag.trim()) { event.preventDefault(); const tag = editTag.trim(); if (!draft.localTags.includes(tag)) setDraft(updateEntryDraft(draft, { localTags: [...draft.localTags, tag] })); setEditTag(''); } }} /><button disabled={savingEntryId === draft.entryId} onClick={() => { const tag = editTag.trim(); if (tag && !draft.localTags.includes(tag)) setDraft(updateEntryDraft(draft, { localTags: [...draft.localTags, tag] })); setEditTag(''); }}>Add local tag</button></div>
+                  <div className="row"><input list="tag-suggestions" aria-label="Add personal tag" placeholder="Add personal tag" value={editTag} disabled={savingEntryId === draft.entryId} onChange={(event) => setEditTag(event.target.value)} onKeyDown={(event) => { if (isComposingEnter(event.key, event.nativeEvent.isComposing, event.nativeEvent.keyCode)) return; if (event.key === 'Enter' && editTag.trim()) { event.preventDefault(); const tag = editTag.trim(); if (!draft.localTags.includes(tag)) setDraft(updateEntryDraft(draft, { localTags: [...draft.localTags, tag] })); setEditTag(''); } }} /><button disabled={savingEntryId === draft.entryId} onClick={() => { const tag = editTag.trim(); if (tag && !draft.localTags.includes(tag)) setDraft(updateEntryDraft(draft, { localTags: [...draft.localTags, tag] })); setEditTag(''); }}>Add local tag</button></div>
                   <div className="row"><button className="primary" disabled={!draft.dirty || savingEntryId === draft.entryId} onClick={() => void saveEntry()}>Save</button><button disabled={!draft.dirty || savingEntryId === draft.entryId} onClick={() => setDraft(entryDraft(selected))}>Discard</button></div>
                 </section>
                 <div className="row">

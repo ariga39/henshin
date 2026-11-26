@@ -44,6 +44,18 @@ export function isCurrentSelection(
   return requestedEntryId === currentEntryId && requestedGeneration === currentGeneration;
 }
 
+export function sameServerOrigin(left: string, right: string): boolean {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
+}
+
+export function isComposingEnter(key: string, isComposing: boolean, keyCode: number): boolean {
+  return key === 'Enter' && (isComposing || keyCode === 229);
+}
+
 export function entryPath(entryId: string): string {
   return `/api/entries/${encodeURIComponent(entryId)}`;
 }

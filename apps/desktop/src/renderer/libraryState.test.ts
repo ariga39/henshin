@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveTagOrigins, effectiveTitle, entryDraft, entryPatch, entryPath, isCurrentSelection, libraryQuery, refreshEntryDraft, updateEntryDraft } from './libraryState.js';
+import { effectiveTagOrigins, effectiveTitle, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, sameServerOrigin, updateEntryDraft } from './libraryState.js';
 
 test('library query preserves repeated tag filters and all list controls', () => {
   const query = new URLSearchParams(libraryQuery({
@@ -40,6 +40,15 @@ test('late selection and save responses are ignored after another entry is selec
   const draft = entryDraft({ id: 'B', note: 'B note' });
   assert.equal(draft.entryId, 'B');
   assert.equal(entryPath(draft.entryId), '/api/entries/B');
+});
+
+test('same-server connection checks preserve the selected library and IME Enter is ignored', () => {
+  assert.equal(sameServerOrigin('http://library.local:4317', 'http://library.local:4317/'), true);
+  assert.equal(sameServerOrigin('http://library.local:4317', 'http://other.local:4317'), false);
+  assert.equal(isComposingEnter('Enter', true, 13), true);
+  assert.equal(isComposingEnter('Enter', false, 229), true);
+  assert.equal(isComposingEnter('Enter', false, 13), false);
+  assert.equal(isComposingEnter('a', true, 65), false);
 });
 
 test('refresh updates selected entry facts without replacing its personal draft fields', () => {
