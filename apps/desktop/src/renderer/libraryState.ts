@@ -31,6 +31,34 @@ export type EntryDraft = {
   dirty: boolean;
 };
 
+export function isCurrentSelection(
+  requestedEntryId: string,
+  currentEntryId: string | null,
+  requestedGeneration: number,
+  currentGeneration: number,
+): boolean {
+  return requestedEntryId === currentEntryId && requestedGeneration === currentGeneration;
+}
+
+export function entryPath(entryId: string): string {
+  return `/api/entries/${encodeURIComponent(entryId)}`;
+}
+
+export function mergeRefreshedEntry<T extends {
+  customTitle?: string;
+  note?: string;
+  localTags?: string[];
+  hiddenTags?: string[];
+}>(current: T, refreshed: T): T {
+  return {
+    ...refreshed,
+    customTitle: current.customTitle,
+    note: current.note,
+    localTags: current.localTags,
+    hiddenTags: current.hiddenTags,
+  };
+}
+
 export function entryDraft(entry: {
   id: string;
   customTitle?: string;

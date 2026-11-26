@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { effectiveTagOrigins, effectiveTitle, entryDraft, libraryQuery, type EntryDraft } from './libraryState.js';
+import { effectiveTagOrigins, effectiveTitle, entryDraft, entryPath, isCurrentSelection, libraryQuery, mergeRefreshedEntry, type EntryDraft } from './libraryState.js';
 
 declare global {
   interface Window {
@@ -106,7 +106,9 @@ function App() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [selected, setSelected] = useState<Entry | null>(null);
   const selectedEntryId = selected?.id;
+  const selectedEntryIdRef = useRef<string | null>(null);
   const [draft, setDraft] = useState<EntryDraft | null>(null);
+  const [savingEntryId, setSavingEntryId] = useState<string | null>(null);
   const [searchText, setSearchText] = useState('');
   const [query, setQuery] = useState('');
   const [composing, setComposing] = useState(false);
@@ -144,6 +146,7 @@ function App() {
   });
   const [readerArgs, setReaderArgs] = useState('');
   const refreshGeneration = useRef(0);
+  const selectionGeneration = useRef(0);
 
   const call = async <T,>(
     url: string,
@@ -160,6 +163,8 @@ function App() {
       connection: { ...nextConfig.connection, token: nextToken },
     });
     refreshGeneration.current += 1;
+    selectionGeneration.current += 1;
+    selectedEntryIdRef.current = null;
     setRoots([]);
     setScans([]);
     setEntries([]);
@@ -191,9 +196,12 @@ function App() {
       setEntries(entryResult.entries);
       setTotal(entryResult.total);
       setScans(scanResult.scans);
-      if (selected) {
-        const detail = await call<Entry>(`/api/entries/${encodeURIComponent(selected.id)}`);
-        setSelected(detail);
+      const selectedId = selectedEntryIdRef.current;
+      if (selectedId) {
+        const refreshedEntry = entryResult.entries.find((entry) => entry.id === selectedId);
+        if (refreshedEntry) {
+          setSelected((current) => current?.id === selectedId ? mergeRefreshedEntry(current, refreshedEntry) : current);
+        }
       }
     } catch (caught) {
       if (generation === refreshGeneration.current) {
@@ -314,6 +322,7 @@ function App() {
   };
 
   const openEntry = async (entry: Entry) => {
+    const generation = selectionGeneration.current;
     setError('');
     try {
       const result = await window.henshin.openEntry({
@@ -335,7 +344,9 @@ function App() {
             currentEntry.id === entry.id ? openedEntry : currentEntry,
           ),
         );
-        setSelected(openedEntry);
+        if (isCurrentSelection(entry.id, selectedEntryIdRef.current, generation, selectionGeneration.current)) {
+          setSelected(openedEntry);
+        }
       }
     } catch (caught) {
       setError((caught as Error).message);
@@ -423,23 +434,46 @@ function App() {
   };
 
   const selectEntry = async (entry: Entry) => {
+    const generation = ++selectionGeneration.current;
+    selectedEntryIdRef.current = entry.id;
+    setSelected(null);
+    setDraft(null);
+    setSavingEntryId(null);
     try {
-      const detail = await call<Entry>(`/api/entries/${encodeURIComponent(entry.id)}`);
+      const detail = await call<Entry>(entryPath(entry.id));
+      if (!isCurrentSelection(entry.id, selectedEntryIdRef.current, generation, selectionGeneration.current)) return;
       setSelected(detail); setDraft(entryDraft(detail)); setEditTag(''); setReaderId('');
-    } catch (caught) { setError((caught as Error).message); }
+    } catch (caught) {
+      if (isCurrentSelection(entry.id, selectedEntryIdRef.current, generation, selectionGeneration.current)) {
+        setError((caught as Error).message);
+      }
+    }
   };
 
   const saveEntry = async () => {
-    if (!selected || !draft) return;
+    if (!selected || !draft || selected.id !== draft.entryId || savingEntryId) return;
+    const generation = selectionGeneration.current;
+    const entryId = draft.entryId;
+    setSavingEntryId(entryId);
     try {
-      const updated = await call<Entry>(`/api/entries/${encodeURIComponent(selected.id)}`, 'PATCH', {
+      const updated = await call<Entry>(entryPath(draft.entryId), 'PATCH', {
         customTitle: draft.customTitle, note: draft.note,
         localTags: draft.localTags, hiddenTags: draft.hiddenTags,
       });
+      if (!isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)
+        || draft.entryId !== entryId || updated.id !== entryId) return;
       setSelected(updated); setDraft(entryDraft(updated)); setEntries((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
-      const tags = await call<{ tags: string[] }>('/api/tags'); setTagSuggestions(tags.tags);
+      const tags = await call<{ tags: string[] }>('/api/tags');
+      if (!isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) return;
+      setTagSuggestions(tags.tags);
       setNotice('Personal details saved.');
-    } catch (caught) { setError((caught as Error).message); }
+    } catch (caught) {
+      if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) {
+        setError((caught as Error).message);
+      }
+    } finally {
+      setSavingEntryId((current) => current === entryId ? null : current);
+    }
   };
 
   return (
@@ -583,15 +617,15 @@ function App() {
                 </p>
                 <section className="editor-section">
                   <h3>Personal details {draft.dirty && <span className="status">Unsaved changes</span>}</h3>
-                  <label className="field"><span>Custom title</span><input value={draft.customTitle} onChange={(event) => setDraft({ ...draft, customTitle: event.target.value, dirty: true })} placeholder="Use source title when empty" /></label>
-                  <label className="field"><span>Note</span><textarea rows={4} value={draft.note} onChange={(event) => setDraft({ ...draft, note: event.target.value, dirty: true })} /></label>
+                  <label className="field"><span>Custom title</span><input value={draft.customTitle} disabled={savingEntryId === draft.entryId} onChange={(event) => setDraft({ ...draft, customTitle: event.target.value, dirty: true })} placeholder="Use source title when empty" /></label>
+                  <label className="field"><span>Note</span><textarea rows={4} value={draft.note} disabled={savingEntryId === draft.entryId} onChange={(event) => setDraft({ ...draft, note: event.target.value, dirty: true })} /></label>
                   <div className="field"><span>Tags</span><div className="chips">
-                    {effectiveTagOrigins({ ehTags: selected.ehTags || [], localTags: draft.localTags, hiddenTags: draft.hiddenTags }).eh.map((tag) => <span className="tag-chip" key={`eh:${tag}`}>{tag}<button onClick={() => setDraft({ ...draft, hiddenTags: [...draft.hiddenTags, tag], dirty: true })}>Hide</button></span>)}
-                    {effectiveTagOrigins({ ehTags: selected.ehTags || [], localTags: draft.localTags, hiddenTags: draft.hiddenTags }).local.map((tag) => <span className="tag-chip" key={`local:${tag}`}>{tag}<button aria-label={`Remove ${tag}`} onClick={() => setDraft({ ...draft, localTags: draft.localTags.filter((item) => item !== tag), dirty: true })}>×</button></span>)}
-                    {draft.hiddenTags.map((tag) => <span className="tag-chip hidden-tag" key={`hidden:${tag}`}>{tag}<button onClick={() => setDraft({ ...draft, hiddenTags: draft.hiddenTags.filter((item) => item !== tag), dirty: true })}>Restore</button></span>)}
+                    {effectiveTagOrigins({ ehTags: selected.ehTags || [], localTags: draft.localTags, hiddenTags: draft.hiddenTags }).eh.map((tag) => <span className="tag-chip" key={`eh:${tag}`}>{tag}<button disabled={savingEntryId === draft.entryId} onClick={() => setDraft({ ...draft, hiddenTags: [...draft.hiddenTags, tag], dirty: true })}>Hide</button></span>)}
+                    {effectiveTagOrigins({ ehTags: selected.ehTags || [], localTags: draft.localTags, hiddenTags: draft.hiddenTags }).local.map((tag) => <span className="tag-chip" key={`local:${tag}`}>{tag}<button aria-label={`Remove ${tag}`} disabled={savingEntryId === draft.entryId} onClick={() => setDraft({ ...draft, localTags: draft.localTags.filter((item) => item !== tag), dirty: true })}>×</button></span>)}
+                    {draft.hiddenTags.map((tag) => <span className="tag-chip hidden-tag" key={`hidden:${tag}`}>{tag}<button disabled={savingEntryId === draft.entryId} onClick={() => setDraft({ ...draft, hiddenTags: draft.hiddenTags.filter((item) => item !== tag), dirty: true })}>Restore</button></span>)}
                   </div></div>
-                  <div className="row"><input list="tag-suggestions" aria-label="Add personal tag" placeholder="Add personal tag" value={editTag} onChange={(event) => setEditTag(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && editTag.trim()) { event.preventDefault(); const tag = editTag.trim(); if (!draft.localTags.includes(tag)) setDraft({ ...draft, localTags: [...draft.localTags, tag], dirty: true }); setEditTag(''); } }} /><button onClick={() => { const tag = editTag.trim(); if (tag && !draft.localTags.includes(tag)) setDraft({ ...draft, localTags: [...draft.localTags, tag], dirty: true }); setEditTag(''); }}>Add local tag</button></div>
-                  <div className="row"><button className="primary" disabled={!draft.dirty} onClick={() => void saveEntry()}>Save</button><button disabled={!draft.dirty} onClick={() => setDraft(entryDraft(selected))}>Discard</button></div>
+                  <div className="row"><input list="tag-suggestions" aria-label="Add personal tag" placeholder="Add personal tag" value={editTag} disabled={savingEntryId === draft.entryId} onChange={(event) => setEditTag(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && editTag.trim()) { event.preventDefault(); const tag = editTag.trim(); if (!draft.localTags.includes(tag)) setDraft({ ...draft, localTags: [...draft.localTags, tag], dirty: true }); setEditTag(''); } }} /><button disabled={savingEntryId === draft.entryId} onClick={() => { const tag = editTag.trim(); if (tag && !draft.localTags.includes(tag)) setDraft({ ...draft, localTags: [...draft.localTags, tag], dirty: true }); setEditTag(''); }}>Add local tag</button></div>
+                  <div className="row"><button className="primary" disabled={!draft.dirty || savingEntryId === draft.entryId} onClick={() => void saveEntry()}>Save</button><button disabled={!draft.dirty || savingEntryId === draft.entryId} onClick={() => setDraft(entryDraft(selected))}>Discard</button></div>
                 </section>
                 <div className="row">
                   <select
@@ -608,7 +642,7 @@ function App() {
                   <button className="primary" onClick={() => void openEntry(selected)}>
                     Open
                   </button>
-                  <button onClick={() => { setSelected(null); setDraft(null); }}>Close</button>
+                  <button onClick={() => { selectionGeneration.current += 1; selectedEntryIdRef.current = null; setSelected(null); setDraft(null); setSavingEntryId(null); }}>Close</button>
                 </div>
               </div>
             </div>
