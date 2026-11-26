@@ -251,7 +251,7 @@ Plain `.zip` archives carry no embedded gallery metadata, so candidate lookup ag
   ```
   Runs only while the server is stopped (acquires the `<data-dir>` lock):
   1. Validates the input file (`PRAGMA integrity_check` and required tables exist) and copies it to a temporary staging file inside `<data-dir>`.
-  2. If `<data-dir>/henshin.sqlite` exists, checkpoints/closes any WAL cleanly and moves `henshin.sqlite` together with any `-wal`/`-shm` sidecars into a timestamped backup folder inside `<data-dir>` (so no stale WAL file remains beside the restored database, and the previous database set remains intact for manual recovery).
+  2. If `<data-dir>/henshin.sqlite` exists, moves it and any existing `-wal`/`-shm` sidecars intact into a timestamped backup folder inside `<data-dir>`. Keep these files together when recovering the previous database.
   3. Moves the staged file into place as `henshin.sqlite` and removes stale files from `<data-dir>/covers/` so covers regenerate cleanly.
   4. Never writes to or modifies any collection root.
 

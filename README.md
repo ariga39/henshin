@@ -46,6 +46,6 @@ The output must not already exist or be inside a configured collection root. Res
 henshin-server restore --data-dir /path/to/henshin-data --in /path/to/archive.sqlite
 ```
 
-Restore validates the backup before changing the data directory. It moves the previous database and any SQLite WAL/SHM sidecars into a `pre-restore-*` folder, then clears the derived cover cache.
+Restore validates the backup before changing the data directory. With the server stopped, it archives the previous database and any existing SQLite WAL/SHM sidecars intact in a `pre-restore-*` folder, then clears the derived cover cache. Keep those archived files together when recovering the previous database.
 
 The backup contains `henshin.sqlite`: configured roots, indexed entries, E-Hentai metadata and tags, personal titles, notes and tag overrides, and open history. It does not contain original comic files (use NAS backup tools), server secrets such as the bearer token or ExHentai credentials, each desktop's `desktop-config.json`, or the regenerable cover cache. Missing covers are recreated when requested or during a root scan.
