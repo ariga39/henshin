@@ -55,7 +55,7 @@ try {
   } else {
     run(artifact, ['--appimage-extract'], { cwd: unpack });
     await import('node:fs/promises').then(fs => fs.rename(path.join(unpack, 'squashfs-root'), path.join(unpack, 'appimage-root')));
-    appPath = artifact;
+    appPath = path.join(unpack, 'appimage-root', 'henshin');
     signingStatus = reportLinuxSigning();
   }
   await writeFile(`${artifact}.signing-status.txt`, `${signingStatus}\n`);
@@ -66,7 +66,8 @@ try {
   const bundledInAsar = asarFiles.flatMap(file => listPackage(file).filter(name => ['henshin-server', 'henshin-server.exe'].includes(path.posix.basename(name))));
   if (bundledInAsar.length) throw new Error(`Desktop app.asar contains a server binary: ${bundledInAsar.join(', ')}`);
   const executable = platform === 'darwin' ? path.join(appPath, 'Contents/MacOS/Henshin') : appPath;
-  await smoke(executable, userData, unpack, platform);
+  const workingDirectory = platform === 'linux' ? path.dirname(executable) : unpack;
+  await smoke(executable, userData, workingDirectory, platform);
   process.stdout.write(`Desktop artifact: ${artifact}\nChecksum: ${artifact}.sha256\nNative runtime smoke: passed (${platform}-${arch})\n`);
 } finally {
   await rm(unpack, platform === 'win'
@@ -113,11 +114,9 @@ async function findAsarFiles(dir) {
 
 async function smoke(executable, userDataDir, cwd, targetPlatform) {
   const args = ['--no-sandbox', '--disable-gpu', `--user-data-dir=${userDataDir}`];
-  const command = targetPlatform === 'linux' && !process.env.DISPLAY ? 'xvfb-run' : executable;
-  const commandArgs = command === 'xvfb-run' ? ['-a', executable, ...args] : args;
-  const child = spawn(command, commandArgs, {
+  const child = spawn(executable, args, {
     cwd,
-    env: { ...process.env, APPIMAGE_EXTRACT_AND_RUN: '1' },
+    env: process.env,
     stdio: 'ignore',
   });
   let startupError;
@@ -137,25 +136,31 @@ async function smoke(executable, userDataDir, cwd, targetPlatform) {
         if (result.status !== 0 && child.exitCode === null && child.signalCode === null) {
           throw new Error(`Could not stop packaged Electron process tree (taskkill exited ${result.status})`);
         }
-        if (child.exitCode === null && child.signalCode === null) {
-          await new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error('Timed out waiting for packaged Electron process tree to exit')), 5000);
-            child.once('exit', () => {
-              clearTimeout(timeout);
-              resolve();
-            });
-          });
-        }
+        if (!await waitForExit(child, 5000)) throw new Error('Timed out waiting for packaged Electron process tree to exit');
       }
     } else {
       child.kill('SIGTERM');
-      await new Promise((resolve, reject) => {
-        if (child.exitCode !== null || child.signalCode !== null) return resolve();
-        child.once('exit', resolve);
-        setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 3000).unref();
-      });
+      if (!await waitForExit(child, 3000)) {
+        child.kill('SIGKILL');
+        if (!await waitForExit(child, 3000)) throw new Error('Timed out waiting for packaged Electron process to exit');
+      }
     }
   }
+}
+
+function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const onExit = () => {
+      clearTimeout(timeout);
+      resolve(true);
+    };
+    const timeout = setTimeout(() => {
+      child.removeListener('exit', onExit);
+      resolve(false);
+    }, timeoutMs);
+    child.once('exit', onExit);
+  });
 }
 
 function reportMacSigning(appPath) {
