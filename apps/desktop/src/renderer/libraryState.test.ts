@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveTagOrigins, effectiveTitle, ehLookupBody, ehLookupMessage, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft } from './libraryState.js';
+import { effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehLookupBody, ehLookupMessage, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft } from './libraryState.js';
 
 test('library query preserves repeated tag filters and all list controls', () => {
   const query = new URLSearchParams(libraryQuery({
@@ -28,11 +28,21 @@ test('library query can restrict results to auto-matched galleries', () => {
 test('ordinary lookup uses server preferences and bound entries request alternatives', () => {
   assert.deepEqual(ehLookupBody('auto', '', '', false), { mode: 'auto' });
   assert.deepEqual(ehLookupBody('auto', '', 'exhentai.org', true), {
-    mode: 'auto', autoBind: false, site: 'exhentai.org',
+    mode: 'auto', autoBind: false,
   });
-  assert.deepEqual(ehLookupBody('title', '  手動検索  ', 'e-hentai.org', true), {
-    mode: 'title', autoBind: false, query: '手動検索', site: 'e-hentai.org',
+  assert.deepEqual(ehLookupBody('title', '  手動検索  ', 'e-hentai.org', true, true), {
+    mode: 'title', autoBind: false, query: '手動検索', site: 'e-hentai.org', includeExpunged: true,
   });
+  assert.deepEqual(ehLookupBody('title', '', '', false, false), {
+    mode: 'title', includeExpunged: false,
+  });
+  assert.deepEqual(ehLookupBody('cover', '', 'exhentai.org', false, true), {
+    mode: 'cover', site: 'exhentai.org',
+  });
+});
+
+test('batch requests auto-lookup and let the server refresh existing bindings', () => {
+  assert.deepEqual(ehBatchLookupBody(), { mode: 'auto', autoBind: true });
 });
 
 test('previewing an existing auto-match does not announce a new match', () => {
@@ -46,6 +56,91 @@ test('manual confirmation removes auto-bound entries from the auto-only filter',
   assert.equal(shouldRemoveFromAutoFilter('auto', ['book'], 'book', 'auto'), false);
   assert.equal(shouldRemoveFromAutoFilter('', ['book'], 'book', 'manual'), false);
   assert.equal(shouldRemoveFromAutoFilter('auto', [], 'book', 'manual'), false);
+});
+
+test('batch lookup is sequential, waits after nonterminal failures, and skips the final wait', async () => {
+  const events: string[] = [];
+  const results: Array<{ kind: string; item: string }> = [];
+  const summary = await runEhLookupBatch(
+    ['matched', 'failed', 'none'],
+    4,
+    async (item) => {
+      events.push(`lookup:${item}`);
+      if (item === 'failed') throw new Error('temporary connection failure');
+      return item === 'matched'
+        ? { candidates: [{ gid: '1' }], autoBound: true }
+        : { candidates: [] };
+    },
+    async (milliseconds) => { events.push(`wait:${milliseconds}`); },
+    () => false,
+    (item) => { events.push(`start:${item}`); },
+    (result) => { results.push({ item: result.item, kind: result.kind }); },
+  );
+
+  assert.deepEqual(events, [
+    'start:matched', 'lookup:matched', 'wait:4000',
+    'start:failed', 'lookup:failed', 'wait:4000',
+    'start:none', 'lookup:none',
+  ]);
+  assert.deepEqual(results, [
+    { item: 'matched', kind: 'matched' },
+    { item: 'failed', kind: 'failed' },
+    { item: 'none', kind: 'no-match' },
+  ]);
+  assert.deepEqual(summary, { processed: 3, cancelled: false, blocked: false });
+});
+
+test('batch refreshes bound entries without changing their binding provenance', async () => {
+  const provenance: Array<[string, string | null | undefined]> = [];
+  await runEhLookupBatch(
+    [
+      { id: 'manual', source: 'manual' as const },
+      { id: 'auto', source: 'auto' as const },
+      { id: 'unbound', source: null },
+    ],
+    0,
+    async (item) => item.source
+      ? { entry: { ehBindSource: item.source }, candidates: [], refreshedBinding: true }
+      : { entry: { ehBindSource: 'auto' }, candidates: [{ gid: '1' }], autoBound: true },
+    async () => assert.fail('zero interval must not wait'),
+    () => false,
+    () => undefined,
+    (result) => provenance.push([result.item.id, result.response?.entry?.ehBindSource]),
+  );
+  assert.deepEqual(provenance, [['manual', 'manual'], ['auto', 'auto'], ['unbound', 'auto']]);
+});
+
+test('batch cancel ends the wait and prevents future lookup calls', async () => {
+  const events: string[] = [];
+  let cancelled = false;
+  const summary = await runEhLookupBatch(
+    ['first', 'second'],
+    4,
+    async (item) => { events.push(`lookup:${item}`); return { candidates: [] }; },
+    async () => { events.push('wait'); cancelled = true; },
+    () => cancelled,
+    () => undefined,
+    (result) => { events.push(`result:${result.item}`); },
+  );
+  assert.deepEqual(events, ['lookup:first', 'result:first', 'wait']);
+  assert.deepEqual(summary, { processed: 1, cancelled: true, blocked: false });
+});
+
+test('batch stops immediately on an explicit upstream access or rate block', async () => {
+  const events: string[] = [];
+  const results: string[] = [];
+  const summary = await runEhLookupBatch(
+    ['first', 'second'],
+    4,
+    async (item) => { events.push(`lookup:${item}`); throw new Error('E-Hentai temporarily banned this IP for excessive requests'); },
+    async () => { events.push('wait'); },
+    () => false,
+    () => undefined,
+    (result) => { results.push(`${result.kind}:${result.blocked}`); },
+  );
+  assert.deepEqual(events, ['lookup:first']);
+  assert.deepEqual(results, ['failed:true']);
+  assert.deepEqual(summary, { processed: 1, cancelled: false, blocked: true });
 });
 
 test('entry draft starts isolated from subsequent server snapshots', () => {
@@ -115,6 +210,7 @@ test('two desktop edits to different personal fields produce non-overlapping pat
 
 test('personal title precedence and effective tag origins are preserved', () => {
   assert.equal(effectiveTitle({ customTitle: 'Personal', ehTitleJpn: 'Japanese', ehTitle: 'English', title: 'Filename' }), 'Personal');
+  assert.equal(effectiveTitle({ ehDisplayTitle: 'Server preferred', ehTitleJpn: 'Japanese', ehTitle: 'English', title: 'Filename' }), 'Server preferred');
   assert.equal(effectiveTitle({ ehTitleJpn: 'Japanese', ehTitle: 'English', title: 'Filename' }), 'Japanese');
   assert.equal(effectiveTitle({ ehTitle: 'English', title: 'Filename' }), 'English');
   assert.equal(effectiveTitle({ title: 'Filename' }), 'Filename');

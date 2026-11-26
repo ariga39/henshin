@@ -67,13 +67,19 @@ export function ehLookupBody(
   query: string,
   site: string,
   hasBinding: boolean,
-): { mode: 'auto' | 'title' | 'cover'; autoBind?: false; query?: string; site?: string } {
+  includeExpunged?: boolean,
+): { mode: 'auto' | 'title' | 'cover'; autoBind?: false; query?: string; site?: string; includeExpunged?: boolean } {
   return {
     mode,
     ...(hasBinding ? { autoBind: false as const } : {}),
     ...(mode === 'title' && query.trim() ? { query: query.trim() } : {}),
-    ...(site ? { site } : {}),
+    ...(mode !== 'auto' && site ? { site } : {}),
+    ...(mode === 'title' && includeExpunged !== undefined ? { includeExpunged } : {}),
   };
+}
+
+export function ehBatchLookupBody(): { mode: 'auto'; autoBind: true } {
+  return { mode: 'auto', autoBind: true };
 }
 
 export function ehLookupMessage(autoBound: boolean | undefined, candidateCount: number): string {
@@ -90,6 +96,74 @@ export function shouldRemoveFromAutoFilter(
   nextBindSource: 'auto' | 'manual' | null | undefined,
 ): boolean {
   return filter === 'auto' && nextBindSource !== 'auto' && visibleEntryIds.includes(entryId);
+}
+
+export type EhBatchResponse = {
+  entry?: { ehError?: string | null; ehBindSource?: 'auto' | 'manual' | null };
+  candidates: unknown[];
+  autoBound?: boolean;
+  refreshedBinding?: boolean;
+};
+
+export type EhBatchResult<T> = {
+  item: T;
+  kind: 'matched' | 'refreshed' | 'no-match' | 'failed';
+  message?: string;
+  response?: EhBatchResponse;
+  blocked: boolean;
+};
+
+export function isEhAccessOrRateBlock(message: string): boolean {
+  const text = message.toLowerCase();
+  return [
+    'temporarily banned', 'rate limiting', 'rate limit', 'access denied', 'login wall',
+    'non-html response', 'http 401', 'http 403', 'http 429', 'credentials are not configured',
+  ].some((marker) => text.includes(marker));
+}
+
+export async function runEhLookupBatch<T>(
+  items: T[],
+  intervalSeconds: number,
+  lookup: (item: T) => Promise<EhBatchResponse>,
+  wait: (milliseconds: number) => Promise<void>,
+  isCancelled: () => boolean,
+  onStart: (item: T, index: number) => void,
+  onResult: (result: EhBatchResult<T>) => void,
+): Promise<{ processed: number; cancelled: boolean; blocked: boolean }> {
+  let processed = 0;
+  let blocked = false;
+  for (let index = 0; index < items.length; index += 1) {
+    if (isCancelled()) break;
+    const item = items[index]!;
+    onStart(item, index);
+    let result: EhBatchResult<T>;
+    try {
+      const response = await lookup(item);
+      const message = response.entry?.ehError || undefined;
+      const isBlocked = message ? isEhAccessOrRateBlock(message) : false;
+      result = {
+        item,
+        kind: message ? 'failed' : response.autoBound ? 'matched' : response.refreshedBinding ? 'refreshed' : response.candidates.length ? 'matched' : 'no-match',
+        ...(message ? { message } : {}),
+        response,
+        blocked: isBlocked,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isBlocked = isEhAccessOrRateBlock(message);
+      result = { item, kind: 'failed', message, blocked: isBlocked };
+    }
+    onResult(result);
+    processed += 1;
+    if (result.blocked) {
+      blocked = true;
+      break;
+    }
+    if (isCancelled() || index === items.length - 1 || intervalSeconds <= 0) continue;
+    await wait(intervalSeconds * 1000);
+    if (isCancelled()) break;
+  }
+  return { processed, cancelled: isCancelled() && processed < items.length && !blocked, blocked };
 }
 
 const sameTags = (left: string[], right: string[]) =>
@@ -148,11 +222,12 @@ export function refreshEntryDraft(
 
 export function effectiveTitle(entry: {
   customTitle?: string;
+  ehDisplayTitle?: string;
   ehTitleJpn?: string;
   ehTitle?: string;
   title: string;
 }): string {
-  return entry.customTitle || entry.ehTitleJpn || entry.ehTitle || entry.title;
+  return entry.customTitle || entry.ehDisplayTitle || entry.ehTitleJpn || entry.ehTitle || entry.title;
 }
 
 export function effectiveTagOrigins(input: {

@@ -70,7 +70,7 @@ pnpm --filter @henshin/desktop start
 
 In Settings, enter the running server’s HTTP address and bearer token. Map a library root to its folder on this device and select a local reader to open books.
 
-The server's E-Hentai settings control the preferred lookup site and community search behavior, including language, title and cover search options, optional result details, and the delay between books in a batch. Entry lookup uses these saved defaults; an edited query or selected site applies to that lookup only. Sending configured named login cookies to public E-Hentai searches is a separate opt-in, disabled by default. An ordinary lookup binds its first result as **Auto-matched** and shows alternatives. Confirming that match, choosing another result, or binding a URL records a **Manual match**. Scans never perform gallery lookup.
+The server's E-Hentai settings control the preferred lookup site and community search behavior, including language, title and cover search options, optional result details, and the delay between books in a batch. In Library, select all books on the current page or only unbound books, then run or cancel a sequential lookup batch. Entry lookup uses saved defaults; an edited query or selected site applies only to the next explicit search. Sending configured named login cookies to public E-Hentai searches is a separate opt-in, disabled by default. An ordinary preference-based lookup binds its first result as **Auto-matched** and shows alternatives. Explicit title and cover searches show preview candidates without binding; confirming an auto-match, choosing another result, or binding a URL records a **Manual match**. Scans never perform gallery lookup.
 
 ## Backup and restore
 
