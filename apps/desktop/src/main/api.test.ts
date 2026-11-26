@@ -110,6 +110,7 @@ test('generic API requests leave response fields unchanged', async () => {
   try {
     globalThis.fetch = (async (_input, init) => {
       assert.equal(init?.method, 'POST');
+      assert.equal(init?.redirect, undefined);
       return Response.json({ open_count: 7, last_opened_at: 1_795_697_000 });
     }) as typeof fetch;
 
@@ -120,6 +121,40 @@ test('generic API requests leave response fields unchanged', async () => {
     );
 
     assert.deepEqual(stats, { open_count: 7, last_opened_at: 1_795_697_000 });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('credential settings writes reject redirects before a cookie body can be forwarded', async () => {
+  const original = globalThis.fetch;
+  let seen: RequestInit | undefined;
+  let redirectedRequestCount = 0;
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      seen = init;
+      if (init?.redirect === 'error') throw new TypeError('redirect blocked');
+      redirectedRequestCount += 1;
+      return Response.json({ site: 'exhentai.org', credentialsConfigured: true });
+    }) as typeof fetch;
+
+    await assert.rejects(
+      request(
+        { url: 'http://127.0.0.1:4317', token: 'fixture-token' },
+        '/api/settings/eh',
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            site: 'exhentai.org',
+            cookieHeader: 'session=synthetic-cookie-value',
+          }),
+        },
+      ),
+      /Could not reach/,
+    );
+    assert.equal(seen?.redirect, 'error');
+    assert.match(String(seen?.body), /synthetic-cookie-value/);
+    assert.equal(redirectedRequestCount, 0);
   } finally {
     globalThis.fetch = original;
   }
