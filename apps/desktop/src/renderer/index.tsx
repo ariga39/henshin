@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 declare global {
@@ -93,6 +93,7 @@ const emptyConfig: Config = {
 function App() {
   const [tab, setTab] = useState<View>('Library');
   const [config, setConfig] = useState<Config>(emptyConfig);
+  const [connectionUrl, setConnectionUrl] = useState('');
   const [token, setToken] = useState('');
   const [health, setHealth] = useState('');
   const [roots, setRoots] = useState<Root[]>([]);
@@ -103,6 +104,8 @@ function App() {
   const [error, setError] = useState('');
   const [rootId, setRootId] = useState('');
   const [status, setStatus] = useState('active');
+  const [offset, setOffset] = useState(0);
+  const [hasNextPage, setHasNextPage] = useState(false);
   const [readerId, setReaderId] = useState('');
   const [newRoot, setNewRoot] = useState({
     label: '',
@@ -123,6 +126,7 @@ function App() {
     isDefault: true,
   });
   const [readerArgs, setReaderArgs] = useState('');
+  const refreshGeneration = useRef(0);
 
   const call = async <T,>(
     url: string,
@@ -138,33 +142,53 @@ function App() {
       ...nextConfig,
       connection: { ...nextConfig.connection, token: nextToken },
     });
+    refreshGeneration.current += 1;
+    setRoots([]);
+    setScans([]);
+    setEntries([]);
+    setSelected(null);
+    setRootId('');
+    setOffset(0);
+    setHasNextPage(false);
+    setHealth('');
     setConfig(saved);
+    setConnectionUrl(saved.connection.url);
     setToken('');
     return saved;
   };
 
-  const refresh = async () => {
+  const refresh = async (rootFilter = rootId, pageOffset = offset) => {
+    const generation = ++refreshGeneration.current;
     setError('');
     try {
-      const rootQuery = rootId ? `&rootId=${encodeURIComponent(rootId)}` : '';
+      const rootQuery = rootFilter
+        ? `&rootId=${encodeURIComponent(rootFilter)}`
+        : '';
+      const pageSize = 500;
       const [rootResult, entryResult, scanResult] = await Promise.all([
         call<{ roots: Root[] }>('/api/roots'),
         call<{ entries: Entry[] }>(
-          `/api/entries?status=${status}${rootQuery}&limit=500`,
+          `/api/entries?status=${status}${rootQuery}&limit=${pageSize}&offset=${pageOffset}`,
         ),
         call<{ scans: Scan[] }>('/api/scans'),
       ]);
+      if (generation !== refreshGeneration.current) return;
       setRoots(rootResult.roots);
       setEntries(entryResult.entries);
+      setHasNextPage(entryResult.entries.length === pageSize);
       setScans(scanResult.scans);
     } catch (caught) {
-      setError((caught as Error).message);
+      if (generation === refreshGeneration.current) {
+        setError((caught as Error).message);
+      }
     }
   };
 
   useEffect(() => {
     window.henshin.getConfig().then((savedConfig: Config) => {
       setConfig(savedConfig);
+      setConnectionUrl(savedConfig.connection.url);
+      if (savedConfig.connection.url) void refresh();
       const defaultReader =
         savedConfig.readers.find((candidate) => candidate.isDefault) ??
         savedConfig.readers[0];
@@ -177,7 +201,7 @@ function App() {
 
   useEffect(() => {
     if (config.connection.url) void refresh();
-  }, [config.connection.url, status, rootId]);
+  }, [status, rootId, offset]);
 
   useEffect(() => {
     const hasRunningScan = scans.some((scanItem) => scanItem.status === 'running');
@@ -190,13 +214,17 @@ function App() {
   const testConnection = async () => {
     setError('');
     try {
-      const savedConfig = await saveConnection(config, token);
+      const savedConfig = await saveConnection(
+        { ...config, connection: { ...config.connection, url: connectionUrl } },
+        token,
+      );
       const result = await call<{ serverId: string; version: string }>(
         '/api/health',
       );
       setHealth(`Connected to ${result.serverId} · v${result.version}`);
       setNotice('Connection tested successfully.');
       setConfig(savedConfig);
+      await refresh('');
     } catch (caught) {
       setHealth('');
       setError((caught as Error).message);
@@ -376,7 +404,13 @@ function App() {
       {tab === 'Library' && (
         <main className="content">
           <div className="toolbar">
-            <select value={rootId} onChange={(event) => setRootId(event.target.value)}>
+            <select
+              value={rootId}
+              onChange={(event) => {
+                setRootId(event.target.value);
+                setOffset(0);
+              }}
+            >
               <option value="">All roots</option>
               {roots.map((root) => (
                 <option key={root.id} value={root.id}>
@@ -384,7 +418,13 @@ function App() {
                 </option>
               ))}
             </select>
-            <select value={status} onChange={(event) => setStatus(event.target.value)}>
+            <select
+              value={status}
+              onChange={(event) => {
+                setStatus(event.target.value);
+                setOffset(0);
+              }}
+            >
               <option value="active">Active</option>
               <option value="missing">Missing</option>
             </select>
@@ -426,6 +466,32 @@ function App() {
                   </div>
                 </article>
               ))}
+            </div>
+          )}
+
+          {entries.length > 0 && (
+            <div className="row">
+              <span className="muted">
+                Books {offset + 1}–{offset + entries.length}
+              </span>
+              <button
+                disabled={offset === 0}
+                onClick={() => {
+                  setSelected(null);
+                  setOffset(Math.max(0, offset - 500));
+                }}
+              >
+                Previous
+              </button>
+              <button
+                disabled={!hasNextPage}
+                onClick={() => {
+                  setSelected(null);
+                  setOffset(offset + 500);
+                }}
+              >
+                Next
+              </button>
             </div>
           )}
 
@@ -564,9 +630,13 @@ function App() {
                     {scanErrorCount(scanItem.errors)}
                   </div>
                   {scanErrorCount(scanItem.errors) > 0 && (
-                    <div className="muted">
-                      Some files could not be indexed; see server logs for details.
-                    </div>
+                    Array.isArray(scanItem.errors) ? (
+                      <ul className="muted">
+                        {scanItem.errors.map((scanError, index) => (
+                          <li key={`${index}-${scanError}`}>{scanError}</li>
+                        ))}
+                      </ul>
+                    ) : null
                   )}
                 </div>
               ))
@@ -582,13 +652,8 @@ function App() {
             <div className="form-grid">
               <Field
                 label="Server URL"
-                value={config.connection.url}
-                set={(url) =>
-                  setConfig({
-                    ...config,
-                    connection: { ...config.connection, url },
-                  })
-                }
+                value={connectionUrl}
+                set={setConnectionUrl}
                 placeholder="http://127.0.0.1:4317"
               />
               <Field

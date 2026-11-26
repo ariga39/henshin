@@ -3,7 +3,23 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, stat, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { readConfig, writeConfig } from './config.js';
+import { connectionForSave, readConfig, writeConfig } from './config.js';
+
+test('connection save keeps a blank token only for the same server origin', () => {
+  const current = { url: 'http://library.local:4317/api', token: 'saved-token' };
+  assert.deepEqual(
+    connectionForSave(current, { url: 'http://library.local:4317', token: '' }),
+    { url: 'http://library.local:4317', token: 'saved-token' },
+  );
+  assert.deepEqual(
+    connectionForSave(current, { url: 'http://other-library.local:4317', token: '' }),
+    { url: 'http://other-library.local:4317', token: '' },
+  );
+  assert.deepEqual(
+    connectionForSave(current, { url: 'http://other-library.local:4317', token: 'new-token' }),
+    { url: 'http://other-library.local:4317', token: 'new-token' },
+  );
+});
 
 test('config persists token, mappings, and readers with private Unix permissions', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'henshin-config-'));

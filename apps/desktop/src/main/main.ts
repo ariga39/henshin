@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { emptyConfig, readConfig, writeConfig, type DesktopConfig } from './config.js';
+import { connectionForSave, emptyConfig, readConfig, writeConfig, type DesktopConfig } from './config.js';
 import { request, serverApiUrl } from './api.js';
 import { resolveLocalPath } from './paths.js';
 import { launchReader } from './reader.js';
@@ -31,7 +31,7 @@ app.whenReady().then(async () => {
     } catch { return new Response('Could not reach the Henshin server', { status: 503 }); }
   });
   ipcMain.handle('config:get', () => ({ connection: { url: config.connection.url, tokenConfigured: !!config.connection.token }, mappings: config.mappings, readers: config.readers }));
-  ipcMain.handle('config:save', async (_event, value: DesktopConfig) => { config = { ...value, connection: { url: value.connection.url.trim(), token: value.connection.token || config.connection.token }, mappings: value.mappings, readers: value.readers }; await persist(); return { connection: { url: config.connection.url, tokenConfigured: !!config.connection.token }, mappings: config.mappings, readers: config.readers }; });
+  ipcMain.handle('config:save', async (_event, value: DesktopConfig) => { config = { ...value, connection: connectionForSave(config.connection, value.connection), mappings: value.mappings, readers: value.readers }; await persist(); return { connection: { url: config.connection.url, tokenConfigured: !!config.connection.token }, mappings: config.mappings, readers: config.readers }; });
   ipcMain.handle('api:request', async (_event, endpoint: string, method = 'GET', body?: unknown) => request(config.connection, endpoint, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
   ipcMain.handle('dialog:directory', async () => (await dialog.showOpenDialog({ properties: ['openDirectory'] })).filePaths[0] ?? null);
   ipcMain.handle('dialog:executable', async () => (await dialog.showOpenDialog({ properties: ['openFile'] })).filePaths[0] ?? null);

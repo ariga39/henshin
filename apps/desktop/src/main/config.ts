@@ -5,6 +5,24 @@ export type ReaderProfile = { id: string; name: string; mode: 'executable' | 'sy
 export type DesktopConfig = { connection: { url: string; token: string }; mappings: Record<string, string>; readers: ReaderProfile[] };
 export const emptyConfig = (): DesktopConfig => ({ connection: { url: '', token: '' }, mappings: {}, readers: [] });
 
+export function connectionForSave(
+  current: DesktopConfig['connection'],
+  next: DesktopConfig['connection'],
+): DesktopConfig['connection'] {
+  const url = next.url.trim();
+  let sameOrigin = false;
+  try {
+    sameOrigin = new URL(current.url).origin === new URL(url).origin;
+  } catch {
+    sameOrigin = false;
+  }
+
+  return {
+    url,
+    token: next.token || (sameOrigin ? current.token : ''),
+  };
+}
+
 export async function readConfig(userData: string): Promise<DesktopConfig> {
   try {
     const value: unknown = JSON.parse(await readFile(path.join(userData, 'desktop-config.json'), 'utf8'));
