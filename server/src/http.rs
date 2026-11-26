@@ -1014,7 +1014,7 @@ async fn eh_lookup(
             }
             let entry = match entry_value(&s, &id) {
                 Ok(entry) => entry,
-                Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error),
+                Err(error) => return entry_value_error_response(error),
             };
             return Json(json!({"mode":"auto","entry":entry,"candidates":[],"autoBound":false,"refreshedBinding":true})).into_response();
         }
@@ -1081,7 +1081,7 @@ async fn eh_lookup(
                     if !input.auto_bind.unwrap_or(true) {
                         let entry = match entry_value(&s, &id) {
                             Ok(entry) => entry,
-                            Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error),
+                            Err(error) => return entry_value_error_response(error),
                         };
                         return Json(json!({"mode":"auto","matchedBy":search_mode,"query":query,"entry":entry,"candidates":candidates,"autoBound":false})).into_response();
                     }
@@ -1126,7 +1126,7 @@ async fn eh_lookup(
                     if changed == 0 {
                         let entry = match entry_value(&s, &id) {
                             Ok(entry) => entry,
-                            Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error),
+                            Err(error) => return entry_value_error_response(error),
                         };
                         return Json(json!({"mode":"auto","matchedBy":search_mode,"query":query,"entry":entry,"candidates":candidates,"autoBound":false,"bindingChanged":true})).into_response();
                     }
@@ -1144,7 +1144,7 @@ async fn eh_lookup(
                     }
                     let entry = match entry_value(&s, &id) {
                         Ok(entry) => entry,
-                        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error),
+                        Err(error) => return entry_value_error_response(error),
                     };
                     return Json(json!({"mode":"auto","matchedBy":search_mode,"query":query,"entry":entry,"candidates":candidates,"autoBound":true})).into_response();
                 }
@@ -1159,7 +1159,7 @@ async fn eh_lookup(
         }
         let entry = match entry_value(&s, &id) {
             Ok(entry) => entry,
-            Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error),
+            Err(error) => return entry_value_error_response(error),
         };
         return Json(
             json!({"mode":"auto","query":title,"entry":entry,"candidates":[],"autoBound":false}),
@@ -1524,10 +1524,15 @@ fn save_eh_result_data(
     }
 }
 
-fn entry_value(s: &AppState, id: &str) -> Result<Value, String> {
+enum EntryValueError {
+    NotFound,
+    Internal(String),
+}
+
+fn entry_value(s: &AppState, id: &str) -> Result<Value, EntryValueError> {
     let conn = match s.db.lock() {
         Ok(c) => c,
-        Err(_) => return Err("database unavailable".into()),
+        Err(_) => return Err(EntryValueError::Internal("database unavailable".into())),
     };
     match conn.query_row(
         &format!("SELECT {ENTRY_COLUMNS} FROM entries WHERE id=?1"),
@@ -1535,18 +1540,28 @@ fn entry_value(s: &AppState, id: &str) -> Result<Value, String> {
         entry_from_row,
     ) {
         Ok(mut entry) => {
-            attach_tags(&conn, &mut entry).map_err(|e| e.to_string())?;
+            attach_tags(&conn, &mut entry)
+                .map_err(|error| EntryValueError::Internal(error.to_string()))?;
             apply_eh_title_preference(s, &mut entry);
-            serde_json::to_value(entry).map_err(|e| e.to_string())
+            serde_json::to_value(entry)
+                .map_err(|error| EntryValueError::Internal(error.to_string()))
         }
-        Err(e) => Err(e.to_string()),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(EntryValueError::NotFound),
+        Err(error) => Err(EntryValueError::Internal(error.to_string())),
+    }
+}
+
+fn entry_value_error_response(error: EntryValueError) -> Response {
+    match error {
+        EntryValueError::NotFound => err(StatusCode::NOT_FOUND, "entry not found"),
+        EntryValueError::Internal(message) => err(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
 }
 
 fn get_entry_response(s: &AppState, id: &str) -> Response {
     match entry_value(s, id) {
         Ok(entry) => Json(entry).into_response(),
-        Err(error) => err(StatusCode::NOT_FOUND, error),
+        Err(error) => entry_value_error_response(error),
     }
 }
 async fn get_cover(State(s): State<Arc<AppState>>, Path(key): Path<String>) -> Response {
@@ -2351,6 +2366,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn entry_response_distinguishes_missing_rows_from_tag_database_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path().join("data"), Some("secret".into())).unwrap();
+        let missing = get_entry_response(&state, "missing");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+            .unwrap();
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO entries(id,root_id,relative_path,title,created_at,updated_at) VALUES('entry','root','book.zip','Book',0,0)",
+                [],
+            )
+            .unwrap();
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE entry_tags")
+            .unwrap();
+
+        let tag_error = get_entry_response(&state, "entry");
+        assert_eq!(tag_error.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
