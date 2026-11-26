@@ -59,7 +59,14 @@ type Entry = {
   ehTags?: string[];
   localTags?: string[];
   hiddenTags?: string[];
+  ehGid?: string;
+  ehToken?: string;
+  ehDomain?: string;
+  ehRefreshedAt?: number | null;
+  ehError?: string | null;
+  coverSha1?: string | null;
 };
+type EhCandidate = { gid: string; token: string; domain: string; url: string; title: string };
 type Reader = {
   id: string;
   name: string;
@@ -126,6 +133,12 @@ function App() {
   const [rootId, setRootId] = useState('');
   const [status, setStatus] = useState('active');
   const [readerId, setReaderId] = useState('');
+  const [ehQuery, setEhQuery] = useState('');
+  const [ehUrl, setEhUrl] = useState('');
+  const [ehCandidates, setEhCandidates] = useState<EhCandidate[]>([]);
+  const [ehBusy, setEhBusy] = useState(false);
+  const [ehMessage, setEhMessage] = useState('');
+  const [includeExpunged, setIncludeExpunged] = useState(false);
   const [newRoot, setNewRoot] = useState({
     label: '',
     serverPath: '',
@@ -453,6 +466,8 @@ function App() {
     selectedEntryIdRef.current = entry.id;
     setSelected(null);
     setDraft(null);
+    setEhBusy(false);
+    setEhCandidates([]); setEhMessage(''); setEhUrl(''); setEhQuery(entry.title);
     setSavingEntryId(null);
     try {
       const detail = await call<Entry>(entryPath(entry.id));
@@ -463,6 +478,49 @@ function App() {
         setError((caught as Error).message);
       }
     }
+  };
+
+  const lookupEh = async (mode: 'title' | 'cover') => {
+    if (!selected) return;
+    const entryId = selected.id; const generation = selectionGeneration.current;
+    setEhBusy(true); setEhMessage(''); setEhCandidates([]);
+    try {
+      const result = await call<{ candidates: EhCandidate[] }>(`${entryPath(entryId)}/eh-lookup`, 'POST', { mode, query: ehQuery, includeExpunged });
+      if (!isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) return;
+      setEhCandidates(result.candidates);
+      setEhMessage(result.candidates.length ? '' : 'No matching galleries found.');
+    } catch (caught) {
+      if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhMessage((caught as Error).message);
+    } finally { if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhBusy(false); }
+  };
+
+  const bindEh = async (binding: { url: string } | { gid: string; token: string; domain: string }) => {
+    if (!selected) return;
+    const entryId = selected.id; const generation = selectionGeneration.current;
+    setEhBusy(true); setEhMessage('');
+    try {
+      const updated = await call<Entry>(`${entryPath(entryId)}/eh-bind`, 'POST', binding);
+      if (!isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) return;
+      setSelected(updated); setEntries((items) => items.map((item) => item.id === entryId ? updated : item));
+      setDraft((current) => refreshEntryDraft(current, updated));
+      setEhCandidates([]); setEhUrl(''); setEhMessage(updated.ehError || 'Gallery binding saved.');
+      try { const tags = await call<{ tags: string[] }>('/api/tags'); setTagSuggestions(tags.tags); } catch { /* Existing suggestions remain usable. */ }
+    } catch (caught) { if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhMessage((caught as Error).message); }
+    finally { if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhBusy(false); }
+  };
+
+  const refreshEh = async () => {
+    if (!selected) return;
+    const entryId = selected.id; const generation = selectionGeneration.current;
+    setEhBusy(true); setEhMessage('');
+    try {
+      const updated = await call<Entry>(`${entryPath(entryId)}/eh-refresh`, 'POST', {});
+      if (!isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) return;
+      setSelected(updated); setEntries((items) => items.map((item) => item.id === entryId ? updated : item));
+      setDraft((current) => refreshEntryDraft(current, updated)); setEhMessage(updated.ehError || 'Metadata refreshed.');
+      try { const tags = await call<{ tags: string[] }>('/api/tags'); setTagSuggestions(tags.tags); } catch { /* Existing suggestions remain usable. */ }
+    } catch (caught) { if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhMessage((caught as Error).message); }
+    finally { if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhBusy(false); }
   };
 
   const saveEntry = async () => {
@@ -635,6 +693,27 @@ function App() {
                   {selected.pageCount} pages · Opened {selected.openCount}× · Last
                   opened {formatTimestamp(selected.lastOpenedAt)}
                 </p>
+                <section className="editor-section eh-section">
+                  <h3>E-Hentai gallery</h3>
+                  {selected.ehGid && selected.ehToken ? <>
+                    <a href={`https://e-hentai.org/g/${selected.ehGid}/${selected.ehToken}/`} target="_blank" rel="noreferrer">https://e-hentai.org/g/{selected.ehGid}/{selected.ehToken}/</a>
+                    <div className="muted">{selected.ehTitleJpn || selected.ehTitle || 'No source title'} · Refreshed {formatTimestamp(selected.ehRefreshedAt)}</div>
+                    <div className="row"><button disabled={ehBusy} onClick={() => void refreshEh()}>Refresh metadata</button></div>
+                  </> : <p className="muted">No gallery bound.</p>}
+                  <label className="field"><span>Search title or filename</span><input value={ehQuery} onChange={(event) => setEhQuery(event.target.value)} /></label>
+                  <div className="row"><label><input type="checkbox" checked={includeExpunged} onChange={(event) => setIncludeExpunged(event.target.checked)} /> Include expunged</label>
+                    <button disabled={ehBusy || !ehQuery.trim()} onClick={() => void lookupEh('title')}>Search by title</button>
+                    <button disabled={ehBusy || !selected.coverSha1} onClick={() => void lookupEh('cover')}>Search by cover</button>
+                  </div>
+                  {ehBusy && <p className="muted">Contacting E-Hentai…</p>}
+                  {ehCandidates.length > 0 && <div className="eh-candidates" aria-label="E-Hentai search candidates">{ehCandidates.map((candidate) => <div className="eh-candidate" key={`${candidate.gid}/${candidate.token}`}>
+                    <a href={candidate.url} target="_blank" rel="noreferrer">{candidate.title}</a><div className="muted">Gallery {candidate.gid}</div>
+                    <button disabled={ehBusy} onClick={() => void bindEh({ gid: candidate.gid, token: candidate.token, domain: candidate.domain })}>Bind this gallery</button>
+                  </div>)}</div>}
+                  <label className="field"><span>Bind or correct with a gallery URL</span><input value={ehUrl} onChange={(event) => setEhUrl(event.target.value)} placeholder="https://e-hentai.org/g/618395/0439fa3666/" /></label>
+                  <button disabled={ehBusy || !ehUrl.trim()} onClick={() => void bindEh({ url: ehUrl.trim() })}>{selected.ehGid ? 'Bind / rebind URL' : 'Bind gallery URL'}</button>
+                  {(ehMessage || selected.ehError) && <p className={selected.ehError ? 'notice error' : 'muted'} role="status">{ehMessage || selected.ehError}</p>}
+                </section>
                 <section className="editor-section">
                   <h3>Personal details {draft.dirty && <span className="status">Unsaved changes</span>}</h3>
                   <label className="field"><span>Custom title</span><input value={draft.customTitle} disabled={savingEntryId === draft.entryId} onChange={(event) => setDraft(updateEntryDraft(draft, { customTitle: event.target.value }))} placeholder="Use source title when empty" /></label>

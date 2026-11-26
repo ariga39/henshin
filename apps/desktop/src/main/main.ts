@@ -1,7 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { connectionForSave, emptyConfig, readConfig, writeConfig, type DesktopConfig } from './config.js';
+import { installExternalNavigationPolicy } from './externalLinks.js';
 import { request, serverApiUrl } from './api.js';
 import { resolveLocalPath } from './paths.js';
 import { launchReader } from './reader.js';
@@ -11,6 +13,8 @@ let config: DesktopConfig;
 const persist = async () => writeConfig(app.getPath('userData'), config);
 const createWindow = () => {
   const window = new BrowserWindow({ width: 1240, height: 820, minWidth: 850, minHeight: 600, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  const appUrl = pathToFileURL(path.join(__dirname, 'index.html')).href;
+  installExternalNavigationPolicy(window.webContents, appUrl, url => shell.openExternal(url));
   void window.loadFile(path.join(__dirname, 'index.html'));
 };
 

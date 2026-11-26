@@ -1,4 +1,8 @@
-use crate::{app::AppState, roots, scanner};
+use crate::{
+    app::AppState,
+    eh::{self, GalleryRef},
+    roots, scanner,
+};
 use axum::{
     Json, Router,
     body::Body,
@@ -36,6 +40,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/entries/{id}", get(get_entry).patch(patch_entry))
         .route("/api/tags", get(list_tags))
         .route("/api/entries/{id}/open", post(open_entry))
+        .route("/api/entries/{id}/eh-lookup", post(eh_lookup))
+        .route("/api/entries/{id}/eh-bind", post(eh_bind))
+        .route("/api/entries/{id}/eh-refresh", post(eh_refresh))
+        .route("/api/eh/refresh", post(eh_refresh_batch))
         .route("/api/covers/{key}", get(get_cover))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state)
@@ -740,6 +748,336 @@ async fn open_entry(
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EhLookupInput {
+    mode: Option<String>,
+    query: Option<String>,
+    include_expunged: Option<bool>,
+}
+
+async fn eh_lookup(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<EhLookupInput>,
+) -> Response {
+    let mode = input.mode.as_deref().unwrap_or("title");
+    if !matches!(mode, "title" | "cover") {
+        return err(StatusCode::BAD_REQUEST, "mode must be title or cover");
+    }
+    let (title, cover_sha1) = {
+        let conn = match s.db.lock() {
+            Ok(c) => c,
+            Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
+        };
+        match conn.query_row(
+            "SELECT title,cover_sha1 FROM entries WHERE id=?1",
+            [&id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        ) {
+            Ok(values) => values,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return err(StatusCode::NOT_FOUND, "entry not found");
+            }
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        }
+    };
+    let query = if mode == "cover" {
+        let Some(hash) = cover_sha1 else {
+            return err(StatusCode::BAD_REQUEST, "entry has no cover SHA-1");
+        };
+        hash
+    } else {
+        input
+            .query
+            .filter(|q| !q.trim().is_empty())
+            .unwrap_or(title)
+    };
+    match s
+        .eh
+        .lookup(mode, &query, input.include_expunged.unwrap_or(false))
+        .await
+    {
+        Ok(candidates) => {
+            Json(json!({"mode":mode,"query":query,"candidates":candidates})).into_response()
+        }
+        Err((status, message)) => err(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            message,
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EhBindInput {
+    url: Option<String>,
+    gid: Option<String>,
+    token: Option<String>,
+    domain: Option<String>,
+}
+
+async fn eh_bind(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<EhBindInput>,
+) -> Response {
+    let gallery = if let Some(url) = input.url.as_deref() {
+        match eh::parse_gallery_url(url) {
+            Ok(g) => g,
+            Err(e) => return err(StatusCode::BAD_REQUEST, e),
+        }
+    } else {
+        let (Some(gid), Some(token)) = (input.gid, input.token) else {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "Provide a gallery URL or gid and token",
+            );
+        };
+        let Some(gid) = eh::normalize_gid(&gid) else {
+            return err(StatusCode::BAD_REQUEST, "Invalid E-Hentai gallery identity");
+        };
+        if token.is_empty()
+            || !token.bytes().all(|b| b.is_ascii_hexdigit())
+            || input.domain.as_deref().unwrap_or("e-hentai.org") != "e-hentai.org"
+        {
+            return err(StatusCode::BAD_REQUEST, "Invalid E-Hentai gallery identity");
+        }
+        GalleryRef {
+            gid,
+            token: token.to_ascii_lowercase(),
+            domain: "e-hentai.org".into(),
+        }
+    };
+    {
+        let mut conn = match s.db.lock() {
+            Ok(c) => c,
+            Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
+        };
+        let tx = match conn.transaction() {
+            Ok(tx) => tx,
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
+        let current = tx.query_row(
+            "SELECT eh_gid,eh_token,eh_domain FROM entries WHERE id=?1",
+            [&id],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        );
+        let (gid, token, domain) = match current {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return err(StatusCode::NOT_FOUND, "entry not found");
+            }
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
+        if (gid.as_deref(), token.as_deref(), domain.as_deref())
+            != (
+                Some(&gallery.gid),
+                Some(&gallery.token),
+                Some(&gallery.domain),
+            )
+        {
+            if let Err(e) = tx.execute("UPDATE entries SET eh_gid=?2,eh_token=?3,eh_domain=?4,eh_title=NULL,eh_title_jpn=NULL,eh_refreshed_at=NULL,eh_error=NULL,updated_at=?5 WHERE id=?1", params![id,gallery.gid,gallery.token,gallery.domain,now()]) { return err(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()); }
+            if let Err(e) = tx.execute(
+                "DELETE FROM entry_tags WHERE entry_id=?1 AND origin='eh'",
+                [&id],
+            ) {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+            }
+        }
+        if let Err(e) = tx.commit() {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    }
+    let result =
+        s.eh.gdata(std::slice::from_ref(&gallery))
+            .await
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Err("No metadata returned".into()));
+    save_eh_result(&s, &id, &gallery, result, false)
+}
+
+async fn eh_refresh(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let gallery = match bound_gallery(&s, &id) {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
+    let result =
+        s.eh.gdata(std::slice::from_ref(&gallery))
+            .await
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Err("No metadata returned".into()));
+    save_eh_result(&s, &id, &gallery, result, true)
+}
+
+async fn eh_refresh_batch(
+    State(s): State<Arc<AppState>>,
+    Json(input): Json<EhBatchInput>,
+) -> Response {
+    let galleries = {
+        let conn = match s.db.lock() {
+            Ok(c) => c,
+            Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
+        };
+        let mut stmt = match conn.prepare("SELECT id,eh_gid,eh_token,eh_domain FROM entries WHERE eh_gid IS NOT NULL AND status='active' ORDER BY id") { Ok(s)=>s,Err(e)=>return err(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()) };
+        match stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|(id, _, _, _)| input.entry_ids.as_ref().is_none_or(|ids| ids.contains(id)))
+                .map(|(id, gid, token, domain)| (id, GalleryRef { gid, token, domain }))
+                .collect::<Vec<_>>(),
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        }
+    };
+    let total = galleries.len();
+    let refs: Vec<_> = galleries.iter().map(|(_, g)| g.clone()).collect();
+    let results = s.eh.gdata(&refs).await;
+    let mut refreshed = 0;
+    let mut failed = 0;
+    let mut errors = Vec::new();
+    for ((id, gallery), result) in galleries.iter().zip(results) {
+        match save_eh_result_data(&s, id, gallery, result, true) {
+            Ok(Some(message)) => {
+                failed += 1;
+                errors.push(json!({"entryId":id,"error":message}));
+            }
+            Ok(None) => refreshed += 1,
+            Err(message) => {
+                failed += 1;
+                errors.push(json!({"entryId":id,"error":message}));
+            }
+        }
+    }
+    Json(json!({"total":total,"refreshed":refreshed,"failed":failed,"errors":errors}))
+        .into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EhBatchInput {
+    entry_ids: Option<Vec<String>>,
+}
+
+fn bound_gallery(s: &AppState, id: &str) -> Result<GalleryRef, Response> {
+    let conn =
+        s.db.lock()
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
+    let binding = conn
+        .query_row(
+            "SELECT eh_gid,eh_token,eh_domain FROM entries WHERE id=?1",
+            [id],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some((Some(gid), Some(token), Some(domain))) = binding else {
+        return Err(if binding.is_none() {
+            err(StatusCode::NOT_FOUND, "entry not found")
+        } else {
+            err(StatusCode::BAD_REQUEST, "entry is not bound to E-Hentai")
+        });
+    };
+    Ok(GalleryRef { gid, token, domain })
+}
+
+fn save_eh_result(
+    s: &AppState,
+    id: &str,
+    gallery: &GalleryRef,
+    result: Result<eh::Metadata, String>,
+    preserve_on_error: bool,
+) -> Response {
+    match save_eh_result_data(s, id, gallery, result, preserve_on_error) {
+        Ok(_) => get_entry_response(s, id),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+fn save_eh_result_data(
+    s: &AppState,
+    id: &str,
+    gallery: &GalleryRef,
+    result: Result<eh::Metadata, String>,
+    preserve_on_error: bool,
+) -> Result<Option<String>, String> {
+    let mut conn =
+        s.db.lock()
+            .map_err(|_| "database unavailable".to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    match result {
+        Ok(metadata) => {
+            let changed=tx.execute("UPDATE entries SET eh_title=?5,eh_title_jpn=?6,eh_refreshed_at=?7,eh_error=NULL,updated_at=?7 WHERE id=?1 AND eh_gid=?2 AND eh_token=?3 AND eh_domain=?4",params![id,gallery.gid,gallery.token,gallery.domain,metadata.title,metadata.title_jpn,now()]).map_err(|e|e.to_string())?;
+            if changed > 0 {
+                tx.execute(
+                    "DELETE FROM entry_tags WHERE entry_id=?1 AND origin='eh'",
+                    [id],
+                )
+                .map_err(|e| e.to_string())?;
+                for tag in metadata.tags {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO entry_tags(entry_id,tag,origin) VALUES(?1,?2,'eh')",
+                        params![id, tag],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(None)
+        }
+        Err(message) => {
+            if preserve_on_error {
+                tx.execute("UPDATE entries SET eh_error=?5,updated_at=?6 WHERE id=?1 AND eh_gid=?2 AND eh_token=?3 AND eh_domain=?4",params![id,gallery.gid,gallery.token,gallery.domain,message,now()]).map_err(|e|e.to_string())?;
+            } else {
+                tx.execute("UPDATE entries SET eh_error=?5,updated_at=?6 WHERE id=?1 AND eh_gid=?2 AND eh_token=?3 AND eh_domain=?4",params![id,gallery.gid,gallery.token,gallery.domain,message,now()]).map_err(|e|e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(Some(message))
+        }
+    }
+}
+
+fn get_entry_response(s: &AppState, id: &str) -> Response {
+    let conn = match s.db.lock() {
+        Ok(c) => c,
+        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
+    };
+    match conn.query_row(
+        &format!("SELECT {ENTRY_COLUMNS} FROM entries WHERE id=?1"),
+        [id],
+        entry_from_row,
+    ) {
+        Ok(mut entry) => match attach_tags(&conn, &mut entry) {
+            Ok(()) => Json(entry).into_response(),
+            Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        },
+        Err(e) => err(StatusCode::NOT_FOUND, e.to_string()),
+    }
+}
 async fn get_cover(State(s): State<Arc<AppState>>, Path(key): Path<String>) -> Response {
     if key.contains('/') || key.contains('\\') || key.contains("..") {
         return err(StatusCode::BAD_REQUEST, "invalid cover key");
@@ -756,8 +1094,31 @@ async fn get_cover(State(s): State<Arc<AppState>>, Path(key): Path<String>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eh::EhClient;
     use axum::{body::Body, http::Request};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
     use tower::ServiceExt;
+
+    async fn mock_eh(responses: Vec<String>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for body in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 8192];
+                let _ = stream.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        format!("http://{address}")
+    }
 
     async fn post_open(app: Router, body: &str) -> (StatusCode, Value) {
         let response = app
@@ -804,6 +1165,87 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    #[tokio::test]
+    async fn bind_refresh_and_failed_rebind_keep_personal_overrides_consistent() {
+        let temp = tempfile::tempdir().unwrap();
+        let api_base = mock_eh(vec![
+            r#"{"gmetadata":[{"gid":1,"token":"aa","title":"First","title_jpn":"猫","category":"Non-H","tags":["artist:one"]}]}"#.into(),
+            r#"{"gmetadata":[{"gid":1,"token":"aa","title":"Updated","title_jpn":"猫の本","category":"Non-H","tags":["artist:two"]}]}"#.into(),
+            r#"{"error":"temporarily unavailable"}"#.into(),
+            r#"{"gmetadata":[{"gid":2,"error":"gallery unavailable"}]}"#.into(),
+        ]).await;
+        let mut state = AppState::open(temp.path().join("data"), Some("secret".into())).unwrap();
+        state.eh =
+            EhClient::new("https://e-hentai.org", &api_base, std::time::Duration::ZERO).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+                .unwrap();
+            conn.execute("INSERT INTO entries(id,root_id,relative_path,title,custom_title,note,created_at,updated_at) VALUES('entry','root','book.zip','Book','Personal title','Personal note',0,0)", []).unwrap();
+            conn.execute("INSERT INTO entry_tags VALUES('entry','local:keep','local'),('entry','artist:one','hidden')", []).unwrap();
+        }
+        let app = router(Arc::new(state));
+        let (status, bound) = api(
+            app.clone(),
+            "POST",
+            "/api/entries/entry/eh-bind",
+            Some(r#"{"url":"https://e-hentai.org/g/1/aa/"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bound["ehTitle"], "First");
+        assert_eq!(bound["ehTags"], json!(["artist:one", "category:non-h"]));
+        assert_eq!(bound["customTitle"], "Personal title");
+        assert_eq!(bound["note"], "Personal note");
+        assert_eq!(bound["localTags"], json!(["local:keep"]));
+        assert_eq!(bound["hiddenTags"], json!(["artist:one"]));
+
+        let (status, refreshed) = api(
+            app.clone(),
+            "POST",
+            "/api/entries/entry/eh-refresh",
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(refreshed["ehTitleJpn"], "猫の本");
+        assert_eq!(refreshed["ehTags"], json!(["artist:two", "category:non-h"]));
+        assert_eq!(refreshed["hiddenTags"], json!(["artist:one"]));
+        assert_eq!(refreshed["localTags"], json!(["local:keep"]));
+
+        let (_, failed_refresh) = api(
+            app.clone(),
+            "POST",
+            "/api/entries/entry/eh-refresh",
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(failed_refresh["ehTitleJpn"], "猫の本");
+        assert_eq!(
+            failed_refresh["ehTags"],
+            json!(["artist:two", "category:non-h"])
+        );
+        assert_eq!(failed_refresh["ehError"], "temporarily unavailable");
+
+        let (status, rebound) = api(
+            app,
+            "POST",
+            "/api/entries/entry/eh-bind",
+            Some(r#"{"url":"https://e-hentai.org/g/2/bb/"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rebound:?}");
+        assert_eq!(rebound["ehGid"], "2");
+        assert_eq!(rebound["ehTitle"], Value::Null);
+        assert_eq!(rebound["ehTitleJpn"], Value::Null);
+        assert_eq!(rebound["ehTags"], json!([]));
+        assert_eq!(rebound["ehError"], "gallery unavailable");
+        assert_eq!(rebound["customTitle"], "Personal title");
+        assert_eq!(rebound["note"], "Personal note");
+        assert_eq!(rebound["localTags"], json!(["local:keep"]));
+        assert_eq!(rebound["hiddenTags"], json!(["artist:one"]));
     }
 
     #[tokio::test]
