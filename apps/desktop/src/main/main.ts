@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { emptyConfig, readConfig, writeConfig, type DesktopConfig } from './config.js';
-import { request } from './api.js';
+import { request, serverApiUrl } from './api.js';
 import { resolveLocalPath } from './paths.js';
 import { launchReader } from './reader.js';
 
@@ -25,7 +25,8 @@ app.whenReady().then(async () => {
     if (!key || key.includes('/') || key.includes('\\') || key.includes('..')) return new Response('Invalid cover key', { status: 400 });
     if (!config.connection.url || !config.connection.token) return new Response('Not configured', { status: 401 });
     try {
-      const response = await fetch(new URL(`/api/covers/${encodeURIComponent(key)}`, config.connection.url), { headers: { Authorization: `Bearer ${config.connection.token}` } });
+      const coverUrl = serverApiUrl(config.connection.url, `/api/covers/${encodeURIComponent(key)}`);
+      const response = await fetch(coverUrl, { headers: { Authorization: `Bearer ${config.connection.token}` } });
       return new Response(response.body, { status: response.status, headers: { 'Content-Type': response.headers.get('content-type') ?? 'image/jpeg' } });
     } catch { return new Response('Could not reach the Henshin server', { status: 503 }); }
   });
@@ -49,3 +50,6 @@ app.whenReady().then(async () => {
   createWindow();
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+});
