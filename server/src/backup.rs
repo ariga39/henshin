@@ -125,17 +125,6 @@ pub fn restore(data_dir: &Path, input: &Path) -> io::Result<()> {
         return Err(error);
     }
 
-    if database.exists() {
-        // A damaged current database must not prevent recovery; the old set is
-        // moved intact after a best-effort checkpoint.
-        if let Ok(connection) = Connection::open(&database) {
-            if let Err(error) = connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
-                tracing::warn!(%error, "could not checkpoint existing database before restore");
-            }
-            drop(connection);
-        }
-    }
-
     let has_old_files = [
         &database,
         &sidecar(&database, "-wal"),
