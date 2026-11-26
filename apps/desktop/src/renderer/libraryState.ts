@@ -121,15 +121,29 @@ export function isEhAccessOrRateBlock(message: string): boolean {
   ].some((marker) => text.includes(marker));
 }
 
+export function ehBatchResultMessage(result: EhBatchResult<unknown>): string {
+  switch (result.kind) {
+    case 'matched':
+      return result.message ? `Auto-matched; metadata error: ${result.message}` : 'Auto-matched';
+    case 'refreshed':
+      return result.message ? `Gallery remains bound; metadata refresh failed: ${result.message}` : 'Refreshed bound gallery';
+    case 'no-match':
+      return result.message ? `No match; metadata error: ${result.message}` : 'No match';
+    case 'failed':
+      return `Failed: ${result.message || 'Metadata lookup failed'}`;
+  }
+}
+
 export async function runEhLookupBatch<T>(
   items: T[],
-  intervalSeconds: number,
+  intervalSeconds: number | (() => Promise<number>),
   lookup: (item: T) => Promise<EhBatchResponse>,
   wait: (milliseconds: number) => Promise<void>,
   isCancelled: () => boolean,
   onStart: (item: T, index: number) => void,
   onResult: (result: EhBatchResult<T>) => void,
 ): Promise<{ processed: number; cancelled: boolean; blocked: boolean }> {
+  const interval = typeof intervalSeconds === 'function' ? await intervalSeconds() : intervalSeconds;
   let processed = 0;
   let blocked = false;
   for (let index = 0; index < items.length; index += 1) {
@@ -143,7 +157,7 @@ export async function runEhLookupBatch<T>(
       const isBlocked = message ? isEhAccessOrRateBlock(message) : false;
       result = {
         item,
-        kind: message ? 'failed' : response.autoBound ? 'matched' : response.refreshedBinding ? 'refreshed' : response.candidates.length ? 'matched' : 'no-match',
+        kind: response.autoBound ? 'matched' : response.refreshedBinding ? 'refreshed' : response.candidates.length ? 'matched' : 'no-match',
         ...(message ? { message } : {}),
         response,
         blocked: isBlocked,
@@ -159,8 +173,8 @@ export async function runEhLookupBatch<T>(
       blocked = true;
       break;
     }
-    if (isCancelled() || index === items.length - 1 || intervalSeconds <= 0) continue;
-    await wait(intervalSeconds * 1000);
+    if (isCancelled() || index === items.length - 1 || interval <= 0) continue;
+    await wait(interval * 1000);
     if (isCancelled()) break;
   }
   return { processed, cancelled: isCancelled() && processed < items.length && !blocked, blocked };

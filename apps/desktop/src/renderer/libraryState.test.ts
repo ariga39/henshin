@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehLookupBody, ehLookupMessage, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft } from './libraryState.js';
+import { effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehBatchResultMessage, ehLookupBody, ehLookupMessage, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft } from './libraryState.js';
 
 test('library query preserves repeated tag filters and all list controls', () => {
   const query = new URLSearchParams(libraryQuery({
@@ -61,9 +61,10 @@ test('manual confirmation removes auto-bound entries from the auto-only filter',
 test('batch lookup is sequential, waits after nonterminal failures, and skips the final wait', async () => {
   const events: string[] = [];
   const results: Array<{ kind: string; item: string }> = [];
+  let settingsReads = 0;
   const summary = await runEhLookupBatch(
     ['matched', 'failed', 'none'],
-    4,
+    async () => { settingsReads += 1; return 2; },
     async (item) => {
       events.push(`lookup:${item}`);
       if (item === 'failed') throw new Error('temporary connection failure');
@@ -78,16 +79,36 @@ test('batch lookup is sequential, waits after nonterminal failures, and skips th
   );
 
   assert.deepEqual(events, [
-    'start:matched', 'lookup:matched', 'wait:4000',
-    'start:failed', 'lookup:failed', 'wait:4000',
+    'start:matched', 'lookup:matched', 'wait:2000',
+    'start:failed', 'lookup:failed', 'wait:2000',
     'start:none', 'lookup:none',
   ]);
+  assert.equal(settingsReads, 1);
   assert.deepEqual(results, [
     { item: 'matched', kind: 'matched' },
     { item: 'failed', kind: 'failed' },
     { item: 'none', kind: 'no-match' },
   ]);
   assert.deepEqual(summary, { processed: 3, cancelled: false, blocked: false });
+});
+
+test('batch reports a new binding with metadata error and does not call it a refresh', async () => {
+  const results: Array<{ kind: string; message?: string }> = [];
+  await runEhLookupBatch(
+    ['new', 'existing'],
+    0,
+    async (item) => item === 'new'
+      ? { entry: { ehBindSource: 'auto', ehError: 'gdata unavailable' }, candidates: [], autoBound: true }
+      : { entry: { ehBindSource: 'manual', ehError: 'gdata unavailable' }, candidates: [], refreshedBinding: true },
+    async () => assert.fail('zero interval must not wait'),
+    () => false,
+    () => undefined,
+    (result) => results.push({ kind: result.kind, message: ehBatchResultMessage(result) }),
+  );
+  assert.deepEqual(results, [
+    { kind: 'matched', message: 'Auto-matched; metadata error: gdata unavailable' },
+    { kind: 'refreshed', message: 'Gallery remains bound; metadata refresh failed: gdata unavailable' },
+  ]);
 });
 
 test('batch refreshes bound entries without changing their binding provenance', async () => {

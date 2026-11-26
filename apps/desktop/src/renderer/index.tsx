@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehLookupBody, ehLookupMessage, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft, type EhBatchResult, type EntryDraft } from './libraryState.js';
+import { effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehBatchResultMessage, ehLookupBody, ehLookupMessage, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft, type EhBatchResult, type EntryDraft } from './libraryState.js';
 
 declare global {
   interface Window {
@@ -74,6 +74,8 @@ type EhBatchProgress = {
   total: number;
   processed: number;
   currentTitle?: string;
+  preparing?: boolean;
+  error?: string;
   cancelled?: boolean;
   cancelRequested?: boolean;
   blocked?: boolean;
@@ -170,11 +172,9 @@ function App() {
     searchGid: false, preferOriginalTitle: false, additionalTags: false, includeExpunged: false,
     interval: 4, sendCookiesToEHentai: false,
   });
-  const [ehSavedIncludeExpunged, setEhSavedIncludeExpunged] = useState(false);
   const [ehLookupSite, setEhLookupSite] = useState<'' | EhSettings['site']>('');
   const [ehCookieHeader, setEhCookieHeader] = useState('');
   const [ehSettingsMessage, setEhSettingsMessage] = useState('');
-  const [ehBatchInterval, setEhBatchInterval] = useState(4);
   const [newRoot, setNewRoot] = useState({
     label: '',
     serverPath: '',
@@ -287,8 +287,6 @@ function App() {
     try {
       const settings = await window.henshin.request<EhSettings>('/api/settings/eh');
       setEhSettings(settings);
-      setEhBatchInterval(settings.interval);
-      setEhSavedIncludeExpunged(settings.includeExpunged);
     } catch { /* Older servers may not expose this endpoint. */ }
   };
 
@@ -391,7 +389,7 @@ function App() {
         ...(ehCookieHeader ? { cookieHeader: ehCookieHeader } : {}),
         ...(clearCredentials ? { clearCredentials: true } : {}),
       });
-      setEhSettings(updated); setEhBatchInterval(updated.interval); setEhSavedIncludeExpunged(updated.includeExpunged); setEhCookieHeader('');
+      setEhSettings(updated); setEhCookieHeader('');
       setEhSettingsMessage(clearCredentials ? 'Credentials cleared.' : 'Settings saved.');
     } catch (caught) { setEhSettingsMessage((caught as Error).message); }
   };
@@ -556,10 +554,13 @@ function App() {
   const lookupEh = async (mode: 'auto' | 'title' | 'cover') => {
     if (!selected) return;
     const entryId = selected.id; const generation = selectionGeneration.current;
-    const body = ehLookupBody(mode, ehQuery, mode === 'auto' ? '' : ehLookupSite, Boolean(selected.ehGid && selected.ehToken), mode === 'title' ? ehSavedIncludeExpunged : undefined);
     setEhLookupSite('');
     setEhBusy(true); setEhMessage(''); setEhCandidates([]);
     try {
+      const includeExpunged = mode === 'title'
+        ? (await call<EhSettings>('/api/settings/eh')).includeExpunged
+        : undefined;
+      const body = ehLookupBody(mode, ehQuery, mode === 'auto' ? '' : ehLookupSite, Boolean(selected.ehGid && selected.ehToken), includeExpunged);
       const result = await call<{ entry?: Entry; candidates: EhCandidate[]; autoBound?: boolean }>(`${entryPath(entryId)}/eh-lookup`, 'POST', {
         ...body,
       });
@@ -603,11 +604,11 @@ function App() {
     if (batchEntries.length === 0) return;
     batchRunning.current = true;
     batchCancelled.current = false;
-    setEhBatchProgress({ running: true, total: batchEntries.length, processed: 0, results: [] });
+    setEhBatchProgress({ running: true, total: batchEntries.length, processed: 0, preparing: true, results: [] });
     try {
       const summary = await runEhLookupBatch(
         batchEntries,
-        ehBatchInterval,
+        async () => (await call<EhSettings>('/api/settings/eh')).interval,
         async (entry) => {
           const response = await call<{ entry?: Entry; candidates: EhCandidate[]; autoBound?: boolean; refreshedBinding?: boolean }>(
             `${entryPath(entry.id)}/eh-lookup`,
@@ -625,24 +626,18 @@ function App() {
         () => batchCancelled.current,
         (entry, index) => setEhBatchProgress((current) => current ? {
           ...current,
+          preparing: false,
           currentTitle: entry.effectiveTitle || effectiveTitle(entry),
           processed: index,
         } : current),
         (result) => setEhBatchProgress((current) => {
           if (!current) return current;
           const title = result.item.effectiveTitle || effectiveTitle(result.item);
-          const message = result.kind === 'matched'
-            ? result.response?.entry?.ehError ? `Matched; metadata failed: ${result.response.entry.ehError}` : 'Auto-matched'
-            : result.kind === 'refreshed'
-              ? result.message ? `Refresh failed: ${result.message}` : result.response?.entry?.ehError ? `Refresh failed: ${result.response.entry.ehError}` : 'Refreshed bound gallery'
-              : result.kind === 'no-match'
-                ? 'No match'
-                : `Failed: ${result.message || 'Metadata lookup failed'}`;
           return {
             ...current,
             processed: current.processed + 1,
             currentTitle: undefined,
-            results: [...current.results, { id: result.item.id, title, kind: result.kind, message }],
+            results: [...current.results, { id: result.item.id, title, kind: result.kind, message: ehBatchResultMessage(result) }],
           };
         }),
       );
@@ -659,6 +654,14 @@ function App() {
           setTagSuggestions(tags.tags);
         } catch { /* Batch results remain useful if tag suggestions fail to refresh. */ }
       }
+    } catch (caught) {
+      setEhBatchProgress((current) => current ? {
+        ...current,
+        running: false,
+        preparing: false,
+        currentTitle: undefined,
+        error: (caught as Error).message,
+      } : current);
     } finally {
       batchRunning.current = false;
       batchWait.current = null;
@@ -779,11 +782,15 @@ function App() {
           </div>
           {ehBatchProgress && <section className="batch-summary" role="status" aria-live="polite">
             <p>{ehBatchProgress.running
-              ? ehBatchProgress.cancelRequested
+              ? ehBatchProgress.preparing
+                ? ehBatchProgress.cancelRequested ? 'Cancelling before the first lookup.' : 'Reading current server lookup settings…'
+                : ehBatchProgress.cancelRequested
                 ? `Finishing the current lookup; no further books will start (${ehBatchProgress.processed} of ${ehBatchProgress.total} complete).`
                 : ehBatchProgress.currentTitle
                   ? `Processing ${ehBatchProgress.processed + 1} of ${ehBatchProgress.total}: ${ehBatchProgress.currentTitle}`
                   : `Completed ${ehBatchProgress.processed} of ${ehBatchProgress.total}; waiting before the next book.`
+              : ehBatchProgress.error
+                ? `Batch could not start: ${ehBatchProgress.error}`
               : ehBatchProgress.blocked
                 ? `Stopped after an upstream access or rate block (${ehBatchProgress.processed} of ${ehBatchProgress.total} books).`
                 : ehBatchProgress.cancelled
