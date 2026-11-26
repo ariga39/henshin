@@ -82,6 +82,56 @@ export function ehBatchLookupBody(): { mode: 'auto'; autoBind: true } {
   return { mode: 'auto', autoBind: true };
 }
 
+export type EhSettingsValues = {
+  site: 'e-hentai.org' | 'exhentai.org';
+  language: string;
+  useThumbnails: boolean;
+  searchGid: boolean;
+  preferOriginalTitle: boolean;
+  additionalTags: boolean;
+  includeExpunged: boolean;
+  interval: number;
+  sendCookiesToEHentai: boolean;
+};
+
+export function ehSettingsUpdateBody(
+  draft: EhSettingsValues,
+  baseline: EhSettingsValues,
+  clearCredentials = false,
+  cookieHeader = '',
+): Partial<EhSettingsValues> & { clearCredentials?: true; cookieHeader?: string } {
+  if (clearCredentials) return { clearCredentials: true };
+  const changes: Partial<EhSettingsValues> = {};
+  if (draft.site !== baseline.site) changes.site = draft.site;
+  if (draft.language !== baseline.language) changes.language = draft.language;
+  if (draft.useThumbnails !== baseline.useThumbnails) changes.useThumbnails = draft.useThumbnails;
+  if (draft.searchGid !== baseline.searchGid) changes.searchGid = draft.searchGid;
+  if (draft.preferOriginalTitle !== baseline.preferOriginalTitle) changes.preferOriginalTitle = draft.preferOriginalTitle;
+  if (draft.additionalTags !== baseline.additionalTags) changes.additionalTags = draft.additionalTags;
+  if (draft.includeExpunged !== baseline.includeExpunged) changes.includeExpunged = draft.includeExpunged;
+  if (draft.interval !== baseline.interval) changes.interval = draft.interval;
+  if (draft.sendCookiesToEHentai !== baseline.sendCookiesToEHentai) changes.sendCookiesToEHentai = draft.sendCookiesToEHentai;
+  return { ...changes, ...(cookieHeader ? { cookieHeader } : {}) };
+}
+
+export function rebaseEhSettingsDraft<T extends EhSettingsValues>(
+  draft: T,
+  baseline: EhSettingsValues,
+  current: T,
+): EhSettingsValues {
+  return {
+    site: draft.site === baseline.site ? current.site : draft.site,
+    language: draft.language === baseline.language ? current.language : draft.language,
+    useThumbnails: draft.useThumbnails === baseline.useThumbnails ? current.useThumbnails : draft.useThumbnails,
+    searchGid: draft.searchGid === baseline.searchGid ? current.searchGid : draft.searchGid,
+    preferOriginalTitle: draft.preferOriginalTitle === baseline.preferOriginalTitle ? current.preferOriginalTitle : draft.preferOriginalTitle,
+    additionalTags: draft.additionalTags === baseline.additionalTags ? current.additionalTags : draft.additionalTags,
+    includeExpunged: draft.includeExpunged === baseline.includeExpunged ? current.includeExpunged : draft.includeExpunged,
+    interval: draft.interval === baseline.interval ? current.interval : draft.interval,
+    sendCookiesToEHentai: draft.sendCookiesToEHentai === baseline.sendCookiesToEHentai ? current.sendCookiesToEHentai : draft.sendCookiesToEHentai,
+  };
+}
+
 export function ehLookupMessage(autoBound: boolean | undefined, candidateCount: number): string {
   if (candidateCount === 0) return 'No matching galleries found.';
   return autoBound === true

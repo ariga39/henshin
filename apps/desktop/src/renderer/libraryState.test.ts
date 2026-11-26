@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehBatchResultMessage, ehLookupBody, ehLookupMessage, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft } from './libraryState.js';
+import { effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehBatchResultMessage, ehLookupBody, ehLookupMessage, ehSettingsUpdateBody, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, rebaseEhSettingsDraft, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft } from './libraryState.js';
+import type { EhSettingsValues } from './libraryState.js';
 
 test('library query preserves repeated tag filters and all list controls', () => {
   const query = new URLSearchParams(libraryQuery({
@@ -43,6 +44,31 @@ test('ordinary lookup uses server preferences and bound entries request alternat
 
 test('batch requests auto-lookup and let the server refresh existing bindings', () => {
   assert.deepEqual(ehBatchLookupBody(), { mode: 'auto', autoBind: true });
+});
+
+test('EH settings saves send changed fields only and clear credentials separately', () => {
+  const baseline: EhSettingsValues = {
+    site: 'e-hentai.org', language: '', useThumbnails: false, searchGid: false,
+    preferOriginalTitle: false, additionalTags: false, includeExpunged: false,
+    interval: 4, sendCookiesToEHentai: false,
+  };
+  const draft: EhSettingsValues = { ...baseline, site: 'exhentai.org', interval: 7 };
+  assert.deepEqual(ehSettingsUpdateBody(draft, baseline), { site: 'exhentai.org', interval: 7 });
+  assert.deepEqual(ehSettingsUpdateBody(draft, baseline, true, 'unsaved cookie draft'), { clearCredentials: true });
+});
+
+test('rebasing settings adopts remote changes while preserving unsaved preference drafts', () => {
+  const baseline: EhSettingsValues = {
+    site: 'e-hentai.org', language: '', useThumbnails: false, searchGid: false,
+    preferOriginalTitle: false, additionalTags: false, includeExpunged: false,
+    interval: 4, sendCookiesToEHentai: false,
+  };
+  const draft: EhSettingsValues = { ...baseline, includeExpunged: true };
+  const current: EhSettingsValues = { ...baseline, site: 'exhentai.org', interval: 8 };
+  assert.deepEqual(rebaseEhSettingsDraft(draft, baseline, current), {
+    ...current,
+    includeExpunged: true,
+  });
 });
 
 test('previewing an existing auto-match does not announce a new match', () => {

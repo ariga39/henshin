@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehBatchResultMessage, ehLookupBody, ehLookupMessage, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft, type EhBatchResult, type EntryDraft } from './libraryState.js';
+import { effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehBatchResultMessage, ehLookupBody, ehLookupMessage, ehSettingsUpdateBody, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, rebaseEhSettingsDraft, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft, type EhBatchResult, type EntryDraft, type EhSettingsValues } from './libraryState.js';
 
 declare global {
   interface Window {
@@ -81,18 +81,7 @@ type EhBatchProgress = {
   blocked?: boolean;
   results: Array<{ id: string; title: string; kind: EhBatchResult<Entry>['kind']; message?: string }>;
 };
-type EhSettings = {
-  site: 'e-hentai.org' | 'exhentai.org';
-  credentialsConfigured: boolean;
-  language: string;
-  useThumbnails: boolean;
-  searchGid: boolean;
-  preferOriginalTitle: boolean;
-  additionalTags: boolean;
-  includeExpunged: boolean;
-  interval: number;
-  sendCookiesToEHentai: boolean;
-};
+type EhSettings = EhSettingsValues & { credentialsConfigured: boolean };
 type Reader = {
   id: string;
   name: string;
@@ -113,6 +102,12 @@ type Scan = {
   found: number;
   indexed: number;
   errors: number | string[];
+};
+
+const defaultEhSettings: EhSettings = {
+  site: 'e-hentai.org', credentialsConfigured: false, language: '', useThumbnails: false,
+  searchGid: false, preferOriginalTitle: false, additionalTags: false, includeExpunged: false,
+  interval: 4, sendCookiesToEHentai: false,
 };
 
 const formatTimestamp = (seconds?: number | null) =>
@@ -167,11 +162,8 @@ function App() {
   const [ehCandidates, setEhCandidates] = useState<EhCandidate[]>([]);
   const [ehBusy, setEhBusy] = useState(false);
   const [ehMessage, setEhMessage] = useState('');
-  const [ehSettings, setEhSettings] = useState<EhSettings>({
-    site: 'e-hentai.org', credentialsConfigured: false, language: '', useThumbnails: false,
-    searchGid: false, preferOriginalTitle: false, additionalTags: false, includeExpunged: false,
-    interval: 4, sendCookiesToEHentai: false,
-  });
+  const [ehSettings, setEhSettings] = useState<EhSettings>(defaultEhSettings);
+  const ehSettingsBaseline = useRef<EhSettings>(defaultEhSettings);
   const [ehLookupSite, setEhLookupSite] = useState<'' | EhSettings['site']>('');
   const [ehCookieHeader, setEhCookieHeader] = useState('');
   const [ehSettingsMessage, setEhSettingsMessage] = useState('');
@@ -286,6 +278,7 @@ function App() {
   const loadEhSettings = async () => {
     try {
       const settings = await window.henshin.request<EhSettings>('/api/settings/eh');
+      ehSettingsBaseline.current = settings;
       setEhSettings(settings);
     } catch { /* Older servers may not expose this endpoint. */ }
   };
@@ -375,21 +368,23 @@ function App() {
 
   const saveEhSettings = async (clearCredentials = false) => {
     setEhSettingsMessage('');
+    const baseline = ehSettingsBaseline.current;
+    const cookieHeader = ehCookieHeader;
+    const body = ehSettingsUpdateBody(ehSettings, baseline, clearCredentials, cookieHeader);
+    if (!clearCredentials && Object.keys(body).length === 0) {
+      setEhSettingsMessage('No settings changes to save.');
+      return;
+    }
     try {
       const updated = await window.henshin.request<EhSettings>('/api/settings/eh', 'PUT', {
-        site: ehSettings.site,
-        language: ehSettings.language,
-        useThumbnails: ehSettings.useThumbnails,
-        searchGid: ehSettings.searchGid,
-        preferOriginalTitle: ehSettings.preferOriginalTitle,
-        additionalTags: ehSettings.additionalTags,
-        includeExpunged: ehSettings.includeExpunged,
-        interval: ehSettings.interval,
-        sendCookiesToEHentai: ehSettings.sendCookiesToEHentai,
-        ...(ehCookieHeader ? { cookieHeader: ehCookieHeader } : {}),
-        ...(clearCredentials ? { clearCredentials: true } : {}),
+        ...body,
       });
-      setEhSettings(updated); setEhCookieHeader('');
+      ehSettingsBaseline.current = updated;
+      setEhSettings((current) => ({
+        ...rebaseEhSettingsDraft(current, baseline, updated),
+        credentialsConfigured: updated.credentialsConfigured,
+      }));
+      if (!clearCredentials) setEhCookieHeader((current) => current === cookieHeader ? '' : current);
       setEhSettingsMessage(clearCredentials ? 'Credentials cleared.' : 'Settings saved.');
     } catch (caught) { setEhSettingsMessage((caught as Error).message); }
   };
