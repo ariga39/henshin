@@ -1009,7 +1009,9 @@ async fn eh_lookup(
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| Err("No metadata returned".into()));
-            let _ = save_eh_result_data(&s, &id, &gallery, result, true);
+            if let Err(error) = save_eh_result_data(&s, &id, &gallery, result, true) {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, error);
+            }
             let entry = match entry_value(&s, &id) {
                 Ok(entry) => entry,
                 Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error),
@@ -1109,10 +1111,12 @@ async fn eh_lookup(
                         };
                         let changed = match tx.execute("UPDATE entries SET eh_gid=?2,eh_token=?3,eh_domain=?4,eh_bind_source='auto',eh_title=NULL,eh_title_jpn=NULL,eh_refreshed_at=NULL,eh_error=NULL,updated_at=?5 WHERE id=?1 AND eh_gid IS NULL AND eh_bind_source IS NULL",params![id,gallery.gid,gallery.token,gallery.domain,now()]) { Ok(changed) => changed, Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR,error.to_string()) };
                         if changed > 0 {
-                            let _ = tx.execute(
+                            if let Err(error) = tx.execute(
                                 "DELETE FROM entry_tags WHERE entry_id=?1 AND origin='eh'",
                                 [&id],
-                            );
+                            ) {
+                                return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+                            }
                         }
                         if let Err(error) = tx.commit() {
                             return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
@@ -1135,7 +1139,9 @@ async fn eh_lookup(
                         .into_iter()
                         .next()
                         .unwrap_or_else(|| Err("No metadata returned".into()));
-                    let _ = save_eh_result_data(&s, &id, &gallery, result, true);
+                    if let Err(error) = save_eh_result_data(&s, &id, &gallery, result, true) {
+                        return err(StatusCode::INTERNAL_SERVER_ERROR, error);
+                    }
                     let entry = match entry_value(&s, &id) {
                         Ok(entry) => entry,
                         Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error),
@@ -1723,6 +1729,65 @@ mod tests {
         format!("http://{address}")
     }
 
+    async fn mock_auto_lookup(
+        gdata_body: String,
+        request_count: usize,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 2048];
+                loop {
+                    let count = stream.read(&mut chunk).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    let Some(header_end) = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|pos| pos + 4)
+                    else {
+                        continue;
+                    };
+                    let headers =
+                        String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length: ")
+                                .and_then(|length| length.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).into_owned();
+                let (content_type, body) = if request.starts_with("POST ") {
+                    ("application/json", gdata_body.clone())
+                } else {
+                    (
+                        "text/html",
+                        "<div class='itg'><a href='https://e-hentai.org/g/9/deadbeef00/'><div class='glink'>Candidate</div></a></div>".to_owned(),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                requests.push(request);
+            }
+            requests
+        });
+        (format!("http://{address}"), server)
+    }
+
     async fn post_open(app: Router, body: &str) -> (StatusCode, Value) {
         let response = app
             .oneshot(
@@ -2125,6 +2190,136 @@ mod tests {
                 .count(),
             4
         );
+    }
+
+    #[tokio::test]
+    async fn automatic_bind_rolls_back_if_old_eh_tags_cannot_be_deleted() {
+        let (base, mock) = mock_auto_lookup(r#"{"gmetadata":[]}"#.into(), 1).await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::open(temp.path().join("data"), Some("secret".into())).unwrap();
+        state.eh = EhClient::new(&base, &base).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+                .unwrap();
+            conn.execute("INSERT INTO entries(id,root_id,relative_path,title,created_at,updated_at) VALUES('entry','root','book.zip','Book',0,0)",[]).unwrap();
+            conn.execute(
+                "INSERT INTO entry_tags VALUES('entry','artist:old','eh')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch("CREATE TRIGGER refuse_eh_tag_delete BEFORE DELETE ON entry_tags WHEN OLD.entry_id='entry' AND OLD.origin='eh' BEGIN SELECT RAISE(ABORT,'tag delete blocked'); END;").unwrap();
+        }
+        let state = Arc::new(state);
+
+        let (status, _) = api(
+            router(state.clone()),
+            "POST",
+            "/api/entries/entry/eh-lookup",
+            Some(r#"{"mode":"auto"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let request = mock.await.unwrap();
+        assert_eq!(request.len(), 1);
+        assert!(request[0].starts_with("GET "));
+        let conn = state.db.lock().unwrap();
+        let (gid, source, old_tag): (Option<String>, Option<String>, String) = conn
+            .query_row(
+                "SELECT e.eh_gid,e.eh_bind_source,t.tag FROM entries e JOIN entry_tags t ON t.entry_id=e.id WHERE e.id='entry'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(gid, None);
+        assert_eq!(source, None);
+        assert_eq!(old_tag, "artist:old");
+    }
+
+    #[tokio::test]
+    async fn automatic_bound_refresh_reports_metadata_write_failure() {
+        let metadata = r#"{"gmetadata":[{"gid":9,"token":"deadbeef00","title":"New title","title_jpn":"新しい","tags":[]}] }"#;
+        let (base, mock) = mock_auto_lookup(metadata.into(), 1).await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::open(temp.path().join("data"), Some("secret".into())).unwrap();
+        state.eh = EhClient::new(&base, &base).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+                .unwrap();
+            conn.execute("INSERT INTO entries(id,root_id,relative_path,title,eh_gid,eh_token,eh_domain,eh_bind_source,eh_title,eh_title_jpn,created_at,updated_at) VALUES('entry','root','book.zip','Book','9','deadbeef00','e-hentai.org','manual','Old title','旧',0,0)",[]).unwrap();
+            conn.execute(
+                "INSERT INTO entry_tags VALUES('entry','artist:old','eh')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch("CREATE TRIGGER refuse_eh_title_update BEFORE UPDATE OF eh_title ON entries WHEN OLD.id='entry' BEGIN SELECT RAISE(ABORT,'metadata write blocked'); END;").unwrap();
+        }
+        let state = Arc::new(state);
+
+        let (status, _) = api(
+            router(state.clone()),
+            "POST",
+            "/api/entries/entry/eh-lookup",
+            Some(r#"{"mode":"auto"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let requests = mock.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST "));
+        assert!(requests[0].contains(r#""gidlist":[[9,"deadbeef00"]]"#));
+        let conn = state.db.lock().unwrap();
+        let (title, title_jpn, tag): (Option<String>, Option<String>, String) = conn
+            .query_row(
+                "SELECT e.eh_title,e.eh_title_jpn,t.tag FROM entries e JOIN entry_tags t ON t.entry_id=e.id WHERE e.id='entry'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(title.as_deref(), Some("Old title"));
+        assert_eq!(title_jpn.as_deref(), Some("旧"));
+        assert_eq!(tag, "artist:old");
+    }
+
+    #[tokio::test]
+    async fn automatic_bind_keeps_selected_gallery_when_gdata_fails() {
+        let body = r#"{"gmetadata":[{"gid":9,"error":"fixture metadata failure"}]}"#;
+        let (base, mock) = mock_auto_lookup(body.into(), 2).await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::open(temp.path().join("data"), Some("secret".into())).unwrap();
+        state.eh = EhClient::new(&base, &base).unwrap();
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+            .unwrap();
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO entries(id,root_id,relative_path,title,created_at,updated_at) VALUES('entry','root','book.zip','Book',0,0)",[])
+            .unwrap();
+        let state = Arc::new(state);
+
+        let (status, result) = api(
+            router(state.clone()),
+            "POST",
+            "/api/entries/entry/eh-lookup",
+            Some(r#"{"mode":"auto"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["autoBound"], true);
+        assert_eq!(result["entry"]["ehGid"], "9");
+        assert_eq!(result["entry"]["ehBindSource"], "auto");
+        assert_eq!(result["entry"]["ehError"], "fixture metadata failure");
+        let requests = mock.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET "));
+        assert!(requests[1].starts_with("POST "));
+        assert!(requests[1].contains(r#""gidlist":[[9,"deadbeef00"]]"#));
     }
 
     #[tokio::test]

@@ -779,7 +779,56 @@ mod tests {
 
     #[tokio::test]
     async fn gdata_sends_one_gallery_per_request() {
-        let base = mock_responses("200 OK", "application/json", r#"{"gmetadata":[]}"#, 26).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mock = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..26 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 2048];
+                loop {
+                    let count = stream.read(&mut chunk).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    let Some(header_end) = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|pos| pos + 4)
+                    else {
+                        continue;
+                    };
+                    let headers =
+                        String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length: ")
+                                .and_then(|length| length.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap()
+                    + 4;
+                requests.push(serde_json::from_slice::<Value>(&request[header_end..]).unwrap());
+                let body = r#"{"gmetadata":[]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let base = format!("http://{address}");
         let client = EhClient::new("https://e-hentai.org", &base).unwrap();
         let galleries = (1..=26)
             .map(|gid| GalleryRef {
@@ -791,7 +840,13 @@ mod tests {
         let results = client.gdata(&galleries).await;
         assert_eq!(results.len(), 26);
         assert!(results.iter().all(Result::is_err));
-        assert_eq!(results.len(), 26);
+        let requests = mock.await.unwrap();
+        assert_eq!(requests.len(), 26);
+        for (request, expected_gid) in requests.iter().zip(1..=26) {
+            let gidlist = request["gidlist"].as_array().unwrap();
+            assert_eq!(gidlist.len(), 1);
+            assert_eq!(gidlist[0][0], expected_gid);
+        }
     }
 
     #[test]
