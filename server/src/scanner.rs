@@ -42,6 +42,7 @@ pub fn start(state: Arc<AppState>, root_id: String) -> Result<ScanState, String>
     {
         return Err("scan already running".into());
     }
+    scans.retain(|_, scan| scan.root_id != root_id);
     let now = unix_now();
     let scan = ScanState {
         id: uuid::Uuid::new_v4().to_string(),
@@ -119,11 +120,7 @@ fn run(
     let mut errors = Vec::new();
     let mut indexed = 0;
     for path in &archives {
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|e| e.to_string())?
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = relative_path(root, path)?;
         seen.insert(relative.clone());
         match process_one(state, root_id, path, &relative) {
             Ok(changed) => {
@@ -157,6 +154,21 @@ fn run(
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok((archives.len(), indexed, errors))
+}
+
+fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
+    path.strip_prefix(root)
+        .map_err(|e| e.to_string())?
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => name
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "archive path is not UTF-8".to_string()),
+            _ => Err("archive path contains an unexpected component".to_string()),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|parts| parts.join("/"))
 }
 
 fn process_one(
