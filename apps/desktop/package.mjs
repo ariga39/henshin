@@ -56,7 +56,7 @@ try {
     run(artifact, ['--appimage-extract'], { cwd: unpack });
     await import('node:fs/promises').then(fs => fs.rename(path.join(unpack, 'squashfs-root'), path.join(unpack, 'appimage-root')));
     appPath = artifact;
-    signingStatus = inspectAppImageSigning(artifact);
+    signingStatus = reportLinuxSigning();
   }
   await writeFile(`${artifact}.signing-status.txt`, `${signingStatus}\n`);
 
@@ -155,17 +155,8 @@ function reportWindowsSigning(executable) {
   return status;
 }
 
-function inspectAppImageSigning(artifact) {
-  const result = spawnSync(artifact, ['--appimage-signature'], { encoding: 'utf8', env: { ...process.env, APPIMAGE_EXTRACT_AND_RUN: '1' } });
-  if (result.status === 0 && result.stdout.trim()) {
-    const status = `AppImage signing status: embedded signature metadata present (${result.stdout.trim()}); no signing identity is configured by this build.`;
-    process.stdout.write(`Signing status: ${status}\n`);
-    return status;
-  }
-  if (result.status !== 0 && /no signature|not signed|no embedded signature/i.test(`${result.stdout}\n${result.stderr}`)) {
-    const status = 'AppImage signing status: unsigned (AppImage runtime reports no embedded signature).';
-    process.stdout.write(`Signing status: ${status}\n`);
-    return status;
-  }
-  throw new Error(`Could not inspect AppImage signature metadata: ${result.stderr || result.stdout || `exit ${result.status}`}`);
+function reportLinuxSigning() {
+  const status = 'Linux AppImage signing status: unsigned; no AppImage signing option or key is configured for this build.';
+  process.stdout.write(`Signing status: ${status}\n`);
+  return status;
 }

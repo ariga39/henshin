@@ -75,8 +75,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @henshin/desktop typecheck
       - run: pnpm --filter @henshin/desktop test
-      - name: Package and smoke test native desktop
-        if: runner.os != 'Windows'
+      - name: Package and smoke test native macOS desktop
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CSC_FOR_PULL_REQUEST: 'true'
+        run: |
+          pnpm --filter @henshin/desktop package
+          cat dist/release/Henshin-*.signing-status.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Package and smoke test native Linux desktop
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           pnpm --filter @henshin/desktop package
