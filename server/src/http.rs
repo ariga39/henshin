@@ -32,6 +32,10 @@ const ENTRY_COLUMNS: &str = concat!(
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route(
+            "/api/settings/eh",
+            get(get_eh_settings).put(put_eh_settings),
+        )
         .route("/api/roots", get(list_roots).post(create_root))
         .route("/api/roots/{id}", patch(update_root).delete(delete_root))
         .route("/api/roots/{id}/scan", post(scan_root))
@@ -81,6 +85,78 @@ fn now() -> i64 {
 
 async fn health(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"serverId":s.server_id,"version":env!("CARGO_PKG_VERSION")}))
+}
+
+async fn get_eh_settings(State(s): State<Arc<AppState>>) -> Response {
+    let settings = match s.eh_settings.lock() {
+        Ok(settings) => settings,
+        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "settings unavailable"),
+    };
+    Json(json!({"site":settings.site,"credentialsConfigured":settings.cookie_header.is_some()}))
+        .into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EhSettingsInput {
+    site: Option<String>,
+    cookie_header: Option<String>,
+    clear_credentials: Option<bool>,
+}
+
+async fn put_eh_settings(
+    State(s): State<Arc<AppState>>,
+    Json(input): Json<EhSettingsInput>,
+) -> Response {
+    if input
+        .site
+        .as_deref()
+        .is_some_and(|site| !matches!(site, "e-hentai.org" | "exhentai.org"))
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "site must be e-hentai.org or exhentai.org",
+        );
+    }
+    if let Some(cookie) = input.cookie_header.as_deref() {
+        if cookie.is_empty()
+            || cookie.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
+            || cookie.split(';').any(|part| {
+                let Some((name, _)) = part.trim().split_once('=') else {
+                    return true;
+                };
+                name.trim().is_empty()
+            })
+        {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "Enter a valid Cookie header using name=value pairs",
+            );
+        }
+    }
+    let mut settings = match s.eh_settings.lock() {
+        Ok(settings) => settings,
+        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "settings unavailable"),
+    };
+    let next = crate::app::EhSettings {
+        site: input.site.unwrap_or_else(|| settings.site.clone()),
+        cookie_header: if input.clear_credentials.unwrap_or(false) {
+            None
+        } else {
+            input
+                .cookie_header
+                .or_else(|| settings.cookie_header.clone())
+        },
+    };
+    if let Err(e) = crate::app::save_eh_settings(&s.data_dir, &next) {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not save EH settings: {e}"),
+        );
+    }
+    *settings = next;
+    Json(json!({"site":settings.site,"credentialsConfigured":settings.cookie_header.is_some()}))
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -755,6 +831,7 @@ struct EhLookupInput {
     mode: Option<String>,
     query: Option<String>,
     include_expunged: Option<bool>,
+    site: Option<String>,
 }
 
 async fn eh_lookup(
@@ -763,6 +840,26 @@ async fn eh_lookup(
     Json(input): Json<EhLookupInput>,
 ) -> Response {
     let mode = input.mode.as_deref().unwrap_or("title");
+    let (site, cookie) = {
+        let settings = match s.eh_settings.lock() {
+            Ok(v) => v,
+            Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "settings unavailable"),
+        };
+        let site = input.site.as_deref().unwrap_or(&settings.site);
+        if !matches!(site, "e-hentai.org" | "exhentai.org") {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "site must be e-hentai.org or exhentai.org",
+            );
+        }
+        if site == "exhentai.org" && settings.cookie_header.is_none() {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "ExHentai credentials are not configured. Configure them in Settings or use e-hentai.org.",
+            );
+        }
+        (site.to_owned(), settings.cookie_header.clone())
+    };
     if !matches!(mode, "title" | "cover") {
         return err(StatusCode::BAD_REQUEST, "mode must be title or cover");
     }
@@ -796,7 +893,13 @@ async fn eh_lookup(
     };
     match s
         .eh
-        .lookup(mode, &query, input.include_expunged.unwrap_or(false))
+        .lookup(
+            &site,
+            cookie.as_deref(),
+            mode,
+            &query,
+            input.include_expunged.unwrap_or(false),
+        )
         .await
     {
         Ok(candidates) => {
@@ -840,14 +943,17 @@ async fn eh_bind(
         };
         if token.is_empty()
             || !token.bytes().all(|b| b.is_ascii_hexdigit())
-            || input.domain.as_deref().unwrap_or("e-hentai.org") != "e-hentai.org"
+            || !matches!(
+                input.domain.as_deref().unwrap_or("e-hentai.org"),
+                "e-hentai.org" | "exhentai.org"
+            )
         {
             return err(StatusCode::BAD_REQUEST, "Invalid E-Hentai gallery identity");
         }
         GalleryRef {
             gid,
             token: token.to_ascii_lowercase(),
-            domain: "e-hentai.org".into(),
+            domain: input.domain.unwrap_or_else(|| "e-hentai.org".into()),
         }
     };
     {
@@ -949,12 +1055,29 @@ async fn eh_refresh_batch(
         }
     };
     let total = galleries.len();
-    let refs: Vec<_> = galleries.iter().map(|(_, g)| g.clone()).collect();
-    let results = s.eh.gdata(&refs).await;
+    let mut results: Vec<Option<Result<eh::Metadata, String>>> =
+        std::iter::repeat_with(|| None).take(total).collect();
+    for domain in ["e-hentai.org", "exhentai.org"] {
+        let indexed: Vec<_> = galleries
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, gallery))| gallery.domain == domain)
+            .collect();
+        let refs: Vec<_> = indexed
+            .iter()
+            .map(|(_, (_, gallery))| (*gallery).clone())
+            .collect();
+        for ((index, _), result) in indexed.into_iter().zip(s.eh.gdata(&refs).await) {
+            results[index] = Some(result);
+        }
+    }
     let mut refreshed = 0;
     let mut failed = 0;
     let mut errors = Vec::new();
-    for ((id, gallery), result) in galleries.iter().zip(results) {
+    for (index, (id, gallery)) in galleries.iter().enumerate() {
+        let result = results[index]
+            .take()
+            .unwrap_or_else(|| Err("No metadata returned".into()));
         match save_eh_result_data(&s, id, gallery, result, true) {
             Ok(Some(message)) => {
                 failed += 1;
@@ -1277,6 +1400,104 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn eh_settings_are_write_only_persisted_separately_and_clearable() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let state = Arc::new(AppState::open(data_dir.clone(), Some("secret".into())).unwrap());
+        let app = router(state);
+        let (status, initial) = api(app.clone(), "GET", "/api/settings/eh", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            initial,
+            json!({"site":"e-hentai.org","credentialsConfigured":false})
+        );
+
+        let (status, saved) = api(app.clone(), "PUT", "/api/settings/eh", Some(
+            r#"{"site":"exhentai.org","cookieHeader":"session=synthetic-test-value; pref=fixture"}"#
+        )).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            saved,
+            json!({"site":"exhentai.org","credentialsConfigured":true})
+        );
+        assert!(!saved.to_string().contains("synthetic-test-value"));
+        let (status, readback) = api(app.clone(), "GET", "/api/settings/eh", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            readback,
+            json!({"site":"exhentai.org","credentialsConfigured":true})
+        );
+        let settings_file = std::fs::read_to_string(data_dir.join("eh-settings.json")).unwrap();
+        assert!(settings_file.contains("synthetic-test-value"));
+        let database = std::fs::read(data_dir.join("henshin.sqlite")).unwrap();
+        assert!(
+            !database
+                .windows(b"synthetic-test-value".len())
+                .any(|w| w == b"synthetic-test-value")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(data_dir.join("eh-settings.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        let (status, kept) = api(
+            app.clone(),
+            "PUT",
+            "/api/settings/eh",
+            Some(r#"{"site":"e-hentai.org"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            kept,
+            json!({"site":"e-hentai.org","credentialsConfigured":true})
+        );
+        let (status, invalid) = api(
+            app.clone(),
+            "PUT",
+            "/api/settings/eh",
+            Some(r#"{"cookieHeader":"session=bad\nvalue"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!invalid.to_string().contains("bad"));
+        let (status, cleared) = api(
+            app.clone(),
+            "PUT",
+            "/api/settings/eh",
+            Some(r#"{"clearCredentials":true}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            cleared,
+            json!({"site":"e-hentai.org","credentialsConfigured":false})
+        );
+        let (status, missing) = api(
+            app,
+            "POST",
+            "/api/entries/missing/eh-lookup",
+            Some(r#"{"site":"exhentai.org","mode":"title","query":"fictional title"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            missing["error"]
+                .as_str()
+                .unwrap()
+                .contains("credentials are not configured")
+        );
     }
 
     #[tokio::test]

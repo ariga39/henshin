@@ -67,6 +67,7 @@ type Entry = {
   coverSha1?: string | null;
 };
 type EhCandidate = { gid: string; token: string; domain: string; url: string; title: string };
+type EhSettings = { site: 'e-hentai.org' | 'exhentai.org'; credentialsConfigured: boolean };
 type Reader = {
   id: string;
   name: string;
@@ -139,6 +140,10 @@ function App() {
   const [ehBusy, setEhBusy] = useState(false);
   const [ehMessage, setEhMessage] = useState('');
   const [includeExpunged, setIncludeExpunged] = useState(false);
+  const [ehSettings, setEhSettings] = useState<EhSettings>({ site: 'e-hentai.org', credentialsConfigured: false });
+  const [ehLookupSite, setEhLookupSite] = useState<EhSettings['site']>('e-hentai.org');
+  const [ehCookieHeader, setEhCookieHeader] = useState('');
+  const [ehSettingsMessage, setEhSettingsMessage] = useState('');
   const [newRoot, setNewRoot] = useState({
     label: '',
     serverPath: '',
@@ -242,11 +247,18 @@ function App() {
   };
   refreshCurrentRef.current = () => refresh();
 
+  const loadEhSettings = async () => {
+    try {
+      const settings = await window.henshin.request<EhSettings>('/api/settings/eh');
+      setEhSettings(settings); setEhLookupSite(settings.site);
+    } catch { /* Older servers may not expose this endpoint. */ }
+  };
+
   useEffect(() => {
     window.henshin.getConfig().then((savedConfig: Config) => {
       setConfig(savedConfig);
       setConnectionUrl(savedConfig.connection.url);
-      if (savedConfig.connection.url) void refresh();
+      if (savedConfig.connection.url) { void refresh(); void loadEhSettings(); }
       const defaultReader =
         savedConfig.readers.find((candidate) => candidate.isDefault) ??
         savedConfig.readers[0];
@@ -299,6 +311,7 @@ function App() {
       setConfig(savedConfig);
       if (sameServer) await refreshCurrentRef.current();
       else await refresh('', 0);
+      await loadEhSettings();
     } catch (caught) {
       setHealth('');
       setError((caught as Error).message);
@@ -321,6 +334,19 @@ function App() {
     } catch (caught) {
       setError((caught as Error).message);
     }
+  };
+
+  const saveEhSettings = async (clearCredentials = false) => {
+    setEhSettingsMessage('');
+    try {
+      const updated = await window.henshin.request<EhSettings>('/api/settings/eh', 'PUT', {
+        site: ehSettings.site,
+        ...(ehCookieHeader ? { cookieHeader: ehCookieHeader } : {}),
+        ...(clearCredentials ? { clearCredentials: true } : {}),
+      });
+      setEhSettings(updated); setEhLookupSite(updated.site); setEhCookieHeader('');
+      setEhSettingsMessage(clearCredentials ? 'Credentials cleared.' : 'Settings saved.');
+    } catch (caught) { setEhSettingsMessage((caught as Error).message); }
   };
 
   const startScan = async (id: string) => {
@@ -485,7 +511,7 @@ function App() {
     const entryId = selected.id; const generation = selectionGeneration.current;
     setEhBusy(true); setEhMessage(''); setEhCandidates([]);
     try {
-      const result = await call<{ candidates: EhCandidate[] }>(`${entryPath(entryId)}/eh-lookup`, 'POST', { mode, query: ehQuery, includeExpunged });
+      const result = await call<{ candidates: EhCandidate[] }>(`${entryPath(entryId)}/eh-lookup`, 'POST', { mode, query: ehQuery, includeExpunged, site: ehLookupSite });
       if (!isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) return;
       setEhCandidates(result.candidates);
       setEhMessage(result.candidates.length ? '' : 'No matching galleries found.');
@@ -696,11 +722,12 @@ function App() {
                 <section className="editor-section eh-section">
                   <h3>E-Hentai gallery</h3>
                   {selected.ehGid && selected.ehToken ? <>
-                    <a href={`https://e-hentai.org/g/${selected.ehGid}/${selected.ehToken}/`} target="_blank" rel="noreferrer">https://e-hentai.org/g/{selected.ehGid}/{selected.ehToken}/</a>
+                    <a href={`https://${selected.ehDomain || 'e-hentai.org'}/g/${selected.ehGid}/${selected.ehToken}/`} target="_blank" rel="noreferrer">https://{selected.ehDomain || 'e-hentai.org'}/g/{selected.ehGid}/{selected.ehToken}/</a>
                     <div className="muted">{selected.ehTitleJpn || selected.ehTitle || 'No source title'} · Refreshed {formatTimestamp(selected.ehRefreshedAt)}</div>
                     <div className="row"><button disabled={ehBusy} onClick={() => void refreshEh()}>Refresh metadata</button></div>
                   </> : <p className="muted">No gallery bound.</p>}
                   <label className="field"><span>Search title or filename</span><input value={ehQuery} onChange={(event) => setEhQuery(event.target.value)} /></label>
+                  <label className="field"><span>Search site</span><select value={ehLookupSite} onChange={(event) => setEhLookupSite(event.target.value as EhSettings['site'])}><option value="e-hentai.org">e-hentai.org</option><option value="exhentai.org">exhentai.org</option></select></label>
                   <div className="row"><label><input type="checkbox" checked={includeExpunged} onChange={(event) => setIncludeExpunged(event.target.checked)} /> Include expunged</label>
                     <button disabled={ehBusy || !ehQuery.trim()} onClick={() => void lookupEh('title')}>Search by title</button>
                     <button disabled={ehBusy || !selected.coverSha1} onClick={() => void lookupEh('cover')}>Search by cover</button>
@@ -888,6 +915,14 @@ function App() {
               </button>
               {health && <span className="muted">{health}</span>}
             </div>
+          </section>
+
+          <section className="form">
+            <h2>E-Hentai / ExHentai</h2>
+            <label className="field"><span>Default site</span><select value={ehSettings.site} onChange={(event) => setEhSettings({ ...ehSettings, site: event.target.value as EhSettings['site'] })}><option value="e-hentai.org">e-hentai.org</option><option value="exhentai.org">exhentai.org</option></select></label>
+            <p className="muted">Credentials: {ehSettings.credentialsConfigured ? 'Configured' : 'Not configured'}</p>
+            <label className="field"><span>Cookie request header</span><input type="password" autoComplete="new-password" value={ehCookieHeader} onChange={(event) => setEhCookieHeader(event.target.value)} placeholder="Paste a Cookie header (name=value; name2=value2)" /></label>
+            <div className="row"><button className="primary" onClick={() => void saveEhSettings()}>Save site and credentials</button><button disabled={!ehSettings.credentialsConfigured} onClick={() => void saveEhSettings(true)}>Clear credentials</button>{ehSettingsMessage && <span className="muted" role="status">{ehSettingsMessage}</span>}</div>
           </section>
 
           <section className="form">

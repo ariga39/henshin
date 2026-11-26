@@ -29,10 +29,12 @@ export function serverApiUrl(serverUrl: string, endpoint: string): URL {
 export async function request<T>(connection: Connection, endpoint: string, init: RequestInit = {}): Promise<T> {
   if (!connection.url || !connection.token) throw new ApiError('Set the server URL and bearer token in Settings first.');
   const url = serverApiUrl(connection.url, endpoint);
+  const credentialWrite = url.pathname === '/api/settings/eh' && init.method?.toUpperCase() === 'PUT';
   let response: Response;
   try {
     response = await fetch(url, {
       ...init,
+      ...(credentialWrite ? { redirect: 'error' } : {}),
       headers: { ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...init.headers, Authorization: `Bearer ${connection.token}` },
     });
   } catch {
