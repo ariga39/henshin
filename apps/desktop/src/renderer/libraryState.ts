@@ -7,6 +7,7 @@ export type LibraryFilters = {
   sort: string;
   limit: number;
   offset: number;
+  ehBindSource?: 'auto';
 };
 
 export function libraryQuery(filters: LibraryFilters): string {
@@ -19,6 +20,7 @@ export function libraryQuery(filters: LibraryFilters): string {
   params.set('sort', filters.sort);
   params.set('limit', String(filters.limit));
   params.set('offset', String(filters.offset));
+  if (filters.ehBindSource) params.set('ehBindSource', filters.ehBindSource);
   return params.toString();
 }
 
@@ -58,6 +60,20 @@ export function isComposingEnter(key: string, isComposing: boolean, keyCode: num
 
 export function entryPath(entryId: string): string {
   return `/api/entries/${encodeURIComponent(entryId)}`;
+}
+
+export function ehLookupBody(
+  mode: 'auto' | 'title' | 'cover',
+  query: string,
+  site: string,
+  hasBinding: boolean,
+): { mode: 'auto' | 'title' | 'cover'; autoBind?: false; query?: string; site?: string } {
+  return {
+    mode,
+    ...(hasBinding ? { autoBind: false as const } : {}),
+    ...(mode === 'title' && query.trim() ? { query: query.trim() } : {}),
+    ...(site ? { site } : {}),
+  };
 }
 
 const sameTags = (left: string[], right: string[]) =>

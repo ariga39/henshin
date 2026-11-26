@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveTagOrigins, effectiveTitle, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, sameServerOrigin, updateEntryDraft } from './libraryState.js';
+import { effectiveTagOrigins, effectiveTitle, ehLookupBody, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, sameServerOrigin, updateEntryDraft } from './libraryState.js';
 
 test('library query preserves repeated tag filters and all list controls', () => {
   const query = new URLSearchParams(libraryQuery({
@@ -15,6 +15,24 @@ test('library query preserves repeated tag filters and all list controls', () =>
   assert.equal(query.get('sort'), 'lastOpened');
   assert.equal(query.get('limit'), '25');
   assert.equal(query.get('offset'), '50');
+});
+
+test('library query can restrict results to auto-matched galleries', () => {
+  const query = new URLSearchParams(libraryQuery({
+    q: '', includeTags: [], excludeTags: [], rootId: '', status: 'active', sort: 'added',
+    limit: 100, offset: 0, ehBindSource: 'auto',
+  }));
+  assert.equal(query.get('ehBindSource'), 'auto');
+});
+
+test('ordinary lookup uses server preferences and bound entries request alternatives', () => {
+  assert.deepEqual(ehLookupBody('auto', '', '', false), { mode: 'auto' });
+  assert.deepEqual(ehLookupBody('auto', '', 'exhentai.org', true), {
+    mode: 'auto', autoBind: false, site: 'exhentai.org',
+  });
+  assert.deepEqual(ehLookupBody('title', '  手動検索  ', 'e-hentai.org', true), {
+    mode: 'title', autoBind: false, query: '手動検索', site: 'e-hentai.org',
+  });
 });
 
 test('entry draft starts isolated from subsequent server snapshots', () => {
