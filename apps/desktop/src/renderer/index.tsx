@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { effectiveTagOrigins, effectiveTitle, entryDraft, libraryQuery, type EntryDraft } from './libraryState.js';
 
 declare global {
   interface Window {
@@ -52,6 +53,12 @@ type Entry = {
   coverKey?: string;
   openCount: number;
   lastOpenedAt?: number | null;
+  note?: string;
+  effectiveTitle?: string;
+  tags?: string[];
+  ehTags?: string[];
+  localTags?: string[];
+  hiddenTags?: string[];
 };
 type Reader = {
   id: string;
@@ -75,9 +82,6 @@ type Scan = {
   errors: number | string[];
 };
 
-const effectiveTitle = (entry: Entry) =>
-  entry.customTitle || entry.ehTitleJpn || entry.ehTitle || entry.title;
-
 const formatTimestamp = (seconds?: number | null) =>
   seconds ? new Date(seconds * 1000).toLocaleString() : 'Never';
 
@@ -98,14 +102,27 @@ function App() {
   const [health, setHealth] = useState('');
   const [roots, setRoots] = useState<Root[]>([]);
   const [scans, setScans] = useState<Scan[]>([]);
+  const scanStatus = scans.map((scanItem) => `${scanItem.id}:${scanItem.status}`).join(',');
   const [entries, setEntries] = useState<Entry[]>([]);
   const [selected, setSelected] = useState<Entry | null>(null);
+  const selectedEntryId = selected?.id;
+  const [draft, setDraft] = useState<EntryDraft | null>(null);
+  const [searchText, setSearchText] = useState('');
+  const [query, setQuery] = useState('');
+  const [composing, setComposing] = useState(false);
+  const [includeTags, setIncludeTags] = useState<string[]>([]);
+  const [excludeTags, setExcludeTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState('');
+  const [tagMode, setTagMode] = useState<'include' | 'exclude'>('include');
+  const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
+  const [sort, setSort] = useState('added');
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [editTag, setEditTag] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [rootId, setRootId] = useState('');
   const [status, setStatus] = useState('active');
-  const [offset, setOffset] = useState(0);
-  const [hasNextPage, setHasNextPage] = useState(false);
   const [readerId, setReaderId] = useState('');
   const [newRoot, setNewRoot] = useState({
     label: '',
@@ -149,7 +166,9 @@ function App() {
     setSelected(null);
     setRootId('');
     setOffset(0);
-    setHasNextPage(false);
+    setTotal(0);
+    setDraft(null);
+    setTagSuggestions([]);
     setHealth('');
     setConfig(saved);
     setConnectionUrl(saved.connection.url);
@@ -161,22 +180,21 @@ function App() {
     const generation = ++refreshGeneration.current;
     setError('');
     try {
-      const rootQuery = rootFilter
-        ? `&rootId=${encodeURIComponent(rootFilter)}`
-        : '';
-      const pageSize = 500;
+      const queryString = libraryQuery({ q: query, includeTags, excludeTags, rootId: rootFilter, status, sort, limit: 100, offset: pageOffset });
       const [rootResult, entryResult, scanResult] = await Promise.all([
         call<{ roots: Root[] }>('/api/roots'),
-        call<{ entries: Entry[] }>(
-          `/api/entries?status=${status}${rootQuery}&limit=${pageSize}&offset=${pageOffset}`,
-        ),
+        call<{ entries: Entry[]; total: number }>(`/api/entries?${queryString}`),
         call<{ scans: Scan[] }>('/api/scans'),
       ]);
       if (generation !== refreshGeneration.current) return;
       setRoots(rootResult.roots);
       setEntries(entryResult.entries);
-      setHasNextPage(entryResult.entries.length === pageSize);
+      setTotal(entryResult.total);
       setScans(scanResult.scans);
+      if (selected) {
+        const detail = await call<Entry>(`/api/entries/${encodeURIComponent(selected.id)}`);
+        setSelected(detail);
+      }
     } catch (caught) {
       if (generation === refreshGeneration.current) {
         setError((caught as Error).message);
@@ -201,7 +219,20 @@ function App() {
 
   useEffect(() => {
     if (config.connection.url) void refresh();
-  }, [status, rootId, offset]);
+  }, [status, rootId, query, includeTags, excludeTags, sort, offset]);
+
+  useEffect(() => {
+    if (composing) return;
+    const timer = setTimeout(() => {
+      if (query !== searchText.trim()) { setQuery(searchText.trim()); setOffset(0); }
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [searchText, composing]);
+
+  useEffect(() => {
+    if (!config.connection.url) return;
+    void call<{ tags: string[] }>('/api/tags').then((result) => setTagSuggestions(result.tags)).catch(() => undefined);
+  }, [config.connection.url, entries.length, selectedEntryId, scanStatus]);
 
   useEffect(() => {
     const hasRunningScan = scans.some((scanItem) => scanItem.status === 'running');
@@ -383,6 +414,34 @@ function App() {
     }
   };
 
+  const addFilterTag = () => {
+    const tag = tagInput.trim();
+    if (!tag) return;
+    if (tagMode === 'include') setIncludeTags((tags) => tags.includes(tag) ? tags : [...tags, tag]);
+    else setExcludeTags((tags) => tags.includes(tag) ? tags : [...tags, tag]);
+    setOffset(0); setTagInput('');
+  };
+
+  const selectEntry = async (entry: Entry) => {
+    try {
+      const detail = await call<Entry>(`/api/entries/${encodeURIComponent(entry.id)}`);
+      setSelected(detail); setDraft(entryDraft(detail)); setEditTag(''); setReaderId('');
+    } catch (caught) { setError((caught as Error).message); }
+  };
+
+  const saveEntry = async () => {
+    if (!selected || !draft) return;
+    try {
+      const updated = await call<Entry>(`/api/entries/${encodeURIComponent(selected.id)}`, 'PATCH', {
+        customTitle: draft.customTitle, note: draft.note,
+        localTags: draft.localTags, hiddenTags: draft.hiddenTags,
+      });
+      setSelected(updated); setDraft(entryDraft(updated)); setEntries((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
+      const tags = await call<{ tags: string[] }>('/api/tags'); setTagSuggestions(tags.tags);
+      setNotice('Personal details saved.');
+    } catch (caught) { setError((caught as Error).message); }
+  };
+
   return (
     <div className="shell">
       <header className="header">
@@ -417,14 +476,32 @@ function App() {
 
       {tab === 'Library' && (
         <main className="content">
-          <div className="toolbar">
-            <select
-              value={rootId}
-              onChange={(event) => {
-                setRootId(event.target.value);
-                setOffset(0);
-              }}
-            >
+          <div className="toolbar search-toolbar">
+            <form className="search-form" onSubmit={(event) => { event.preventDefault(); setQuery(searchText.trim()); setOffset(0); }}>
+              <input aria-label="Search titles and filenames" placeholder="Search titles and filenames" value={searchText}
+                onChange={(event) => setSearchText(event.target.value)}
+                onCompositionStart={() => setComposing(true)} onCompositionEnd={(event) => { const value = event.currentTarget.value; setComposing(false); setSearchText(value); setQuery(value.trim()); setOffset(0); }}
+                onKeyDown={(event) => { if (event.key === 'Enter' && (composing || event.nativeEvent.isComposing)) { event.preventDefault(); return; } if (event.key === 'Enter') { setQuery(searchText.trim()); setOffset(0); } }} />
+              <button type="submit">Search</button>
+              {searchText && <button type="button" onClick={() => { setSearchText(''); setQuery(''); setOffset(0); }}>Clear</button>}
+            </form>
+            <div className="tag-filter">
+              <select aria-label="Tag filter mode" value={tagMode} onChange={(event) => setTagMode(event.target.value as 'include' | 'exclude')}>
+                <option value="include">Include all</option><option value="exclude">Exclude</option>
+              </select>
+              <input list="tag-suggestions" aria-label="Filter by tag" placeholder="Type a tag and press Enter" value={tagInput}
+                onChange={(event) => setTagInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addFilterTag(); } }} />
+              <datalist id="tag-suggestions">{tagSuggestions.map((tag) => <option key={tag} value={tag} />)}</datalist>
+              <button onClick={addFilterTag}>Add tag</button>
+            </div>
+            <div className="chips">
+              {[...includeTags.map((tag) => ({ tag, mode: 'include' as const })), ...excludeTags.map((tag) => ({ tag, mode: 'exclude' as const }))].map(({ tag, mode }) => (
+                <button key={`${mode}:${tag}`} className="filter-chip" onClick={() => { (mode === 'include' ? setIncludeTags : setExcludeTags)((tags) => tags.filter((item) => item !== tag)); setOffset(0); }}>
+                  {mode === 'include' ? '＋' : '−'} {tag} ×
+                </button>
+              ))}
+            </div>
+            <select value={rootId} onChange={(event) => { setRootId(event.target.value); setOffset(0); }}>
               <option value="">All roots</option>
               {roots.map((root) => (
                 <option key={root.id} value={root.id}>
@@ -432,15 +509,12 @@ function App() {
                 </option>
               ))}
             </select>
-            <select
-              value={status}
-              onChange={(event) => {
-                setStatus(event.target.value);
-                setOffset(0);
-              }}
-            >
+            <select value={status} onChange={(event) => { setStatus(event.target.value); setOffset(0); }}>
               <option value="active">Active</option>
               <option value="missing">Missing</option>
+            </select>
+            <select aria-label="Sort entries" value={sort} onChange={(event) => { setSort(event.target.value); setOffset(0); }}>
+              <option value="added">Date added</option><option value="title">Title</option><option value="openCount">Open count</option><option value="lastOpened">Last opened</option>
             </select>
             <button onClick={() => void refresh()}>Refresh</button>
           </div>
@@ -453,7 +527,7 @@ function App() {
             <div className="empty">
               {offset > 0
                 ? 'No books on this page.'
-                : 'No entries found. Add a root and scan it under Roots & Scans.'}
+                : 'No entries found. Try another search or filter, or add and scan a root under Roots & Scans.'}
             </div>
           ) : (
             <div className="grid">
@@ -461,10 +535,7 @@ function App() {
                 <article
                   className="card"
                   key={entry.id}
-                  onClick={() => {
-                    setSelected(entry);
-                    setReaderId('');
-                  }}
+                  onClick={() => void selectEntry(entry)}
                 >
                   <img
                     src={
@@ -475,7 +546,8 @@ function App() {
                     alt=""
                   />
                   <div className="meta">
-                    <h3>{effectiveTitle(entry)}</h3>
+                    <h3>{entry.effectiveTitle || effectiveTitle(entry)}</h3>
+                    {!!entry.tags?.length && <div className="muted">{entry.tags.slice(0, 4).join(' · ')}{entry.tags.length > 4 ? ` · +${entry.tags.length - 4}` : ''}</div>}
                     <div className="muted">
                       {entry.pageCount} pages · Opened {entry.openCount}×
                     </div>
@@ -485,35 +557,13 @@ function App() {
             </div>
           )}
 
-          {(entries.length > 0 || offset > 0) && (
-            <div className="row">
-              {entries.length > 0 && (
-                <span className="muted">
-                  Books {offset + 1}–{offset + entries.length}
-                </span>
-              )}
-              <button
-                disabled={offset === 0}
-                onClick={() => {
-                  setSelected(null);
-                  setOffset(Math.max(0, offset - 500));
-                }}
-              >
-                Previous
-              </button>
-              <button
-                disabled={!hasNextPage}
-                onClick={() => {
-                  setSelected(null);
-                  setOffset(offset + 500);
-                }}
-              >
-                Next
-              </button>
-            </div>
-          )}
+          {(total > 0 || offset > 0) && <div className="pagination">
+            {entries.length > 0 && <span className="muted">Showing {offset + 1}–{Math.min(offset + entries.length, total)} of {total}</span>}
+            <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 100))}>Previous</button>
+            <button disabled={offset + entries.length >= total} onClick={() => setOffset(offset + 100)}>Next</button>
+          </div>}
 
-          {selected && (
+          {selected && draft && (
             <div className="panel detail">
               <div>
                 {selected.coverKey && (
@@ -524,12 +574,25 @@ function App() {
                 )}
               </div>
               <div>
-                <h2>{effectiveTitle(selected)}</h2>
+                <h2>{selected.effectiveTitle || effectiveTitle(selected)}</h2>
                 <div className="muted">{selected.relativePath}</div>
+                <div className="muted">{selected.ehTitleJpn || selected.ehTitle || selected.title}</div>
                 <p>
                   {selected.pageCount} pages · Opened {selected.openCount}× · Last
                   opened {formatTimestamp(selected.lastOpenedAt)}
                 </p>
+                <section className="editor-section">
+                  <h3>Personal details {draft.dirty && <span className="status">Unsaved changes</span>}</h3>
+                  <label className="field"><span>Custom title</span><input value={draft.customTitle} onChange={(event) => setDraft({ ...draft, customTitle: event.target.value, dirty: true })} placeholder="Use source title when empty" /></label>
+                  <label className="field"><span>Note</span><textarea rows={4} value={draft.note} onChange={(event) => setDraft({ ...draft, note: event.target.value, dirty: true })} /></label>
+                  <div className="field"><span>Tags</span><div className="chips">
+                    {effectiveTagOrigins({ ehTags: selected.ehTags || [], localTags: draft.localTags, hiddenTags: draft.hiddenTags }).eh.map((tag) => <span className="tag-chip" key={`eh:${tag}`}>{tag}<button onClick={() => setDraft({ ...draft, hiddenTags: [...draft.hiddenTags, tag], dirty: true })}>Hide</button></span>)}
+                    {effectiveTagOrigins({ ehTags: selected.ehTags || [], localTags: draft.localTags, hiddenTags: draft.hiddenTags }).local.map((tag) => <span className="tag-chip" key={`local:${tag}`}>{tag}<button aria-label={`Remove ${tag}`} onClick={() => setDraft({ ...draft, localTags: draft.localTags.filter((item) => item !== tag), dirty: true })}>×</button></span>)}
+                    {draft.hiddenTags.map((tag) => <span className="tag-chip hidden-tag" key={`hidden:${tag}`}>{tag}<button onClick={() => setDraft({ ...draft, hiddenTags: draft.hiddenTags.filter((item) => item !== tag), dirty: true })}>Restore</button></span>)}
+                  </div></div>
+                  <div className="row"><input list="tag-suggestions" aria-label="Add personal tag" placeholder="Add personal tag" value={editTag} onChange={(event) => setEditTag(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && editTag.trim()) { event.preventDefault(); const tag = editTag.trim(); if (!draft.localTags.includes(tag)) setDraft({ ...draft, localTags: [...draft.localTags, tag], dirty: true }); setEditTag(''); } }} /><button onClick={() => { const tag = editTag.trim(); if (tag && !draft.localTags.includes(tag)) setDraft({ ...draft, localTags: [...draft.localTags, tag], dirty: true }); setEditTag(''); }}>Add local tag</button></div>
+                  <div className="row"><button className="primary" disabled={!draft.dirty} onClick={() => void saveEntry()}>Save</button><button disabled={!draft.dirty} onClick={() => setDraft(entryDraft(selected))}>Discard</button></div>
+                </section>
                 <div className="row">
                   <select
                     value={readerId}
@@ -545,7 +608,7 @@ function App() {
                   <button className="primary" onClick={() => void openEntry(selected)}>
                     Open
                   </button>
-                  <button onClick={() => setSelected(null)}>Close</button>
+                  <button onClick={() => { setSelected(null); setDraft(null); }}>Close</button>
                 </div>
               </div>
             </div>

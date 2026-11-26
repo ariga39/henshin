@@ -2,13 +2,13 @@ use crate::{app::AppState, roots, scanner};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, Query, Request, State},
+    extract::{Path, RawQuery, Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, params, params_from_iter, types::Value as SqlValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -16,6 +16,7 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+use unicode_normalization::UnicodeNormalization;
 
 const ENTRY_COLUMNS: &str = concat!(
     "id,root_id,relative_path,status,title,custom_title,note,",
@@ -32,7 +33,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/roots/{id}/scan", post(scan_root))
         .route("/api/scans", get(list_scans))
         .route("/api/entries", get(list_entries))
-        .route("/api/entries/{id}", get(get_entry))
+        .route("/api/entries/{id}", get(get_entry).patch(patch_entry))
+        .route("/api/tags", get(list_tags))
         .route("/api/entries/{id}/open", post(open_entry))
         .route("/api/covers/{key}", get(get_cover))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
@@ -256,54 +258,345 @@ async fn list_scans(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"scans":scans}))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EntryQuery {
-    root_id: Option<String>,
-    status: Option<String>,
-    limit: Option<u32>,
-    offset: Option<u32>,
+fn normalize_tag(value: &str) -> Result<String, String> {
+    let normalized = value.trim().nfkc().collect::<String>().to_lowercase();
+    let normalized = if let Some((namespace, tag)) = normalized.split_once(':') {
+        let (namespace, tag) = (namespace.trim(), tag.trim());
+        if namespace.is_empty() || tag.is_empty() || tag.contains(':') {
+            return Err(format!("invalid tag: {value}"));
+        }
+        format!("{namespace}:{tag}")
+    } else {
+        normalized.trim().to_owned()
+    };
+    if normalized.is_empty() {
+        Err("tag cannot be empty".into())
+    } else {
+        Ok(normalized)
+    }
 }
-async fn list_entries(State(s): State<Arc<AppState>>, Query(q): Query<EntryQuery>) -> Response {
-    if q.status
-        .as_deref()
-        .is_some_and(|x| x != "active" && x != "missing")
-    {
+
+fn query_params(raw: Option<&str>) -> Vec<(String, String)> {
+    form_urlencoded::parse(raw.unwrap_or_default().as_bytes())
+        .into_owned()
+        .collect()
+}
+
+async fn list_entries(State(s): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
+    let pairs = query_params(raw.as_deref());
+    let one = |name: &str| {
+        pairs
+            .iter()
+            .rev()
+            .find(|(key, _)| key == name)
+            .map(|(_, v)| v.clone())
+    };
+    let status = one("status").unwrap_or_else(|| "active".into());
+    if status != "active" && status != "missing" {
         return err(StatusCode::BAD_REQUEST, "invalid status");
     }
-    let status = q.status.unwrap_or_else(|| "active".into());
-    let limit = q.limit.unwrap_or(100).clamp(1, 500);
-    let offset = q.offset.unwrap_or(0);
+    let sort = one("sort").unwrap_or_else(|| "added".into());
+    let order = match sort.as_str() {
+        "added" => "created_at DESC,id ASC",
+        "title" => {
+            "norm_text(COALESCE(NULLIF(custom_title,''),NULLIF(eh_title_jpn,''),NULLIF(eh_title,''),title)) ASC,id ASC"
+        }
+        "openCount" => "open_count DESC,id ASC",
+        "lastOpened" => {
+            "CASE WHEN last_opened_at IS NULL THEN 1 ELSE 0 END ASC,last_opened_at DESC,id ASC"
+        }
+        _ => return err(StatusCode::BAD_REQUEST, "invalid sort"),
+    };
+    let limit = one("limit")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(100)
+        .clamp(1, 500);
+    let offset = one("offset")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    let q = one("q")
+        .unwrap_or_default()
+        .trim()
+        .nfkc()
+        .collect::<String>()
+        .to_lowercase();
+    let root = one("rootId").filter(|v| !v.is_empty());
+    let mut include = Vec::new();
+    let mut exclude = Vec::new();
+    for (key, value) in pairs
+        .iter()
+        .filter(|(k, _)| k == "includeTags" || k == "excludeTags")
+    {
+        let tag = match normalize_tag(value) {
+            Ok(tag) => tag,
+            Err(e) => return err(StatusCode::BAD_REQUEST, e),
+        };
+        let list = if key == "includeTags" {
+            &mut include
+        } else {
+            &mut exclude
+        };
+        if !list.contains(&tag) {
+            list.push(tag);
+        }
+    }
+    let mut clauses = vec!["status=?".to_owned()];
+    let mut values = vec![SqlValue::Text(status)];
+    if let Some(root) = root {
+        values.push(SqlValue::Text(root));
+        clauses.push(format!("root_id=?{}", values.len()));
+    }
+    if !q.is_empty() {
+        values.push(SqlValue::Text(q));
+        let n = values.len();
+        clauses.push(format!("(instr(norm_text(COALESCE(NULLIF(custom_title,''),NULLIF(eh_title_jpn,''),NULLIF(eh_title,''),title)),?{n})>0 OR instr(norm_text(COALESCE(eh_title,'')),?{n})>0 OR instr(norm_text(COALESCE(eh_title_jpn,'')),?{n})>0 OR instr(norm_text(path_basename(relative_path)),?{n})>0)"));
+    }
+    for tag in include {
+        values.push(SqlValue::Text(tag));
+        let n = values.len();
+        clauses.push(format!("EXISTS(SELECT 1 FROM entry_tags t WHERE t.entry_id=entries.id AND t.tag=?{n} AND t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=entries.id AND h.tag=t.tag AND h.origin='hidden'))"));
+    }
+    for tag in exclude {
+        values.push(SqlValue::Text(tag));
+        let n = values.len();
+        clauses.push(format!("NOT EXISTS(SELECT 1 FROM entry_tags t WHERE t.entry_id=entries.id AND t.tag=?{n} AND t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=entries.id AND h.tag=t.tag AND h.origin='hidden'))"));
+    }
+    let where_sql = clauses.join(" AND ");
     let conn = match s.db.lock() {
         Ok(c) => c,
         Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
     };
-    let sql = format!(
-        "SELECT {ENTRY_COLUMNS} FROM entries \
-         WHERE status=?1 AND (?2 IS NULL OR root_id=?2) \
-         ORDER BY created_at DESC,id ASC LIMIT ?3 OFFSET ?4"
-    );
-    let mut st = match conn.prepare(&sql) {
-        Ok(statement) => statement,
+    let total: i64 = match conn.query_row(
+        &format!("SELECT count(*) FROM entries WHERE {where_sql}"),
+        params_from_iter(values.iter()),
+        |r| r.get(0),
+    ) {
+        Ok(v) => v,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
-    let rows = st.query_map(params![status, q.root_id, limit, offset], entry_from_row);
-    match rows.and_then(|r| r.collect::<rusqlite::Result<Vec<_>>>()) {
-        Ok(entries) => {
-            Json(json!({"entries":entries,"limit":limit,"offset":offset})).into_response()
+    let mut page_values = values.clone();
+    page_values.push(SqlValue::Integer(limit as i64));
+    page_values.push(SqlValue::Integer(offset as i64));
+    let sql = format!(
+        "SELECT {ENTRY_COLUMNS} FROM entries WHERE {where_sql} ORDER BY {order} LIMIT ?{} OFFSET ?{}",
+        page_values.len() - 1,
+        page_values.len()
+    );
+    let mut st = match conn.prepare(&sql) {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let rows = st.query_map(params_from_iter(page_values.iter()), entry_from_row);
+    let mut entries = match rows.and_then(|r| r.collect::<rusqlite::Result<Vec<_>>>()) {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    for entry in &mut entries {
+        if let Err(e) = attach_tags(&conn, entry) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+    Json(json!({"entries":entries,"total":total,"limit":limit,"offset":offset})).into_response()
+}
+
+async fn list_tags(State(s): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
+    let q = query_params(raw.as_deref())
+        .into_iter()
+        .rev()
+        .find(|(k, _)| k == "q")
+        .map(|(_, v)| v.trim().nfkc().collect::<String>().to_lowercase())
+        .unwrap_or_default();
+    let conn = match s.db.lock() {
+        Ok(c) => c,
+        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
+    };
+    match conn.prepare("SELECT DISTINCT t.tag FROM entry_tags t WHERE t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=t.entry_id AND h.tag=t.tag AND h.origin='hidden') AND instr(norm_text(t.tag),?1)>0 ORDER BY t.tag ASC").and_then(|mut st|st.query_map([q],|r|r.get::<_,String>(0)).and_then(|r|r.collect::<rusqlite::Result<Vec<_>>>())) {
+        Ok(tags)=>Json(json!({"tags":tags})).into_response(),Err(e)=>err(StatusCode::INTERNAL_SERVER_ERROR,e.to_string())
     }
 }
+
 async fn get_entry(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let conn = match s.db.lock() {
         Ok(c) => c,
         Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
     };
-    let sql = format!("SELECT {ENTRY_COLUMNS} FROM entries WHERE id=?1");
-    match conn.query_row(&sql, [id], entry_from_row) {
-        Ok(entry) => Json(entry).into_response(),
+    match conn.query_row(
+        &format!("SELECT {ENTRY_COLUMNS} FROM entries WHERE id=?1"),
+        [id],
+        entry_from_row,
+    ) {
+        Ok(mut entry) => match attach_tags(&conn, &mut entry) {
+            Ok(()) => Json(entry).into_response(),
+            Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        },
         Err(rusqlite::Error::QueryReturnedNoRows) => err(StatusCode::NOT_FOUND, "entry not found"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+fn attach_tags(conn: &rusqlite::Connection, entry: &mut Entry) -> rusqlite::Result<()> {
+    let mut st =
+        conn.prepare("SELECT tag,origin FROM entry_tags WHERE entry_id=?1 ORDER BY tag ASC")?;
+    for row in st.query_map([&entry.id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })? {
+        let (tag, origin) = row?;
+        match origin.as_str() {
+            "eh" => entry.eh_tags.push(tag),
+            "local" => entry.local_tags.push(tag),
+            "hidden" => entry.hidden_tags.push(tag),
+            _ => {}
+        }
+    }
+    entry.tags = entry
+        .eh_tags
+        .iter()
+        .chain(entry.local_tags.iter())
+        .filter(|tag| !entry.hidden_tags.contains(tag))
+        .cloned()
+        .collect();
+    entry.tags.sort();
+    entry.tags.dedup();
+    entry.effective_title = entry
+        .custom_title
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .or(entry.eh_title_jpn.as_deref().filter(|v| !v.is_empty()))
+        .or(entry.eh_title.as_deref().filter(|v| !v.is_empty()))
+        .unwrap_or(&entry.title)
+        .to_owned();
+    Ok(())
+}
+
+async fn patch_entry(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let Some(object) = body.as_object() else {
+        return err(StatusCode::BAD_REQUEST, "expected an object");
+    };
+    let custom_present = object.contains_key("customTitle") || object.contains_key("custom_title");
+    let custom = object
+        .get("customTitle")
+        .or_else(|| object.get("custom_title"));
+    let custom = match custom {
+        Some(Value::Null) => Some(None),
+        Some(Value::String(v)) => Some(if v.trim().is_empty() {
+            None
+        } else {
+            Some(v.trim().to_owned())
+        }),
+        Some(_) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "customTitle must be a string or null",
+            );
+        }
+        None => None,
+    };
+    let note = object.get("note");
+    if note.is_some_and(|v| !v.is_string()) {
+        return err(StatusCode::BAD_REQUEST, "note must be a string");
+    }
+    let parse_tags = |camel: &str, snake: &str| -> Result<Option<Vec<String>>, String> {
+        let Some(value) = object.get(camel).or_else(|| object.get(snake)) else {
+            return Ok(None);
+        };
+        let Some(values) = value.as_array() else {
+            return Err(format!("{camel} must be an array"));
+        };
+        let mut out = Vec::new();
+        for value in values {
+            let Some(v) = value.as_str() else {
+                return Err(format!("{camel} values must be strings"));
+            };
+            let tag = normalize_tag(v)?;
+            if !out.contains(&tag) {
+                out.push(tag)
+            }
+        }
+        Ok(Some(out))
+    };
+    let local = match parse_tags("localTags", "local_tags") {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e),
+    };
+    let hidden = match parse_tags("hiddenTags", "hidden_tags") {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e),
+    };
+    if !custom_present && note.is_none() && local.is_none() && hidden.is_none() {
+        return err(StatusCode::BAD_REQUEST, "no fields to update");
+    }
+    let mut conn = match s.db.lock() {
+        Ok(c) => c,
+        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
+    };
+    let tx = match conn.transaction() {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    if !matches!(
+        tx.query_row("SELECT 1 FROM entries WHERE id=?1", [&id], |r| r
+            .get::<_, i32>(0))
+            .optional(),
+        Ok(Some(_))
+    ) {
+        return err(StatusCode::NOT_FOUND, "entry not found");
+    }
+    if custom_present {
+        if let Err(e) = tx.execute(
+            "UPDATE entries SET custom_title=?1 WHERE id=?2",
+            params![custom.flatten(), id],
+        ) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    }
+    if let Some(note) = note {
+        if let Err(e) = tx.execute(
+            "UPDATE entries SET note=?1 WHERE id=?2",
+            params![note.as_str().unwrap(), id],
+        ) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    }
+    for (origin, tags) in [("local", local), ("hidden", hidden)] {
+        if let Some(tags) = tags {
+            if let Err(e) = tx.execute(
+                "DELETE FROM entry_tags WHERE entry_id=?1 AND origin=?2",
+                params![id, origin],
+            ) {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+            }
+            for tag in tags {
+                if let Err(e) = tx.execute(
+                    "INSERT INTO entry_tags(entry_id,tag,origin) VALUES(?1,?2,?3)",
+                    params![id, tag, origin],
+                ) {
+                    return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+                }
+            }
+        }
+    }
+    if let Err(e) = tx.execute(
+        "UPDATE entries SET updated_at=?1 WHERE id=?2",
+        params![now(), id],
+    ) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    if let Err(e) = tx.commit() {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    match conn.query_row(
+        &format!("SELECT {ENTRY_COLUMNS} FROM entries WHERE id=?1"),
+        [id],
+        entry_from_row,
+    ) {
+        Ok(mut entry) => match attach_tags(&conn, &mut entry) {
+            Ok(()) => Json(entry).into_response(),
+            Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        },
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -334,6 +627,11 @@ struct Entry {
     last_opened_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
+    effective_title: String,
+    tags: Vec<String>,
+    eh_tags: Vec<String>,
+    local_tags: Vec<String>,
+    hidden_tags: Vec<String>,
 }
 
 fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
@@ -361,6 +659,11 @@ fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         last_opened_at: row.get(20)?,
         created_at: row.get(21)?,
         updated_at: row.get(22)?,
+        effective_title: String::new(),
+        tags: Vec::new(),
+        eh_tags: Vec::new(),
+        local_tags: Vec::new(),
+        hidden_tags: Vec::new(),
     })
 }
 #[derive(Deserialize)]
@@ -475,6 +778,32 @@ mod tests {
             .unwrap();
         let body = serde_json::from_slice(&bytes).unwrap();
         (status, body)
+    }
+
+    async fn api(app: Router, method: &str, uri: &str, body: Option<&str>) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, "Bearer secret");
+        if body.is_some() {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        let response = app
+            .oneshot(
+                builder
+                    .body(Body::from(body.unwrap_or_default().to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     #[tokio::test]
@@ -618,5 +947,157 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(collection.is_dir());
+    }
+
+    #[tokio::test]
+    async fn search_tags_editing_sorting_and_pagination_work_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let state =
+            Arc::new(AppState::open(temp.path().join("data"), Some("secret".into())).unwrap());
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+                .unwrap();
+            conn.execute("INSERT INTO entries(id,root_id,relative_path,title,eh_title,eh_title_jpn,open_count,last_opened_at,created_at,updated_at) VALUES(?1,'root',?2,?3,?4,?5,?6,?7,?8,?8)", params!["a", "parent/ＡＢＣ.zip", "stored", "猫 EN", "猫の本", 4, 10, 1]).unwrap();
+            conn.execute("INSERT INTO entries(id,root_id,relative_path,title,eh_title,eh_title_jpn,open_count,created_at,updated_at) VALUES(?1,'root',?2,?3,'English','',?4,?5,?5)", params!["b", "other/同人作品.zip", "同人作品", 4, 1]).unwrap();
+            conn.execute("INSERT INTO entries(id,root_id,relative_path,title,open_count,last_opened_at,created_at,updated_at) VALUES(?1,'root',?2,?3,?4,?5,?6,?6)", params!["c", "artist/under_%'\".zip", "ｶﾞ作品", 9, 20, 3]).unwrap();
+            conn.execute("INSERT INTO entry_tags VALUES('a','artist:alice','eh'),('a','language:japanese','local'),('a','female:sole female','eh'),('b','artist:alice','eh')", []).unwrap();
+            conn.execute(
+                "INSERT INTO entry_tags VALUES('a','female:sole female','hidden')",
+                [],
+            )
+            .unwrap();
+        }
+        let app = router(state.clone());
+        for (q, id) in [
+            ("%E7%8C%AB", "a"),
+            ("%E5%90%8C%E4%BA%BA", "b"),
+            ("ABC", "a"),
+            ("%E3%82%AC", "c"),
+            ("猫%20EN", "a"),
+            ("English", "b"),
+            ("under", "c"),
+            ("%5F", "c"),
+            ("%25", "c"),
+            ("%27", "c"),
+            ("%22", "c"),
+            ("parent", ""),
+        ] {
+            let (status, value) =
+                api(app.clone(), "GET", &format!("/api/entries?q={q}"), None).await;
+            assert_eq!(status, StatusCode::OK);
+            if id.is_empty() {
+                assert_eq!(value["total"], 0);
+            } else {
+                assert_eq!(value["total"], 1, "query {q}");
+                assert_eq!(value["entries"][0]["id"], id);
+            }
+        }
+        let (status, value) = api(app.clone(), "GET", "/api/entries?includeTags=artist%3Aalice&includeTags=language%3Ajapanese&excludeTags=female%3Asole%20female", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["total"], 1);
+        assert_eq!(
+            value["entries"][0]["tags"],
+            json!(["artist:alice", "language:japanese"])
+        );
+        let (status, value) = api(
+            app.clone(),
+            "GET",
+            "/api/entries?includeTags=female%3Asole%20female",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["total"], 0);
+        let (status, value) = api(app.clone(), "GET", "/api/tags", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["tags"], json!(["artist:alice", "language:japanese"]));
+        let (status, detail) = api(app.clone(), "GET", "/api/entries/b", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["effectiveTitle"], "English");
+        for (sort, expected) in [
+            ("added", vec!["c", "a", "b"]),
+            ("title", vec!["b", "c", "a"]),
+            ("openCount", vec!["c", "a", "b"]),
+            ("lastOpened", vec!["c", "a", "b"]),
+        ] {
+            let (status, value) = api(
+                app.clone(),
+                "GET",
+                &format!("/api/entries?sort={sort}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let ids = value["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(ids, expected);
+        }
+        let (status, first) = api(
+            app.clone(),
+            "GET",
+            "/api/entries?sort=added&limit=1&offset=0",
+            None,
+        )
+        .await;
+        let (status2, second) = api(
+            app.clone(),
+            "GET",
+            "/api/entries?sort=added&limit=1&offset=1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status2, StatusCode::OK);
+        assert_eq!(first["total"], 3);
+        assert_eq!(first["entries"][0]["id"], "c");
+        assert_eq!(second["entries"][0]["id"], "a");
+        let (status, _) = api(app.clone(), "GET", "/api/entries?sort=random", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = api(app.clone(), "GET", "/api/entries?status=other", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, value) = api(app.clone(), "PATCH", "/api/entries/a", Some(r#"{"customTitle":"  Personal  ","note":"hello","localTags":["New : Tag","NEW:TAG"]}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["effectiveTitle"], "Personal");
+        assert_eq!(value["note"], "hello");
+        assert_eq!(value["localTags"], json!(["new:tag"]));
+        assert_eq!(
+            value["ehTags"],
+            json!(["artist:alice", "female:sole female"])
+        );
+        assert_eq!(value["hiddenTags"], json!(["female:sole female"]));
+        let (status, value) = api(app.clone(), "GET", "/api/entries?q=personal", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["total"], 1);
+        assert_eq!(value["entries"][0]["id"], "a");
+        let (status, value) = api(app.clone(), "GET", "/api/entries?q=%E7%8C%AB", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["total"], 1);
+        assert_eq!(value["entries"][0]["id"], "a");
+        let (status, value) = api(
+            app.clone(),
+            "PATCH",
+            "/api/entries/a",
+            Some(r#"{"customTitle":" ","localTags":[],"hiddenTags":[]}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["customTitle"], Value::Null);
+        assert_eq!(value["effectiveTitle"], "猫の本");
+        assert_eq!(value["tags"], json!(["artist:alice", "female:sole female"]));
+        let (status, _) = api(
+            app.clone(),
+            "PATCH",
+            "/api/entries/a",
+            Some(r#"{"localTags":[":bad"]}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = api(app, "PATCH", "/api/entries/nope", Some(r#"{"note":"x"}"#)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }
