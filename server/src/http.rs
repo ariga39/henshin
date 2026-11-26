@@ -490,12 +490,12 @@ async fn list_entries(State(s): State<Arc<AppState>>, RawQuery(raw): RawQuery) -
     for tag in include {
         values.push(SqlValue::Text(tag));
         let n = values.len();
-        clauses.push(format!("EXISTS(SELECT 1 FROM entry_tags t WHERE t.entry_id=entries.id AND t.tag=?{n} AND t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=entries.id AND h.tag=t.tag AND h.origin='hidden'))"));
+        clauses.push(format!("EXISTS(SELECT 1 FROM entry_tags t WHERE t.entry_id=entries.id AND norm_text(t.tag)=norm_text(?{n}) AND t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=entries.id AND norm_text(h.tag)=norm_text(t.tag) AND h.origin='hidden'))"));
     }
     for tag in exclude {
         values.push(SqlValue::Text(tag));
         let n = values.len();
-        clauses.push(format!("NOT EXISTS(SELECT 1 FROM entry_tags t WHERE t.entry_id=entries.id AND t.tag=?{n} AND t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=entries.id AND h.tag=t.tag AND h.origin='hidden'))"));
+        clauses.push(format!("NOT EXISTS(SELECT 1 FROM entry_tags t WHERE t.entry_id=entries.id AND norm_text(t.tag)=norm_text(?{n}) AND t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=entries.id AND norm_text(h.tag)=norm_text(t.tag) AND h.origin='hidden'))"));
     }
     let where_sql = clauses.join(" AND ");
     let conn = match s.db.lock() {
@@ -547,7 +547,7 @@ async fn list_tags(State(s): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> R
         Ok(c) => c,
         Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
     };
-    match conn.prepare("SELECT DISTINCT t.tag FROM entry_tags t WHERE t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=t.entry_id AND h.tag=t.tag AND h.origin='hidden') AND instr(norm_text(t.tag),?1)>0 ORDER BY t.tag ASC").and_then(|mut st|st.query_map([q],|r|r.get::<_,String>(0)).and_then(|r|r.collect::<rusqlite::Result<Vec<_>>>())) {
+    match conn.prepare("SELECT DISTINCT t.tag FROM entry_tags t WHERE t.origin IN ('eh','local') AND NOT EXISTS(SELECT 1 FROM entry_tags h WHERE h.entry_id=t.entry_id AND norm_text(h.tag)=norm_text(t.tag) AND h.origin='hidden') AND instr(norm_text(t.tag),?1)>0 ORDER BY t.tag ASC").and_then(|mut st|st.query_map([q],|r|r.get::<_,String>(0)).and_then(|r|r.collect::<rusqlite::Result<Vec<_>>>())) {
         Ok(tags)=>Json(json!({"tags":tags})).into_response(),Err(e)=>err(StatusCode::INTERNAL_SERVER_ERROR,e.to_string())
     }
 }
@@ -592,7 +592,12 @@ fn attach_tags(conn: &rusqlite::Connection, entry: &mut Entry) -> rusqlite::Resu
         .eh_tags
         .iter()
         .chain(entry.local_tags.iter())
-        .filter(|tag| !entry.hidden_tags.contains(tag))
+        .filter(|tag| {
+            !entry
+                .hidden_tags
+                .iter()
+                .any(|hidden| crate::db::normalize_text(hidden) == crate::db::normalize_text(tag))
+        })
         .cloned()
         .collect();
     entry.tags.sort();
@@ -965,7 +970,8 @@ async fn eh_lookup(
         cached_size,
         cached_mtime,
         artist,
-        root_id,
+        root_path,
+        other_roots,
         relative_path,
         existing_binding,
     ) = {
@@ -980,8 +986,11 @@ async fn eh_lookup(
         ) {
             Ok((title, hash, hash_version, cached_size, cached_mtime, root_id, relative, gid, token, domain)) => {
                 let artist = conn.query_row("SELECT tag FROM entry_tags WHERE entry_id=?1 AND origin IN ('eh','local') AND lower(tag) LIKE 'artist:%' ORDER BY origin='eh' DESC LIMIT 1", [&id], |r| r.get::<_,String>(0)).optional().ok().flatten();
+                let root_path = match conn.query_row("SELECT server_path FROM roots WHERE id=?1",[&root_id],|r|r.get::<_,String>(0)) { Ok(path) => path, Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR,error.to_string()) };
+                let mut roots_statement = match conn.prepare("SELECT server_path FROM roots WHERE id<>?1") { Ok(statement) => statement, Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR,error.to_string()) };
+                let other_roots = match roots_statement.query_map([&root_id],|r|r.get::<_,String>(0)).and_then(|rows|rows.collect::<rusqlite::Result<Vec<_>>>()) { Ok(paths) => paths.into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>(), Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR,error.to_string()) };
                 let binding = gid.zip(token).zip(domain).map(|((gid,token),domain)| GalleryRef { gid,token,domain });
-                (title, hash, hash_version, cached_size, cached_mtime, artist, root_id, relative, binding)
+                (title, hash, hash_version, cached_size, cached_mtime, artist, root_path, other_roots, relative, binding)
             },
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 return err(StatusCode::NOT_FOUND, "entry not found");
@@ -1008,63 +1017,23 @@ async fn eh_lookup(
             return Json(json!({"mode":"auto","entry":entry,"candidates":[],"autoBound":false,"refreshedBinding":true})).into_response();
         }
     }
-    if mode == "auto" && settings_snapshot.use_thumbnails {
-        let cached_cover_sha1 = cover_sha1.clone();
-        cover_sha1 = None;
-        let archive_path = {
-            let conn = match s.db.lock() {
-                Ok(conn) => conn,
-                Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
-            };
-            let root: String = match conn.query_row(
-                "SELECT server_path FROM roots WHERE id=?1",
-                [&root_id],
-                |r| r.get(0),
-            ) {
-                Ok(root) => root,
-                Err(_) => String::new(),
-            };
-            match crate::roots::validate(&root, &s.data_dir, &conn, Some(&root_id)) {
-                Ok(canonical_root) if canonical_root == std::path::PathBuf::from(&root) => {
-                    let candidate = canonical_root.join(&relative_path);
-                    std::fs::canonicalize(candidate)
-                        .ok()
-                        .filter(|path| crate::scanner::relative_path(&canonical_root, path).is_ok())
-                }
-                _ => None,
-            }
-        };
-        if let Some(archive_path) = archive_path {
-            let current = std::fs::metadata(&archive_path).ok().and_then(|metadata| {
-                let modified = metadata
-                    .modified()
-                    .ok()?
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()?
-                    .as_secs() as i64;
-                Some((metadata.len(), modified))
-            });
-            if hash_version == 1
-                && cached_cover_sha1.is_some()
-                && current.is_some_and(|(size, mtime)| {
-                    cached_size == Some(size) && cached_mtime == Some(mtime)
-                })
-            {
-                cover_sha1 = cached_cover_sha1;
-            } else {
-                let path_for_hash = archive_path.clone();
-                if let Ok(Ok(hash)) = tokio::task::spawn_blocking(move || {
-                    crate::cover::raw_first_sha1(&path_for_hash)
-                })
-                .await
-                {
-                    cover_sha1 = Some(hash.clone());
-                    if let (Some((size, mtime)), Ok(conn)) = (current, s.db.lock()) {
-                        let _ = conn.execute("UPDATE entries SET cover_sha1=?2,cover_hash_version=1,file_size=?3,file_mtime=?4 WHERE id=?1", params![id,hash,size as i64,mtime]);
-                    }
-                }
-            }
-        }
+    if mode == "cover" || (mode == "auto" && settings_snapshot.use_thumbnails) {
+        let data_dir = s.data_dir.clone();
+        cover_sha1 = tokio::task::spawn_blocking(move || {
+            cached_lookup_cover_sha1(
+                &root_path,
+                &relative_path,
+                &data_dir,
+                &other_roots,
+                hash_version,
+                cached_size,
+                cached_mtime,
+                cover_sha1,
+            )
+        })
+        .await
+        .ok()
+        .flatten();
     }
     if mode == "auto" {
         let mut queries: Vec<(&str, String, bool)> = Vec::new();
@@ -1431,6 +1400,40 @@ struct EhBatchInput {
     entry_ids: Option<Vec<String>>,
 }
 
+fn cached_lookup_cover_sha1(
+    root_path: &str,
+    relative_path: &str,
+    data_dir: &std::path::Path,
+    other_roots: &[std::path::PathBuf],
+    hash_version: i64,
+    cached_size: Option<u64>,
+    cached_mtime: Option<i64>,
+    cached_hash: Option<String>,
+) -> Option<String> {
+    let canonical_root = crate::roots::validate_snapshot(root_path, data_dir, other_roots).ok()?;
+    if canonical_root != std::path::PathBuf::from(root_path) {
+        return None;
+    }
+    let archive_path = std::fs::canonicalize(canonical_root.join(relative_path)).ok()?;
+    crate::scanner::relative_path(&canonical_root, &archive_path).ok()?;
+    let metadata = std::fs::metadata(&archive_path).ok()?;
+    let current_mtime = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    if hash_version == 1
+        && cached_hash.is_some()
+        && cached_size == Some(metadata.len())
+        && cached_mtime == Some(current_mtime)
+    {
+        cached_hash
+    } else {
+        crate::cover::raw_first_sha1(&archive_path).ok()
+    }
+}
+
 fn bound_gallery(s: &AppState, id: &str) -> Result<GalleryRef, Response> {
     let conn =
         s.db.lock()
@@ -1659,6 +1662,10 @@ mod tests {
     }
 
     fn make_archive_with_width(path: &std::path::Path, width: u32) {
+        make_archive_with_pages(path, width, 1);
+    }
+
+    fn make_archive_with_pages(path: &std::path::Path, width: u32, pages: usize) {
         let file = fs::File::create(path).unwrap();
         let mut archive = ZipWriter::new(file);
         let image = image::DynamicImage::ImageRgb8(ImageBuffer::from_pixel(
@@ -1673,10 +1680,12 @@ mod tests {
                 image::ImageFormat::Png,
             )
             .unwrap();
-        archive
-            .start_file("page.png", SimpleFileOptions::default())
-            .unwrap();
-        archive.write_all(&bytes).unwrap();
+        for page in 0..pages {
+            archive
+                .start_file(format!("page-{page:02}.png"), SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(&bytes).unwrap();
+        }
         archive.finish().unwrap();
     }
 
@@ -2381,6 +2390,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_cached_cover_lookup_uses_transient_hash_until_rescan_commits_scan_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let root = temp.path().join("library");
+        fs::create_dir(&root).unwrap();
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        let source = root.join("book.zip");
+        make_archive_with_pages(&source, 2, 1);
+        let mut state = AppState::open(data, Some("secret".into())).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = requests.clone();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 2048];
+                loop {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                observed
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&request).into_owned());
+                let body = "<html><div class='nohits'>No hits found</div></html>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        state.eh = EhClient::new(&base, &base).unwrap();
+        state.eh_settings.lock().unwrap().use_thumbnails = true;
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO roots VALUES('root','Library',?1,'[]',1)",
+                [canonical_root.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        let state = Arc::new(state);
+        let scan = crate::scanner::start(state.clone(), "root".into()).unwrap();
+        wait_for_scan(&state, &scan.id).await;
+        let (entry_id, cached): (String, (i64, u64, i64, String, i64)) = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id,page_count,file_size,file_mtime,cover_sha1,cover_hash_version FROM entries",
+                [],
+                |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))),
+            )
+            .unwrap();
+
+        make_archive_with_pages(&source, 16, 2);
+        let new_hash = crate::cover::raw_first_sha1(&source).unwrap();
+        let new_size = fs::metadata(&source).unwrap().len();
+        let (status, lookup) = api(
+            router(state.clone()),
+            "POST",
+            &format!("/api/entries/{entry_id}/eh-lookup"),
+            Some(r#"{"mode":"auto"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(lookup["candidates"], json!([]));
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests[0].contains(&format!("f_shash={new_hash}")),
+            "first lookup request did not use current raw hash {new_hash}: {:?}",
+            *requests
+        );
+        assert!(requests[1].contains("f_search=%22book%22"));
+        drop(requests);
+        let unchanged = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT page_count,file_size,file_mtime,cover_sha1,cover_hash_version FROM entries WHERE id=?1",
+                [&entry_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(unchanged, cached);
+
+        let rescan = crate::scanner::start(state.clone(), "root".into()).unwrap();
+        wait_for_scan(&state, &rescan.id).await;
+        let refreshed = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT page_count,file_size,cover_sha1,cover_hash_version FROM entries WHERE id=?1",
+                [&entry_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?)),
+            )
+            .unwrap();
+        assert_eq!(refreshed, (2, new_size, new_hash, 1));
+    }
+
+    #[tokio::test]
     async fn open_accepts_both_field_spellings_and_keeps_latest_timestamp() {
         let temp = tempfile::tempdir().unwrap();
         let state =
@@ -2504,7 +2626,7 @@ mod tests {
             conn.execute("INSERT INTO entries(id,root_id,relative_path,title,eh_title,eh_title_jpn,open_count,last_opened_at,created_at,updated_at) VALUES(?1,'root',?2,?3,?4,?5,?6,?7,?8,?8)", params!["a", "parent/ＡＢＣ.zip", "stored", "猫 EN", "猫の本", 4, 10, 1]).unwrap();
             conn.execute("INSERT INTO entries(id,root_id,relative_path,title,eh_title,eh_title_jpn,open_count,created_at,updated_at) VALUES(?1,'root',?2,?3,'English','',?4,?5,?5)", params!["b", "other/同人作品.zip", "同人作品", 4, 1]).unwrap();
             conn.execute("INSERT INTO entries(id,root_id,relative_path,title,open_count,last_opened_at,created_at,updated_at) VALUES(?1,'root',?2,?3,?4,?5,?6,?6)", params!["c", "artist/under_%'\".zip", "ｶﾞ作品", 9, 20, 3]).unwrap();
-            conn.execute("INSERT INTO entry_tags VALUES('a','artist:alice','eh'),('a','language:japanese','local'),('a','female:sole female','eh'),('b','artist:alice','eh')", []).unwrap();
+            conn.execute("INSERT INTO entry_tags VALUES('a','artist:alice','eh'),('a','language:japanese','local'),('a','female:sole female','eh'),('b','artist:alice','eh'),('b','uploader:MixedCase','eh')", []).unwrap();
             conn.execute(
                 "INSERT INTO entry_tags VALUES('a','female:sole female','hidden')",
                 [],
@@ -2543,6 +2665,16 @@ mod tests {
             value["entries"][0]["tags"],
             json!(["artist:alice", "language:japanese"])
         );
+        let (status, mixed_case_tag) = api(
+            app.clone(),
+            "GET",
+            "/api/entries?includeTags=uploader%3Amixedcase",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(mixed_case_tag["total"], 1);
+        assert_eq!(mixed_case_tag["entries"][0]["id"], "b");
         let (status, value) = api(
             app.clone(),
             "GET",
@@ -2554,7 +2686,10 @@ mod tests {
         assert_eq!(value["total"], 0);
         let (status, value) = api(app.clone(), "GET", "/api/tags", None).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["tags"], json!(["artist:alice", "language:japanese"]));
+        assert_eq!(
+            value["tags"],
+            json!(["artist:alice", "language:japanese", "uploader:MixedCase"])
+        );
         let (status, detail) = api(app.clone(), "GET", "/api/entries/b", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(detail["effectiveTitle"], "English");
