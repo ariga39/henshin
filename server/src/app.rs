@@ -1,5 +1,6 @@
 use crate::{db, eh, scanner};
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
@@ -17,7 +18,22 @@ pub struct AppState {
     pub scans: Mutex<HashMap<String, scanner::ScanState>>,
     pub scan_gate: Arc<Semaphore>,
     pub eh: eh::EhClient,
+    pub eh_settings: Mutex<EhSettings>,
     _lock: fs::File,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EhSettings {
+    pub site: String,
+    pub cookie_header: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedEhSettings<'a> {
+    site: &'a str,
+    cookie_header: Option<&'a str>,
 }
 
 impl AppState {
@@ -67,6 +83,15 @@ impl AppState {
         };
         let connection = Connection::open(data_dir.join("henshin.sqlite"))?;
         db::initialize(&connection)?;
+        let settings_path = data_dir.join("eh-settings.json");
+        let eh_settings = if settings_path.exists() {
+            serde_json::from_slice(&fs::read(&settings_path)?)?
+        } else {
+            EhSettings {
+                site: "e-hentai.org".into(),
+                cookie_header: None,
+            }
+        };
         Ok(Self {
             data_dir,
             covers_dir,
@@ -80,9 +105,64 @@ impl AppState {
                 "https://api.e-hentai.org/api.php",
                 std::time::Duration::from_secs(4),
             )?,
+            eh_settings: Mutex::new(eh_settings),
             _lock: lock,
         })
     }
+}
+
+#[cfg(unix)]
+pub fn save_eh_settings(data_dir: &Path, settings: &EhSettings) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = data_dir.join("eh-settings.json");
+    let temp = data_dir.join(format!(".eh-settings-{}.tmp", uuid::Uuid::new_v4()));
+    let bytes = serde_json::to_vec(&PersistedEhSettings {
+        site: &settings.site,
+        cookie_header: settings.cookie_header.as_deref(),
+    })
+    .map_err(std::io::Error::other)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)?;
+    let result = (|| {
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+#[cfg(not(unix))]
+pub fn save_eh_settings(data_dir: &Path, settings: &EhSettings) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = data_dir.join("eh-settings.json");
+    let temp = data_dir.join(format!(".eh-settings-{}.tmp", uuid::Uuid::new_v4()));
+    let bytes = serde_json::to_vec(&PersistedEhSettings {
+        site: &settings.site,
+        cookie_header: settings.cookie_header.as_deref(),
+    })
+    .map_err(std::io::Error::other)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let result = (|| {
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
 }
 
 #[cfg(test)]
