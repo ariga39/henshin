@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { effectiveTagOrigins, effectiveTitle, ehLookupBody, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, sameServerOrigin, updateEntryDraft, type EntryDraft } from './libraryState.js';
+import { effectiveTagOrigins, effectiveTitle, ehLookupBody, ehLookupMessage, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft, type EntryDraft } from './libraryState.js';
 
 declare global {
   interface Window {
@@ -537,7 +537,7 @@ function App() {
     setEhBusy(true); setEhMessage(''); setEhCandidates([]);
     try {
       const hasBinding = Boolean(selected.ehGid && selected.ehToken);
-      const result = await call<{ entry?: Entry; candidates: EhCandidate[] }>(`${entryPath(entryId)}/eh-lookup`, 'POST', {
+      const result = await call<{ entry?: Entry; candidates: EhCandidate[]; autoBound?: boolean }>(`${entryPath(entryId)}/eh-lookup`, 'POST', {
         ...ehLookupBody(mode, ehQuery, ehLookupSite, hasBinding),
       });
       if (!isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) return;
@@ -547,7 +547,7 @@ function App() {
         setDraft((current) => refreshEntryDraft(current, result.entry!));
       }
       setEhCandidates(result.candidates);
-      setEhMessage(result.candidates.length ? (result.entry?.ehBindSource === 'auto' ? 'Auto-matched the first candidate. Confirm it or choose another gallery.' : '') : 'No matching galleries found.');
+      setEhMessage(ehLookupMessage(result.autoBound, result.candidates.length));
     } catch (caught) {
       if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhMessage((caught as Error).message);
     } finally { if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhBusy(false); }
@@ -560,9 +560,16 @@ function App() {
     try {
       const updated = await call<Entry>(`${entryPath(entryId)}/eh-bind`, 'POST', binding);
       if (!isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) return;
-      setSelected(updated); setEntries((items) => items.map((item) => item.id === entryId ? updated : item));
+      const removedFromAutoFilter = shouldRemoveFromAutoFilter(ehBindSource, entries.map((item) => item.id), entryId, updated.ehBindSource);
+      setSelected(updated);
+      if (removedFromAutoFilter) {
+        setEntries((items) => items.filter((item) => item.id !== entryId));
+        setTotal((current) => Math.max(0, current - 1));
+      } else {
+        setEntries((items) => items.map((item) => item.id === entryId ? updated : item));
+      }
       setDraft((current) => refreshEntryDraft(current, updated));
-      setEhCandidates([]); setEhUrl(''); setEhMessage(updated.ehError || 'Gallery binding saved.');
+      setEhCandidates([]); setEhUrl(''); setEhMessage(updated.ehError || (removedFromAutoFilter ? 'Manual match saved; this entry no longer matches the auto-matched filter.' : 'Gallery binding saved.'));
       try { const tags = await call<{ tags: string[] }>('/api/tags'); setTagSuggestions(tags.tags); } catch { /* Existing suggestions remain usable. */ }
     } catch (caught) { if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhMessage((caught as Error).message); }
     finally { if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhBusy(false); }
@@ -762,6 +769,7 @@ function App() {
                   {selected.ehGid && selected.ehToken ? <>
                     <a href={`https://${selected.ehDomain || 'e-hentai.org'}/g/${selected.ehGid}/${selected.ehToken}/`} target="_blank" rel="noreferrer">https://{selected.ehDomain || 'e-hentai.org'}/g/{selected.ehGid}/{selected.ehToken}/</a>
                     <div className="row"><span className={selected.ehBindSource === 'auto' ? 'status' : 'muted'}>{selected.ehBindSource === 'auto' ? 'Auto-matched' : selected.ehBindSource === 'manual' ? 'Manual match' : 'Source not recorded'}</span><span className="muted">{selected.ehTitleJpn || selected.ehTitle || 'No source title'} · Refreshed {formatTimestamp(selected.ehRefreshedAt)}</span></div>
+                    {selected.ehBindSource === 'auto' && <button disabled={ehBusy} onClick={() => void bindEh({ gid: selected.ehGid!, token: selected.ehToken!, domain: selected.ehDomain || 'e-hentai.org' })}>Confirm this match</button>}
                     <div className="row"><button disabled={ehBusy} onClick={() => void refreshEh()}>Refresh metadata</button></div>
                   </> : <p className="muted">No gallery bound.</p>}
                   <label className="field"><span>Optional search query</span><input value={ehQuery} onChange={(event) => setEhQuery(event.target.value)} placeholder={selected.title} /></label>
@@ -774,9 +782,7 @@ function App() {
                   {ehCandidates.length > 0 && <div className="eh-candidates" aria-label="E-Hentai search candidates">{ehCandidates.map((candidate) => <div className="eh-candidate" key={`${candidate.gid}/${candidate.token}`}>
                     <a href={candidate.url} target="_blank" rel="noreferrer">{candidate.title}</a><div className="muted">Gallery {candidate.gid}</div>
                     {selected.ehGid === candidate.gid && selected.ehToken === candidate.token && selected.ehDomain === candidate.domain
-                      ? selected.ehBindSource === 'auto'
-                        ? <button disabled={ehBusy} onClick={() => void bindEh({ gid: candidate.gid, token: candidate.token, domain: candidate.domain })}>Confirm this match</button>
-                        : <span className="muted">Currently bound</span>
+                      ? <span className="muted">Currently bound</span>
                       : <button disabled={ehBusy} onClick={() => void bindEh({ gid: candidate.gid, token: candidate.token, domain: candidate.domain })}>Choose this gallery</button>}
                   </div>)}</div>}
                   <label className="field"><span>Bind or correct with a gallery URL</span><input value={ehUrl} onChange={(event) => setEhUrl(event.target.value)} placeholder="https://e-hentai.org/g/618395/0439fa3666/" /></label>

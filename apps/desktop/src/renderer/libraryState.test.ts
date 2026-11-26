@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveTagOrigins, effectiveTitle, ehLookupBody, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, sameServerOrigin, updateEntryDraft } from './libraryState.js';
+import { effectiveTagOrigins, effectiveTitle, ehLookupBody, ehLookupMessage, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft } from './libraryState.js';
 
 test('library query preserves repeated tag filters and all list controls', () => {
   const query = new URLSearchParams(libraryQuery({
@@ -33,6 +33,19 @@ test('ordinary lookup uses server preferences and bound entries request alternat
   assert.deepEqual(ehLookupBody('title', '  手動検索  ', 'e-hentai.org', true), {
     mode: 'title', autoBind: false, query: '手動検索', site: 'e-hentai.org',
   });
+});
+
+test('previewing an existing auto-match does not announce a new match', () => {
+  assert.equal(ehLookupMessage(true, 1), 'Auto-matched the first candidate. Confirm it or choose another gallery.');
+  assert.equal(ehLookupMessage(false, 1), '');
+  assert.equal(ehLookupMessage(undefined, 0), 'No matching galleries found.');
+});
+
+test('manual confirmation removes auto-bound entries from the auto-only filter', () => {
+  assert.equal(shouldRemoveFromAutoFilter('auto', ['book'], 'book', 'manual'), true);
+  assert.equal(shouldRemoveFromAutoFilter('auto', ['book'], 'book', 'auto'), false);
+  assert.equal(shouldRemoveFromAutoFilter('', ['book'], 'book', 'manual'), false);
+  assert.equal(shouldRemoveFromAutoFilter('auto', [], 'book', 'manual'), false);
 });
 
 test('entry draft starts isolated from subsequent server snapshots', () => {

@@ -76,6 +76,22 @@ export function ehLookupBody(
   };
 }
 
+export function ehLookupMessage(autoBound: boolean | undefined, candidateCount: number): string {
+  if (candidateCount === 0) return 'No matching galleries found.';
+  return autoBound === true
+    ? 'Auto-matched the first candidate. Confirm it or choose another gallery.'
+    : '';
+}
+
+export function shouldRemoveFromAutoFilter(
+  filter: '' | 'auto',
+  visibleEntryIds: string[],
+  entryId: string,
+  nextBindSource: 'auto' | 'manual' | null | undefined,
+): boolean {
+  return filter === 'auto' && nextBindSource !== 'auto' && visibleEntryIds.includes(entryId);
+}
+
 const sameTags = (left: string[], right: string[]) =>
   left.length === right.length && left.every((tag, index) => tag === right[index]);
 
