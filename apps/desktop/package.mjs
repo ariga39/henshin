@@ -123,7 +123,10 @@ async function smoke(executable, userDataDir, cwd, targetPlatform) {
   await new Promise(resolve => setTimeout(resolve, 5000));
   try {
     if (startupError) throw startupError;
-    if (child.exitCode !== null) throw new Error(`Packaged Electron app exited during startup with status ${child.exitCode}`);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      const termination = child.signalCode ? `signal ${child.signalCode}` : `status ${child.exitCode}`;
+      throw new Error(`Packaged Electron app exited during startup with ${termination}`);
+    }
   } finally {
     child.kill('SIGTERM');
     await new Promise(resolve => {
