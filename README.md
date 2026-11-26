@@ -20,12 +20,14 @@ cargo build --release
 
 The data directory holds the SQLite database, cover cache, lock, server ID, and bearer token. Keep it separate from collection directories. On first start, the server creates and prints a token; keep it private. Use `--listen 127.0.0.1:4317` when the server is only used from the same machine.
 
-## Current status
+## Run the desktop app
 
-The Rust service is implemented under `server/`. The desktop implementation is not present in this baseline; its workspace dependency setup remains.
-
-For desktop workspace work, Node.js 24.19.0 or newer and pnpm 11 are required. Install the locked workspace dependencies with:
+From the repository root, use Node.js 24.19.0 or newer and pnpm 11 to install, build, and launch the desktop client.
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm --filter @henshin/desktop build
+pnpm --filter @henshin/desktop start
 ```
+
+In Settings, enter the running server’s HTTP address and bearer token. Map a library root to its folder on this device and select a local reader to open books.
