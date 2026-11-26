@@ -43,12 +43,13 @@ export async function request<T>(connection: Connection, endpoint: string, init:
   if (!response.ok) {
     let detail = '';
     try { detail = (await response.json() as { error?: string }).error ?? ''; } catch { /* use status message */ }
-    const message = detail || (
-      response.status === 401 ? 'The server rejected the bearer token. Check it in Settings.'
-        : response.status === 404 ? 'The requested server item was not found.'
-        : response.status === 409 ? 'The server reported a conflict.'
-        : `The server returned HTTP ${response.status}.`
-    );
+    const message = response.status === 401
+      ? `HTTP 401: ${detail || 'The server rejected the bearer token. Check it in Settings.'}`
+      : detail || (
+        response.status === 404 ? 'The requested server item was not found.'
+          : response.status === 409 ? 'The server reported a conflict.'
+          : `The server returned HTTP ${response.status}.`
+      );
     throw new ApiError(message, response.status);
   }
   if (response.status === 204) return undefined as T;

@@ -1021,7 +1021,8 @@ async fn eh_lookup(
     }
     if mode == "cover" || (mode == "auto" && settings_snapshot.use_thumbnails) {
         let data_dir = s.data_dir.clone();
-        cover_sha1 = tokio::task::spawn_blocking(move || {
+        let cached_hash = cover_sha1.clone();
+        let lookup = tokio::task::spawn_blocking(move || {
             cached_lookup_cover_sha1(
                 &root_path,
                 &relative_path,
@@ -1030,12 +1031,16 @@ async fn eh_lookup(
                 hash_version,
                 cached_size,
                 cached_mtime,
-                cover_sha1,
+                cached_hash,
             )
         })
         .await
-        .ok()
-        .flatten();
+        .ok();
+        cover_sha1 = match lookup {
+            Some(CoverHashLookup::Current(hash)) => Some(hash),
+            Some(CoverHashLookup::Unavailable) if mode == "cover" => cover_sha1,
+            _ => None,
+        };
     }
     if mode == "auto" {
         let mut queries: Vec<(&str, String, bool)> = Vec::new();
@@ -1406,6 +1411,12 @@ struct EhBatchInput {
     entry_ids: Option<Vec<String>>,
 }
 
+enum CoverHashLookup {
+    Current(String),
+    Unavailable,
+    Invalid,
+}
+
 fn cached_lookup_cover_sha1(
     root_path: &str,
     relative_path: &str,
@@ -1415,28 +1426,53 @@ fn cached_lookup_cover_sha1(
     cached_size: Option<u64>,
     cached_mtime: Option<i64>,
     cached_hash: Option<String>,
-) -> Option<String> {
-    let canonical_root = crate::roots::validate_snapshot(root_path, data_dir, other_roots).ok()?;
+) -> CoverHashLookup {
+    let canonical_root = match crate::roots::validate_snapshot(root_path, data_dir, other_roots) {
+        Ok(root) => root,
+        Err(error)
+            if matches!(
+                error.as_str(),
+                "root directory is unavailable" | "root must be a readable directory"
+            ) =>
+        {
+            return CoverHashLookup::Unavailable;
+        }
+        Err(_) => return CoverHashLookup::Invalid,
+    };
     if canonical_root != std::path::PathBuf::from(root_path) {
-        return None;
+        return CoverHashLookup::Invalid;
     }
-    let archive_path = std::fs::canonicalize(canonical_root.join(relative_path)).ok()?;
-    crate::scanner::relative_path(&canonical_root, &archive_path).ok()?;
-    let metadata = std::fs::metadata(&archive_path).ok()?;
-    let current_mtime = metadata
+    let archive_path = match std::fs::canonicalize(canonical_root.join(relative_path)) {
+        Ok(path) => path,
+        Err(_) => return CoverHashLookup::Unavailable,
+    };
+    if crate::scanner::relative_path(&canonical_root, &archive_path).is_err() {
+        return CoverHashLookup::Invalid;
+    }
+    let metadata = match std::fs::metadata(&archive_path) {
+        Ok(metadata) => metadata,
+        Err(_) => return CoverHashLookup::Unavailable,
+    };
+    let current_mtime = match metadata
         .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs() as i64;
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+    {
+        Some(mtime) => mtime,
+        None => return CoverHashLookup::Unavailable,
+    };
     if hash_version == 1
-        && cached_hash.is_some()
         && cached_size == Some(metadata.len())
         && cached_mtime == Some(current_mtime)
     {
-        cached_hash
-    } else {
-        crate::cover::raw_first_sha1(&archive_path).ok()
+        if let Some(hash) = cached_hash {
+            return CoverHashLookup::Current(hash);
+        }
+    }
+    match crate::cover::raw_first_sha1(&archive_path) {
+        Ok(hash) => CoverHashLookup::Current(hash),
+        Err(_) => CoverHashLookup::Invalid,
     }
 }
 
@@ -2743,6 +2779,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(refreshed, (2, new_size, new_hash, 1));
+    }
+
+    #[tokio::test]
+    async fn explicit_cover_preview_uses_cached_hash_only_when_archive_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let offline_root = temp.path().join("offline-library");
+        let live_root = temp.path().join("live-library");
+        let moved_root = temp.path().join("offline-library-moved");
+        fs::create_dir(&offline_root).unwrap();
+        fs::create_dir(&live_root).unwrap();
+        let offline_root = fs::canonicalize(offline_root).unwrap();
+        let live_root = fs::canonicalize(live_root).unwrap();
+        let changed_archive = live_root.join("book.zip");
+        make_archive_with_width(&changed_archive, 16);
+        let current_hash = crate::cover::raw_first_sha1(&changed_archive).unwrap();
+        let cached_hash = "a".repeat(40);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = requests.clone();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 1024];
+                loop {
+                    let count = stream.read(&mut chunk).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                observed
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&request).into_owned());
+                let body = "<div class='itg'>No hits found</div>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let mut state = AppState::open(data, Some("secret".into())).unwrap();
+        state.eh =
+            EhClient::new(&format!("http://{address}"), &format!("http://{address}")).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO roots VALUES('offline','Offline',?1,'[]',0),('live','Live',?2,'[]',0)",
+                params![offline_root.to_string_lossy(), live_root.to_string_lossy()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO entries(id,root_id,relative_path,title,file_size,file_mtime,cover_sha1,cover_hash_version,created_at,updated_at) VALUES('offline-entry','offline','missing.zip','Offline',100,1,?1,1,0,0),('changed-entry','live','book.zip','Changed',1,0,?1,1,0,0)",
+                [&cached_hash],
+            )
+            .unwrap();
+        }
+        fs::rename(&offline_root, moved_root).unwrap();
+        let state = Arc::new(state);
+
+        let (offline_status, offline) = api(
+            router(state.clone()),
+            "POST",
+            "/api/entries/offline-entry/eh-lookup",
+            Some(r#"{"mode":"cover"}"#),
+        )
+        .await;
+        assert_eq!(offline_status, StatusCode::OK);
+        assert_eq!(offline["candidates"], json!([]));
+        let (changed_status, changed) = api(
+            router(state),
+            "POST",
+            "/api/entries/changed-entry/eh-lookup",
+            Some(r#"{"mode":"cover"}"#),
+        )
+        .await;
+        assert_eq!(changed_status, StatusCode::OK);
+        assert_eq!(changed["candidates"], json!([]));
+
+        let requests = requests.lock().unwrap();
+        assert!(requests[0].contains(&format!("f_shash={cached_hash}")));
+        assert!(requests[1].contains(&format!("f_shash={current_hash}")));
+        assert!(!requests[1].contains(&format!("f_shash={cached_hash}")));
     }
 
     #[tokio::test]

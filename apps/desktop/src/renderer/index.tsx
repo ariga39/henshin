@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { effectiveTagOrigins, effectiveTitle, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, refreshEntryDraft, sameServerOrigin, updateEntryDraft, type EntryDraft } from './libraryState.js';
+import { clampLibraryOffset, effectiveTagOrigins, effectiveTitle, ehBatchLookupBody, ehBatchResultMessage, ehLookupBody, ehLookupMessage, ehSettingsUpdateBody, entryDraft, entryPatch, entryPath, isComposingEnter, isCurrentSelection, libraryQuery, rebaseEhSettingsDraft, refreshEntryDraft, runEhLookupBatch, sameServerOrigin, shouldRemoveFromAutoFilter, updateEntryDraft, type EhBatchResult, type EntryDraft, type EhSettingsValues } from './libraryState.js';
 
 declare global {
   interface Window {
@@ -55,6 +55,7 @@ type Entry = {
   lastOpenedAt?: number | null;
   note?: string;
   effectiveTitle?: string;
+  ehDisplayTitle?: string;
   tags?: string[];
   ehTags?: string[];
   localTags?: string[];
@@ -62,12 +63,25 @@ type Entry = {
   ehGid?: string;
   ehToken?: string;
   ehDomain?: string;
+  ehBindSource?: 'auto' | 'manual' | null;
   ehRefreshedAt?: number | null;
   ehError?: string | null;
   coverSha1?: string | null;
 };
 type EhCandidate = { gid: string; token: string; domain: string; url: string; title: string };
-type EhSettings = { site: 'e-hentai.org' | 'exhentai.org'; credentialsConfigured: boolean };
+type EhBatchProgress = {
+  running: boolean;
+  total: number;
+  processed: number;
+  currentTitle?: string;
+  preparing?: boolean;
+  error?: string;
+  cancelled?: boolean;
+  cancelRequested?: boolean;
+  blocked?: boolean;
+  results: Array<{ id: string; title: string; kind: EhBatchResult<Entry>['kind']; message?: string }>;
+};
+type EhSettings = EhSettingsValues & { credentialsConfigured: boolean };
 type Reader = {
   id: string;
   name: string;
@@ -88,6 +102,12 @@ type Scan = {
   found: number;
   indexed: number;
   errors: number | string[];
+};
+
+const defaultEhSettings: EhSettings = {
+  site: 'e-hentai.org', credentialsConfigured: false, language: '', useThumbnails: false,
+  searchGid: false, preferOriginalTitle: false, additionalTags: false, includeExpunged: false,
+  interval: 4, sendCookiesToEHentai: false,
 };
 
 const formatTimestamp = (seconds?: number | null) =>
@@ -112,6 +132,8 @@ function App() {
   const [scans, setScans] = useState<Scan[]>([]);
   const scanStatus = scans.map((scanItem) => `${scanItem.id}:${scanItem.status}`).join(',');
   const [entries, setEntries] = useState<Entry[]>([]);
+  const [batchSelectedIds, setBatchSelectedIds] = useState<string[]>([]);
+  const [ehBatchProgress, setEhBatchProgress] = useState<EhBatchProgress | null>(null);
   const [selected, setSelected] = useState<Entry | null>(null);
   const selectedEntryId = selected?.id;
   const selectedEntryIdRef = useRef<string | null>(null);
@@ -133,15 +155,16 @@ function App() {
   const [error, setError] = useState('');
   const [rootId, setRootId] = useState('');
   const [status, setStatus] = useState('active');
+  const [ehBindSource, setEhBindSource] = useState<'' | 'auto'>('');
   const [readerId, setReaderId] = useState('');
   const [ehQuery, setEhQuery] = useState('');
   const [ehUrl, setEhUrl] = useState('');
   const [ehCandidates, setEhCandidates] = useState<EhCandidate[]>([]);
   const [ehBusy, setEhBusy] = useState(false);
   const [ehMessage, setEhMessage] = useState('');
-  const [includeExpunged, setIncludeExpunged] = useState(false);
-  const [ehSettings, setEhSettings] = useState<EhSettings>({ site: 'e-hentai.org', credentialsConfigured: false });
-  const [ehLookupSite, setEhLookupSite] = useState<EhSettings['site']>('e-hentai.org');
+  const [ehSettings, setEhSettings] = useState<EhSettings>(defaultEhSettings);
+  const ehSettingsBaseline = useRef<EhSettings>(defaultEhSettings);
+  const [ehLookupSite, setEhLookupSite] = useState<'' | EhSettings['site']>('');
   const [ehCookieHeader, setEhCookieHeader] = useState('');
   const [ehSettingsMessage, setEhSettingsMessage] = useState('');
   const [newRoot, setNewRoot] = useState({
@@ -165,6 +188,9 @@ function App() {
   const [readerArgs, setReaderArgs] = useState('');
   const refreshGeneration = useRef(0);
   const selectionGeneration = useRef(0);
+  const batchRunning = useRef(false);
+  const batchCancelled = useRef(false);
+  const batchWait = useRef<{ timer: ReturnType<typeof setTimeout>; resolve: () => void } | null>(null);
   const refreshCurrentRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   const call = async <T,>(
@@ -206,7 +232,7 @@ function App() {
     const generation = ++refreshGeneration.current;
     setError('');
     try {
-      const queryString = libraryQuery({ q: query, includeTags, excludeTags, rootId: rootFilter, status, sort, limit: 100, offset: pageOffset });
+      const queryString = libraryQuery({ q: query, includeTags, excludeTags, rootId: rootFilter, status, sort, limit: 100, offset: pageOffset, ...(ehBindSource ? { ehBindSource } : {}) });
       const [rootResult, entryResult, scanResult] = await Promise.all([
         call<{ roots: Root[] }>('/api/roots'),
         call<{ entries: Entry[]; total: number }>(`/api/entries?${queryString}`),
@@ -215,6 +241,8 @@ function App() {
       if (generation !== refreshGeneration.current) return;
       setRoots(rootResult.roots);
       setEntries(entryResult.entries);
+      const pageEntryIds = new Set(entryResult.entries.map((entry) => entry.id));
+      setBatchSelectedIds((current) => current.filter((id) => pageEntryIds.has(id)));
       setTotal(entryResult.total);
       setScans(scanResult.scans);
       const selectedId = selectedEntryIdRef.current;
@@ -250,7 +278,8 @@ function App() {
   const loadEhSettings = async () => {
     try {
       const settings = await window.henshin.request<EhSettings>('/api/settings/eh');
-      setEhSettings(settings); setEhLookupSite(settings.site);
+      ehSettingsBaseline.current = settings;
+      setEhSettings(settings);
     } catch { /* Older servers may not expose this endpoint. */ }
   };
 
@@ -270,8 +299,9 @@ function App() {
   }, []);
 
   useEffect(() => {
+    setBatchSelectedIds([]);
     if (config.connection.url) void refresh();
-  }, [status, rootId, query, includeTags, excludeTags, sort, offset]);
+  }, [status, rootId, query, includeTags, excludeTags, sort, offset, ehBindSource]);
 
   useEffect(() => {
     if (composing) return;
@@ -338,13 +368,23 @@ function App() {
 
   const saveEhSettings = async (clearCredentials = false) => {
     setEhSettingsMessage('');
+    const baseline = ehSettingsBaseline.current;
+    const cookieHeader = ehCookieHeader;
+    const body = ehSettingsUpdateBody(ehSettings, baseline, clearCredentials, cookieHeader);
+    if (!clearCredentials && Object.keys(body).length === 0) {
+      setEhSettingsMessage('No settings changes to save.');
+      return;
+    }
     try {
       const updated = await window.henshin.request<EhSettings>('/api/settings/eh', 'PUT', {
-        site: ehSettings.site,
-        ...(ehCookieHeader ? { cookieHeader: ehCookieHeader } : {}),
-        ...(clearCredentials ? { clearCredentials: true } : {}),
+        ...body,
       });
-      setEhSettings(updated); setEhLookupSite(updated.site); setEhCookieHeader('');
+      ehSettingsBaseline.current = updated;
+      setEhSettings((current) => ({
+        ...rebaseEhSettingsDraft(current, baseline, updated),
+        credentialsConfigured: updated.credentialsConfigured,
+      }));
+      if (!clearCredentials) setEhCookieHeader((current) => current === cookieHeader ? '' : current);
       setEhSettingsMessage(clearCredentials ? 'Credentials cleared.' : 'Settings saved.');
     } catch (caught) { setEhSettingsMessage((caught as Error).message); }
   };
@@ -493,7 +533,7 @@ function App() {
     setSelected(null);
     setDraft(null);
     setEhBusy(false);
-    setEhCandidates([]); setEhMessage(''); setEhUrl(''); setEhQuery(entry.title);
+    setEhCandidates([]); setEhMessage(''); setEhUrl(''); setEhQuery(''); setEhLookupSite('');
     setSavingEntryId(null);
     try {
       const detail = await call<Entry>(entryPath(entry.id));
@@ -506,18 +546,121 @@ function App() {
     }
   };
 
-  const lookupEh = async (mode: 'title' | 'cover') => {
+  const lookupEh = async (mode: 'auto' | 'title' | 'cover') => {
     if (!selected) return;
     const entryId = selected.id; const generation = selectionGeneration.current;
+    setEhLookupSite('');
     setEhBusy(true); setEhMessage(''); setEhCandidates([]);
     try {
-      const result = await call<{ candidates: EhCandidate[] }>(`${entryPath(entryId)}/eh-lookup`, 'POST', { mode, query: ehQuery, includeExpunged, site: ehLookupSite });
+      const includeExpunged = mode === 'title'
+        ? (await call<EhSettings>('/api/settings/eh')).includeExpunged
+        : undefined;
+      const body = ehLookupBody(mode, ehQuery, mode === 'auto' ? '' : ehLookupSite, Boolean(selected.ehGid && selected.ehToken), includeExpunged);
+      const result = await call<{ entry?: Entry; candidates: EhCandidate[]; autoBound?: boolean }>(`${entryPath(entryId)}/eh-lookup`, 'POST', {
+        ...body,
+      });
       if (!isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) return;
+      if (result.entry) {
+        setSelected(result.entry);
+        setEntries((items) => items.map((item) => item.id === entryId ? result.entry! : item));
+        setDraft((current) => refreshEntryDraft(current, result.entry!));
+      }
       setEhCandidates(result.candidates);
-      setEhMessage(result.candidates.length ? '' : 'No matching galleries found.');
+      setEhMessage(ehLookupMessage(result.autoBound, result.candidates.length));
     } catch (caught) {
       if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhMessage((caught as Error).message);
     } finally { if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhBusy(false); }
+  };
+
+  const waitForBatchInterval = (milliseconds: number) => new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      if (batchWait.current?.timer === timer) batchWait.current = null;
+      resolve();
+    }, milliseconds);
+    batchWait.current = { timer, resolve };
+  });
+
+  const cancelEhBatch = () => {
+    if (!batchRunning.current) return;
+    batchCancelled.current = true;
+    setEhBatchProgress((current) => current ? { ...current, cancelRequested: true } : current);
+    const pending = batchWait.current;
+    if (pending) {
+      clearTimeout(pending.timer);
+      batchWait.current = null;
+      pending.resolve();
+    }
+  };
+
+  const runEhBatch = async () => {
+    if (batchRunning.current || batchSelectedIds.length === 0) return;
+    const selectedIds = new Set(batchSelectedIds);
+    const batchEntries = entries.filter((entry) => selectedIds.has(entry.id));
+    if (batchEntries.length === 0) return;
+    batchRunning.current = true;
+    batchCancelled.current = false;
+    setEhBatchProgress({ running: true, total: batchEntries.length, processed: 0, preparing: true, results: [] });
+    try {
+      const summary = await runEhLookupBatch(
+        batchEntries,
+        async () => (await call<EhSettings>('/api/settings/eh')).interval,
+        async (entry) => {
+          const response = await call<{ entry?: Entry; candidates: EhCandidate[]; autoBound?: boolean; refreshedBinding?: boolean }>(
+            `${entryPath(entry.id)}/eh-lookup`,
+            'POST',
+            ehBatchLookupBody(),
+          );
+          if (response.entry) {
+            setEntries((items) => items.map((item) => item.id === entry.id ? response.entry! : item));
+            setSelected((current) => current?.id === entry.id ? response.entry! : current);
+            setDraft((current) => current?.entryId === entry.id ? refreshEntryDraft(current, response.entry!) : current);
+          }
+          return response;
+        },
+        waitForBatchInterval,
+        () => batchCancelled.current,
+        (entry, index) => setEhBatchProgress((current) => current ? {
+          ...current,
+          preparing: false,
+          currentTitle: entry.effectiveTitle || effectiveTitle(entry),
+          processed: index,
+        } : current),
+        (result) => setEhBatchProgress((current) => {
+          if (!current) return current;
+          const title = result.item.effectiveTitle || effectiveTitle(result.item);
+          return {
+            ...current,
+            processed: current.processed + 1,
+            currentTitle: undefined,
+            results: [...current.results, { id: result.item.id, title, kind: result.kind, message: ehBatchResultMessage(result) }],
+          };
+        }),
+      );
+      setEhBatchProgress((current) => current ? {
+        ...current,
+        running: false,
+        currentTitle: undefined,
+        cancelled: summary.cancelled,
+        blocked: summary.blocked,
+      } : current);
+      if (summary.processed > 0) {
+        try {
+          const tags = await call<{ tags: string[] }>('/api/tags');
+          setTagSuggestions(tags.tags);
+        } catch { /* Batch results remain useful if tag suggestions fail to refresh. */ }
+      }
+    } catch (caught) {
+      setEhBatchProgress((current) => current ? {
+        ...current,
+        running: false,
+        preparing: false,
+        currentTitle: undefined,
+        error: (caught as Error).message,
+      } : current);
+    } finally {
+      batchRunning.current = false;
+      batchWait.current = null;
+    }
   };
 
   const bindEh = async (binding: { url: string } | { gid: string; token: string; domain: string }) => {
@@ -527,9 +670,18 @@ function App() {
     try {
       const updated = await call<Entry>(`${entryPath(entryId)}/eh-bind`, 'POST', binding);
       if (!isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) return;
-      setSelected(updated); setEntries((items) => items.map((item) => item.id === entryId ? updated : item));
+      const removedFromAutoFilter = shouldRemoveFromAutoFilter(ehBindSource, entries.map((item) => item.id), entryId, updated.ehBindSource);
+      setSelected(updated);
+      if (removedFromAutoFilter) {
+        setBatchSelectedIds((ids) => ids.filter((id) => id !== entryId));
+        const nextOffset = clampLibraryOffset(offset, Math.max(0, total - 1), 100);
+        if (nextOffset === offset) await refresh(rootId, nextOffset);
+        else setOffset(nextOffset);
+      } else {
+        setEntries((items) => items.map((item) => item.id === entryId ? updated : item));
+      }
       setDraft((current) => refreshEntryDraft(current, updated));
-      setEhCandidates([]); setEhUrl(''); setEhMessage(updated.ehError || 'Gallery binding saved.');
+      setEhCandidates([]); setEhUrl(''); setEhMessage(updated.ehError || (removedFromAutoFilter ? 'Manual match saved; this entry no longer matches the auto-matched filter.' : 'Gallery binding saved.'));
       try { const tags = await call<{ tags: string[] }>('/api/tags'); setTagSuggestions(tags.tags); } catch { /* Existing suggestions remain usable. */ }
     } catch (caught) { if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhMessage((caught as Error).message); }
     finally { if (isCurrentSelection(entryId, selectedEntryIdRef.current, generation, selectionGeneration.current)) setEhBusy(false); }
@@ -589,6 +741,7 @@ function App() {
             <button
               key={view}
               className={tab === view ? 'active' : ''}
+              disabled={ehBatchProgress?.running}
               onClick={() => setTab(view)}
             >
               {view}
@@ -614,6 +767,33 @@ function App() {
 
       {tab === 'Library' && (
         <main className="content">
+          <div className="row batch-toolbar">
+            <button disabled={ehBatchProgress?.running || entries.length === 0} onClick={() => setBatchSelectedIds(entries.map((entry) => entry.id))}>Select all on page</button>
+            <button disabled={ehBatchProgress?.running || !entries.some((entry) => !entry.ehGid || !entry.ehToken)} onClick={() => setBatchSelectedIds(entries.filter((entry) => !entry.ehGid || !entry.ehToken).map((entry) => entry.id))}>Select unbound</button>
+            <button disabled={ehBatchProgress?.running || batchSelectedIds.length === 0} onClick={() => setBatchSelectedIds([])}>Clear selection</button>
+            <span className="muted">{batchSelectedIds.length} selected on this page</span>
+            {ehBatchProgress?.running
+              ? <button className="danger" onClick={cancelEhBatch}>Cancel batch</button>
+              : <button className="primary" disabled={!config.connection.url || !config.connection.tokenConfigured || batchSelectedIds.length === 0} onClick={() => void runEhBatch()}>Look up selected</button>}
+          </div>
+          {ehBatchProgress && <section className="batch-summary" role="status" aria-live="polite">
+            <p>{ehBatchProgress.running
+              ? ehBatchProgress.preparing
+                ? ehBatchProgress.cancelRequested ? 'Cancelling before the first lookup.' : 'Reading current server lookup settings…'
+                : ehBatchProgress.cancelRequested
+                ? `Finishing the current lookup; no further books will start (${ehBatchProgress.processed} of ${ehBatchProgress.total} complete).`
+                : ehBatchProgress.currentTitle
+                  ? `Processing ${ehBatchProgress.processed + 1} of ${ehBatchProgress.total}: ${ehBatchProgress.currentTitle}`
+                  : `Completed ${ehBatchProgress.processed} of ${ehBatchProgress.total}; waiting before the next book.`
+              : ehBatchProgress.error
+                ? `Batch could not start: ${ehBatchProgress.error}`
+              : ehBatchProgress.blocked
+                ? `Stopped after an upstream access or rate block (${ehBatchProgress.processed} of ${ehBatchProgress.total} books).`
+                : ehBatchProgress.cancelled
+                  ? `Cancelled after ${ehBatchProgress.processed} of ${ehBatchProgress.total} books.`
+                  : `Completed ${ehBatchProgress.processed} of ${ehBatchProgress.total} books.`}</p>
+            {!!ehBatchProgress.results.length && <ul>{ehBatchProgress.results.map((result) => <li key={result.id}>{result.title} — {result.message}</li>)}</ul>}
+          </section>}
           <div className="toolbar search-toolbar">
             <form className="search-form" onSubmit={(event) => { event.preventDefault(); setQuery(searchText.trim()); setOffset(0); }}>
               <input aria-label="Search titles and filenames" placeholder="Search titles and filenames" value={searchText}
@@ -651,6 +831,10 @@ function App() {
               <option value="active">Active</option>
               <option value="missing">Missing</option>
             </select>
+            <select aria-label="Gallery binding source" value={ehBindSource} onChange={(event) => { setEhBindSource(event.target.value as '' | 'auto'); setOffset(0); }}>
+              <option value="">All gallery bindings</option>
+              <option value="auto">Auto-matched only</option>
+            </select>
             <select aria-label="Sort entries" value={sort} onChange={(event) => { setSort(event.target.value); setOffset(0); }}>
               <option value="added">Date added</option><option value="title">Title</option><option value="openCount">Open count</option><option value="lastOpened">Last opened</option>
             </select>
@@ -675,6 +859,10 @@ function App() {
                   key={entry.id}
                   onClick={() => void selectEntry(entry)}
                 >
+                  <label className="card-selection" onClick={(event) => event.stopPropagation()}>
+                    <input type="checkbox" aria-label={`Select ${entry.effectiveTitle || effectiveTitle(entry)}`} checked={batchSelectedIds.includes(entry.id)} disabled={ehBatchProgress?.running} onChange={() => setBatchSelectedIds((ids) => ids.includes(entry.id) ? ids.filter((id) => id !== entry.id) : [...ids, entry.id])} />
+                    Select
+                  </label>
                   <img
                     src={
                       entry.coverKey
@@ -685,6 +873,7 @@ function App() {
                   />
                   <div className="meta">
                     <h3>{entry.effectiveTitle || effectiveTitle(entry)}</h3>
+                    {entry.ehBindSource === 'auto' && <span className="status">Auto-matched</span>}
                     {!!entry.tags?.length && <div className="muted">{entry.tags.slice(0, 4).join(' · ')}{entry.tags.length > 4 ? ` · +${entry.tags.length - 4}` : ''}</div>}
                     <div className="muted">
                       {entry.pageCount} pages · Opened {entry.openCount}×
@@ -714,7 +903,7 @@ function App() {
               <div>
                 <h2>{selected.effectiveTitle || effectiveTitle(selected)}</h2>
                 <div className="muted">{selected.relativePath}</div>
-                <div className="muted">{selected.ehTitleJpn || selected.ehTitle || selected.title}</div>
+                <div className="muted">{selected.ehDisplayTitle || selected.ehTitle || selected.ehTitleJpn || selected.title}</div>
                 <p>
                   {selected.pageCount} pages · Opened {selected.openCount}× · Last
                   opened {formatTimestamp(selected.lastOpenedAt)}
@@ -723,23 +912,27 @@ function App() {
                   <h3>E-Hentai gallery</h3>
                   {selected.ehGid && selected.ehToken ? <>
                     <a href={`https://${selected.ehDomain || 'e-hentai.org'}/g/${selected.ehGid}/${selected.ehToken}/`} target="_blank" rel="noreferrer">https://{selected.ehDomain || 'e-hentai.org'}/g/{selected.ehGid}/{selected.ehToken}/</a>
-                    <div className="muted">{selected.ehTitleJpn || selected.ehTitle || 'No source title'} · Refreshed {formatTimestamp(selected.ehRefreshedAt)}</div>
+                    <div className="row"><span className={selected.ehBindSource === 'auto' ? 'status' : 'muted'}>{selected.ehBindSource === 'auto' ? 'Auto-matched' : selected.ehBindSource === 'manual' ? 'Manual match' : 'Source not recorded'}</span><span className="muted">{selected.ehDisplayTitle || selected.ehTitle || selected.ehTitleJpn || 'No source title'} · Refreshed {formatTimestamp(selected.ehRefreshedAt)}</span></div>
+                    {selected.ehBindSource === 'auto' && <button disabled={ehBusy} onClick={() => void bindEh({ gid: selected.ehGid!, token: selected.ehToken!, domain: selected.ehDomain || 'e-hentai.org' })}>Confirm this match</button>}
                     <div className="row"><button disabled={ehBusy} onClick={() => void refreshEh()}>Refresh metadata</button></div>
                   </> : <p className="muted">No gallery bound.</p>}
-                  <label className="field"><span>Search title or filename</span><input value={ehQuery} onChange={(event) => setEhQuery(event.target.value)} /></label>
-                  <label className="field"><span>Search site</span><select value={ehLookupSite} onChange={(event) => setEhLookupSite(event.target.value as EhSettings['site'])}><option value="e-hentai.org">e-hentai.org</option><option value="exhentai.org">exhentai.org</option></select></label>
-                  <div className="row"><label><input type="checkbox" checked={includeExpunged} onChange={(event) => setIncludeExpunged(event.target.checked)} /> Include expunged</label>
-                    <button disabled={ehBusy || !ehQuery.trim()} onClick={() => void lookupEh('title')}>Search by title</button>
+                  <label className="field"><span>Optional search query</span><input value={ehQuery} onChange={(event) => setEhQuery(event.target.value)} placeholder={selected.title} /></label>
+                  <label className="field"><span>Site for this search</span><select value={ehLookupSite} onChange={(event) => setEhLookupSite(event.target.value as '' | EhSettings['site'])}><option value="">Use server preference ({ehSettings.site})</option><option value="e-hentai.org">e-hentai.org</option><option value="exhentai.org">exhentai.org</option></select></label>
+                  <div className="row"><button disabled={ehBusy} onClick={() => void lookupEh('auto')}>Search with server preferences</button>
+                    <button disabled={ehBusy || !ehQuery.trim()} onClick={() => void lookupEh('title')}>Search explicit query</button>
                     <button disabled={ehBusy || !selected.coverSha1} onClick={() => void lookupEh('cover')}>Search by cover</button>
                   </div>
                   {ehBusy && <p className="muted">Contacting E-Hentai…</p>}
                   {ehCandidates.length > 0 && <div className="eh-candidates" aria-label="E-Hentai search candidates">{ehCandidates.map((candidate) => <div className="eh-candidate" key={`${candidate.gid}/${candidate.token}`}>
                     <a href={candidate.url} target="_blank" rel="noreferrer">{candidate.title}</a><div className="muted">Gallery {candidate.gid}</div>
-                    <button disabled={ehBusy} onClick={() => void bindEh({ gid: candidate.gid, token: candidate.token, domain: candidate.domain })}>Bind this gallery</button>
+                    {selected.ehGid === candidate.gid && selected.ehToken === candidate.token && selected.ehDomain === candidate.domain
+                      ? <span className="muted">Currently bound</span>
+                      : <button disabled={ehBusy} onClick={() => void bindEh({ gid: candidate.gid, token: candidate.token, domain: candidate.domain })}>Choose this gallery</button>}
                   </div>)}</div>}
                   <label className="field"><span>Bind or correct with a gallery URL</span><input value={ehUrl} onChange={(event) => setEhUrl(event.target.value)} placeholder="https://e-hentai.org/g/618395/0439fa3666/" /></label>
                   <button disabled={ehBusy || !ehUrl.trim()} onClick={() => void bindEh({ url: ehUrl.trim() })}>{selected.ehGid ? 'Bind / rebind URL' : 'Bind gallery URL'}</button>
-                  {(ehMessage || selected.ehError) && <p className={selected.ehError ? 'notice error' : 'muted'} role="status">{ehMessage || selected.ehError}</p>}
+                  {ehMessage && <p className="muted" role="status">{ehMessage}</p>}
+                  {selected.ehError && <p className="notice error" role="status">{selected.ehError}</p>}
                 </section>
                 <section className="editor-section">
                   <h3>Personal details {draft.dirty && <span className="status">Unsaved changes</span>}</h3>
@@ -918,11 +1111,22 @@ function App() {
           </section>
 
           <section className="form">
-            <h2>E-Hentai / ExHentai</h2>
+            <h2>E-Hentai / ExHentai lookup</h2>
             <label className="field"><span>Default site</span><select value={ehSettings.site} onChange={(event) => setEhSettings({ ...ehSettings, site: event.target.value as EhSettings['site'] })}><option value="e-hentai.org">e-hentai.org</option><option value="exhentai.org">exhentai.org</option></select></label>
+            <label className="field"><span>Preferred language</span><input value={ehSettings.language} onChange={(event) => setEhSettings({ ...ehSettings, language: event.target.value })} placeholder="Any language" /></label>
+            <div className="setting-options">
+              <label><input type="checkbox" checked={ehSettings.useThumbnails} onChange={(event) => setEhSettings({ ...ehSettings, useThumbnails: event.target.checked })} /> Try cover search first, then fall back to title</label>
+              <label><input type="checkbox" checked={ehSettings.searchGid} onChange={(event) => setEhSettings({ ...ehSettings, searchGid: event.target.checked })} /> Use a bracketed filename number as gallery ID</label>
+              <label><input type="checkbox" checked={ehSettings.includeExpunged} onChange={(event) => setEhSettings({ ...ehSettings, includeExpunged: event.target.checked })} /> Include expunged galleries</label>
+              <label><input type="checkbox" checked={ehSettings.preferOriginalTitle} onChange={(event) => setEhSettings({ ...ehSettings, preferOriginalTitle: event.target.checked })} /> Prefer the original gallery title</label>
+              <label><input type="checkbox" checked={ehSettings.additionalTags} onChange={(event) => setEhSettings({ ...ehSettings, additionalTags: event.target.checked })} /> Include uploader and upload time</label>
+            </div>
+            <label className="field"><span>Wait between books in a batch (seconds)</span><input type="number" min={0} max={20} step={1} value={ehSettings.interval} onChange={(event) => setEhSettings({ ...ehSettings, interval: event.target.value === '' ? 0 : Number(event.target.value) })} /></label>
             <p className="muted">Credentials: {ehSettings.credentialsConfigured ? 'Configured' : 'Not configured'}</p>
-            <label className="field"><span>Cookie request header</span><input type="password" autoComplete="new-password" value={ehCookieHeader} onChange={(event) => setEhCookieHeader(event.target.value)} placeholder="Paste a Cookie header (name=value; name2=value2)" /></label>
-            <div className="row"><button className="primary" onClick={() => void saveEhSettings()}>Save site and credentials</button><button disabled={!ehSettings.credentialsConfigured} onClick={() => void saveEhSettings(true)}>Clear credentials</button>{ehSettingsMessage && <span className="muted" role="status">{ehSettingsMessage}</span>}</div>
+            <label className="field"><span>Named EH login cookies</span><input type="password" autoComplete="new-password" value={ehCookieHeader} onChange={(event) => setEhCookieHeader(event.target.value)} placeholder="Paste the server-supported name=value cookies" /></label>
+            <label><input type="checkbox" checked={ehSettings.sendCookiesToEHentai} onChange={(event) => setEhSettings({ ...ehSettings, sendCookiesToEHentai: event.target.checked })} /> Send configured cookies to public e-hentai.org searches</label>
+            <p className="muted">This opt-in applies only to searches on e-hentai.org. Cookies are write-only and are never returned to the desktop.</p>
+            <div className="row"><button className="primary" onClick={() => void saveEhSettings()}>Save lookup settings</button><button disabled={!ehSettings.credentialsConfigured} onClick={() => void saveEhSettings(true)}>Clear credentials</button>{ehSettingsMessage && <span className="muted" role="status">{ehSettingsMessage}</span>}</div>
           </section>
 
           <section className="form">
