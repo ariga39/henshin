@@ -1171,8 +1171,8 @@ mod tests {
     async fn bind_refresh_and_failed_rebind_keep_personal_overrides_consistent() {
         let temp = tempfile::tempdir().unwrap();
         let api_base = mock_eh(vec![
-            r#"{"gmetadata":[{"gid":1,"title":"First","title_jpn":"猫","category":"Non-H","tags":["artist:one"]}]}"#.into(),
-            r#"{"gmetadata":[{"gid":1,"title":"Updated","title_jpn":"猫の本","category":"Non-H","tags":["artist:two"]}]}"#.into(),
+            r#"{"gmetadata":[{"gid":1,"token":"aa","title":"First","title_jpn":"猫","category":"Non-H","tags":["artist:one"]}]}"#.into(),
+            r#"{"gmetadata":[{"gid":1,"token":"aa","title":"Updated","title_jpn":"猫の本","category":"Non-H","tags":["artist:two"]}]}"#.into(),
             r#"{"error":"temporarily unavailable"}"#.into(),
             r#"{"gmetadata":[{"gid":2,"error":"gallery unavailable"}]}"#.into(),
         ]).await;

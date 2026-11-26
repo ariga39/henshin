@@ -204,15 +204,30 @@ impl EhClient {
                 .unwrap_or_default();
             for gallery in chunk {
                 let expected_gid = normalize_gid(&gallery.gid);
-                let record = records.iter().find(|r| {
-                    r.get("gid")
+                let same_gid = |record: &&Value| {
+                    record
+                        .get("gid")
                         .and_then(Value::as_u64)
                         .map(|n| n.to_string())
                         .as_deref()
                         == expected_gid.as_deref()
+                };
+                let success = records.iter().find(|record| {
+                    same_gid(record)
+                        && record
+                            .get("token")
+                            .and_then(Value::as_str)
+                            .is_some_and(|token| token.eq_ignore_ascii_case(&gallery.token))
+                });
+                let result = success.or_else(|| {
+                    records.iter().find(|record| {
+                        same_gid(record)
+                            && record.get("token").and_then(Value::as_str).is_none()
+                            && record.get("error").and_then(Value::as_str).is_some()
+                    })
                 });
                 output.push(
-                    record
+                    result
                         .map(parse_metadata)
                         .unwrap_or_else(|| Err("E-Hentai omitted this gallery".into())),
                 );
@@ -485,7 +500,7 @@ mod tests {
 
     #[tokio::test]
     async fn gdata_maps_success_and_per_gallery_errors_to_the_requested_id() {
-        let body = r#"{"gmetadata":[{"gid":1,"title":"A &amp; B","title_jpn":"猫&#039;本","category":"Non-H","tags":["artist:Foo"]},{"gid":2,"error":"gallery unavailable"}]}"#;
+        let body = r#"{"gmetadata":[{"gid":1,"token":"aa","title":"A &amp; B","title_jpn":"猫&#039;本","category":"Non-H","tags":["artist:Foo"]},{"gid":2,"error":"gallery unavailable"}]}"#;
         let base = mock_response("200 OK", "application/json", body).await;
         let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
         let results = client
@@ -507,6 +522,32 @@ mod tests {
         assert_eq!(metadata.title_jpn.as_deref(), Some("猫'本"));
         assert!(metadata.tags.contains(&"category:non-h".into()));
         assert_eq!(results[1].as_ref().unwrap_err(), "gallery unavailable");
+    }
+
+    #[tokio::test]
+    async fn gdata_matches_shared_gallery_ids_by_token_and_keeps_tokenless_errors() {
+        let body = r#"{"gmetadata":[{"gid":618395,"token":"0439fa3666","title":"Correct gallery","title_jpn":"正しい","category":"Non-H","tags":[]},{"gid":618395,"error":"invalid gallery token"}]}"#;
+        let base = mock_response("200 OK", "application/json", body).await;
+        let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
+        let results = client
+            .gdata(&[
+                GalleryRef {
+                    gid: "000618395".into(),
+                    token: "0439fa3666".into(),
+                    domain: "e-hentai.org".into(),
+                },
+                GalleryRef {
+                    gid: "618395".into(),
+                    token: "deadbeef00".into(),
+                    domain: "e-hentai.org".into(),
+                },
+            ])
+            .await;
+        assert_eq!(
+            results[0].as_ref().unwrap().title.as_deref(),
+            Some("Correct gallery")
+        );
+        assert_eq!(results[1].as_ref().unwrap_err(), "invalid gallery token");
     }
 
     #[tokio::test]
