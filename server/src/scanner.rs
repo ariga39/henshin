@@ -96,6 +96,8 @@ fn run(
     let excludes: HashSet<String> =
         serde_json::from_str(exclusions).map_err(|_| "invalid root exclusions")?;
     let mut archives = Vec::new();
+    let mut blocked_paths = Vec::new();
+    let mut errors = Vec::new();
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -105,7 +107,27 @@ fn run(
                 && excludes.contains(&entry.file_name().to_string_lossy().into_owned()))
         });
     for item in walker {
-        let item = item.map_err(|e| format!("root traversal failed: {e}"))?;
+        let item = match item {
+            Ok(item) => item,
+            Err(error) => {
+                let Some(path) = error.path() else {
+                    return Err(format!("root traversal failed: {error}"));
+                };
+                if path == root {
+                    return Err(format!("root directory is unavailable: {error}"));
+                }
+                errors.push(format!("path could not be traversed: {error}"));
+                let disappeared = error
+                    .io_error()
+                    .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::NotFound);
+                if !disappeared {
+                    if let Ok(relative) = relative_path(root, path) {
+                        blocked_paths.push(relative);
+                    }
+                }
+                continue;
+            }
+        };
         if item.file_type().is_file()
             && item
                 .path()
@@ -115,7 +137,7 @@ fn run(
             archives.push(item.into_path());
         }
     }
-    process_archives(state, root_id, root, archives)
+    process_archives(state, root_id, root, archives, blocked_paths, errors)
 }
 
 fn process_archives(
@@ -123,18 +145,17 @@ fn process_archives(
     root_id: &str,
     root: &Path,
     mut archives: Vec<PathBuf>,
+    blocked_paths: Vec<String>,
+    mut errors: Vec<String>,
 ) -> Result<(usize, usize, Vec<String>), String> {
     archives.sort();
     let mut seen = HashSet::new();
-    let mut errors = Vec::new();
     let mut indexed = 0;
-    let mut all_paths_representable = true;
     for path in &archives {
         let relative = match relative_path(root, path) {
             Ok(relative) => relative,
             Err(error) => {
                 errors.push(format!("archive skipped: {error}"));
-                all_paths_representable = false;
                 continue;
             }
         };
@@ -148,7 +169,7 @@ fn process_archives(
             Err(e) => errors.push(format!("archive skipped: {e}")),
         }
     }
-    if all_paths_representable {
+    {
         let conn = state.db.lock().map_err(|_| "database lock poisoned")?;
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let mut stmt = tx
@@ -166,7 +187,13 @@ fn process_archives(
             .map_err(|e| e.to_string())?;
         drop(stmt);
         for (relative, cover_key) in existing {
-            if !seen.contains(&relative) {
+            let path_is_blocked = blocked_paths.iter().any(|prefix| {
+                relative == *prefix
+                    || relative
+                        .strip_prefix(prefix)
+                        .is_some_and(|remainder| remainder.starts_with('/'))
+            });
+            if !seen.contains(&relative) && !path_is_blocked {
                 tx.execute(
                     "UPDATE entries SET status='missing',updated_at=?1 \
                      WHERE root_id=?2 AND relative_path=?3",
@@ -445,10 +472,23 @@ mod tests {
                 [],
             )
             .unwrap();
+            conn.execute(
+                "INSERT INTO entries(id,root_id,relative_path,status,title,created_at,updated_at) \
+                 VALUES('gone','root','gone.zip','active','gone',0,0)",
+                [],
+            )
+            .unwrap();
         }
 
-        let (found, indexed, errors) =
-            process_archives(&state, "root", &root, vec![invalid_path, valid_path]).unwrap();
+        let (found, indexed, errors) = process_archives(
+            &state,
+            "root",
+            &root,
+            vec![invalid_path, valid_path],
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
         assert_eq!(found, 2);
         assert_eq!(indexed, 1);
         assert_eq!(errors.len(), 1);
@@ -460,7 +500,7 @@ mod tests {
                 row.get::<_, String>(0)
             },)
                 .unwrap(),
-            "active"
+            "missing"
         );
         assert_eq!(
             conn.query_row(
@@ -470,6 +510,67 @@ mod tests {
             )
             .unwrap(),
             1
+        );
+        assert_eq!(
+            conn.query_row("SELECT status FROM entries WHERE id='gone'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "missing"
+        );
+    }
+
+    #[test]
+    fn partial_walk_indexes_readable_archives_and_preserves_blocked_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let root = temp.path().join("library");
+        fs::create_dir_all(root.join("locked")).unwrap();
+        let readable = root.join("readable.zip");
+        archive(&readable, &[("1.png", [1, 2, 3])]);
+
+        let state = AppState::open(data, Some("secret".into())).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO roots VALUES('root','root',?1,'[]',0)",
+                [root.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "INSERT INTO entries(id,root_id,relative_path,status,title,created_at,updated_at) VALUES
+                 ('gone','root','gone.zip','active','gone',0,0),
+                 ('blocked','root','locked/old.zip','active','old',0,0);",
+            )
+            .unwrap();
+        }
+
+        let (found, indexed, errors) = process_archives(
+            &state,
+            "root",
+            &root,
+            vec![readable],
+            vec!["locked".into()],
+            vec!["path could not be traversed".into()],
+        )
+        .unwrap();
+        assert_eq!((found, indexed), (1, 1));
+        assert_eq!(errors.len(), 1);
+
+        let conn = state.db.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT status FROM entries WHERE id='gone'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "missing"
+        );
+        assert_eq!(
+            conn.query_row("SELECT status FROM entries WHERE id='blocked'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "active"
         );
     }
 }

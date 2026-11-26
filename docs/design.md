@@ -180,6 +180,7 @@ CREATE INDEX idx_open_events_entry ON open_events(entry_id, opened_at DESC);
   - Unchanged `(file_size, file_mtime)` entries are skipped quickly.
   - **Replacing a `.zip` at the same `(root_id, relative_path)` is treated as the same book**: the rescan refreshes file facts (`page_count`, `file_size`, `file_mtime`, `cover_key`, `cover_sha1`) while keeping the existing entry `id`, `custom_title`, `note`, EH binding/metadata, personal tag overrides, and `open_count` / `last_opened_at`. The user can trigger EH refresh or rebind manually if needed.
   - Files absent during a completed scan are marked `status = 'missing'` (never auto-deleted), preserving their EH metadata, notes, and open history. If a file reappears at the same path (including a replacement `.zip`), it returns to `active` as the same book and updates its file facts and cover.
+  - A traversal error below the root is reported while readable paths continue to index. Entries under an unreadable path keep their prior status; other absent entries can be marked `missing`. If the root itself is unavailable, the scan fails without changing missing status.
 
 ### 4.2 E-Hentai / ExHentai Lookup, Metadata, and Tag Sync
 
