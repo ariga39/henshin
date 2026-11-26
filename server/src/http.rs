@@ -1052,7 +1052,7 @@ fn save_eh_result_data(
             if preserve_on_error {
                 tx.execute("UPDATE entries SET eh_error=?5,updated_at=?6 WHERE id=?1 AND eh_gid=?2 AND eh_token=?3 AND eh_domain=?4",params![id,gallery.gid,gallery.token,gallery.domain,message,now()]).map_err(|e|e.to_string())?;
             } else {
-                tx.execute("UPDATE entries SET eh_error=?5 WHERE id=?1 AND eh_gid=?2 AND eh_token=?3 AND eh_domain=?4",params![id,gallery.gid,gallery.token,gallery.domain,message,now()]).map_err(|e|e.to_string())?;
+                tx.execute("UPDATE entries SET eh_error=?5,updated_at=?6 WHERE id=?1 AND eh_gid=?2 AND eh_token=?3 AND eh_domain=?4",params![id,gallery.gid,gallery.token,gallery.domain,message,now()]).map_err(|e|e.to_string())?;
             }
             tx.commit().map_err(|e| e.to_string())?;
             Ok(Some(message))
@@ -1093,8 +1093,31 @@ async fn get_cover(State(s): State<Arc<AppState>>, Path(key): Path<String>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eh::EhClient;
     use axum::{body::Body, http::Request};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
     use tower::ServiceExt;
+
+    async fn mock_eh(responses: Vec<String>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for body in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 8192];
+                let _ = stream.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        format!("http://{address}")
+    }
 
     async fn post_open(app: Router, body: &str) -> (StatusCode, Value) {
         let response = app
@@ -1141,6 +1164,87 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    #[tokio::test]
+    async fn bind_refresh_and_failed_rebind_keep_personal_overrides_consistent() {
+        let temp = tempfile::tempdir().unwrap();
+        let api_base = mock_eh(vec![
+            r#"{"gmetadata":[{"gid":1,"title":"First","title_jpn":"猫","category":"Non-H","tags":["artist:one"]}]}"#.into(),
+            r#"{"gmetadata":[{"gid":1,"title":"Updated","title_jpn":"猫の本","category":"Non-H","tags":["artist:two"]}]}"#.into(),
+            r#"{"error":"temporarily unavailable"}"#.into(),
+            r#"{"gmetadata":[{"gid":2,"error":"gallery unavailable"}]}"#.into(),
+        ]).await;
+        let mut state = AppState::open(temp.path().join("data"), Some("secret".into())).unwrap();
+        state.eh =
+            EhClient::new("https://e-hentai.org", &api_base, std::time::Duration::ZERO).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+                .unwrap();
+            conn.execute("INSERT INTO entries(id,root_id,relative_path,title,custom_title,note,created_at,updated_at) VALUES('entry','root','book.zip','Book','Personal title','Personal note',0,0)", []).unwrap();
+            conn.execute("INSERT INTO entry_tags VALUES('entry','local:keep','local'),('entry','artist:one','hidden')", []).unwrap();
+        }
+        let app = router(Arc::new(state));
+        let (status, bound) = api(
+            app.clone(),
+            "POST",
+            "/api/entries/entry/eh-bind",
+            Some(r#"{"url":"https://e-hentai.org/g/1/aa/"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bound["ehTitle"], "First");
+        assert_eq!(bound["ehTags"], json!(["artist:one", "category:non-h"]));
+        assert_eq!(bound["customTitle"], "Personal title");
+        assert_eq!(bound["note"], "Personal note");
+        assert_eq!(bound["localTags"], json!(["local:keep"]));
+        assert_eq!(bound["hiddenTags"], json!(["artist:one"]));
+
+        let (status, refreshed) = api(
+            app.clone(),
+            "POST",
+            "/api/entries/entry/eh-refresh",
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(refreshed["ehTitleJpn"], "猫の本");
+        assert_eq!(refreshed["ehTags"], json!(["artist:two", "category:non-h"]));
+        assert_eq!(refreshed["hiddenTags"], json!(["artist:one"]));
+        assert_eq!(refreshed["localTags"], json!(["local:keep"]));
+
+        let (_, failed_refresh) = api(
+            app.clone(),
+            "POST",
+            "/api/entries/entry/eh-refresh",
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(failed_refresh["ehTitleJpn"], "猫の本");
+        assert_eq!(
+            failed_refresh["ehTags"],
+            json!(["artist:two", "category:non-h"])
+        );
+        assert_eq!(failed_refresh["ehError"], "temporarily unavailable");
+
+        let (status, rebound) = api(
+            app,
+            "POST",
+            "/api/entries/entry/eh-bind",
+            Some(r#"{"url":"https://e-hentai.org/g/2/bb/"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rebound:?}");
+        assert_eq!(rebound["ehGid"], "2");
+        assert_eq!(rebound["ehTitle"], Value::Null);
+        assert_eq!(rebound["ehTitleJpn"], Value::Null);
+        assert_eq!(rebound["ehTags"], json!([]));
+        assert_eq!(rebound["ehError"], "gallery unavailable");
+        assert_eq!(rebound["customTitle"], "Personal title");
+        assert_eq!(rebound["note"], "Personal note");
+        assert_eq!(rebound["localTags"], json!(["local:keep"]));
+        assert_eq!(rebound["hiddenTags"], json!(["artist:one"]));
     }
 
     #[tokio::test]

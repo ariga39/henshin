@@ -357,6 +357,26 @@ fn parse_metadata(record: &Value) -> Result<Metadata, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    async fn mock_response(status: &str, content_type: &str, body: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 8192];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}")
+    }
     #[test]
     fn parses_and_normalizes_eh_urls() {
         let parsed = parse_gallery_url("http://g.e-hentai.org/g/123/ABcd/?x=1").unwrap();
@@ -384,5 +404,133 @@ mod tests {
         assert_eq!(metadata.title_jpn.as_deref(), Some("猫'本"));
         assert!(metadata.tags.contains(&"category:non-h".into()));
         assert!(metadata.tags.contains(&"artist:foo".into()));
+    }
+
+    #[tokio::test]
+    async fn lookup_returns_all_candidates_and_distinguishes_empty_and_upstream_errors() {
+        let base = mock_response("200 OK", "text/html", "<div class='itg'><a href='https://e-hentai.org/g/10/aa/'><div class='glink'>First</div></a><a href='https://e-hentai.org/g/11/bb/' title='Second'></a></div>").await;
+        let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
+        let candidates = client.lookup("title", "sample", false).await.unwrap();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.gid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["10", "11"]
+        );
+
+        let base = mock_response(
+            "200 OK",
+            "text/html",
+            "<div class='itg'>No hits found</div>",
+        )
+        .await;
+        let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
+        assert!(
+            client
+                .lookup("title", "absent", false)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let base = mock_response("200 OK", "application/json", "{}").await;
+        let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
+        assert_eq!(
+            client.lookup("title", "sample", false).await.unwrap_err().0,
+            502
+        );
+
+        let base = mock_response("429 Too Many Requests", "text/html", "wait").await;
+        let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
+        assert_eq!(
+            client.lookup("title", "sample", false).await.unwrap_err().0,
+            429
+        );
+    }
+
+    #[tokio::test]
+    async fn gdata_maps_success_and_per_gallery_errors_to_the_requested_id() {
+        let body = r#"{"gmetadata":[{"gid":1,"title":"A &amp; B","title_jpn":"猫&#039;本","category":"Non-H","tags":["artist:Foo"]},{"gid":2,"error":"gallery unavailable"}]}"#;
+        let base = mock_response("200 OK", "application/json", body).await;
+        let client = EhClient::new(&base, &base, Duration::ZERO).unwrap();
+        let results = client
+            .gdata(&[
+                GalleryRef {
+                    gid: "1".into(),
+                    token: "aa".into(),
+                    domain: "e-hentai.org".into(),
+                },
+                GalleryRef {
+                    gid: "2".into(),
+                    token: "bb".into(),
+                    domain: "e-hentai.org".into(),
+                },
+            ])
+            .await;
+        let metadata = results[0].as_ref().unwrap();
+        assert_eq!(metadata.title.as_deref(), Some("A & B"));
+        assert_eq!(metadata.title_jpn.as_deref(), Some("猫'本"));
+        assert!(metadata.tags.contains(&"category:non-h".into()));
+        assert_eq!(results[1].as_ref().unwrap_err(), "gallery unavailable");
+    }
+
+    #[tokio::test]
+    async fn gdata_splits_requests_at_twenty_five_galleries() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 8192];
+                let _ = stream.read(&mut request).await.unwrap();
+                let body = r#"{"gmetadata":[]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            2
+        });
+        let base = format!("http://{address}");
+        let client = EhClient::new("https://e-hentai.org", &base, Duration::ZERO).unwrap();
+        let galleries = (1..=26)
+            .map(|gid| GalleryRef {
+                gid: gid.to_string(),
+                token: "aa".into(),
+                domain: "e-hentai.org".into(),
+            })
+            .collect::<Vec<_>>();
+        let results = client.gdata(&galleries).await;
+        assert_eq!(results.len(), 26);
+        assert!(results.iter().all(Result::is_err));
+        assert_eq!(server.await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn lookup_paces_consecutive_upstream_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 8192];
+                let _ = stream.read(&mut request).await.unwrap();
+                let body = "<div class='itg'>No hits found</div>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let base = format!("http://{address}");
+        let client = EhClient::new(&base, &base, Duration::from_millis(50)).unwrap();
+        let start = Instant::now();
+        client.lookup("title", "one", false).await.unwrap();
+        client.lookup("title", "two", false).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(45));
+        server.await.unwrap();
     }
 }
