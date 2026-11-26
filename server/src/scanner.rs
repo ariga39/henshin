@@ -115,12 +115,29 @@ fn run(
             archives.push(item.into_path());
         }
     }
+    process_archives(state, root_id, root, archives)
+}
+
+fn process_archives(
+    state: &AppState,
+    root_id: &str,
+    root: &Path,
+    mut archives: Vec<PathBuf>,
+) -> Result<(usize, usize, Vec<String>), String> {
     archives.sort();
     let mut seen = HashSet::new();
     let mut errors = Vec::new();
     let mut indexed = 0;
+    let mut all_paths_representable = true;
     for path in &archives {
-        let relative = relative_path(root, path)?;
+        let relative = match relative_path(root, path) {
+            Ok(relative) => relative,
+            Err(error) => {
+                errors.push(format!("archive skipped: {error}"));
+                all_paths_representable = false;
+                continue;
+            }
+        };
         seen.insert(relative.clone());
         match process_one(state, root_id, path, &relative) {
             Ok(changed) => {
@@ -131,28 +148,38 @@ fn run(
             Err(e) => errors.push(format!("archive skipped: {e}")),
         }
     }
-    let conn = state.db.lock().map_err(|_| "database lock poisoned")?;
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    let mut stmt = tx
-        .prepare("SELECT relative_path,cover_key FROM entries WHERE root_id=?1 AND status='active'")
-        .map_err(|e| e.to_string())?;
-    let existing = stmt
-        .query_map([root_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    drop(stmt);
-    for (relative, cover_key) in existing {
-        if !seen.contains(&relative) {
-            tx.execute("UPDATE entries SET status='missing',updated_at=?1 WHERE root_id=?2 AND relative_path=?3",params![unix_now(),root_id,relative]).map_err(|e|e.to_string())?;
-            if let Some(key) = cover_key {
-                let _ = fs::remove_file(state.covers_dir.join(key));
+    if all_paths_representable {
+        let conn = state.db.lock().map_err(|_| "database lock poisoned")?;
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let mut stmt = tx
+            .prepare(
+                "SELECT relative_path,cover_key FROM entries \
+                 WHERE root_id=?1 AND status='active'",
+            )
+            .map_err(|e| e.to_string())?;
+        let existing = stmt
+            .query_map([root_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        drop(stmt);
+        for (relative, cover_key) in existing {
+            if !seen.contains(&relative) {
+                tx.execute(
+                    "UPDATE entries SET status='missing',updated_at=?1 \
+                     WHERE root_id=?2 AND relative_path=?3",
+                    params![unix_now(), root_id, relative],
+                )
+                .map_err(|e| e.to_string())?;
+                if let Some(key) = cover_key {
+                    let _ = fs::remove_file(state.covers_dir.join(key));
+                }
             }
         }
+        tx.commit().map_err(|e| e.to_string())?;
     }
-    tx.commit().map_err(|e| e.to_string())?;
     Ok((archives.len(), indexed, errors))
 }
 
@@ -164,8 +191,8 @@ fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
             std::path::Component::Normal(name) => name
                 .to_str()
                 .map(str::to_owned)
-                .ok_or_else(|| "archive path is not UTF-8".to_string()),
-            _ => Err("archive path contains an unexpected component".to_string()),
+                .ok_or_else(|| "archive path cannot be represented as UTF-8".to_string()),
+            _ => Err("archive path cannot be represented as a relative path".to_string()),
         })
         .collect::<Result<Vec<_>, _>>()
         .map(|parts| parts.join("/"))
@@ -388,5 +415,61 @@ mod tests {
             .unwrap();
         let (found, indexed, _) = run(&state, "root", &root, "[\"skip\"]").unwrap();
         assert_eq!((found, indexed), (0, 0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrepresentable_local_name_is_reported_without_stopping_or_marking_missing() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let root = temp.path().join("library");
+        fs::create_dir(&root).unwrap();
+        let invalid_name = std::ffi::OsString::from_vec(b"legacy-\xff.zip".to_vec());
+        let invalid_path = root.join(invalid_name);
+        let valid_path = root.join("valid.zip");
+        archive(&valid_path, &[("1.png", [1, 2, 3])]);
+
+        let state = AppState::open(data, Some("secret".into())).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO roots VALUES('root','root',?1,'[]',0)",
+                [root.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO entries(id,root_id,relative_path,status,title,created_at,updated_at) \
+                 VALUES('legacy','root','legacy-�.zip','active','legacy',0,0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let (found, indexed, errors) =
+            process_archives(&state, "root", &root, vec![invalid_path, valid_path]).unwrap();
+        assert_eq!(found, 2);
+        assert_eq!(indexed, 1);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("cannot be represented"));
+
+        let conn = state.db.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT status FROM entries WHERE id='legacy'", [], |row| {
+                row.get::<_, String>(0)
+            },)
+                .unwrap(),
+            "active"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM entries WHERE relative_path='valid.zip'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
     }
 }

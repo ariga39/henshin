@@ -212,6 +212,20 @@ async fn delete_root(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> 
         Ok(c) => c,
         Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
     };
+    let has_entries = match conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM entries WHERE root_id=?1)",
+        [&id],
+        |row| row.get::<_, bool>(0),
+    ) {
+        Ok(has_entries) => has_entries,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    if has_entries {
+        return err(
+            StatusCode::CONFLICT,
+            "root contains indexed entries; remove its entries before deleting the root",
+        );
+    }
     match conn.execute("DELETE FROM roots WHERE id=?1", [id]) {
         Ok(0) => err(StatusCode::NOT_FOUND, "root not found"),
         Ok(_) => (StatusCode::NO_CONTENT, Body::empty()).into_response(),
@@ -350,10 +364,17 @@ fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
     })
 }
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct OpenInput {
+    #[serde(alias = "eventId")]
     event_id: String,
+    #[serde(alias = "openedAt")]
     opened_at: i64,
+}
+
+#[derive(Serialize)]
+struct OpenStats {
+    open_count: i64,
+    last_opened_at: Option<i64>,
 }
 async fn open_entry(
     State(s): State<Arc<AppState>>,
@@ -383,8 +404,15 @@ async fn open_entry(
     };
     if inserted > 0 {
         if let Err(e) = tx.execute(
-            "UPDATE entries SET open_count=open_count+1,last_opened_at=?1,updated_at=?1 WHERE id=?2",
-            params![input.opened_at, id],
+            "UPDATE entries SET \
+             open_count=open_count+1, \
+             last_opened_at=CASE \
+                 WHEN last_opened_at IS NULL OR last_opened_at<?1 THEN ?1 \
+                 ELSE last_opened_at \
+             END, \
+             updated_at=?2 \
+             WHERE id=?3",
+            params![input.opened_at, now(), id],
         ) {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
@@ -393,10 +421,10 @@ async fn open_entry(
         "SELECT open_count,last_opened_at FROM entries WHERE id=?1",
         [id],
         |row| {
-            Ok(json!({
-                "openCount": row.get::<_, i64>(0)?,
-                "lastOpenedAt": row.get::<_, Option<i64>>(1)?
-            }))
+            Ok(OpenStats {
+                open_count: row.get(0)?,
+                last_opened_at: row.get(1)?,
+            })
         },
     ) {
         Ok(v) => {
@@ -427,6 +455,27 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
+
+    async fn post_open(app: Router, body: &str) -> (StatusCode, Value) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/entries/entry/open")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = serde_json::from_slice(&bytes).unwrap();
+        (status, body)
+    }
 
     #[tokio::test]
     async fn api_requires_the_persisted_bearer_token() {
@@ -459,30 +508,115 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    #[test]
-    fn open_event_is_idempotent() {
-        let c = rusqlite::Connection::open_in_memory().unwrap();
-        crate::db::initialize(&c).unwrap();
-        c.execute("INSERT INTO roots VALUES('r','r','/r','[]',0)", [])
-            .unwrap();
-        c.execute(
-            "INSERT INTO entries(id,root_id,relative_path,title,created_at,updated_at) \
-             VALUES('e','r','a.zip','a',0,0)",
-            [],
-        )
-        .unwrap();
-        for _ in 0..2 {
-            c.execute(
-                "INSERT OR IGNORE INTO open_events VALUES('event','e',12)",
+    #[tokio::test]
+    async fn open_accepts_both_field_spellings_and_keeps_latest_timestamp() {
+        let temp = tempfile::tempdir().unwrap();
+        let state =
+            Arc::new(AppState::open(temp.path().join("data"), Some("secret".into())).unwrap());
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("INSERT INTO roots VALUES('root','root','/root','[]',0)", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO entries(id,root_id,relative_path,title,created_at,updated_at) \
+                 VALUES('entry','root','book.zip','book',0,0)",
                 [],
             )
             .unwrap();
         }
-        let n = c
-            .query_row("SELECT count(*) FROM open_events", [], |r| {
-                r.get::<_, i64>(0)
-            })
+        let app = router(state);
+
+        let (status, first) =
+            post_open(app.clone(), r#"{"event_id":"first","opened_at":30}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["open_count"], 1);
+        assert_eq!(first["last_opened_at"], 30);
+        assert!(first.get("openCount").is_none());
+
+        let (status, second) =
+            post_open(app.clone(), r#"{"eventId":"second","openedAt":40}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(second["open_count"], 2);
+        assert_eq!(second["last_opened_at"], 40);
+
+        let (_, older) = post_open(app.clone(), r#"{"event_id":"older","opened_at":25}"#).await;
+        assert_eq!(older["open_count"], 3);
+        assert_eq!(older["last_opened_at"], 40);
+
+        let (_, duplicate) = post_open(app, r#"{"eventId":"first","openedAt":50}"#).await;
+        assert_eq!(duplicate["open_count"], 3);
+        assert_eq!(duplicate["last_opened_at"], 40);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_root_with_entries_conflicts_and_preserves_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let collection = temp.path().join("collection");
+        std::fs::create_dir(&collection).unwrap();
+        let state =
+            Arc::new(AppState::open(temp.path().join("data"), Some("secret".into())).unwrap());
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO roots VALUES('root','root',?1,'[]',0)",
+                [collection.to_string_lossy().as_ref()],
+            )
             .unwrap();
-        assert_eq!(n, 1);
+            conn.execute(
+                "INSERT INTO entries(id,root_id,relative_path,status,title,created_at,updated_at) \
+                 VALUES('entry','root','book.zip','missing','book',0,0)",
+                [],
+            )
+            .unwrap();
+        }
+        let app = router(state.clone());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/roots/root")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        {
+            let conn = state.db.lock().unwrap();
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM roots", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                conn.query_row("SELECT status FROM entries WHERE id='entry'", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "missing"
+            );
+        }
+
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM entries WHERE id='entry'", [])
+            .unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/roots/root")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(collection.is_dir());
     }
 }
