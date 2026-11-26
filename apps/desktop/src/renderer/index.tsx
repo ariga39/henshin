@@ -926,6 +926,16 @@ function App() {
           </section>
 
           <section className="form">
+            <h2>Database backup and restore</h2>
+            <p className="muted">
+              Use the server CLI: <code>henshin-server backup --data-dir &lt;dir&gt; --out &lt;file.sqlite&gt;</code> works while the server is running or stopped. Restore with <code>henshin-server restore --data-dir &lt;dir&gt; --in &lt;file.sqlite&gt;</code> only while the server is stopped. Restore keeps the previous database and WAL/SHM files in a <code>pre-restore-*</code> folder and clears covers for regeneration.
+            </p>
+            <p className="muted">
+              <strong>Included:</strong> the application database (roots, entries, E-Hentai metadata and tags, personal titles, notes, tag overrides, and open history). <strong>Outside this backup:</strong> original comic files on the NAS, server secrets and ExHentai credentials, this device’s <code>desktop-config.json</code>, and the regenerable cover cache.
+            </p>
+          </section>
+
+          <section className="form">
             <h2>Local root mappings</h2>
             {roots.length === 0 ? (
               <p className="muted">Connect to the server to load roots.</p>

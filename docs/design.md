@@ -239,7 +239,7 @@ Plain `.zip` archives carry no embedded gallery metadata, so candidate lookup ag
   - Original comic files on the NAS (protected externally by NAS snapshots/backups).
   - Server secrets (`token` and any optional ExHentai credential file in `<data-dir>`): when restoring into a fresh `<data-dir>`, re-initialize/re-enter server credentials as needed.
   - Per-desktop `desktop-config.json` (connection URL/token, local path mappings, reader profiles): stays on each desktop and continues working if the server URL/token and root IDs remain the same, or is reconfigured locally on a new machine.
-  - Cover cache (`<data-dir>/covers/`): derived cache, regenerated on demand.
+  - Cover cache (`<data-dir>/covers/`): derived cache, cleared after restore and regenerated on a cover request when the source archive still matches its stored size and modification time, or during a root scan. A changed, missing, or unavailable source is not used to recreate an old cover key.
 - **Backup / long-term archive command**:
   ```sh
   henshin-server backup --data-dir <dir> --out <output-file.sqlite>
@@ -251,7 +251,7 @@ Plain `.zip` archives carry no embedded gallery metadata, so candidate lookup ag
   ```
   Runs only while the server is stopped (acquires the `<data-dir>` lock):
   1. Validates the input file (`PRAGMA integrity_check` and required tables exist) and copies it to a temporary staging file inside `<data-dir>`.
-  2. If `<data-dir>/henshin.sqlite` exists, checkpoints/closes any WAL cleanly and moves `henshin.sqlite` together with any `-wal`/`-shm` sidecars into a timestamped backup folder inside `<data-dir>` (so no stale WAL file remains beside the restored database, and the previous database set remains intact for manual recovery).
+  2. If `<data-dir>/henshin.sqlite` exists, moves it and any existing `-wal`/`-shm` sidecars intact into a timestamped backup folder inside `<data-dir>`. Keep these files together when recovering the previous database.
   3. Moves the staged file into place as `henshin.sqlite` and removes stale files from `<data-dir>/covers/` so covers regenerate cleanly.
   4. Never writes to or modifies any collection root.
 

@@ -1205,10 +1205,97 @@ async fn get_cover(State(s): State<Arc<AppState>>, Path(key): Path<String>) -> R
     if key.contains('/') || key.contains('\\') || key.contains("..") {
         return err(StatusCode::BAD_REQUEST, "invalid cover key");
     }
-    match fs::read(s.covers_dir.join(key)) {
+    let cover_path = s.covers_dir.join(&key);
+    match fs::read(&cover_path) {
         Ok(bytes) => ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            err(StatusCode::NOT_FOUND, "cover not found")
+            let permit = match Arc::clone(&s.scan_gate).acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "cover generation is unavailable",
+                    );
+                }
+            };
+            if let Ok(bytes) = fs::read(&cover_path) {
+                return ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response();
+            }
+            let source = {
+                let conn = match s.db.lock() {
+                    Ok(conn) => conn,
+                    Err(_) => {
+                        return err(StatusCode::INTERNAL_SERVER_ERROR, "database lock poisoned");
+                    }
+                };
+                conn.query_row(
+                    "SELECT e.id,e.relative_path,e.file_mtime,e.file_size,r.server_path FROM entries e JOIN roots r ON r.id=e.root_id WHERE e.cover_key=?1 AND e.status='active'",
+                    [&key],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, Option<u64>>(3)?, row.get::<_, String>(4)?)),
+                ).ok()
+            };
+            let Some((entry_id, relative, stamp, size, root)) = source else {
+                return err(StatusCode::NOT_FOUND, "cover not found");
+            };
+            let relative = std::path::PathBuf::from(relative);
+            if relative.is_absolute()
+                || relative.components().any(|part| {
+                    matches!(
+                        part,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                })
+            {
+                return err(StatusCode::NOT_FOUND, "cover source is unavailable");
+            }
+            let source_path = match fs::canonicalize(std::path::Path::new(&root).join(relative)) {
+                Ok(path) => path,
+                Err(_) => return err(StatusCode::NOT_FOUND, "cover source is unavailable"),
+            };
+            let root_path = match fs::canonicalize(&root) {
+                Ok(path) => path,
+                Err(_) => return err(StatusCode::NOT_FOUND, "cover source is unavailable"),
+            };
+            if !source_path.starts_with(root_path) {
+                return err(StatusCode::NOT_FOUND, "cover source is unavailable");
+            }
+            let metadata = match fs::metadata(&source_path) {
+                Ok(metadata) => metadata,
+                Err(_) => return err(StatusCode::NOT_FOUND, "cover source is unavailable"),
+            };
+            let modified = metadata
+                .modified()
+                .unwrap_or(std::time::UNIX_EPOCH)
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            if Some(metadata.len()) != size || Some(modified) != stamp {
+                return err(
+                    StatusCode::NOT_FOUND,
+                    "cover source has changed; rescan the collection root",
+                );
+            }
+            let covers_dir = s.covers_dir.clone();
+            let generated = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                crate::cover::extract(
+                    &source_path,
+                    &covers_dir,
+                    &entry_id,
+                    stamp.unwrap_or_default(),
+                    size.unwrap_or_default(),
+                )
+            })
+            .await;
+            match generated {
+                Ok(Ok(_)) => match fs::read(&cover_path) {
+                    Ok(bytes) => ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response(),
+                    Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+                },
+                _ => err(StatusCode::NOT_FOUND, "cover could not be regenerated"),
+            }
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -1219,11 +1306,56 @@ mod tests {
     use super::*;
     use crate::eh::EhClient;
     use axum::{body::Body, http::Request};
+    use image::{ImageBuffer, Rgb};
+    use std::io::Write;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
     use tower::ServiceExt;
+    use zip::{ZipWriter, write::SimpleFileOptions};
+
+    fn make_archive(path: &std::path::Path) {
+        make_archive_with_width(path, 2);
+    }
+
+    fn make_archive_with_width(path: &std::path::Path, width: u32) {
+        let file = fs::File::create(path).unwrap();
+        let mut archive = ZipWriter::new(file);
+        let image = image::DynamicImage::ImageRgb8(ImageBuffer::from_pixel(
+            width,
+            width,
+            Rgb([20, 40, 60]),
+        ));
+        let mut bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        archive
+            .start_file("page.png", SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(&bytes).unwrap();
+        archive.finish().unwrap();
+    }
+
+    async fn wait_for_scan(state: &Arc<AppState>, scan_id: &str) {
+        for _ in 0..100 {
+            if state
+                .scans
+                .lock()
+                .unwrap()
+                .get(scan_id)
+                .is_some_and(|scan| scan.status != "running")
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("scan did not finish");
+    }
 
     async fn mock_eh(responses: Vec<String>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1498,6 +1630,132 @@ mod tests {
                 .unwrap()
                 .contains("credentials are not configured")
         );
+    }
+
+    #[tokio::test]
+    async fn missing_cover_is_regenerated_from_unchanged_collection_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let root = temp.path().join("library");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("book.zip");
+        make_archive(&source);
+        let source_before = fs::read(&source).unwrap();
+        let metadata = fs::metadata(&source).unwrap();
+        let stamp = metadata
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let size = metadata.len();
+        let key = format!("entry-{stamp}-{size}.jpg");
+        let state = Arc::new(AppState::open(data, Some("secret".into())).unwrap());
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO roots VALUES('root','Library',?1,'[]',1)",
+                [root.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO entries(id,root_id,relative_path,title,file_size,file_mtime,cover_key,created_at,updated_at) VALUES('entry','root','book.zip','book',?1,?2,?3,1,1)", rusqlite::params![size, stamp, key]).unwrap();
+        }
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/covers/{key}"))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
+        let jpeg = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(jpeg.starts_with(&[0xff, 0xd8]));
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+    }
+
+    #[tokio::test]
+    async fn queued_cover_miss_reads_same_path_replacement_after_scan_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let root = temp.path().join("library");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("book.zip");
+        make_archive(&source);
+        let state = Arc::new(AppState::open(data, Some("secret".into())).unwrap());
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO roots VALUES('root','Library',?1,'[]',1)",
+                [root.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        let initial = crate::scanner::start(state.clone(), "root".into()).unwrap();
+        wait_for_scan(&state, &initial.id).await;
+        let (entry_id, old_key): (String, String) = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT id,cover_key FROM entries", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE entries SET custom_title='keep this entry' WHERE id=?1",
+                [&entry_id],
+            )
+            .unwrap();
+        fs::remove_file(state.covers_dir.join(&old_key)).unwrap();
+
+        let permit = state.scan_gate.clone().acquire_owned().await.unwrap();
+        let replacement_scan = crate::scanner::start(state.clone(), "root".into()).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let app = router(state.clone());
+        let requested_key = old_key.clone();
+        let request = tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .uri(format!("/api/covers/{requested_key}"))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        make_archive_with_width(&source, 16);
+        drop(permit);
+
+        let response = request.await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        wait_for_scan(&state, &replacement_scan.id).await;
+        let (new_id, new_key, title): (String, String, String) = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id,cover_key,custom_title FROM entries WHERE relative_path='book.zip'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(new_id, entry_id);
+        assert_ne!(new_key, old_key);
+        assert_eq!(title, "keep this entry");
+        assert!(!state.covers_dir.join(&old_key).exists());
+        assert!(state.covers_dir.join(new_key).exists());
     }
 
     #[tokio::test]

@@ -43,13 +43,7 @@ impl AppState {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         fs::create_dir_all(&data_dir)?;
         let data_dir = fs::canonicalize(data_dir)?;
-        let lock_path = data_dir.join("server.lock");
-        let lock = fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(lock_path)?;
-        lock.try_lock()?;
+        let lock = acquire_data_dir_lock(&data_dir)?;
         let covers_dir = data_dir.join("covers");
         fs::create_dir_all(&covers_dir)?;
         let token_path = data_dir.join("token");
@@ -163,6 +157,16 @@ pub fn save_eh_settings(data_dir: &Path, settings: &EhSettings) -> std::io::Resu
         let _ = fs::remove_file(temp);
     }
     result
+}
+
+pub fn acquire_data_dir_lock(data_dir: &Path) -> std::io::Result<fs::File> {
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(data_dir.join("server.lock"))?;
+    lock.try_lock()?;
+    Ok(lock)
 }
 
 #[cfg(test)]

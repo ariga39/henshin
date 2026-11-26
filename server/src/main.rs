@@ -3,6 +3,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tracing_subscriber::EnvFilter;
 
 mod app;
+mod backup;
 mod cover;
 mod db;
 mod eh;
@@ -27,6 +28,18 @@ enum Command {
         #[arg(long)]
         token: Option<String>,
     },
+    Backup {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    Restore {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        r#in: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -37,6 +50,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .init();
     match Cli::parse().command {
+        Command::Backup { data_dir, out } => backup::create(&data_dir, &out)?,
+        Command::Restore { data_dir, r#in } => backup::restore(&data_dir, &r#in)?,
         Command::Serve {
             data_dir,
             listen,

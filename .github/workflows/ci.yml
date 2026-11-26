@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    name: Server (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: darwin-arm64
+          - os: ubuntu-latest
+            target: linux-x64
+          - os: windows-latest
+            target: windows-x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+      - name: Test server
+        run: cargo test --locked
+        working-directory: server
+      - name: Package and smoke test native server
+        run: node scripts/package-server.mjs
+      - name: Upload standalone server archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: henshin-server-${{ matrix.target }}
+          path: |
+            dist/release/henshin-server-*-${{ matrix.target }}.tar.gz
+            dist/release/henshin-server-*-${{ matrix.target }}.tar.gz.sha256
+            dist/release/henshin-server-*-${{ matrix.target }}.zip
+            dist/release/henshin-server-*-${{ matrix.target }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: darwin-arm64
+          - os: ubuntu-latest
+            target: linux-x64
+          - os: windows-latest
+            target: windows-x64
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb libfuse2t64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @henshin/desktop typecheck
+      - run: pnpm --filter @henshin/desktop test
+      - name: Package and smoke test native macOS desktop
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CSC_FOR_PULL_REQUEST: 'true'
+        run: |
+          pnpm --filter @henshin/desktop package
+          cat dist/release/Henshin-*.signing-status.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Package and smoke test native Linux desktop
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          xvfb-run -a pnpm --filter @henshin/desktop package
+          cat dist/release/Henshin-*.signing-status.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Package and smoke test native desktop on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          pnpm --filter @henshin/desktop package
+          if ($LASTEXITCODE -ne 0) { throw "desktop packaging failed" }
+          Get-Content dist/release/Henshin-*.signing-status.txt | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+      - name: Upload standalone desktop archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: henshin-desktop-${{ matrix.target }}
+          path: |
+            dist/release/Henshin-*-${{ matrix.target }}.zip
+            dist/release/Henshin-*-${{ matrix.target }}.zip.sha256
+            dist/release/Henshin-*-${{ matrix.target }}.zip.signing-status.txt
+            dist/release/Henshin-*-${{ matrix.target }}.AppImage
+            dist/release/Henshin-*-${{ matrix.target }}.AppImage.sha256
+            dist/release/Henshin-*-${{ matrix.target }}.AppImage.signing-status.txt
+          if-no-files-found: error
+          retention-days: 7

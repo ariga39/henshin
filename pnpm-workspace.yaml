@@ -5,4 +5,5 @@ packages:
 # `allowBuilds` form; electron downloads its runtime, esbuild links its binary.
 allowBuilds:
   electron: true
+  electron-winstaller: false
   esbuild: true
